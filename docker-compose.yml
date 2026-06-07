@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: shamrai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-shamrai}
+      POSTGRES_USER: ${POSTGRES_USER:-shamrai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - shamrai
+
+  backend:
+    build:
+      context: ./backend
+    container_name: shamrai-backend
+    restart: unless-stopped
+    extra_hosts:
+      - "api.telegram.org:149.154.167.220"
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG_MODE: ${DEBUG_MODE:-false}
+      ALLOW_DEBUG_AUTH_BYPASS: ${ALLOW_DEBUG_AUTH_BYPASS:-false}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-shamrai}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-shamrai}
+    volumes:
+      - backend_static:/app/static
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).read()\""
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    expose:
+      - "8000"
+    networks:
+      - shamrai
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_ENABLE_DEBUG_AUTH: ${VITE_ENABLE_DEBUG_AUTH:-false}
+    container_name: shamrai-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8082}:80"
+    volumes:
+      - backend_static:/usr/share/nginx/html/static:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shamrai
+
+volumes:
+  postgres_data:
+  backend_static:
+
+networks:
+  shamrai:
+    driver: bridge
