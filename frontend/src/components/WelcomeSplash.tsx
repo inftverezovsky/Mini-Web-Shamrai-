@@ -56,9 +56,17 @@ export default function WelcomeSplash({
       return;
     }
 
-    completedRef.current = true;
-    const completeTimer = setTimeout(() => onIntroComplete?.(), 420);
-    return () => clearTimeout(completeTimer);
+    let active = true;
+    const completeTimer = setTimeout(() => {
+      if (!active || completedRef.current) return;
+      completedRef.current = true;
+      onIntroComplete?.();
+    }, 420);
+
+    return () => {
+      active = false;
+      clearTimeout(completeTimer);
+    };
   }, [appReady, logoPlayed, mediaReady, minimumWatchDone, onIntroComplete]);
 
   const handleTimeUpdate = () => {

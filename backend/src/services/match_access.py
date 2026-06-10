@@ -4,7 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func
+from sqlalchemy import and_, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -21,6 +21,24 @@ class UserBetAccessResult:
     balance_before: int
     balance_after: int
     no_balance_warning: bool
+
+
+@dataclass
+class UserBetAccessRevokeResult:
+    had_access: bool
+    access_type: Optional[str]
+    match_charged: bool
+    balance_before: int
+    balance_after: int
+    delta_matches: int
+    previous_ledger_delta: int
+
+
+REVOKE_USER_BET_ACCESS_EVENT = "admin_bet_access_revoked"
+
+
+def current_match_balance(user: User) -> int:
+    return int(user.purchased_bets_balance or user.matches_remaining or 0)
 
 
 async def activate_match_package(
@@ -170,4 +188,74 @@ async def record_user_bet_access(
         balance_before=balance_before,
         balance_after=balance_after,
         no_balance_warning=no_balance_warning,
+    )
+
+
+async def revoke_user_bet_access(
+    db: AsyncSession,
+    *,
+    user: User,
+    bet: Bet,
+    actor_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> UserBetAccessRevokeResult:
+    """
+    Remove a user's access to a bet and reverse that bet's net match ledger impact.
+    The caller owns commit/rollback.
+    """
+    balance_before = current_match_balance(user)
+    existing_res = await db.execute(
+        select(user_bets).filter(
+            and_(user_bets.c.user_id == user.telegram_id, user_bets.c.bet_id == bet.id)
+        )
+    )
+    existing = existing_res.first()
+    if not existing:
+        return UserBetAccessRevokeResult(
+            had_access=False,
+            access_type=None,
+            match_charged=False,
+            balance_before=balance_before,
+            balance_after=balance_before,
+            delta_matches=0,
+            previous_ledger_delta=0,
+        )
+
+    row = existing._mapping
+    ledger_res = await db.execute(
+        select(func.coalesce(func.sum(MatchBalanceLog.delta_matches), 0)).filter(
+            MatchBalanceLog.user_id == user.telegram_id,
+            MatchBalanceLog.bet_id == bet.id,
+            MatchBalanceLog.event_type != REVOKE_USER_BET_ACCESS_EVENT,
+        )
+    )
+    previous_ledger_delta = int(ledger_res.scalar() or 0)
+    reverse_delta = -previous_ledger_delta
+    balance_after = balance_before + reverse_delta
+    user.purchased_bets_balance = balance_after
+    user.matches_remaining = balance_after
+
+    actor_note = f" by admin {actor_id}" if actor_id is not None else ""
+    reason_note = f": {reason}" if reason else ""
+    db.add(log_match_balance_event(
+        user_id=user.telegram_id,
+        bet_id=bet.id,
+        event_type=REVOKE_USER_BET_ACCESS_EVENT,
+        delta_matches=reverse_delta,
+        note=f"Bet access revoked{actor_note}{reason_note}",
+    ))
+    await db.execute(
+        delete(user_bets).where(
+            and_(user_bets.c.user_id == user.telegram_id, user_bets.c.bet_id == bet.id)
+        )
+    )
+
+    return UserBetAccessRevokeResult(
+        had_access=True,
+        access_type=row.get("access_type") or None,
+        match_charged=bool(row.get("match_charged")),
+        balance_before=balance_before,
+        balance_after=balance_after,
+        delta_matches=reverse_delta,
+        previous_ledger_delta=previous_ledger_delta,
     )

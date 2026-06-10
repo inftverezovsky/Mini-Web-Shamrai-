@@ -12,7 +12,7 @@ interface TariffsProps {
 
 export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const { login } = useAuth();
-  const debugCheckoutEnabled = import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const debugCheckoutEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [referralDiscountPercent, setReferralDiscountPercent] = useState(0);
   const [loading, setLoading] = useState(true);

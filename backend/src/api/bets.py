@@ -1,3 +1,5 @@
+import asyncio
+import html
 import os
 import uuid as uuid_pkg
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
@@ -6,19 +8,32 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy import and_, or_, func
 from typing import List, Optional
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 from datetime import datetime, timezone
 
 from src.models.database import get_db
-from src.models.models import User, Bookmaker, Bet, Subscription, user_bets
-from src.schemas.schemas import BetResponse, BetCreate, BetResolve, BetHintRequest, BetHintResponse, UserStats, AdminAnalytics
+from src.models.models import User, Bookmaker, Bet, ForecastRequest, Subscription, user_bets
+from src.schemas.schemas import (
+    AdminAnalytics,
+    BetCreate,
+    BetHintRequest,
+    BetHintResponse,
+    BetOddsDropNotifyResponse,
+    BetOddsDropUpdate,
+    BetResolve,
+    BetResponse,
+    UserStats,
+)
 from src.api.deps import get_current_user, get_current_admin
 from src.core.bookmaker_links import normalize_bookmaker_links
 from src.core.roles import is_staff_role
 from src.core.config import settings
+from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.services.match_access import log_match_balance_event, record_user_bet_access
-from src.api.payments import call_telegram_api
+from src.services.signals import broadcast_live_signal
+from src.services.vk_delivery import html_to_vk_text, send_vk_message_to_user, user_can_receive_vk_messages
+from src.api.payments import call_telegram_api, run_telegram_api_background
 
 router = APIRouter(prefix="/bets", tags=["Bets"])
 
@@ -27,6 +42,110 @@ STATIC_COUPONS_DIR = os.path.join(
     "static",
     "coupons",
 )
+
+ODDS_DROP_DELIVERED_FORECAST_STATUSES = {"sent", "manual_sent"}
+
+
+def _format_decimal(value: Optional[Decimal]) -> str:
+    try:
+        return f"{Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):.2f}"
+    except Exception:
+        return str(value or "").strip()
+
+
+def _validate_odds_dropped_to(value: Optional[Decimal]) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        clean_value = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректный коэффициент",
+        )
+    if clean_value < Decimal("1.00") or clean_value > Decimal("999.99"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Коэффициент должен быть от 1.00 до 999.99",
+        )
+    return clean_value
+
+
+def build_odds_drop_message(bet: Bet) -> str:
+    dropped_to = _format_decimal(bet.odds_dropped_to)
+    original = _format_decimal(bet.coefficient)
+    event_name = html.escape(str(bet.event_name or "матч").strip())
+    outcome = html.escape(str(bet.outcome or "наш исход").strip())
+    return (
+        "🔥 <b>Посмотри, как выгодно взяли наш исход.</b>\n\n"
+        f"Матч: <b>{event_name}</b>\n"
+        f"Исход: <b>{outcome}</b>\n\n"
+        f"Мы давали кф. <b>{original}</b>, а сейчас линия уже упала до <b>{dropped_to}</b>.\n\n"
+        "Поздравляю с выгодной ставкой, ждём заход 🤝"
+    )
+
+
+async def _load_bet_for_admin(db: AsyncSession, bet_id: UUID) -> Bet:
+    result = await db.execute(
+        select(Bet)
+        .filter(Bet.id == bet_id)
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+    )
+    bet = result.scalars().first()
+    if not bet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Прогноз не найден",
+        )
+    return bet
+
+
+async def _load_odds_drop_recipients(db: AsyncSession, bet_id: UUID) -> List[User]:
+    user_ids: set[int] = set()
+    access_result = await db.execute(
+        select(user_bets.c.user_id).filter(user_bets.c.bet_id == bet_id)
+    )
+    user_ids.update(int(row[0]) for row in access_result.all() if row[0] is not None)
+
+    requests_result = await db.execute(
+        select(ForecastRequest.user_id).filter(
+            ForecastRequest.bet_id == bet_id,
+            ForecastRequest.status.in_(ODDS_DROP_DELIVERED_FORECAST_STATUSES),
+        )
+    )
+    user_ids.update(int(row[0]) for row in requests_result.all() if row[0] is not None)
+
+    if not user_ids:
+        return []
+
+    users_result = await db.execute(select(User).filter(User.telegram_id.in_(user_ids)))
+    users_by_id = {user.telegram_id: user for user in users_result.scalars().all()}
+    return [
+        users_by_id[user_id]
+        for user_id in sorted(user_ids)
+        if user_id in users_by_id and not is_staff_role(users_by_id[user_id].role)
+    ]
+
+
+async def _send_odds_drop_message(user: User, html_message: str) -> dict:
+    if is_personal_telegram_user_id(user.telegram_id):
+        return await asyncio.to_thread(
+            call_telegram_api,
+            "sendMessage",
+            {
+                "chat_id": user.telegram_id,
+                "text": html_message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+        )
+    if user_can_receive_vk_messages(user):
+        return await asyncio.to_thread(
+            send_vk_message_to_user,
+            user,
+            html_to_vk_text(html_message),
+        )
+    return {"ok": False, "description": "У клиента нет доступного канала доставки"}
 
 
 def _parse_bookmaker_id_values(values: Optional[List[str]]) -> List[int]:
@@ -173,26 +292,6 @@ async def _build_bet_response(
     )
     return result.scalars().first()
 
-
-def _send_live_alarm_to_all_users(
-    *,
-    user_ids: List[int],
-    event_name: str,
-    coefficient: Decimal,
-    brain_score: Optional[int],
-):
-    alarm_text = (
-        "⚡⚡⚡ SHAMRAI LIVE SIGNAL ALARM ⚡⚡⚡\n\n"
-        f"Новый срочный Live-прогноз от Shamrai:\n"
-        f"🏆 {event_name}\n"
-        f"📈 Коэффициент: {float(coefficient):.2f}\n\n"
-        "Быстрее заходите в приложение Shamrai Analytics Hub!"
-    )
-    for user_id in user_ids:
-        call_telegram_api("sendMessage", {
-            "chat_id": user_id,
-            "text": alarm_text
-        })
 
 async def has_active_subscription(user: User, db: AsyncSession) -> bool:
     """Compatibility helper: access is now based on match balance or active guarantee."""
@@ -487,10 +586,10 @@ async def create_bet(
 
     # Process Live Alarm
     if bet_data.live_alarm:
-        res_users = await db.execute(select(User.telegram_id))
-        user_ids = res_users.scalars().all()
-        _send_live_alarm_to_all_users(
-            user_ids=user_ids,
+        res_users = await db.execute(select(User))
+        await broadcast_live_signal(
+            db,
+            users=res_users.scalars().all(),
             event_name=bet_data.event_name,
             coefficient=bet_data.coefficient,
             brain_score=bet_data.brain_score,
@@ -550,16 +649,81 @@ async def create_bet_with_coupon(
     )
 
     if live_alarm:
-        res_users = await db.execute(select(User.telegram_id))
-        user_ids = res_users.scalars().all()
-        _send_live_alarm_to_all_users(
-            user_ids=user_ids,
+        res_users = await db.execute(select(User))
+        await broadcast_live_signal(
+            db,
+            users=res_users.scalars().all(),
             event_name=event_name,
             coefficient=coefficient,
             brain_score=brain_score,
         )
 
     return bet
+
+
+@router.put("/{bet_id}/odds-drop", response_model=BetResponse)
+async def update_bet_odds_drop(
+    bet_id: UUID,
+    payload: BetOddsDropUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only: Save the coefficient that the line dropped to after clients took the forecast."""
+    bet = await _load_bet_for_admin(db, bet_id)
+    bet.odds_dropped_to = _validate_odds_dropped_to(payload.odds_dropped_to)
+    await db.commit()
+    return await _load_bet_for_admin(db, bet_id)
+
+
+@router.post("/{bet_id}/odds-drop/notify", response_model=BetOddsDropNotifyResponse)
+async def notify_bet_odds_drop(
+    bet_id: UUID,
+    payload: BetOddsDropUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only: Tell clients who already took this forecast that the line has dropped."""
+    bet = await _load_bet_for_admin(db, bet_id)
+    if payload.odds_dropped_to is not None:
+        bet.odds_dropped_to = _validate_odds_dropped_to(payload.odds_dropped_to)
+        await db.flush()
+    if bet.odds_dropped_to is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сначала укажите коэффициент в поле «Упал до»",
+        )
+
+    recipients = await _load_odds_drop_recipients(db, bet.id)
+    if not recipients:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Нет клиентов, которым уже был выдан этот прогноз",
+        )
+
+    html_message = build_odds_drop_message(bet)
+    sent = 0
+    failed = 0
+    errors: List[str] = []
+    for user in recipients:
+        result = await _send_odds_drop_message(user, html_message)
+        if result.get("ok"):
+            sent += 1
+            continue
+        failed += 1
+        user_label = user.username or user.first_name or str(user.telegram_id)
+        errors.append(f"{user_label}: {result.get('description', 'unknown error')}")
+
+    if sent:
+        bet.odds_drop_notified_at = datetime.now(timezone.utc)
+    await db.commit()
+    refreshed_bet = await _load_bet_for_admin(db, bet_id)
+    return BetOddsDropNotifyResponse(
+        bet=BetResponse.model_validate(refreshed_bet),
+        total=len(recipients),
+        sent=sent,
+        failed=failed,
+        errors=errors[:10],
+    )
 
 @router.put("/{bet_id}/resolve", response_model=BetResponse)
 async def resolve_bet(
@@ -622,23 +786,25 @@ async def resolve_bet(
                     delta_matches=2,
                     note="Loss supercompensation: charged stake returned and +1 bonus stake added",
                 ))
-                call_telegram_api("sendMessage", {
-                    "chat_id": user_id,
-                    "text": (
-                        "⚡ Сверхкомпенсация Shamrai активирована.\n\n"
-                        f"Прогноз «{bet.event_name}» закрыт минусом, поэтому мы вернули списанную ставку "
-                        "и начислили +1 бонусную ставку сверху. Баланс пакета увеличен на 2."
-                    ),
-                })
+                if is_personal_telegram_user_id(user_id):
+                    run_telegram_api_background("sendMessage", {
+                        "chat_id": user_id,
+                        "text": (
+                            "⚡ Сверхкомпенсация Shamrai активирована.\n\n"
+                            f"Прогноз «{bet.event_name}» закрыт минусом, поэтому мы вернули списанную ставку "
+                            "и начислили +1 бонусную ставку сверху. Баланс пакета увеличен на 2."
+                        ),
+                    })
             elif resolution.status == "win":
-                call_telegram_api("sendMessage", {
-                    "chat_id": user_id,
-                    "text": (
-                        "🔥 Прогноз Shamrai рассчитан в плюс!\n\n"
-                        f"Матч «{bet.event_name}» успешно закрыт победой. 🧠 "
-                        "Списание купона произведено честно, ваш банк увеличен. Работаем дальше.🤝"
-                    ),
-                })
+                if is_personal_telegram_user_id(user_id):
+                    run_telegram_api_background("sendMessage", {
+                        "chat_id": user_id,
+                        "text": (
+                            "🔥 Прогноз Shamrai рассчитан в плюс!\n\n"
+                            f"Матч «{bet.event_name}» успешно закрыт победой. 🧠 "
+                            "Списание купона произведено честно, ваш банк увеличен. Работаем дальше.🤝"
+                        ),
+                    })
 
     await db.commit()
 

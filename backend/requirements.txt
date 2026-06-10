@@ -11,3 +11,4 @@ psycopg2-binary>=2.9.10
 pyjwt==2.8.0
 reportlab==4.1.0
 python-multipart==0.0.9
+pywebpush==2.0.3

@@ -21,9 +21,14 @@ frontend-vite*.log
 !.env.example
 !backend/.env.example
 !frontend/.env.example
+*.pem
 
 # Generated/static runtime artifacts
 .deploy/
+deploy.tar.gz
+*.tar.gz
+output/
+.playwright-cli/
 backend/static/coupons/*
 !backend/static/coupons/.gitkeep
 

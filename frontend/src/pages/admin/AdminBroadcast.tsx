@@ -3,6 +3,7 @@ import { apiFetch } from '../../utils/api';
 import { BetResponse, BookmakerLink, BookmakerResponse, ForecastRequestResponse } from '../../schemas/schemas';
 import { SPORT_FILTER_OPTIONS } from '../../constants/sports';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
+import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import {
   AlertTriangle,
@@ -10,6 +11,7 @@ import {
   Bot,
   CheckCheck,
   CheckCircle,
+  ChevronDown,
   ClipboardList,
   Clock3,
   Handshake,
@@ -23,12 +25,13 @@ import {
   Target,
   Upload,
   UserCheck,
+  UserMinus,
   Users,
   XCircle,
 } from 'lucide-react';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 
-type BroadcastMode = 'announcement' | 'forecast';
+type BroadcastMode = 'announcement' | 'forecast' | 'requests';
 type BetCategory = 'prematch' | 'live';
 type FullForecastMode = 'prepare' | 'send' | 'bulkSend';
 type ForecastRequestStatus = ForecastRequestResponse['status'];
@@ -36,6 +39,19 @@ type ForecastRequestStatus = ForecastRequestResponse['status'];
 interface DeliveryResult {
   sent: number;
   failed: number;
+  telegram?: {
+    sent: number;
+    failed: number;
+  };
+  vkMessages?: {
+    sent: number;
+    failed: number;
+  };
+  webPush?: {
+    sent: number;
+    failed: number;
+    missing_permission?: number;
+  };
 }
 
 interface ForecastBulkSendResult {
@@ -46,24 +62,62 @@ interface ForecastBulkSendResult {
   errors: string[];
 }
 
+interface ForecastBroadcastFullResult {
+  bet: BetResponse;
+  auto_send_enabled: boolean;
+  auto_send: ForecastBulkSendResult | null;
+}
+
+interface ForecastBroadcastStopResult {
+  status: string;
+  bet_id: string;
+  already_stopped: boolean;
+  stopped_requests: number;
+  skipped_processing: number;
+}
+
+interface ForecastRequestGroup {
+  key: string;
+  eventName: string;
+  bet: BetResponse;
+  requests: ForecastRequestResponse[];
+}
+
 const FORECAST_REQUEST_TABS: Array<{ status: ForecastRequestStatus; label: string }> = [
   { status: 'interested', label: 'Ожидают' },
   { status: 'announced', label: 'Анонсировано' },
   { status: 'processing', label: 'Обработка' },
-  { status: 'sent', label: 'Отправлено ботом' },
+  { status: 'sent', label: 'Отправлено' },
   { status: 'manual_sent', label: 'Взяли вручную' },
   { status: 'declined', label: 'Отказались' },
+  { status: 'removed', label: 'Удалены' },
 ];
 
 function getForecastRequestUserName(request: ForecastRequestResponse) {
   const user = request.user;
   const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
   if (user.username) return fullName ? `${fullName} (@${user.username})` : `@${user.username}`;
-  return fullName || `ID ${user.telegram_id}`;
+  return fullName || (user.is_web_only ? 'Web/VK клиент' : `ID ${user.telegram_id}`);
+}
+
+function getForecastRequestUserIdLabel(request: ForecastRequestResponse) {
+  return request.user.is_web_only ? 'Web/VK клиент' : `ID ${request.user.telegram_id}`;
 }
 
 function canProcessForecastRequest(request: ForecastRequestResponse) {
   return request.status === 'interested';
+}
+
+function canRemoveForecastRequest(request: ForecastRequestResponse) {
+  return request.status !== 'removed' && request.status !== 'processing';
+}
+
+function getDeliveryMethodLabel(deliveryMethod?: string | null) {
+  if (deliveryMethod === 'vk_bot') return 'VK + бот';
+  if (deliveryMethod === 'vk') return 'VK';
+  if (deliveryMethod === 'web') return 'web';
+  if (deliveryMethod === 'manual') return 'вручную';
+  return 'бот';
 }
 
 function getBetBookmakers(bet: BetResponse | null | undefined): BookmakerResponse[] {
@@ -81,6 +135,63 @@ function bookmakerLinksToState(links: BookmakerLink[] | null | undefined): Recor
   }, {});
 }
 
+function normalizeMatchUrlForPreview(rawUrl: string): string {
+  const url = rawUrl.trim().replace(/\u200b|\u200c|\u200d|\ufeff/g, '');
+  if (!url || url.startsWith('//') || /[<>\\\s]/.test(url)) return '';
+
+  let withScheme = url;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(withScheme)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(withScheme)) return '';
+    withScheme = `https://${withScheme}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    return '';
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+  if (parsed.username || parsed.password) return '';
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!hostname || !/[a-z0-9]/i.test(hostname)) return '';
+  if (hostname.toLowerCase() === 'localhost') {
+    const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+    return `${scheme}://${withScheme.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}`;
+  }
+  if (hostname.includes(':')) {
+    const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+    return `${scheme}://${withScheme.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}`;
+  }
+  if (!hostname.includes('.')) return '';
+  const labels = hostname.split('.');
+  if (!labels.every((label) => /^[A-Za-z0-9-]{1,63}$/.test(label) && !label.startsWith('-') && !label.endsWith('-'))) {
+    return '';
+  }
+
+  const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+  return `${scheme}://${withScheme.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}`;
+}
+
+function bookmakerLinkError(rawUrl: string): string | null {
+  if (!rawUrl.trim()) return null;
+  return normalizeMatchUrlForPreview(rawUrl) ? null : 'Введите корректную ссылку: домен или URL http/https';
+}
+
+function betHasSavedFullForecast(bet: BetResponse | null | undefined): boolean {
+  if (!bet || bet.status === 'deleted') return false;
+  const eventName = (bet.event_name || '').trim();
+  const hasEventName = Boolean(eventName && eventName !== 'Закрытый прогноз');
+  const hasOutcome = Boolean((bet.outcome || '').trim());
+  const hasCoefficient = Number(bet.coefficient || 0) > 0;
+  const hasCoupon = Boolean((bet.coupon_image_url || '').trim());
+  const hasBookmakerLink = (bet.bookmaker_links || []).some((link) => (
+    Boolean(normalizeMatchUrlForPreview(link.url || ''))
+  ));
+  return hasEventName && hasOutcome && hasCoefficient && hasCoupon && hasBookmakerLink;
+}
+
 function formatRequestDate(value: string | null) {
   if (!value) return '—';
   return new Date(value).toLocaleString('ru-RU', {
@@ -89,6 +200,25 @@ function formatRequestDate(value: string | null) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function getForecastRequestGroupKey(request: ForecastRequestResponse) {
+  return request.bet_id || request.bet.id || request.bet.event_name || request.id;
+}
+
+function getForecastRequestEventName(request: ForecastRequestResponse) {
+  return request.bet.event_name?.trim() || 'Закрытый прогноз';
+}
+
+function formatForecastRequestCount(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  const noun = mod10 === 1 && mod100 !== 11
+    ? 'заявка'
+    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
+      ? 'заявки'
+      : 'заявок';
+  return `${count} ${noun}`;
 }
 
 interface UploadDropzoneProps {
@@ -234,9 +364,11 @@ export default function AdminBroadcast() {
   const [fullForecastMode, setFullForecastMode] = useState<FullForecastMode>('send');
   const [fullForecastPreparedBetId, setFullForecastPreparedBetId] = useState<string | null>(null);
   const [fullForecastExistingCouponUrl, setFullForecastExistingCouponUrl] = useState<string | null>(null);
+  const [fullForecastAutoSend, setFullForecastAutoSend] = useState(false);
 
   const [requestStatusFilter, setRequestStatusFilter] = useState<ForecastRequestStatus>('interested');
   const [forecastRequests, setForecastRequests] = useState<ForecastRequestResponse[]>([]);
+  const [expandedForecastMatchKeys, setExpandedForecastMatchKeys] = useState<string[]>([]);
   const [requestsLoading, setRequestsLoading] = useState(false);
   const [requestActionLoading, setRequestActionLoading] = useState<string | null>(null);
   const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
@@ -277,6 +409,20 @@ export default function AdminBroadcast() {
     const selectedIds = new Set(fullForecastBookmakerIds);
     return bookmakers.filter((bookmaker) => selectedIds.has(bookmaker.id));
   }, [bookmakers, fullForecastBookmakerIds]);
+  const fullForecastBookmakerLinkStates = useMemo(() => {
+    return fullForecastBookmakers.reduce<Record<number, { error: string | null; preview: string }>>((acc, bookmaker) => {
+      const rawUrl = fullForecastBookmakerLinks[bookmaker.id] || '';
+      acc[bookmaker.id] = {
+        error: bookmakerLinkError(rawUrl),
+        preview: normalizeMatchUrlForPreview(rawUrl),
+      };
+      return acc;
+    }, {});
+  }, [fullForecastBookmakers, fullForecastBookmakerLinks]);
+  const fullForecastHasInvalidBookmakerLink = useMemo(
+    () => Object.values(fullForecastBookmakerLinkStates).some((state) => Boolean(state.error)),
+    [fullForecastBookmakerLinkStates],
+  );
 
   const fetchAudienceCount = useCallback(async () => {
     if (announcementBkIds.length === 0) {
@@ -325,7 +471,7 @@ export default function AdminBroadcast() {
   }, [requestStatusFilter]);
 
   useEffect(() => {
-    if (mode !== 'forecast') return;
+    if (mode !== 'requests') return;
     fetchForecastRequests();
   }, [mode, fetchForecastRequests]);
 
@@ -408,7 +554,7 @@ export default function AdminBroadcast() {
 
   const runRequestAction = async (
     requestId: string,
-    action: 'mark-manual' | 'cancel',
+    action: 'mark-manual' | 'cancel' | 'remove-client',
     successText: string,
   ) => {
     try {
@@ -423,6 +569,53 @@ export default function AdminBroadcast() {
     }
   };
 
+  const sendSavedFullForecast = async (request: ForecastRequestResponse) => {
+    try {
+      resetFeedback();
+      setRequestActionLoading(`send:${request.id}`);
+      await apiFetch(`/admin/forecast-requests/${request.id}/send-saved`, { method: 'POST' });
+      notifySuccess('Полный прогноз отправлен клиенту');
+      setSelectedRequestIds((current) => current.filter((id) => id !== request.id));
+      await fetchForecastRequests();
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось отправить полный прогноз');
+    } finally {
+      setRequestActionLoading(null);
+    }
+  };
+
+  const stopForecastMatch = async (group: ForecastRequestGroup) => {
+    try {
+      resetFeedback();
+      setRequestActionLoading(`stop:${group.bet.id}`);
+      const result = await apiFetch<ForecastBroadcastStopResult>(
+        `/admin/forecast-broadcast/${group.bet.id}/stop`,
+        { method: 'POST' },
+      );
+      const message = result.already_stopped
+        ? 'Матч уже остановлен'
+        : `Матч остановлен. Недоступно заявок: ${result.stopped_requests}`;
+      notifySuccess(message);
+      setSelectedRequestIds((current) => (
+        current.filter((id) => !group.requests.some((request) => request.id === id))
+      ));
+      await fetchForecastRequests();
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось остановить матч');
+    } finally {
+      setRequestActionLoading(null);
+    }
+  };
+
+  const handleRemoveForecastRequest = async (request: ForecastRequestResponse) => {
+    const confirmed = window.confirm(
+      `Удалить клиента «${getForecastRequestUserName(request)}» с матча?`,
+    );
+    if (!confirmed) return;
+    await runRequestAction(request.id, 'remove-client', 'Клиент удален с матча');
+    setSelectedRequestIds((current) => current.filter((id) => id !== request.id));
+  };
+
   const fillFullForecastFields = (bet: BetResponse) => {
     const betBookmakers = getBetBookmakers(bet);
     setFullForecastEvent(bet.event_name === 'Закрытый прогноз' ? '' : bet.event_name || '');
@@ -434,6 +627,7 @@ export default function AdminBroadcast() {
     setFullForecastBookmakerLinks(bookmakerLinksToState(bet.bookmaker_links));
     setFullForecastCategory(bet.category === 'live' ? 'live' : 'prematch');
     setFullForecastExistingCouponUrl(bet.coupon_image_url || null);
+    setFullForecastAutoSend(Boolean(bet.auto_send_on_interest));
     clearFullForecastFile();
   };
 
@@ -451,6 +645,7 @@ export default function AdminBroadcast() {
     setFullForecastBookmakerLinks({});
     setFullForecastCategory('prematch');
     setFullForecastExistingCouponUrl(null);
+    setFullForecastAutoSend(false);
     clearFullForecastFile();
   };
 
@@ -504,6 +699,7 @@ export default function AdminBroadcast() {
     setFullForecastBookmakerLinks({});
     setFullForecastCategory('prematch');
     setFullForecastExistingCouponUrl(null);
+    setFullForecastAutoSend(false);
     clearFullForecastFile();
   };
 
@@ -531,7 +727,12 @@ export default function AdminBroadcast() {
       notifyError('Загрузите скрин купона');
       return;
     }
+    if (fullForecastHasInvalidBookmakerLink) {
+      notifyError('Проверьте ссылки по БК');
+      return;
+    }
 
+    resetFeedback();
     try {
       const actionKey = isPreparing
         ? `prepare:${targetBetId}`
@@ -550,11 +751,14 @@ export default function AdminBroadcast() {
       formData.append('coefficient', fullForecastCoef);
       formData.append('sport_type', fullForecastSport);
       formData.append('category', fullForecastCategory);
+      if (isPreparing) {
+        formData.append('auto_send_interested', fullForecastAutoSend ? 'true' : 'false');
+      }
       if (fullForecastDescription.trim()) formData.append('description', fullForecastDescription.trim());
       const bookmakerLinksPayload = fullForecastBookmakers
         .map((bookmaker) => ({
           bookmaker_id: bookmaker.id,
-          url: (fullForecastBookmakerLinks[bookmaker.id] || '').trim(),
+          url: normalizeMatchUrlForPreview(fullForecastBookmakerLinks[bookmaker.id] || ''),
         }))
         .filter((link) => link.url.length > 0);
       if (bookmakerLinksPayload.length === 0) {
@@ -572,7 +776,7 @@ export default function AdminBroadcast() {
         : isBulkSending
           ? '/admin/forecast-requests/bulk-send'
           : `/admin/forecast-requests/${fullForecastRequest?.id}/send`;
-      const result = await apiFetch<BetResponse | ForecastRequestResponse | ForecastBulkSendResult>(endpoint, {
+      const result = await apiFetch<ForecastBroadcastFullResult | ForecastRequestResponse | ForecastBulkSendResult>(endpoint, {
         method: 'POST',
         body: formData,
       });
@@ -593,11 +797,36 @@ export default function AdminBroadcast() {
         } else {
           notifySuccess(message);
         }
+      } else if (isPreparing) {
+        const preparedResult = result as ForecastBroadcastFullResult;
+        const autoSendResult = preparedResult.auto_send;
+        if (fullForecastAutoSend && autoSendResult) {
+          if ((autoSendResult.total ?? 0) > 0) {
+            setDeliveryResult({
+              sent: autoSendResult.sent ?? 0,
+              failed: autoSendResult.failed ?? 0,
+            });
+          }
+          const message = autoSendResult.failed > 0
+            ? `Полная ставка сохранена. Автоотправлено: ${autoSendResult.sent}, не отправлено: ${autoSendResult.failed}`
+            : autoSendResult.sent > 0
+              ? `Полная ставка сохранена и автоотправлена: ${autoSendResult.sent}`
+              : 'Полная ставка сохранена, автоотправка включена';
+          setSuccessMessage(message);
+          setSubmitError(autoSendResult.failed > 0 ? autoSendResult.errors?.[0] || 'Часть автоотправок не прошла' : null);
+          if (autoSendResult.failed > 0) {
+            notifyInfo(message);
+          } else {
+            notifySuccess(message);
+          }
+        } else {
+          notifySuccess('Полная ставка сохранена');
+        }
       } else {
-        notifySuccess(isPreparing ? 'Полная ставка сохранена' : 'Полный прогноз отправлен клиенту');
+        notifySuccess('Полный прогноз отправлен клиенту');
       }
       if (isPreparing) {
-        const preparedBet = result as BetResponse;
+        const preparedBet = (result as ForecastBroadcastFullResult).bet;
         setFullForecastExistingCouponUrl(preparedBet.coupon_image_url || fullForecastExistingCouponUrl);
         setFullForecastBookmakerLinks(bookmakerLinksToState(preparedBet.bookmaker_links));
       }
@@ -697,6 +926,9 @@ export default function AdminBroadcast() {
       setDeliveryResult({
         sent: result.sent ?? result.delivery?.sent ?? 0,
         failed: result.failed ?? result.delivery?.failed ?? 0,
+        telegram: result.delivery?.telegram,
+        vkMessages: result.delivery?.vk_messages,
+        webPush: result.delivery?.web_push,
       });
       setSuccessMessage('Анонс отправлен выбранной аудитории');
       setAnnouncementBody('');
@@ -749,6 +981,9 @@ export default function AdminBroadcast() {
       setDeliveryResult({
         sent,
         failed,
+        telegram: result.delivery?.telegram,
+        vkMessages: result.delivery?.vk_messages,
+        webPush: result.delivery?.web_push,
       });
       if (totalAudience === 0) {
         const message = 'Под выбранные БК сейчас нет клиентов для анонса прогноза';
@@ -759,8 +994,8 @@ export default function AdminBroadcast() {
       if (sent === 0) {
         const firstError = result.errors?.[0] ?? result.delivery?.errors?.[0];
         const message = firstError
-          ? `Telegram не доставил анонс прогноза: ${firstError}`
-          : 'Telegram не доставил анонс прогноза ни одному клиенту';
+          ? `Каналы доставки не отправили анонс прогноза: ${firstError}`
+          : 'Каналы доставки не отправили анонс прогноза ни одному клиенту';
         setSubmitError(message);
         notifyError(message);
         return;
@@ -802,6 +1037,38 @@ export default function AdminBroadcast() {
   const fullForecastSubmitting = Boolean(fullForecastActionKey && requestActionLoading === fullForecastActionKey);
   const processableRequestIds = forecastRequests.filter(canProcessForecastRequest).map((request) => request.id);
   const allProcessableSelected = processableRequestIds.length > 0 && processableRequestIds.every((id) => selectedRequestIds.includes(id));
+  const forecastRequestGroups = useMemo<ForecastRequestGroup[]>(() => {
+    const groups = new Map<string, ForecastRequestGroup>();
+
+    forecastRequests.forEach((request) => {
+      const key = getForecastRequestGroupKey(request);
+      const existingGroup = groups.get(key);
+      if (existingGroup) {
+        existingGroup.requests.push(request);
+        return;
+      }
+      groups.set(key, {
+        key,
+        eventName: getForecastRequestEventName(request),
+        bet: request.bet,
+        requests: [request],
+      });
+    });
+
+    return Array.from(groups.values());
+  }, [forecastRequests]);
+  const expandedForecastMatchKeySet = useMemo(
+    () => new Set(expandedForecastMatchKeys),
+    [expandedForecastMatchKeys],
+  );
+
+  const toggleForecastMatchGroup = (groupKey: string) => {
+    setExpandedForecastMatchKeys((current) => (
+      current.includes(groupKey)
+        ? current.filter((key) => key !== groupKey)
+        : [...current, groupKey]
+    ));
+  };
 
   return (
     <div className="space-y-5 animate-slide-up pb-10">
@@ -812,12 +1079,12 @@ export default function AdminBroadcast() {
             Рассылка
           </h2>
           <p className="text-slate-400 text-[10px] uppercase font-bold tracking-widest mt-0.5">
-            Анонс и прогноз
+            Анонс, прогноз и заявки
           </p>
         </div>
       </div>
 
-      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-2 gap-1.5 shadow-inner">
+      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-3 gap-1.5 shadow-inner">
         <button
           type="button"
           onClick={() => {
@@ -848,6 +1115,21 @@ export default function AdminBroadcast() {
           <ClipboardList className="w-3.5 h-3.5" />
           <span>Прогноз</span>
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMode('requests');
+            resetFeedback();
+          }}
+          className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
+            mode === 'requests'
+              ? 'bg-[#00d2ff] text-slate-950 shadow-[0_0_18px_rgba(0,210,255,0.24)]'
+              : 'text-slate-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <Inbox className="w-3.5 h-3.5" />
+          <span>Заявки</span>
+        </button>
       </div>
 
       {mode === 'announcement' && (
@@ -876,17 +1158,17 @@ export default function AdminBroadcast() {
         </div>
       )}
 
-      {mode === 'announcement' ? (
+      {mode === 'announcement' && (
         <form onSubmit={handleAnnouncementSubmit} className="space-y-4">
           <div className="backdrop-blur-xl bg-slate-950/40 border border-white/10 rounded-2xl p-5 space-y-4">
             <div>
               <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                 Заголовок
               </label>
-              <input
+              <EmojiTextField
                 type="text"
                 value={announcementTitle}
-                onChange={(event) => setAnnouncementTitle(event.target.value)}
+                onValueChange={setAnnouncementTitle}
                 className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
               />
             </div>
@@ -939,9 +1221,10 @@ export default function AdminBroadcast() {
               <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                 Текст <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
               </label>
-              <textarea
+              <EmojiTextField
+                multiline
                 value={announcementBody}
-                onChange={(event) => setAnnouncementBody(event.target.value)}
+                onValueChange={setAnnouncementBody}
                 placeholder="Коротко: что за ставка и почему срочно."
                 rows={3}
                 className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors resize-none"
@@ -984,8 +1267,9 @@ export default function AdminBroadcast() {
             <span>{submitting ? 'Отправка...' : 'Отправить анонс'}</span>
           </button>
         </form>
-      ) : (
-        <>
+      )}
+
+      {mode === 'forecast' && (
         <form onSubmit={handleForecastSubmit} className="space-y-4">
           <div className="backdrop-blur-xl bg-slate-950/40 border border-white/10 rounded-2xl p-5 space-y-4">
             <div className="grid grid-cols-2 gap-3">
@@ -1036,9 +1320,10 @@ export default function AdminBroadcast() {
               <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                 Описание анонса <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
               </label>
-              <textarea
+              <EmojiTextField
+                multiline
                 value={forecastTeaserText}
-                onChange={(event) => setForecastTeaserText(event.target.value)}
+                onValueChange={setForecastTeaserText}
                 placeholder="Например: закрытый прогноз по вашей БК, линия скоро уйдет."
                 rows={3}
                 className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors resize-none"
@@ -1064,6 +1349,9 @@ export default function AdminBroadcast() {
             <span>{submitting ? 'Отправка...' : 'Отправить анонс прогноза'}</span>
           </button>
         </form>
+      )}
+
+      {mode === 'requests' && (
         <div className="backdrop-blur-xl bg-slate-950/40 border border-white/10 rounded-2xl p-5 space-y-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center space-x-2 min-w-0">
@@ -1096,6 +1384,7 @@ export default function AdminBroadcast() {
                 onClick={() => {
                   setRequestStatusFilter(tab.status);
                   setSelectedRequestIds([]);
+                  setExpandedForecastMatchKeys([]);
                 }}
                 className={`shrink-0 px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-wider transition-all ${
                   requestStatusFilter === tab.status
@@ -1166,138 +1455,256 @@ export default function AdminBroadcast() {
             </div>
           ) : (
             <div className="space-y-3">
-              {forecastRequests.map((request) => {
-                const processable = canProcessForecastRequest(request);
-                const selected = selectedRequestIds.includes(request.id);
-                const balance = request.balance_after ?? request.user.matches_remaining;
+              {forecastRequestGroups.map((group) => {
+                const expanded = expandedForecastMatchKeySet.has(group.key);
+                const groupBookmakers = getBetBookmakers(group.bet);
+                const selectedInGroup = group.requests.filter((request) => selectedRequestIds.includes(request.id)).length;
+                const stopActionKey = `stop:${group.bet.id}`;
+                const groupStopped = group.bet.status === 'deleted';
                 return (
-                  <div key={request.id} className="bg-slate-900/50 border border-white/10 rounded-xl p-3 space-y-3">
-                    <div className="flex items-start gap-3">
-                      {processable && (
-                        <button
-                          type="button"
-                          onClick={() => toggleRequestSelection(request.id)}
-                          className={`mt-0.5 h-5 w-5 rounded-md border flex items-center justify-center transition-all ${
-                            selected
-                              ? 'bg-emerald-500 border-emerald-400 text-slate-950'
-                              : 'border-white/15 text-transparent hover:border-emerald-400'
-                          }`}
-                          title="Выбрать заявку"
-                        >
-                          <CheckCircle className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="text-sm font-black text-white truncate">
-                              {getForecastRequestUserName(request)}
-                            </p>
-                            <p className="text-[10px] text-slate-500 font-bold">
-                              ID {request.user.telegram_id} · баланс {balance}
-                            </p>
-                          </div>
-                          <div className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border ${
-                            request.status === 'sent'
-                              ? 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10'
-                              : request.status === 'manual_sent'
-                                ? 'text-[#00d2ff] border-[#00d2ff]/30 bg-[#00d2ff]/10'
-                                : request.status === 'declined' || request.status === 'cancelled'
-                                  ? 'text-rose-300 border-rose-500/30 bg-rose-500/10'
-                                  : request.status === 'processing'
-                                    ? 'text-indigo-300 border-indigo-500/30 bg-indigo-500/10'
-                                    : 'text-amber-300 border-amber-500/30 bg-amber-500/10'
-                          }`}>
-                            {request.status === 'sent' && 'бот'}
-                            {request.status === 'manual_sent' && 'взял'}
-                            {request.status === 'declined' && 'отказ'}
-                            {request.status === 'cancelled' && 'отмена'}
-                            {request.status === 'interested' && 'ждет'}
-                            {request.status === 'processing' && 'идет'}
-                            {request.status === 'announced' && 'анонс'}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
-                          <div className="bg-slate-950/50 rounded-lg px-2.5 py-2 border border-white/5">
-                            <span className="block text-slate-500 font-bold uppercase tracking-wider">Матч</span>
-                            <span className="block text-slate-200 font-bold truncate">{request.bet.event_name}</span>
-                          </div>
-                          <div className="bg-slate-950/50 rounded-lg px-2.5 py-2 border border-white/5">
-                            <span className="block text-slate-500 font-bold uppercase tracking-wider">БК</span>
-                            <span className="flex min-w-0 items-center gap-1.5 text-slate-200 font-bold">
-                              {getBetBookmakers(request.bet).slice(0, 3).map((bookmaker) => (
-                                <BookmakerLogoFrame
-                                  key={bookmaker.id}
-                                  bookmaker={bookmaker}
-                                  size="tiny"
-                                  className="shrink-0"
-                                />
-                              ))}
-                              <span className="truncate">
-                                {getBetBookmakers(request.bet).map((bookmaker) => bookmaker.name).join(', ') || '—'}
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-
-                        {(request.no_balance_warning || request.user.matches_remaining <= 0) && processable && (
-                          <div className="mt-2 bg-amber-500/10 border border-amber-500/20 text-amber-300 rounded-lg p-2 text-[10px] font-bold flex items-center space-x-1.5">
-                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                            <span>У клиента 0 матчей. После подтверждения баланс уйдет в минус.</span>
-                          </div>
-                        )}
-
-                        <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-slate-500 font-bold">
-                          <span className="flex items-center space-x-1">
-                            <Clock3 className="w-3.5 h-3.5" />
-                            <span>{formatRequestDate(request.responded_at || request.created_at)}</span>
+                  <div key={group.key} className="overflow-hidden bg-slate-900/45 border border-white/10 rounded-xl">
+                    <div className="flex items-stretch gap-2 px-3 py-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleForecastMatchGroup(group.key)}
+                        aria-expanded={expanded}
+                        className="min-w-0 flex-1 text-left flex items-center gap-3 rounded-lg hover:bg-white/[0.03] transition-all"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <span className="block text-[10px] text-slate-500 font-black uppercase tracking-wider">
+                            Матч
                           </span>
-                          {request.delivery_method === 'bot' && (
-                            <span className="flex items-center space-x-1 text-emerald-400">
-                              <Bot className="w-3.5 h-3.5" />
-                              <span>бот</span>
+                          <span className="block text-sm font-black text-white truncate">
+                            {group.eventName}
+                          </span>
+                          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-slate-500 font-bold">
+                            {groupBookmakers.slice(0, 3).map((bookmaker) => (
+                              <BookmakerLogoFrame
+                                key={bookmaker.id}
+                                bookmaker={bookmaker}
+                                size="tiny"
+                                className="shrink-0"
+                              />
+                            ))}
+                            <span className="truncate">
+                              {groupBookmakers.map((bookmaker) => bookmaker.name).join(', ') || 'БК не указана'}
                             </span>
-                          )}
-                          {request.delivery_method === 'manual' && (
-                            <span className="flex items-center space-x-1 text-[#00d2ff]">
-                              <Handshake className="w-3.5 h-3.5" />
-                              <span>вручную</span>
-                            </span>
+                          </span>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className="text-[10px] font-black uppercase tracking-wider text-slate-300">
+                            {formatForecastRequestCount(group.requests.length)}
+                          </div>
+                          {selectedInGroup > 0 && (
+                            <div className="mt-1 text-[9px] font-black uppercase tracking-wider text-emerald-300">
+                              выбрано {selectedInGroup}
+                            </div>
                           )}
                         </div>
-                      </div>
+                        <ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => stopForecastMatch(group)}
+                        disabled={requestActionLoading !== null || groupStopped}
+                        className="shrink-0 self-center rounded-lg border border-rose-500/25 bg-rose-500/10 px-2.5 py-2 text-[9px] font-black uppercase tracking-wider text-rose-300 transition-all hover:bg-rose-500/20 disabled:opacity-50"
+                        title={groupStopped ? 'Матч остановлен' : 'Остановить матч'}
+                      >
+                        {requestActionLoading === stopActionKey ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <span>{groupStopped ? 'Стоп' : 'Остановить'}</span>
+                        )}
+                      </button>
                     </div>
 
-                    {processable && (
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openFullForecastModal(request)}
-                          disabled={requestActionLoading !== null}
-                          className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
-                        >
-                          {requestActionLoading === `send:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserCheck className="w-3.5 h-3.5" />}
-                          <span>Полная ставка</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => runRequestAction(request.id, 'mark-manual', 'Клиент отмечен как взявший прогноз')}
-                          disabled={requestActionLoading !== null}
-                          className="px-3 py-2 rounded-xl bg-[#00d2ff] hover:bg-[#00d2ff]/90 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
-                        >
-                          {requestActionLoading === `mark-manual:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Handshake className="w-3.5 h-3.5" />}
-                          <span>Взял вручную</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => runRequestAction(request.id, 'cancel', 'Заявка отменена')}
-                          disabled={requestActionLoading !== null}
-                          className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 disabled:opacity-50 text-slate-300 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
-                        >
-                          {requestActionLoading === `cancel:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
-                          <span>Отменить</span>
-                        </button>
+                    {expanded && (
+                      <div className="space-y-3 border-t border-white/10 p-3">
+                        {group.requests.map((request) => {
+                          const processable = canProcessForecastRequest(request);
+                          const removable = canRemoveForecastRequest(request);
+                          const selected = selectedRequestIds.includes(request.id);
+                          const balance = request.balance_after ?? request.user.matches_remaining;
+                          const canSendSavedForecast = processable && betHasSavedFullForecast(request.bet);
+                          return (
+                            <div key={request.id} className="bg-slate-950/35 border border-white/10 rounded-xl p-3 space-y-3">
+                              <div className="flex items-start gap-3">
+                                {processable && (
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleRequestSelection(request.id)}
+                                    className={`mt-0.5 h-5 w-5 rounded-md border flex items-center justify-center transition-all ${
+                                      selected
+                                        ? 'bg-emerald-500 border-emerald-400 text-slate-950'
+                                        : 'border-white/15 text-transparent hover:border-emerald-400'
+                                    }`}
+                                    title="Выбрать заявку"
+                                  >
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-black text-white truncate">
+                                        {getForecastRequestUserName(request)}
+                                      </p>
+                                      <p className="text-[10px] text-slate-500 font-bold">
+                                        {getForecastRequestUserIdLabel(request)} · баланс {balance}
+                                      </p>
+                                    </div>
+                                    <div className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border ${
+                                      request.status === 'sent'
+                                        ? 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10'
+                                        : request.status === 'manual_sent'
+                                          ? 'text-[#00d2ff] border-[#00d2ff]/30 bg-[#00d2ff]/10'
+                                          : request.status === 'removed'
+                                            ? 'text-slate-300 border-slate-500/30 bg-slate-500/10'
+                                            : request.status === 'declined' || request.status === 'cancelled'
+                                            ? 'text-rose-300 border-rose-500/30 bg-rose-500/10'
+                                            : request.status === 'processing'
+                                              ? 'text-indigo-300 border-indigo-500/30 bg-indigo-500/10'
+                                              : 'text-amber-300 border-amber-500/30 bg-amber-500/10'
+                                    }`}>
+                                      {request.status === 'sent' && getDeliveryMethodLabel(request.delivery_method)}
+                                      {request.status === 'manual_sent' && 'взял'}
+                                      {request.status === 'removed' && 'удален'}
+                                      {request.status === 'declined' && 'отказ'}
+                                      {request.status === 'cancelled' && 'отмена'}
+                                      {request.status === 'interested' && 'ждет'}
+                                      {request.status === 'processing' && 'идет'}
+                                      {request.status === 'announced' && 'анонс'}
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                                    <div className="bg-slate-950/50 rounded-lg px-2.5 py-2 border border-white/5">
+                                      <span className="block text-slate-500 font-bold uppercase tracking-wider">Матч</span>
+                                      <span className="block text-slate-200 font-bold truncate">{request.bet.event_name}</span>
+                                    </div>
+                                    <div className="bg-slate-950/50 rounded-lg px-2.5 py-2 border border-white/5">
+                                      <span className="block text-slate-500 font-bold uppercase tracking-wider">БК</span>
+                                      <span className="flex min-w-0 items-center gap-1.5 text-slate-200 font-bold">
+                                        {getBetBookmakers(request.bet).slice(0, 3).map((bookmaker) => (
+                                          <BookmakerLogoFrame
+                                            key={bookmaker.id}
+                                            bookmaker={bookmaker}
+                                            size="tiny"
+                                            className="shrink-0"
+                                          />
+                                        ))}
+                                        <span className="truncate">
+                                          {getBetBookmakers(request.bet).map((bookmaker) => bookmaker.name).join(', ') || '—'}
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {(request.no_balance_warning || request.user.matches_remaining <= 0) && processable && (
+                                    <div className="mt-2 bg-amber-500/10 border border-amber-500/20 text-amber-300 rounded-lg p-2 text-[10px] font-bold flex items-center space-x-1.5">
+                                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                      <span>У клиента 0 матчей. После подтверждения баланс уйдет в минус.</span>
+                                    </div>
+                                  )}
+
+                                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-slate-500 font-bold">
+                                    <span className="flex items-center space-x-1">
+                                      <Clock3 className="w-3.5 h-3.5" />
+                                      <span>{formatRequestDate(request.responded_at || request.created_at)}</span>
+                                    </span>
+                                    {request.delivery_method === 'bot' && (
+                                      <span className="flex items-center space-x-1 text-emerald-400">
+                                        <Bot className="w-3.5 h-3.5" />
+                                        <span>бот</span>
+                                      </span>
+                                    )}
+                                    {request.delivery_method === 'vk' && (
+                                      <span className="flex items-center space-x-1 text-[#4c8dff]">
+                                        <Radio className="w-3.5 h-3.5" />
+                                        <span>VK</span>
+                                      </span>
+                                    )}
+                                    {request.delivery_method === 'vk_bot' && (
+                                      <span className="flex items-center space-x-1 text-[#4c8dff]">
+                                        <Radio className="w-3.5 h-3.5" />
+                                        <span>VK + бот</span>
+                                      </span>
+                                    )}
+                                    {request.delivery_method === 'web' && (
+                                      <span className="flex items-center space-x-1 text-emerald-300">
+                                        <BellRing className="w-3.5 h-3.5" />
+                                        <span>web</span>
+                                      </span>
+                                    )}
+                                    {request.delivery_method === 'manual' && (
+                                      <span className="flex items-center space-x-1 text-[#00d2ff]">
+                                        <Handshake className="w-3.5 h-3.5" />
+                                        <span>вручную</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {(processable || removable) && (
+                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                                  {processable && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => (
+                                          canSendSavedForecast
+                                            ? sendSavedFullForecast(request)
+                                            : openFullForecastModal(request)
+                                        )}
+                                        disabled={requestActionLoading !== null}
+                                        className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                      >
+                                        {requestActionLoading === `send:${request.id}` ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : canSendSavedForecast ? (
+                                          <Send className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <UserCheck className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>{canSendSavedForecast ? 'Отправить' : 'Полная ставка'}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => runRequestAction(request.id, 'mark-manual', 'Клиент отмечен как взявший прогноз')}
+                                        disabled={requestActionLoading !== null}
+                                        className="px-3 py-2 rounded-xl bg-[#00d2ff] hover:bg-[#00d2ff]/90 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                      >
+                                        {requestActionLoading === `mark-manual:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Handshake className="w-3.5 h-3.5" />}
+                                        <span>Взял вручную</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => runRequestAction(request.id, 'cancel', 'Заявка отменена')}
+                                        disabled={requestActionLoading !== null}
+                                        className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 disabled:opacity-50 text-slate-300 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                      >
+                                        {requestActionLoading === `cancel:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
+                                        <span>Отменить</span>
+                                      </button>
+                                    </>
+                                  )}
+                                  {removable && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveForecastRequest(request)}
+                                      disabled={requestActionLoading !== null}
+                                      className={`px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-300 border border-rose-500/25 hover:border-rose-400/45 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5 ${processable ? '' : 'sm:col-span-4'}`}
+                                    >
+                                      {requestActionLoading === `remove-client:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserMinus className="w-3.5 h-3.5" />}
+                                      <span>Удалить клиента</span>
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1306,7 +1713,6 @@ export default function AdminBroadcast() {
             </div>
           )}
         </div>
-        </>
       )}
 
       {fullForecastModalOpen && (
@@ -1349,10 +1755,10 @@ export default function AdminBroadcast() {
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                   Матч <span className="text-rose-400">*</span>
                 </label>
-                <input
+                <EmojiTextField
                   type="text"
                   value={fullForecastEvent}
-                  onChange={(event) => setFullForecastEvent(event.target.value)}
+                  onValueChange={setFullForecastEvent}
                   placeholder="Реал Мадрид - Барселона"
                   className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
                 />
@@ -1362,10 +1768,10 @@ export default function AdminBroadcast() {
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                   Исход <span className="text-rose-400">*</span>
                 </label>
-                <input
+                <EmojiTextField
                   type="text"
                   value={fullForecastOutcome}
-                  onChange={(event) => setFullForecastOutcome(event.target.value)}
+                  onValueChange={setFullForecastOutcome}
                   placeholder="П1 / ТБ 2.5"
                   className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
                 />
@@ -1437,32 +1843,60 @@ export default function AdminBroadcast() {
                       Ссылки по БК
                     </label>
                     <div className="space-y-2">
-                      {fullForecastBookmakers.map((bookmaker) => (
-                        <div
-                          key={bookmaker.id}
-                          className="grid grid-cols-1 sm:grid-cols-[190px_minmax(0,1fr)] gap-2 rounded-xl border border-white/10 bg-slate-900/45 p-2"
-                        >
-                          <div className="flex min-w-0 items-center gap-2 rounded-lg bg-slate-950/40 px-2 py-1.5">
-                            <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="shrink-0" />
-                            <span className="min-w-0 truncate text-[11px] font-black text-white">
-                              {bookmaker.name}
-                            </span>
+                      {fullForecastBookmakers.map((bookmaker) => {
+                        const linkState = fullForecastBookmakerLinkStates[bookmaker.id];
+                        const linkError = linkState?.error;
+                        const linkPreview = linkState?.preview;
+                        return (
+                          <div
+                            key={bookmaker.id}
+                            className={`grid grid-cols-1 sm:grid-cols-[190px_minmax(0,1fr)] gap-2 rounded-xl border bg-slate-900/45 p-2 ${
+                              linkError ? 'border-rose-500/40' : 'border-white/10'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2 rounded-lg bg-slate-950/40 px-2 py-1.5">
+                              <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="shrink-0" />
+                              <span className="min-w-0 truncate text-[11px] font-black text-white">
+                                {bookmaker.name}
+                              </span>
+                            </div>
+                            <div className="min-w-0 space-y-1.5">
+                              <input
+                                type="text"
+                                inputMode="url"
+                                autoCapitalize="none"
+                                spellCheck={false}
+                                aria-invalid={Boolean(linkError)}
+                                value={fullForecastBookmakerLinks[bookmaker.id] || ''}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value;
+                                  setFullForecastBookmakerLinks((current) => ({
+                                    ...current,
+                                    [bookmaker.id]: nextValue,
+                                  }));
+                                }}
+                                placeholder="https://..."
+                                className={`min-w-0 w-full bg-slate-800/60 border rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none transition-colors ${
+                                  linkError
+                                    ? 'border-rose-500/50 focus:border-rose-400'
+                                    : 'border-white/10 focus:border-emerald-500/50'
+                                }`}
+                              />
+                              {linkError && (
+                                <p className="text-[10px] font-bold text-rose-300">
+                                  {linkError}
+                                </p>
+                              )}
+                              {!linkError && linkPreview && (
+                                <p className="text-[10px] font-bold text-slate-500">
+                                  Клиент увидит:{' '}
+                                  <span className="break-all text-emerald-300">{linkPreview}</span>
+                                </p>
+                              )}
+                            </div>
                           </div>
-                          <input
-                            type="url"
-                            value={fullForecastBookmakerLinks[bookmaker.id] || ''}
-                            onChange={(event) => {
-                              const nextValue = event.target.value;
-                              setFullForecastBookmakerLinks((current) => ({
-                                ...current,
-                                [bookmaker.id]: nextValue,
-                              }));
-                            }}
-                            placeholder="https://..."
-                            className="min-w-0 w-full bg-slate-800/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
-                          />
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -1472,9 +1906,10 @@ export default function AdminBroadcast() {
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                   Аналитика <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
                 </label>
-                <textarea
+                <EmojiTextField
+                  multiline
                   value={fullForecastDescription}
-                  onChange={(event) => setFullForecastDescription(event.target.value)}
+                  onValueChange={setFullForecastDescription}
                   placeholder="Разбор матча, аргументы, риск."
                   rows={3}
                   className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors resize-none"
@@ -1494,6 +1929,41 @@ export default function AdminBroadcast() {
               {...fullForecastFileHandlers}
             />
 
+            {fullForecastIsPreparing && (
+              <button
+                type="button"
+                onClick={() => setFullForecastAutoSend((current) => !current)}
+                className={`w-full rounded-xl border p-3 text-left transition-all ${
+                  fullForecastAutoSend
+                    ? 'border-emerald-500/40 bg-emerald-500/10'
+                    : 'border-white/10 bg-slate-900/50 hover:border-emerald-500/30'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition-all ${
+                      fullForecastAutoSend ? 'bg-emerald-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                        fullForecastAutoSend ? 'left-6' : 'left-1'
+                      }`}
+                    />
+                  </span>
+                  <Bot className={`h-4 w-4 shrink-0 ${fullForecastAutoSend ? 'text-emerald-300' : 'text-slate-500'}`} />
+                  <div className="min-w-0">
+                    <p className="text-xs font-black uppercase tracking-wider text-white">
+                      Автоотправка после «Взять»
+                    </p>
+                    <p className="mt-0.5 text-[10px] font-bold text-slate-500">
+                      Текущим и новым заявкам
+                    </p>
+                  </div>
+                </div>
+              </button>
+            )}
+
             <button
               type="submit"
               disabled={fullForecastSubmitting}
@@ -1510,7 +1980,7 @@ export default function AdminBroadcast() {
                 {fullForecastSubmitting
                   ? fullForecastIsPreparing ? 'Сохранение...' : 'Отправка...'
                   : fullForecastIsPreparing
-                    ? 'Сохранить полную ставку'
+                    ? fullForecastAutoSend ? 'Сохранить и отправить' : 'Сохранить полную ставку'
                     : fullForecastIsBulkSending
                       ? 'Отправить выбранным'
                       : 'Отправить полную ставку'}
@@ -1542,6 +2012,34 @@ export default function AdminBroadcast() {
                   Не доставлено
                 </div>
               </div>
+            </div>
+          )}
+          {deliveryResult && (deliveryResult.telegram || deliveryResult.vkMessages || deliveryResult.webPush) && (
+            <div className="grid grid-cols-1 gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-300 sm:grid-cols-3">
+              {deliveryResult.telegram && (
+                <div className="rounded-xl border border-sky-400/15 bg-sky-400/10 px-3 py-2">
+                  Telegram: <span className="text-emerald-300">{deliveryResult.telegram.sent}</span>
+                  <span className="text-slate-500"> / </span>
+                  <span className="text-rose-300">{deliveryResult.telegram.failed}</span>
+                </div>
+              )}
+              {deliveryResult.vkMessages && (
+                <div className="rounded-xl border border-[#0077ff]/20 bg-[#0077ff]/10 px-3 py-2">
+                  VK: <span className="text-emerald-300">{deliveryResult.vkMessages.sent}</span>
+                  <span className="text-slate-500"> / </span>
+                  <span className="text-rose-300">{deliveryResult.vkMessages.failed}</span>
+                </div>
+              )}
+              {deliveryResult.webPush && (
+                <div className="rounded-xl border border-emerald-300/15 bg-emerald-300/10 px-3 py-2">
+                  Web Push: <span className="text-emerald-300">{deliveryResult.webPush.sent}</span>
+                  <span className="text-slate-500"> / </span>
+                  <span className="text-rose-300">{deliveryResult.webPush.failed}</span>
+                  {typeof deliveryResult.webPush.missing_permission === 'number' && deliveryResult.webPush.missing_permission > 0 && (
+                    <span className="ml-1 text-amber-200">без разрешения: {deliveryResult.webPush.missing_permission}</span>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

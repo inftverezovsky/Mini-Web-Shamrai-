@@ -1,3 +1,6 @@
+import asyncio
+from html import escape
+
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
@@ -12,8 +15,21 @@ from src.models.models import User, Bookmaker, Subscription, Bet, user_bets
 from src.schemas.schemas import UserResponse, BookmakerResponse, UserUpdateBookmakers, AdminUpdateUserPreferences, UserUpdateBankroll, BetResponse, OnboardRequest, OnboardResponse
 from src.api.deps import get_current_user, get_current_admin
 from src.core.bookmakers import ensure_standard_bookmakers
+from src.core.config import settings
+from src.core.quiet_hours import (
+    DEFAULT_NIGHT_MODE_END,
+    DEFAULT_NIGHT_MODE_START,
+    normalize_quiet_time,
+    quiet_time_or_default,
+)
 from src.core.roles import is_staff_role
+from src.api.payments import call_telegram_api
 from src.services.referrals import get_referral_stats
+from src.services.vk_delivery import (
+    refresh_vk_delivery_status,
+    vk_delivery_configured,
+    vk_group_id,
+)
 
 router = APIRouter(tags=["Users"])
 
@@ -66,6 +82,24 @@ ALL_SPORT_LABELS = [
     "Футзал",
     "Хоккей",
 ]
+ALERT_MIN_COEF_MIN = 1.0
+ALERT_MIN_COEF_MAX = 1.6
+
+EXPERIENCE_LABELS = {
+    "novice": "Новичок",
+    "amateur": "Любитель",
+    "pro": "Профи",
+}
+BANKROLL_LABELS = {
+    "micro": "До 30 000 ₽",
+    "mid": "50 000 - 100 000 ₽",
+    "high": "Более 100 000 ₽",
+}
+RISK_LABELS = {
+    "cautious": "Осторожная",
+    "balanced": "Сбалансированная",
+    "aggressive": "Агрессивная",
+}
 
 class AdminUserListResponse(BaseModel):
     telegram_id: int
@@ -135,6 +169,15 @@ def validate_onboarding_payload(data: OnboardRequest) -> None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid currency_preference"
+        )
+
+
+def validate_onboarding_vk_link(user: User, data: OnboardRequest) -> None:
+    payload_vk_user_id = (data.vk_user_id or "").strip()
+    if payload_vk_user_id and payload_vk_user_id != (user.vk_user_id or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="vk_user_id must match the linked VK profile",
         )
 
 
@@ -228,12 +271,84 @@ async def build_onboarding_recommendation(
     }
 
 
+def _onboarding_report_line(label: str, value: object) -> str:
+    rendered = str(value).strip() if value is not None else "не указано"
+    return f"<b>{escape(label)}:</b> {escape(rendered or 'не указано')}"
+
+
+def _format_onboarding_report(
+    user: User,
+    data: OnboardRequest,
+    selected_bookmakers: List[Bookmaker],
+    recommendation: dict,
+) -> str:
+    display_name = " ".join(
+        part for part in [user.first_name, user.last_name] if part
+    ).strip()
+    username = f"@{user.username}" if user.username else None
+    client_label = " / ".join(part for part in [display_name, username] if part) or "без имени"
+    selected_bookmaker_names = ", ".join(bookmaker.name for bookmaker in selected_bookmakers) or "не указано"
+    pains = "; ".join(data.anti_capper_pains or []) or "не указано"
+
+    lines = [
+        "<b>Новая анкета приветственного опроса</b>",
+        _onboarding_report_line("Клиент", client_label),
+        _onboarding_report_line("Telegram ID", user.telegram_id),
+        "",
+        _onboarding_report_line("Что раздражает", pains),
+        _onboarding_report_line("Опыт", EXPERIENCE_LABELS.get(data.experience_level, data.experience_level)),
+        _onboarding_report_line("Банк", BANKROLL_LABELS.get(data.bankroll_size, data.bankroll_size)),
+        _onboarding_report_line("Риск", RISK_LABELS.get(data.risk_tolerance, data.risk_tolerance)),
+        _onboarding_report_line("БК", selected_bookmaker_names),
+        _onboarding_report_line("VK", f"привязан {user.vk_user_id}" if user.vk_user_id else "пропущен"),
+    ]
+
+    if data.other_bookmaker_name and data.other_bookmaker_name.strip():
+        lines.append(_onboarding_report_line("Другие БК", data.other_bookmaker_name.strip()))
+
+    lines.extend([
+        _onboarding_report_line("Валюта", normalize_currency(data.currency_preference)),
+        "",
+        _onboarding_report_line("Рекомендованный флэт", f"{recommendation['flat_stake_percent']}%"),
+        _onboarding_report_line("Потенциал в месяц", f"+{recommendation['monthly_profit_percent']}%"),
+        _onboarding_report_line("Упущено за 24 часа", f"+{recommendation['missed_profit_percent_24h']}%"),
+    ])
+
+    return "\n".join(lines)
+
+
+async def send_onboarding_report(
+    user: User,
+    data: OnboardRequest,
+    selected_bookmakers: List[Bookmaker],
+    recommendation: dict,
+) -> None:
+    chat_id = settings.SHAMRAI_ONBOARDING_REPORT_CHAT_ID
+    if not chat_id:
+        return
+
+    message = _format_onboarding_report(user, data, selected_bookmakers, recommendation)
+    result = await asyncio.to_thread(
+        call_telegram_api,
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+    )
+    if not result.get("ok"):
+        print(f"Onboarding report delivery failed: {result.get('description', 'unknown error')}")
+
+
 async def save_onboarding_profile(
     db: AsyncSession,
     user: User,
     data: OnboardRequest,
 ) -> OnboardResponse:
     validate_onboarding_payload(data)
+    validate_onboarding_vk_link(user, data)
     recommendation = await build_onboarding_recommendation(db, data)
     active_bookmakers = await ensure_standard_bookmakers(db)
     bookmakers_by_id = {bookmaker.id: bookmaker for bookmaker in active_bookmakers}
@@ -269,6 +384,12 @@ async def save_onboarding_profile(
     user.risk_tolerance = data.risk_tolerance
     user.primary_bookmaker = selected_bookmakers[0].code if selected_bookmakers else None
     user.bookmakers = selected_bookmakers
+    has_other_bookmaker = any(bookmaker.code == "other" for bookmaker in selected_bookmakers)
+    user.other_bookmaker_name = (
+        data.other_bookmaker_name.strip()
+        if has_other_bookmaker and data.other_bookmaker_name and data.other_bookmaker_name.strip()
+        else None
+    )
     user.currency_preference = normalize_currency(data.currency_preference)
     user.free_bets_available = 0
     user.favorite_sports = []
@@ -278,6 +399,7 @@ async def save_onboarding_profile(
     telegram_id = user.telegram_id
     await db.commit()
     hydrated_user = await load_user_or_404(db, telegram_id)
+    await send_onboarding_report(hydrated_user, data, selected_bookmakers, recommendation)
 
     return OnboardResponse(
         status="success",
@@ -343,6 +465,30 @@ async def onboard_user(
     Processes the current user's neural calibration quiz.
     """
     return await save_onboarding_profile(db, current_user, data)
+
+
+@router.post("/users/me/onboard/skip", response_model=UserResponse)
+async def skip_my_onboarding(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    POST /api/users/me/onboard/skip
+    Marks the current user's welcome quiz as skipped while keeping broad feed access.
+    """
+    active_bookmakers = await ensure_standard_bookmakers(db)
+
+    if not current_user.bookmakers:
+        current_user.bookmakers = active_bookmakers
+    if not current_user.preferred_sports:
+        current_user.preferred_sports = ALL_SPORT_LABELS
+
+    current_user.is_onboarded = True
+    current_user.free_bets_available = 0
+    telegram_id = current_user.telegram_id
+    await db.commit()
+
+    return await load_user_or_404(db, telegram_id)
 
 
 @router.post("/users/{user_id}/onboard", response_model=OnboardResponse)
@@ -593,16 +739,35 @@ async def generate_user_pdf_report(
 class UserPreferencesUpdate(BaseModel):
     alert_min_coef: Optional[float] = None
     is_night_mode: Optional[bool] = None
+    night_mode_start: Optional[str] = None
+    night_mode_end: Optional[str] = None
     preferred_sports: Optional[List[str]] = None
     stats_display_mode: Optional[str] = None
+
+
+class VkDeliveryStatusUpdate(BaseModel):
+    group_member: Optional[bool] = None
+    messages_allowed: Optional[bool] = None
+    notifications_allowed: Optional[bool] = None
 
 
 @router.get("/users/me/preferences")
 async def get_my_preferences(current_user: User = Depends(get_current_user)):
     """GET /api/users/me/preferences — Returns current notification and display preferences."""
     return {
-        "alert_min_coef": current_user.alert_min_coef,
+        "alert_min_coef": min(
+            ALERT_MIN_COEF_MAX,
+            max(ALERT_MIN_COEF_MIN, current_user.alert_min_coef or ALERT_MIN_COEF_MIN),
+        ),
         "is_night_mode": current_user.is_night_mode,
+        "night_mode_start": quiet_time_or_default(
+            getattr(current_user, "night_mode_start", None),
+            DEFAULT_NIGHT_MODE_START,
+        ),
+        "night_mode_end": quiet_time_or_default(
+            getattr(current_user, "night_mode_end", None),
+            DEFAULT_NIGHT_MODE_END,
+        ),
         "preferred_sports": current_user.preferred_sports or ALL_SPORT_LABELS,
         "stats_display_mode": current_user.stats_display_mode
     }
@@ -616,15 +781,42 @@ async def update_my_preferences(
 ):
     """PUT /api/users/me/preferences — Updates smart notification settings and display preferences."""
     if data.alert_min_coef is not None:
-        if data.alert_min_coef < 1.0 or data.alert_min_coef > 50.0:
+        if data.alert_min_coef < ALERT_MIN_COEF_MIN or data.alert_min_coef > ALERT_MIN_COEF_MAX:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Минимальный коэффициент должен быть от 1.0 до 50.0"
+                detail="Минимальный коэффициент должен быть от 1.0 до 1.6"
             )
         current_user.alert_min_coef = data.alert_min_coef
 
     if data.is_night_mode is not None:
         current_user.is_night_mode = data.is_night_mode
+
+    next_night_mode_start = quiet_time_or_default(
+        getattr(current_user, "night_mode_start", None),
+        DEFAULT_NIGHT_MODE_START,
+    )
+    next_night_mode_end = quiet_time_or_default(
+        getattr(current_user, "night_mode_end", None),
+        DEFAULT_NIGHT_MODE_END,
+    )
+    try:
+        if data.night_mode_start is not None:
+            next_night_mode_start = normalize_quiet_time(data.night_mode_start, DEFAULT_NIGHT_MODE_START)
+        if data.night_mode_end is not None:
+            next_night_mode_end = normalize_quiet_time(data.night_mode_end, DEFAULT_NIGHT_MODE_END)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Время ночного режима должно быть в формате HH:MM",
+        )
+    if data.night_mode_start is not None or data.night_mode_end is not None:
+        if next_night_mode_start == next_night_mode_end:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Начало и конец ночного режима должны отличаться",
+            )
+        current_user.night_mode_start = next_night_mode_start
+        current_user.night_mode_end = next_night_mode_end
 
     if data.preferred_sports is not None:
         current_user.preferred_sports = data.preferred_sports
@@ -645,9 +837,74 @@ async def update_my_preferences(
         "preferences": {
             "alert_min_coef": current_user.alert_min_coef,
             "is_night_mode": current_user.is_night_mode,
+            "night_mode_start": quiet_time_or_default(
+                getattr(current_user, "night_mode_start", None),
+                DEFAULT_NIGHT_MODE_START,
+            ),
+            "night_mode_end": quiet_time_or_default(
+                getattr(current_user, "night_mode_end", None),
+                DEFAULT_NIGHT_MODE_END,
+            ),
             "preferred_sports": current_user.preferred_sports or ALL_SPORT_LABELS,
             "stats_display_mode": current_user.stats_display_mode
         }
+    }
+
+
+@router.get("/users/me/vk-delivery-status")
+async def get_my_vk_delivery_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns VK delivery readiness for the current profile."""
+    status_payload = await refresh_vk_delivery_status(db, current_user, commit=True)
+
+    group_id = vk_group_id()
+    return {
+        "vk_user_id": current_user.vk_user_id,
+        "group_id": group_id,
+        "configured": vk_delivery_configured(),
+        "group_member": bool(status_payload["group_member"]),
+        "messages_allowed": bool(status_payload["messages_allowed"]),
+        "notifications_allowed": bool(current_user.vk_notifications_allowed),
+    }
+
+
+@router.put("/users/me/vk-delivery-status")
+async def update_my_vk_delivery_status(
+    data: VkDeliveryStatusUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stores VK permission grants and refreshes message permission from VK when possible."""
+    if not current_user.vk_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VK ID is not linked to this profile",
+        )
+
+    if data.messages_allowed is not None:
+        messages_allowed = bool(data.messages_allowed)
+        current_user.vk_messages_allowed = messages_allowed
+
+    if data.group_member is not None:
+        current_user.vk_group_member = bool(data.group_member)
+
+    if data.notifications_allowed is not None:
+        current_user.vk_notifications_allowed = bool(data.notifications_allowed)
+
+    await refresh_vk_delivery_status(db, current_user)
+    await db.commit()
+    await db.refresh(current_user)
+
+    return {
+        "status": "success",
+        "vk_user_id": current_user.vk_user_id,
+        "group_id": vk_group_id(),
+        "configured": vk_delivery_configured(),
+        "group_member": bool(current_user.vk_group_member),
+        "messages_allowed": bool(current_user.vk_messages_allowed),
+        "notifications_allowed": bool(current_user.vk_notifications_allowed),
     }
 
 

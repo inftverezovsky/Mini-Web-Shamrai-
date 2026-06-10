@@ -2,8 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import { BookmakerResponse } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
+import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
+import { useAuth } from '../../context/AuthContext';
+import { isPrivilegedRole } from '../../utils/roles';
 import {
+  AlertTriangle,
   BadgeCheck,
   Calendar,
   CheckSquare,
@@ -16,6 +20,7 @@ import {
   ShieldCheck,
   Sliders,
   Tags,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
@@ -29,10 +34,12 @@ interface CRMUser {
   username: string | null;
   first_name: string | null;
   last_name: string | null;
+  is_web_only?: boolean;
   role: string;
   stats_display_mode: string;
   has_active_subscription: boolean;
   subscription_end_date: string | null;
+  purchased_bets_balance?: number;
   matches_remaining: number;
   guarantee_active: boolean;
   guarantee_opened_from_bet_id: string | null;
@@ -62,12 +69,22 @@ const filterLabels: Record<ActivityFilter, string> = {
 
 function getDisplayName(user: CRMUser) {
   const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim();
-  return fullName || user.username || `ID ${user.telegram_id}`;
+  return fullName || user.username || (user.is_web_only ? 'Web/VK клиент' : `ID ${user.telegram_id}`);
+}
+
+function getClientIdLabel(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
+  return user.is_web_only ? 'Web/VK клиент' : `ID: ${user.telegram_id}`;
 }
 
 function cleanText(value: string) {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function getMatchBalance(user: Pick<CRMUser, 'purchased_bets_balance' | 'matches_remaining'>) {
+  return user.purchased_bets_balance !== undefined && user.purchased_bets_balance !== 0
+    ? user.purchased_bets_balance
+    : user.matches_remaining || 0;
 }
 
 function pluralRu(value: number, one: string, few: string, many: string) {
@@ -100,6 +117,7 @@ function getMatchStreak(results: ClientRecentMatchResult[]) {
 }
 
 export default function AdminCRM() {
+  const { user: currentAdmin } = useAuth();
   const [users, setUsers] = useState<CRMUser[]>([]);
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,6 +134,7 @@ export default function AdminCRM() {
   const [editClientTag, setEditClientTag] = useState('');
   const [matchDelta, setMatchDelta] = useState('');
   const [saving, setSaving] = useState(false);
+  const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
 
   const loadCRM = async () => {
     try {
@@ -154,6 +173,7 @@ export default function AdminCRM() {
         user.last_name,
         user.username,
         user.telegram_id,
+        getMatchBalance(user),
         user.client_group,
         user.client_tag,
         user.other_bookmaker_name,
@@ -163,7 +183,7 @@ export default function AdminCRM() {
       const matchesActivity =
         activityFilter === 'all' ||
         (activityFilter === 'active' && user.has_active_subscription) ||
-        (activityFilter === 'empty' && !user.guarantee_active && (user.matches_remaining || 0) <= 0) ||
+        (activityFilter === 'empty' && !user.guarantee_active && getMatchBalance(user) <= 0) ||
         (activityFilter === 'guarantee' && user.guarantee_active);
       const matchesGroup = groupFilter === 'all' || user.client_group === groupFilter;
       const matchesTag = tagFilter === 'all' || user.client_tag === tagFilter;
@@ -174,7 +194,7 @@ export default function AdminCRM() {
 
   const summary = useMemo(() => {
     const active = users.filter(user => user.has_active_subscription).length;
-    const empty = users.filter(user => !user.guarantee_active && (user.matches_remaining || 0) <= 0).length;
+    const empty = users.filter(user => !user.guarantee_active && getMatchBalance(user) <= 0).length;
     const guarantee = users.filter(user => user.guarantee_active).length;
     return { active, empty, guarantee };
   }, [users]);
@@ -269,13 +289,17 @@ export default function AdminCRM() {
 
   const handleRevokeSub = async () => {
     if (!selectedUser) return;
+    const currentBalance = getMatchBalance(selectedUser);
     const confirmed = await confirmDestructive({
-      title: 'Обнулить матчи',
-      message: 'Обнулить остаток матчей у клиента?',
+      title: currentBalance < 0 ? 'Обнулить долг' : 'Обнулить матчи',
+      message: currentBalance < 0
+        ? `Обнулить отрицательный баланс клиента ${currentBalance} до 0?`
+        : 'Обнулить остаток матчей у клиента?',
       confirmLabel: 'Обнулить',
+      tone: currentBalance < 0 ? 'warning' : 'danger',
     });
     if (!confirmed) return;
-    setMatchDelta(String(-(selectedUser.matches_remaining || 0)));
+    setMatchDelta(String(-currentBalance));
   };
 
   const handleCloseGuarantee = async () => {
@@ -307,6 +331,33 @@ export default function AdminCRM() {
       await loadCRM();
     } catch (err: any) {
       notifyError(err.message || 'Ошибка закрытия гарантии');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteUser = async () => {
+    if (!selectedUser || !canDeleteClients) return;
+
+    const confirmed = await confirmDestructive({
+      title: 'Удалить клиента',
+      message: `Удалить ${getDisplayName(selectedUser)} из базы? Заявки, оплаты, баланс и CRM-метки клиента будут удалены.`,
+      confirmLabel: 'Удалить',
+    });
+    if (!confirmed) return;
+
+    const deletedUserId = selectedUser.telegram_id;
+    try {
+      setSaving(true);
+      await apiFetch(`/admin/users/${deletedUserId}`, {
+        method: 'DELETE',
+      });
+      notifySuccess('Клиент удален из базы');
+      setUsers(prev => prev.filter(user => user.telegram_id !== deletedUserId));
+      setSelectedUser(null);
+      await loadCRM();
+    } catch (err: any) {
+      notifyError(err.message || 'Ошибка удаления клиента');
     } finally {
       setSaving(false);
     }
@@ -427,6 +478,8 @@ export default function AdminCRM() {
             const recentResults = user.recent_match_results || [];
             const streak = getMatchStreak(recentResults);
             const chronologicalResults = [...recentResults].reverse();
+            const matchBalance = getMatchBalance(user);
+            const hasMatchDebt = matchBalance < 0;
 
             return (
               <button
@@ -441,13 +494,17 @@ export default function AdminCRM() {
                       {getDisplayName(user)}
                     </h4>
                     <p className="text-[10px] text-slate-400 font-bold truncate">
-                      {user.username ? `@${user.username}` : 'без юзернейма'} • ID: {user.telegram_id}
+                      {user.username ? `@${user.username}` : 'без юзернейма'} • {getClientIdLabel(user)}
                     </p>
                   </div>
 
-                  {user.has_active_subscription ? (
+                  {hasMatchDebt ? (
+                    <span className="shrink-0 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
+                      <AlertTriangle className="w-3.5 h-3.5 mr-0.5" /> {matchBalance} матч.
+                    </span>
+                  ) : user.has_active_subscription ? (
                     <span className="shrink-0 bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
-                      <ShieldCheck className="w-3.5 h-3.5 mr-0.5" /> {user.matches_remaining} матч.
+                      <ShieldCheck className="w-3.5 h-3.5 mr-0.5" /> {matchBalance} матч.
                     </span>
                   ) : (
                     <span className="shrink-0 bg-slate-900 border border-slate-700/50 text-slate-500 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
@@ -537,7 +594,7 @@ export default function AdminCRM() {
             <div className="space-y-0.5 text-center pr-6">
               <h3 className="text-white text-base font-black truncate">Карточка клиента</h3>
               <p className="text-slate-450 text-[10px] uppercase font-bold truncate">
-                {getDisplayName(selectedUser)} • {selectedUser.username ? `@${selectedUser.username}` : `ID ${selectedUser.telegram_id}`}
+                {getDisplayName(selectedUser)} • {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
               </p>
             </div>
 
@@ -547,11 +604,11 @@ export default function AdminCRM() {
                   <Layers3 className="w-3.5 h-3.5 text-cyan-300 mr-1.5" />
                   Группа
                 </span>
-                <input
+                <EmojiTextField
                   type="text"
                   list="client-group-options"
                   value={editClientGroup}
-                  onChange={event => setEditClientGroup(event.target.value)}
+                  onValueChange={setEditClientGroup}
                   placeholder="VIP, новые..."
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-cyan-400/50 text-xs font-bold"
                 />
@@ -562,11 +619,11 @@ export default function AdminCRM() {
                   <Tags className="w-3.5 h-3.5 text-fuchsia-300 mr-1.5" />
                   Метка
                 </span>
-                <input
+                <EmojiTextField
                   type="text"
                   list="client-tag-options"
                   value={editClientTag}
-                  onChange={event => setEditClientTag(event.target.value)}
+                  onValueChange={setEditClientTag}
                   placeholder="топ, важный..."
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-fuchsia-400/50 text-xs font-bold"
                 />
@@ -578,12 +635,26 @@ export default function AdminCRM() {
                 <Calendar className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
                 Абонемент по матчам
               </h4>
+              <div className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${
+                getMatchBalance(selectedUser) < 0
+                  ? 'bg-rose-500/10 border-rose-500/25 text-rose-200'
+                  : getMatchBalance(selectedUser) > 0
+                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
+                    : 'bg-slate-900/70 border-slate-700/70 text-slate-300'
+              }`}>
+                <span className="text-[9px] font-black uppercase tracking-wider">
+                  Текущий баланс
+                </span>
+                <span className="text-xs font-black">
+                  {getMatchBalance(selectedUser)} матч.
+                </span>
+              </div>
               <div className="grid grid-cols-[1fr_auto] gap-2">
                 <input
                   type="number"
                   value={matchDelta}
                   onChange={event => setMatchDelta(event.target.value)}
-                  placeholder={`Изменить баланс: сейчас ${selectedUser.matches_remaining}`}
+                  placeholder={`Изменить баланс: сейчас ${getMatchBalance(selectedUser)}`}
                   className="min-w-0 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
                 />
                 <button
@@ -686,10 +757,10 @@ export default function AdminCRM() {
               </div>
 
               {otherBookmakerSelected && (
-                <input
+                <EmojiTextField
                   type="text"
                   value={editOtherBookmakerName}
-                  onChange={event => setEditOtherBookmakerName(event.target.value)}
+                  onValueChange={setEditOtherBookmakerName}
                   placeholder="Название другой БК"
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
                 />
@@ -711,6 +782,24 @@ export default function AdminCRM() {
                 </>
               )}
             </button>
+
+            {canDeleteClients && (
+              <button
+                type="button"
+                onClick={handleDeleteUser}
+                disabled={saving}
+                className="w-full bg-rose-500/10 hover:bg-rose-500 border border-rose-500/25 hover:border-rose-400 active:scale-[0.98] disabled:opacity-50 text-rose-300 hover:text-white font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all text-xs"
+              >
+                {saving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>Удалить клиента</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       )}

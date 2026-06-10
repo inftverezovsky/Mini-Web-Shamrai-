@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import { SubscriptionPlanResponse } from '../../schemas/schemas';
 import { Loader2, Package, Save, ToggleLeft, ToggleRight } from 'lucide-react';
+import EmojiTextField from '../../components/EmojiTextField';
 import { notifyError, notifySuccess } from '../../utils/notify';
 
 export default function AdminPlans() {
@@ -91,9 +92,9 @@ export default function AdminPlans() {
           Новый пакет матчей
         </h3>
         <form onSubmit={createPlan} className="space-y-3 text-xs">
-          <input
+          <EmojiTextField
             value={name}
-            onChange={e => setName(e.target.value)}
+            onValueChange={setName}
             placeholder="Название пакета"
             className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50"
           />

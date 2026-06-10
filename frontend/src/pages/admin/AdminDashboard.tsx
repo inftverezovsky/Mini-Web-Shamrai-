@@ -2,14 +2,16 @@ import React, { useState } from 'react';
 import { Settings } from 'lucide-react';
 import AdminBets from './AdminBets';
 import AdminBroadcast from './AdminBroadcast';
+import AdminResults from './AdminResults';
 
-type AdminTabId = 'bets' | 'broadcast';
+type AdminTabId = 'bets' | 'results' | 'broadcast';
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<AdminTabId>('bets');
 
   const adminTabs: Array<{ id: AdminTabId; label: string }> = [
     { id: 'bets', label: 'Прогнозы' },
+    { id: 'results', label: 'Результаты' },
     { id: 'broadcast', label: 'Рассылки' },
   ];
 
@@ -28,7 +30,7 @@ export default function AdminDashboard() {
       </div>
 
       {/* 2. Sub-Tab bar Navigation */}
-      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-2 gap-1.5 shadow-inner">
+      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-3 gap-1.5 shadow-inner">
         {adminTabs.map(tab => (
           <button
             key={tab.id}
@@ -47,6 +49,7 @@ export default function AdminDashboard() {
       {/* 3. Sub-Tab Component Switcher */}
       <div>
         {activeTab === 'bets' && <AdminBets />}
+        {activeTab === 'results' && <AdminResults />}
         {activeTab === 'broadcast' && <AdminBroadcast />}
       </div>
 

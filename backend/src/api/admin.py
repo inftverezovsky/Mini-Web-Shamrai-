@@ -2,14 +2,34 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, and_
+from sqlalchemy import delete, func, update
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 from pydantic import BaseModel
 
 from src.models.database import get_db
-from src.models.models import User, Bet, Subscription, SubscriptionPlan, PromoCode, Marathon, Bookmaker, AdminAuditLog, PaymentAttempt, user_bets
+from src.models.models import (
+    AdminAuditLog,
+    Bet,
+    Bookmaker,
+    CrowdBetParticipant,
+    DailyRewardClaim,
+    ForecastRequest,
+    Marathon,
+    MatchBalanceLog,
+    PaymentAttempt,
+    PromoCode,
+    PvPBattleVote,
+    Subscription,
+    SubscriptionPlan,
+    User,
+    UserBadge,
+    UserNote,
+    user_bets,
+    user_bookmakers,
+)
 from src.schemas.schemas import (
     AdminAuditLogResponse,
     AdminGrantRequest,
@@ -20,7 +40,8 @@ from src.schemas.schemas import (
 )
 from src.api.deps import get_current_admin, get_current_privileged_admin
 from src.core.roles import ADMIN_ROLES, ROLE_LABELS, STAFF_ROLES, VALID_ROLES, is_admin_role, is_owner_role, normalize_role
-from src.services.match_access import log_match_balance_event
+from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
+from src.services.match_access import log_match_balance_event, revoke_user_bet_access
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 
@@ -50,16 +71,24 @@ def build_admin_user_response(
     user: User,
     recent_match_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    match_balance = int(
+        user.purchased_bets_balance
+        if (user.purchased_bets_balance or 0) != 0
+        else (user.matches_remaining or 0)
+    )
     return {
         "telegram_id": user.telegram_id,
         "username": user.username,
         "first_name": user.first_name,
         "last_name": user.last_name,
+        "photo_url": user.photo_url,
+        "is_web_only": user.is_web_only,
         "role": user.role,
         "stats_display_mode": user.stats_display_mode,
-        "has_active_subscription": (user.purchased_bets_balance or user.matches_remaining or 0) > 0 or user.guarantee_active,
+        "has_active_subscription": match_balance > 0 or user.guarantee_active,
         "subscription_end_date": None,
-        "matches_remaining": user.matches_remaining or 0,
+        "purchased_bets_balance": match_balance,
+        "matches_remaining": match_balance,
         "guarantee_active": user.guarantee_active,
         "guarantee_opened_from_bet_id": user.guarantee_opened_from_bet_id,
         "guarantee_closed_at": user.guarantee_closed_at,
@@ -339,6 +368,92 @@ async def get_pending_bets(
     )
     res = await db.execute(query)
     return res.scalars().all()
+
+
+@router.delete("/bets/{bet_id}")
+async def delete_bet_from_admin(
+    bet_id: UUID,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    DELETE /api/admin/bets/{bet_id}
+    Soft-deletes a forecast and removes all client access/balance impact.
+    """
+    result = await db.execute(
+        select(Bet)
+        .filter(Bet.id == bet_id)
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+    )
+    bet = result.scalars().first()
+    if not bet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Прогноз не найден",
+        )
+
+    users_result = await db.execute(
+        select(User)
+        .join(user_bets, user_bets.c.user_id == User.telegram_id)
+        .filter(user_bets.c.bet_id == bet.id)
+    )
+    takers = users_result.scalars().all()
+    revoke_results = []
+    revoke_results_by_user_id = {}
+    for user in takers:
+        revoke_result = await revoke_user_bet_access(
+            db,
+            user=user,
+            bet=bet,
+            actor_id=admin.telegram_id,
+            reason="Forecast deleted by admin",
+        )
+        revoke_results.append(revoke_result)
+        revoke_results_by_user_id[user.telegram_id] = revoke_result
+
+    requests_result = await db.execute(
+        select(ForecastRequest).filter(ForecastRequest.bet_id == bet.id)
+    )
+    marked_requests = 0
+    for forecast_request in requests_result.scalars().all():
+        if forecast_request.status != FORECAST_STATUS_REMOVED:
+            marked_requests += 1
+        forecast_request.status = FORECAST_STATUS_REMOVED
+        forecast_request.handled_by = admin.telegram_id
+        revoke_result = revoke_results_by_user_id.get(forecast_request.user_id)
+        if revoke_result and revoke_result.had_access:
+            if forecast_request.balance_before is None:
+                forecast_request.balance_before = revoke_result.balance_before
+            forecast_request.balance_after = revoke_result.balance_after
+            forecast_request.no_balance_warning = False
+
+    already_deleted = bet.status == "deleted"
+    bet.status = "deleted"
+    bet.resolved_at = bet.resolved_at or datetime.now(timezone.utc)
+
+    revoked_count = sum(1 for item in revoke_results if item.had_access)
+    balance_delta_total = sum(item.delta_matches for item in revoke_results)
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="bet_deleted",
+        details={
+            "bet_id": str(bet.id),
+            "event_name": bet.event_name,
+            "already_deleted": already_deleted,
+            "revoked_count": revoked_count,
+            "marked_requests": marked_requests,
+            "balance_delta_total": balance_delta_total,
+        },
+    )
+    await db.commit()
+    return {
+        "status": "success",
+        "bet_id": str(bet.id),
+        "revoked_count": revoked_count,
+        "marked_requests": marked_requests,
+        "balance_delta_total": balance_delta_total,
+    }
 
 # --- PROMO CODES MANAGER ---
 
@@ -692,11 +807,17 @@ async def admin_update_user(
             user.client_tag = next_client_tag
         
     if data.matches_delta is not None and data.matches_delta != 0:
-        previous_matches = user.matches_remaining or 0
-        user.matches_remaining = max(0, (user.matches_remaining or 0) + data.matches_delta)
+        previous_matches = int(
+            user.purchased_bets_balance
+            if (user.purchased_bets_balance or 0) != 0
+            else (user.matches_remaining or 0)
+        )
+        next_matches = max(0, previous_matches + data.matches_delta)
+        user.purchased_bets_balance = next_matches
+        user.matches_remaining = next_matches
         audit_changes["matches_remaining"] = {
             "from": previous_matches,
-            "to": user.matches_remaining,
+            "to": next_matches,
             "delta": data.matches_delta,
         }
         db.add(log_match_balance_event(
@@ -762,6 +883,76 @@ async def admin_update_user(
     telegram_id = user.telegram_id
     await db.commit()
     return await load_user_response(db, telegram_id)
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_200_OK)
+async def admin_delete_user(
+    user_id: int,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    DELETE /api/admin/users/{user_id}
+    Permanently removes a CRM client and their linked client-side records.
+    """
+    if user_id == admin.telegram_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Нельзя удалить собственный аккаунт"
+        )
+
+    result = await db.execute(select(User).filter(User.telegram_id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пользователь не найден"
+        )
+
+    if normalize_role(user.role) != "user":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Можно удалять только клиентов. Сначала снимите роль сотрудника в доступах"
+        )
+
+    deleted_user_details = {
+        "deleted_user_id": user.telegram_id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "is_web_only": user.is_web_only,
+        "client_group": user.client_group,
+        "client_tag": user.client_tag,
+    }
+
+    await db.execute(delete(user_bookmakers).where(user_bookmakers.c.user_id == user.telegram_id))
+    await db.execute(delete(user_bets).where(user_bets.c.user_id == user.telegram_id))
+    await db.execute(delete(MatchBalanceLog).where(MatchBalanceLog.user_id == user.telegram_id))
+    await db.execute(delete(Subscription).where(Subscription.user_id == user.telegram_id))
+    await db.execute(delete(PaymentAttempt).where(PaymentAttempt.user_id == user.telegram_id))
+    await db.execute(delete(ForecastRequest).where(ForecastRequest.user_id == user.telegram_id))
+    await db.execute(delete(CrowdBetParticipant).where(CrowdBetParticipant.user_id == user.telegram_id))
+    await db.execute(delete(DailyRewardClaim).where(DailyRewardClaim.user_id == user.telegram_id))
+    await db.execute(delete(PvPBattleVote).where(PvPBattleVote.user_id == user.telegram_id))
+    await db.execute(delete(PromoCode).where(PromoCode.user_id == user.telegram_id))
+    await db.execute(delete(UserBadge).where(UserBadge.user_id == user.telegram_id))
+    await db.execute(delete(UserNote).where(UserNote.user_id == user.telegram_id))
+
+    await db.execute(update(Bet).where(Bet.author_id == user.telegram_id).values(author_id=None))
+    await db.execute(update(User).where(User.referred_by_user_id == user.telegram_id).values(referred_by_user_id=None))
+    await db.execute(update(ForecastRequest).where(ForecastRequest.handled_by == user.telegram_id).values(handled_by=None))
+    await db.execute(update(AdminAuditLog).where(AdminAuditLog.actor_id == user.telegram_id).values(actor_id=None))
+    await db.execute(update(AdminAuditLog).where(AdminAuditLog.target_user_id == user.telegram_id).values(target_user_id=None))
+
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="user_deleted",
+        details=deleted_user_details,
+    )
+    await db.delete(user)
+    await db.commit()
+    return {"status": "success", "deleted_user_id": user_id}
 
 
 @router.post("/admins/grant", response_model=UserResponse)
@@ -847,12 +1038,12 @@ async def admin_chats_generate_link(
     from src.core.config import settings
     chat_id = settings.TELEGRAM_VIP_CHAT_ID
     
-    from src.api.payments import call_telegram_api
+    from src.api.payments import call_telegram_api_async
     payload = {
         "chat_id": chat_id,
         "member_limit": 1
     }
-    res = call_telegram_api("createChatInviteLink", payload)
+    res = await call_telegram_api_async("createChatInviteLink", payload)
     
     if res.get("ok"):
         return {"invite_link": res["result"]["invite_link"]}

@@ -1,0 +1,281 @@
+from typing import Any, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
+
+from src.api.deps import get_current_user
+from src.core.config import settings
+from src.core.security import verify_access_token
+from src.models.database import AsyncSessionLocal, get_db
+from src.models.models import Bet, ForecastRequest, PersonalSignal, User
+from src.services.forecast_delivery import (
+    build_web_forecast_signal_data,
+    build_web_teaser_signal_data,
+    notify_sales_manager_for_request,
+    set_forecast_request_declined,
+    set_forecast_request_interested,
+)
+from src.services.signals import signal_stream_hub, signal_to_payload, web_push_configured
+
+router = APIRouter(prefix="/signals", tags=["Personal Signals"])
+
+
+class PersonalSignalResponse(BaseModel):
+    id: int
+    user_id: int
+    text: str
+    type: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class ForecastSignalActionResponse(BaseModel):
+    status: str
+    message: str
+    forecast_request_id: str
+
+
+class WebPushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class WebPushSubscriptionPayload(BaseModel):
+    endpoint: str
+    expirationTime: Optional[int] = None
+    keys: WebPushKeys
+
+
+class WebPushSubscriptionResponse(BaseModel):
+    status: str
+    configured: bool = False
+
+
+class WebPushPublicKeyResponse(BaseModel):
+    public_key: str = ""
+    configured: bool = False
+
+
+def _serialize_signal(signal: PersonalSignal) -> PersonalSignalResponse:
+    return PersonalSignalResponse(**signal_to_payload(signal))
+
+
+def _forecast_request_id_from_signal(signal: PersonalSignal) -> Optional[UUID]:
+    signal_data = signal.data or {}
+    raw_request_id = signal_data.get("forecast_request_id")
+    if not raw_request_id:
+        return None
+    try:
+        return UUID(str(raw_request_id))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _forecast_requests_for_signals(
+    db: AsyncSession,
+    *,
+    signals: list[PersonalSignal],
+    user_id: int,
+) -> dict[str, ForecastRequest]:
+    request_ids = {
+        request_id
+        for request_id in (_forecast_request_id_from_signal(signal) for signal in signals)
+        if request_id is not None
+    }
+    if not request_ids:
+        return {}
+
+    result = await db.execute(
+        select(ForecastRequest)
+        .filter(
+            ForecastRequest.user_id == user_id,
+            ForecastRequest.id.in_(request_ids),
+        )
+        .options(
+            selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
+            selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
+        )
+    )
+    return {str(forecast_request.id): forecast_request for forecast_request in result.scalars().all()}
+
+
+def _is_missing_signal_data_value(value: Any) -> bool:
+    return value is None or value == "" or value == []
+
+
+def _enrich_forecast_signal_data(
+    signal: PersonalSignal,
+    signal_data: dict[str, Any],
+    forecast_request: ForecastRequest,
+) -> dict[str, Any]:
+    if signal.type == "forecast_full":
+        fresh_data = build_web_forecast_signal_data(
+            forecast_request,
+            status_value=forecast_request.status,
+        )
+    elif signal.type == "forecast_teaser":
+        fresh_data = build_web_teaser_signal_data(forecast_request, None)
+        fresh_data["forecast_status"] = forecast_request.status
+    else:
+        return signal_data
+
+    enriched_data = dict(signal_data)
+    for key, value in fresh_data.items():
+        if _is_missing_signal_data_value(enriched_data.get(key)):
+            enriched_data[key] = value
+    enriched_data["forecast_status"] = forecast_request.status
+    return enriched_data
+
+
+def _serialize_signal_with_forecast_data(
+    signal: PersonalSignal,
+    forecast_requests: dict[str, ForecastRequest],
+) -> PersonalSignalResponse:
+    payload = signal_to_payload(signal)
+    signal_data = dict(payload.get("data") or {})
+    request_id = signal_data.get("forecast_request_id")
+    forecast_request = forecast_requests.get(str(request_id)) if request_id else None
+    if forecast_request:
+        signal_data = _enrich_forecast_signal_data(signal, signal_data, forecast_request)
+    payload["data"] = signal_data
+    return PersonalSignalResponse(**payload)
+
+
+async def _load_user_from_ws_token(db: AsyncSession, token: str) -> Optional[User]:
+    payload = verify_access_token(token)
+    if not payload or "sub" not in payload:
+        return None
+
+    try:
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError):
+        return None
+
+    result = await db.execute(select(User).filter(User.telegram_id == user_id))
+    return result.scalars().first()
+
+
+@router.get("/web-push/public-key", response_model=WebPushPublicKeyResponse)
+async def get_web_push_public_key():
+    public_key = settings.WEB_PUSH_VAPID_PUBLIC_KEY.strip()
+    return WebPushPublicKeyResponse(public_key=public_key, configured=bool(public_key and web_push_configured()))
+
+
+@router.put("/web-push/subscription", response_model=WebPushSubscriptionResponse)
+async def save_web_push_subscription(
+    subscription: WebPushSubscriptionPayload,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.web_push_subscription = subscription.model_dump()
+    await db.flush()
+    return WebPushSubscriptionResponse(status="saved", configured=web_push_configured())
+
+
+@router.delete("/web-push/subscription", response_model=WebPushSubscriptionResponse)
+async def delete_web_push_subscription(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user.web_push_subscription = None
+    await db.flush()
+    return WebPushSubscriptionResponse(status="deleted", configured=web_push_configured())
+
+
+@router.get("/history", response_model=list[PersonalSignalResponse])
+async def get_signal_history(
+    limit: int = Query(60, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(PersonalSignal)
+        .filter(PersonalSignal.user_id == current_user.telegram_id)
+        .order_by(PersonalSignal.created_at.desc(), PersonalSignal.id.desc())
+        .limit(limit)
+    )
+    signals = list(reversed(result.scalars().all()))
+    forecast_requests = await _forecast_requests_for_signals(
+        db,
+        signals=signals,
+        user_id=current_user.telegram_id,
+    )
+    return [_serialize_signal_with_forecast_data(signal, forecast_requests) for signal in signals]
+
+
+@router.post("/forecast-requests/{request_id}/{action}", response_model=ForecastSignalActionResponse)
+async def answer_forecast_request_from_web_chat(
+    request_id: UUID,
+    action: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if action == "take":
+        forecast_request, message, should_notify_sales = await set_forecast_request_interested(
+            db,
+            request_id=request_id,
+            actor_user_id=current_user.telegram_id,
+            notify_sales_manager_now=False,
+            auto_delivery_method="auto",
+            auto_delivery_now=True,
+        )
+        await db.commit()
+        if should_notify_sales:
+            background_tasks.add_task(notify_sales_manager_for_request, forecast_request.id)
+        return ForecastSignalActionResponse(
+            status=forecast_request.status,
+            message=message,
+            forecast_request_id=str(forecast_request.id),
+        )
+
+    if action == "decline":
+        forecast_request, message = await set_forecast_request_declined(
+            db,
+            request_id=request_id,
+            actor_user_id=current_user.telegram_id,
+        )
+        await db.commit()
+        return ForecastSignalActionResponse(
+            status=forecast_request.status,
+            message=message,
+            forecast_request_id=str(forecast_request.id),
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Неизвестное действие",
+    )
+
+
+@router.websocket("/stream")
+async def stream_personal_signals(
+    websocket: WebSocket,
+    token: str = Query(""),
+):
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    async with AsyncSessionLocal() as db:
+        user = await _load_user_from_ws_token(db, token)
+
+    if not user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await signal_stream_hub.connect(user.telegram_id, websocket)
+    try:
+        while True:
+            message = await websocket.receive_text()
+            if message == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await signal_stream_hub.disconnect(user.telegram_id, websocket)

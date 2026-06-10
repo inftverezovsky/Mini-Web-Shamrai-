@@ -1,6 +1,7 @@
 import asyncio
 import html
 import json
+import time
 from typing import Optional
 from uuid import UUID
 
@@ -10,19 +11,22 @@ from src.models.database import AsyncSessionLocal
 from src.core.config import settings
 from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_text import contact_footer, write_emoji
-from src.api.payments import process_telegram_payment_update
+from src.api.payments import call_telegram_api, process_telegram_payment_update
 from src.services.forecast_delivery import (
+    auto_deliver_forecast_request_for_request,
+    forecast_request_should_auto_deliver,
     handle_sales_callback,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
     set_forecast_request_interested,
 )
+from src.services.telegram_auth import confirm_telegram_bot_auth_session, parse_telegram_auth_start_param
 import logging
 
 router = APIRouter(prefix="/telegram", tags=["Telegram Webhook"])
 logger = logging.getLogger("uvicorn")
 
-SHAMRAI_BUTTON_TEXT = "Открыть Shamrai Analytics"
+SHAMRAI_BUTTON_TEXT = "Открыть Shamrai"
 EMOJI_ID_COMMANDS = {
     "/emoji_ids": "TELEGRAM_CUSTOM_EMOJI_IDS",
     "/emoji_ids_bk": "TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS",
@@ -30,10 +34,113 @@ EMOJI_ID_COMMANDS = {
 }
 
 
+def _telegram_update_type(update: dict) -> str:
+    if update.get("callback_query"):
+        return "callback_query"
+    if update.get("pre_checkout_query"):
+        return "pre_checkout_query"
+    message = update.get("message") or {}
+    if message.get("successful_payment"):
+        return "successful_payment"
+    if message:
+        return "message"
+    return "unknown"
+
+
+def _telegram_update_chat_id(update: dict) -> Optional[int]:
+    callback_query = update.get("callback_query") or {}
+    callback_message = callback_query.get("message") or {}
+    callback_chat = callback_message.get("chat") or {}
+    if callback_chat.get("id") is not None:
+        return callback_chat.get("id")
+
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    if chat.get("id") is not None:
+        return chat.get("id")
+
+    pre_checkout_query = update.get("pre_checkout_query") or {}
+    user = pre_checkout_query.get("from") or {}
+    return user.get("id")
+
+
+def _telegram_response_label(response: dict) -> str:
+    if not isinstance(response, dict):
+        return type(response).__name__
+    return str(response.get("method") or response.get("status") or "dict")
+
+
 def _shamrai_web_app_button(web_app_url: str) -> dict:
     return {
         "text": SHAMRAI_BUTTON_TEXT,
         "web_app": {"url": web_app_url},
+    }
+
+
+def _is_start_command(text: str) -> bool:
+    first_token = (text.strip().split(None, 1)[0] if text.strip() else "").lower()
+    return first_token.split("@", 1)[0] == "/start"
+
+
+def _start_command_param(text: str) -> str:
+    parts = (text or "").strip().split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _start_web_app_url(request_base_url: Optional[str]) -> str:
+    return settings.FRONTEND_BASE_URL.strip() or request_base_url or settings.API_BASE_URL.strip()
+
+
+def _build_start_response(message: dict, request_base_url: Optional[str] = None) -> dict:
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    web_app_url = _start_web_app_url(request_base_url)
+    welcome_text = (
+        f"👋 <b>Привет, {user.get('first_name', 'друг')}!</b>\n\n"
+        "Добро пожаловать в <b>ШАМРАЙ | ОШИБКИ БК</b>.\n\n"
+        "📊 Прогнозы, ошибки БК и умные уведомления уже внутри приложения.\n\n"
+        f"{contact_footer()}\n\n"
+        "👇 Нажмите кнопку ниже, чтобы открыть Shamrai."
+    )
+    return {
+        "method": "sendMessage",
+        "chat_id": chat.get("id"),
+        "text": welcome_text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    _shamrai_web_app_button(web_app_url)
+                ]
+            ]
+        },
+    }
+
+
+def _build_auth_response(message: dict, confirmed: bool, request_base_url: Optional[str] = None) -> dict:
+    chat = message.get("chat") or {}
+    web_app_url = _start_web_app_url(request_base_url)
+    text = (
+        "✅ <b>Вход подтвержден.</b>\n\n"
+        "Вернитесь на сайт Shamrai: кабинет откроется автоматически."
+        if confirmed
+        else (
+            "Ссылка для входа устарела или уже использована.\n\n"
+            "Откройте сайт Shamrai и нажмите «Войти через Telegram» еще раз."
+        )
+    )
+    return {
+        "method": "sendMessage",
+        "chat_id": chat.get("id"),
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    _shamrai_web_app_button(web_app_url)
+                ]
+            ]
+        },
     }
 
 
@@ -147,6 +254,41 @@ def _run_background(coro) -> None:
     task.add_done_callback(_log_failure)
 
 
+def _clear_forecast_client_message(callback_query: dict) -> None:
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if not chat_id or not message_id:
+        return
+
+    delete_result = call_telegram_api(
+        "deleteMessage",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        },
+    )
+    if delete_result.get("ok"):
+        return
+
+    edit_result = call_telegram_api(
+        "editMessageReplyMarkup",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": {"inline_keyboard": []},
+        },
+    )
+    if not edit_result.get("ok"):
+        logger.warning(
+            "[Webhook] Failed to clear forecast client buttons for message %s/%s: %s",
+            chat_id,
+            message_id,
+            edit_result.get("description") or delete_result.get("description"),
+        )
+
+
 async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> dict:
     callback_id = callback_query.get("id")
     data = callback_query.get("data") or ""
@@ -163,6 +305,7 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
 
     action = parts[1]
     should_notify_sales = False
+    should_auto_deliver = False
     try:
         request_id = UUID(parts[2])
     except ValueError:
@@ -175,7 +318,9 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
                 request_id=request_id,
                 actor_user_id=int(actor_user_id),
                 notify_sales_manager_now=False,
+                auto_delivery_now=False,
             )
+            should_auto_deliver = forecast_request_should_auto_deliver(forecast_request)
         elif action == "decline":
             _, message = await set_forecast_request_declined(
                 db,
@@ -193,9 +338,21 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
             return _answer_callback_query(callback_id, "Неизвестное действие", True)
 
         await db.commit()
+        if action in {"take", "decline"}:
+            _run_background(asyncio.to_thread(_clear_forecast_client_message, callback_query))
+        if should_auto_deliver:
+            _run_background(
+                auto_deliver_forecast_request_for_request(
+                    forecast_request.id,
+                    delivery_method="auto",
+                )
+            )
         if should_notify_sales:
             _run_background(notify_sales_manager_for_request(forecast_request.id))
-        return _answer_callback_query(callback_id, message)
+        callback_message = "Принято" if action in {"take", "decline"} else message
+        if action == "take" and "Прогноз" in message:
+            callback_message = message
+        return _answer_callback_query(callback_id, callback_message)
     except HTTPException as exc:
         await db.rollback()
         return _answer_callback_query(callback_id, str(exc.detail), True)
@@ -229,6 +386,36 @@ async def handle_telegram_update(update: dict, request_base_url: Optional[str] =
     Handles one Telegram update and returns a Bot API webhook-style response.
     The same function is used by the public webhook and by the polling fallback.
     """
+    started_at = time.perf_counter()
+    update_id = update.get("update_id")
+    update_type = _telegram_update_type(update)
+    chat_id = _telegram_update_chat_id(update)
+    try:
+        response = await _handle_telegram_update_inner(update, request_base_url=request_base_url)
+    except Exception:
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        logger.exception(
+            "[Webhook] update failed update_id=%s type=%s chat_id=%s elapsed_ms=%s",
+            update_id,
+            update_type,
+            chat_id,
+            duration_ms,
+        )
+        raise
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[Webhook] update handled update_id=%s type=%s chat_id=%s elapsed_ms=%s response=%s",
+        update_id,
+        update_type,
+        chat_id,
+        duration_ms,
+        _telegram_response_label(response),
+    )
+    return response
+
+
+async def _handle_telegram_update_inner(update: dict, request_base_url: Optional[str] = None) -> dict:
     callback_query = update.get("callback_query")
     if callback_query:
         async with AsyncSessionLocal() as db:
@@ -250,7 +437,23 @@ async def handle_telegram_update(update: dict, request_base_url: Optional[str] =
     text = message.get("text", "")
     user = message.get("from", {})
 
-    logger.info(f"[Webhook] Received message from {chat_id}: {text}")
+    logger.debug("[Webhook] message payload chat_id=%s text_len=%s", chat_id, len(text or ""))
+
+    if _is_start_command(text):
+        auth_token = parse_telegram_auth_start_param(_start_command_param(text))
+        if auth_token:
+            confirmed = await confirm_telegram_bot_auth_session(
+                auth_token,
+                {
+                    "id": user.get("id") or chat_id,
+                    "username": user.get("username"),
+                    "first_name": user.get("first_name"),
+                    "last_name": user.get("last_name"),
+                    "start_param": _start_command_param(text),
+                },
+            )
+            return _build_auth_response(message, confirmed, request_base_url=request_base_url)
+        return _build_start_response(message, request_base_url=request_base_url)
 
     emoji_ids_response = _build_emoji_ids_response(message, user.get("id"))
     if emoji_ids_response:
@@ -259,30 +462,4 @@ async def handle_telegram_update(update: dict, request_base_url: Optional[str] =
             **emoji_ids_response,
         }
 
-    # Welcome message with a button to launch the Mini App
-    welcome_text = (
-        f"👋 <b>Привет, {user.get('first_name', 'друг')}!</b>\n\n"
-        "Добро пожаловать в <b>ШАМРАЙ | ОШИБКИ БК</b> — высокотехнологичную экосистему спортивной аналитики от действующих сотрудников БК.\n\n"
-        "📊 Здесь вас ждут профессиональные прогнозы, невероятные ошибки буков и умные уведомления.\n\n"
-        f"{contact_footer()}\n\n"
-        "👇 Нажмите на кнопку ниже, чтобы открыть для себя то, что вы еще не видели нигде."
-    )
-
-    # Prefer the configured Mini App URL, but never send an empty web_app URL.
-    web_app_url = settings.FRONTEND_BASE_URL.strip() or request_base_url or settings.API_BASE_URL.strip()
-
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                _shamrai_web_app_button(web_app_url)
-            ]
-        ]
-    }
-
-    return {
-        "method": "sendMessage",
-        "chat_id": chat_id,
-        "text": welcome_text,
-        "parse_mode": "HTML",
-        "reply_markup": reply_markup
-    }
+    return _build_start_response(message, request_base_url=request_base_url)

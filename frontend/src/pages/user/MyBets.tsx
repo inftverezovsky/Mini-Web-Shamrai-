@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../../utils/api';
 import { BetResponse, UserStats } from '../../schemas/schemas';
 import { Trophy, Calendar, Loader2, TrendingUp, AlertCircle, BookOpen } from 'lucide-react';
+import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 
 export default function MyBets() {
@@ -280,9 +281,10 @@ export default function MyBets() {
 
                             <div>
                               <span className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Заметки по матчу:</span>
-                              <textarea
+                              <EmojiTextField
+                                multiline
                                 value={noteTexts[bet.id] || ''}
-                                onChange={e => setNoteTexts(prev => ({ ...prev, [bet.id]: e.target.value }))}
+                                onValueChange={(value) => setNoteTexts(prev => ({ ...prev, [bet.id]: value }))}
                                 placeholder="Опишите свои мысли, ход игры, ошибки или выводы..."
                                 rows={3}
                                 className="w-full bg-slate-950/60 border border-slate-800/60 rounded-xl py-2 px-3 text-xs text-white placeholder-slate-650 focus:outline-none focus:border-indigo-500/50 transition-all leading-normal"

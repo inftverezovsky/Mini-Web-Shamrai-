@@ -22,8 +22,6 @@ services:
       context: ./backend
     container_name: shamrai-backend
     restart: unless-stopped
-    extra_hosts:
-      - "api.telegram.org:149.154.167.220"
     env_file:
       - ./backend/.env
     environment:
@@ -31,6 +29,10 @@ services:
       DEBUG_MODE: ${DEBUG_MODE:-false}
       ALLOW_DEBUG_AUTH_BYPASS: ${ALLOW_DEBUG_AUTH_BYPASS:-false}
       DATABASE_URL: postgresql://${POSTGRES_USER:-shamrai}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-shamrai}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-Shamra1_bot}
+      WEB_PUSH_VAPID_PUBLIC_KEY: ${WEB_PUSH_VAPID_PUBLIC_KEY:-}
+      WEB_PUSH_VAPID_PRIVATE_KEY: ${WEB_PUSH_VAPID_PRIVATE_KEY:-}
+      WEB_PUSH_VAPID_SUBJECT: ${WEB_PUSH_VAPID_SUBJECT:-mailto:support@shamra1.pro}
     volumes:
       - backend_static:/app/static
     depends_on:
@@ -46,6 +48,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+    ports:
+      - "127.0.0.1:8000:8000"
     expose:
       - "8000"
     networks:
@@ -57,6 +61,11 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-}
         VITE_ENABLE_DEBUG_AUTH: ${VITE_ENABLE_DEBUG_AUTH:-false}
+        VITE_VK_ID_APP_ID: ${VITE_VK_ID_APP_ID:-}
+        VITE_VK_ID_REDIRECT_URI: ${VITE_VK_ID_REDIRECT_URI:-}
+        VITE_VK_GROUP_ID: ${VITE_VK_GROUP_ID:-}
+        VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-Shamra1_bot}
+        VITE_WEB_PUSH_VAPID_PUBLIC_KEY: ${VITE_WEB_PUSH_VAPID_PUBLIC_KEY:-}
     container_name: shamrai-frontend
     restart: unless-stopped
     depends_on:

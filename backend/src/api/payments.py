@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 import mimetypes
 import time
 import urllib.request
@@ -20,11 +22,13 @@ from src.models.database import get_db
 from src.models.models import User, SubscriptionPlan, PaymentAttempt, PromoCode, Bet, user_bets
 from src.core.config import settings
 from src.core.security import verify_telegram_webhook_secret
+from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.api.deps import get_current_user
 from src.services.referrals import get_referral_discount_percent
 from src.services.match_access import activate_match_package
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
+logger = logging.getLogger("uvicorn")
 
 class InvoiceRequest(BaseModel):
     plan_id: Optional[int] = None
@@ -94,6 +98,46 @@ def call_telegram_api(
     return {"ok": False, "description": last_description}
 
 
+async def call_telegram_api_async(
+    method: str,
+    payload: dict,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None,
+) -> dict:
+    return await asyncio.to_thread(call_telegram_api, method, payload, timeout, retries)
+
+
+def run_telegram_api_background(
+    method: str,
+    payload: dict,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None,
+) -> None:
+    task = asyncio.create_task(call_telegram_api_async(method, payload, timeout, retries))
+
+    def _log_failure(done_task: asyncio.Task) -> None:
+        try:
+            result = done_task.result()
+            if not result.get("ok"):
+                logger.info(
+                    "[Telegram] Background %s failed: %s",
+                    method,
+                    result.get("description", "unknown error"),
+                )
+        except Exception as exc:
+            logger.exception("[Telegram] Background %s crashed: %s", method, exc)
+
+    task.add_done_callback(_log_failure)
+
+
+def _telegram_multipart_field_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def call_telegram_api_multipart(
     method: str,
     payload: dict,
@@ -115,7 +159,7 @@ def call_telegram_api_multipart(
         body_parts.extend([
             f"--{boundary}\r\n".encode("utf-8"),
             f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
-            str(value).encode("utf-8"),
+            _telegram_multipart_field_value(value).encode("utf-8"),
             b"\r\n",
         ])
 
@@ -518,7 +562,7 @@ async def create_stars_invoice(
             detail="Telegram Stars billing is not configured",
         )
 
-    res = call_telegram_api("createInvoiceLink", tg_payload)
+    res = await call_telegram_api_async("createInvoiceLink", tg_payload)
     if not res.get("ok"):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -827,11 +871,16 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
         except Exception:
             is_valid = False
 
-        call_telegram_api("answerPreCheckoutQuery", {
-            "pre_checkout_query_id": query_id,
-            "ok": is_valid,
-            **({} if is_valid else {"error_message": error_message}),
-        })
+        await call_telegram_api_async(
+            "answerPreCheckoutQuery",
+            {
+                "pre_checkout_query_id": query_id,
+                "ok": is_valid,
+                **({} if is_valid else {"error_message": error_message}),
+            },
+            2,
+            0,
+        )
         return {"status": "pre_checkout_answered" if is_valid else "pre_checkout_rejected"}
 
     message = update.get("message", {})
@@ -871,7 +920,8 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
                 confirm_text = "✅ Прогноз успешно разблокирован!"
             else:
                 confirm_text = "✅ Платеж успешно обработан!"
-            call_telegram_api("sendMessage", {"chat_id": user_id, "text": confirm_text})
+            if is_personal_telegram_user_id(user_id):
+                run_telegram_api_background("sendMessage", {"chat_id": user_id, "text": confirm_text})
 
         return result
 

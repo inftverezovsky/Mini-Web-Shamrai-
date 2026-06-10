@@ -56,6 +56,8 @@ class User(Base):
     username = Column(String, nullable=True, index=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
+    phone = Column(String, nullable=True, unique=True, index=True)
+    photo_url = Column(Text, nullable=True)
     role = Column(String, default="user")  # "owner" | "admin" | "moderator" | "user"
     stats_display_mode = Column(String, default="percent")  # "percent" | "flat"
     bankroll = Column(Float, default=0.0)
@@ -65,6 +67,11 @@ class User(Base):
     favorite_sports = Column(JSON, default=list, nullable=False)
     risk_tolerance = Column(String, nullable=True)  # "cautious" | "balanced" | "aggressive"
     primary_bookmaker = Column(String, nullable=True)
+    vk_user_id = Column(String, nullable=True, unique=True, index=True)
+    vk_group_member = Column(Boolean, default=False, nullable=False)
+    vk_messages_allowed = Column(Boolean, default=False, nullable=False)
+    vk_notifications_allowed = Column(Boolean, default=False, nullable=False)
+    web_push_subscription = Column(JSON, nullable=True)
     currency_preference = Column(String, default="RUB", nullable=False)
     purchased_bets_balance = Column(Integer, default=0, nullable=False)
     free_bets_available = Column(Integer, default=0, nullable=False)
@@ -78,6 +85,8 @@ class User(Base):
     has_used_shield = Column(Boolean, default=False, nullable=False)
     alert_min_coef = Column(Float, default=1.0, nullable=False)
     is_night_mode = Column(Boolean, default=False, nullable=False)
+    night_mode_start = Column(String(5), default="23:00", nullable=False)
+    night_mode_end = Column(String(5), default="08:00", nullable=False)
     preferred_sports = Column(JSON, default=list, nullable=False)
     other_bookmaker_name = Column(String, nullable=True)
     client_group = Column(String, nullable=True)
@@ -89,6 +98,11 @@ class User(Base):
     bookmakers = relationship("Bookmaker", secondary=user_bookmakers, back_populates="users")
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     bets_taken = relationship("Bet", secondary=user_bets, back_populates="takers")
+    personal_signals = relationship("PersonalSignal", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def is_web_only(self) -> bool:
+        return self.telegram_id < 0 and bool(self.vk_user_id)
 
 class Bookmaker(Base):
     __tablename__ = "bookmakers"
@@ -180,6 +194,22 @@ class MatchBalanceLog(Base):
     subscription = relationship("Subscription")
 
 
+class PersonalSignal(Base):
+    __tablename__ = "personal_signals"
+    __table_args__ = (
+        Index("ix_personal_signals_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    text = Column(Text, nullable=False)
+    type = Column(String, default="signal", nullable=False, index=True)
+    data = Column(JSON, default=dict, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="personal_signals")
+
+
 class AdminAuditLog(Base):
     __tablename__ = "admin_audit_logs"
 
@@ -216,6 +246,9 @@ class Bet(Base):
     coupon_image_url = Column(String, nullable=True)
     match_link = Column(Text, nullable=True)
     bookmaker_links = Column(JSON, default=list, nullable=False)
+    auto_send_on_interest = Column(Boolean, default=False, nullable=False)
+    odds_dropped_to = Column(Numeric(5, 2), nullable=True)
+    odds_drop_notified_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     bookmaker = relationship("Bookmaker")

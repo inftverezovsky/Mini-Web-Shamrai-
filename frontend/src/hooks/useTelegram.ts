@@ -33,7 +33,7 @@ export function useTelegram() {
   const [isReady, setIsReady] = useState(false);
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [initData, setInitData] = useState<string>('');
-  const debugAuthEnabled = import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const debugAuthEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
   const debugRoleStorageKey = 'bet_tma_debug_role';
   
   // Local storage mock configuration to persist role state across page refreshes in browser
@@ -97,7 +97,7 @@ export function useTelegram() {
     user,
     initData,
     isReady,
-    isTelegram: !!initData,
+    isTelegram: !!tg?.initData,
     debugAuthEnabled,
     mockRole,
     toggleMockRole,

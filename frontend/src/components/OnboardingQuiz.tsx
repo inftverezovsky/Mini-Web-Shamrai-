@@ -22,13 +22,17 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { apiFetch } from '../utils/api';
+import { isVkIdReady, isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
 import { BookmakerResponse } from '../schemas/schemas';
+import EmojiTextField from './EmojiTextField';
 import { BookmakerLogoFrame } from './LogoFrame';
+import { useAuth } from '../context/AuthContext';
 
 type ExperienceLevel = 'novice' | 'amateur' | 'pro';
 type BankrollSize = 'micro' | 'mid' | 'high';
 type RiskTolerance = 'cautious' | 'balanced' | 'aggressive';
 type CurrencyCode = 'RUB' | 'USD' | 'FLATS';
+type VkLinkStatus = 'idle' | 'loading' | 'linked' | 'error';
 
 interface OnboardingAnswers {
   anti_capper_pains: string[];
@@ -36,6 +40,8 @@ interface OnboardingAnswers {
   bankroll_size: BankrollSize | null;
   risk_tolerance: RiskTolerance | null;
   bookmaker_codes: string[];
+  other_bookmaker_name: string;
+  vk_user_id: string | null;
 }
 
 interface OnboardingRecommendation {
@@ -198,6 +204,7 @@ const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFr
 };
 
 export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizProps) {
+  const { user } = useAuth();
   const [stepIndex, setStepIndex] = useState(0);
   const [direction, setDirection] = useState(1);
   const [answers, setAnswers] = useState<OnboardingAnswers>({
@@ -206,6 +213,8 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     bankroll_size: null,
     risk_tolerance: null,
     bookmaker_codes: [],
+    other_bookmaker_name: '',
+    vk_user_id: null,
   });
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>(fallbackBookmakers);
   const [bookmakersLoading, setBookmakersLoading] = useState(true);
@@ -216,6 +225,10 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const [manifestAccepted, setManifestAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [skipping, setSkipping] = useState(false);
+  const [vkLinkStatus, setVkLinkStatus] = useState<VkLinkStatus>('idle');
+  const [vkDisplayName, setVkDisplayName] = useState<string | null>(null);
+  const [vkLinkError, setVkLinkError] = useState<string | null>(null);
   const [flashActive, setFlashActive] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -223,19 +236,41 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const glow = proMode ? GOLD_GLOW : PINK_GLOW;
   const accent = proMode ? GOLD : PINK;
   const secondaryGlow = proMode ? GOLD_GLOW : CYAN_GLOW;
-  const progressIndex = Math.min(stepIndex, 4);
+  const progressIndex = Math.min(stepIndex, 5);
+  const vkReady = isVkIdReady();
 
   const visibleBookmakers = useMemo(() => {
     return bookmakers.length ? bookmakers : fallbackBookmakers;
   }, [bookmakers]);
 
+  useEffect(() => {
+    if (!user?.vk_user_id) return;
+
+    setAnswers((current) => (
+      current.vk_user_id === user.vk_user_id
+        ? current
+        : { ...current, vk_user_id: user.vk_user_id }
+    ));
+    setVkDisplayName(`VK ID ${user.vk_user_id}`);
+    setVkLinkStatus('linked');
+    setVkLinkError(null);
+
+    if (stepIndex === 0) {
+      const timer = window.setTimeout(() => {
+        setDirection(1);
+        setStepIndex(1);
+      }, 850);
+      return () => window.clearTimeout(timer);
+    }
+  }, [stepIndex, user?.vk_user_id]);
+
   const canContinue = useMemo(() => {
-    if (stepIndex === 0) return answers.anti_capper_pains.length > 0;
-    if (stepIndex === 1) return Boolean(answers.experience_level && answers.bankroll_size);
-    if (stepIndex === 2) return Boolean(answers.risk_tolerance && answers.bookmaker_codes.length);
-    if (stepIndex === 3) return !submitting && Boolean(recommendation);
+    if (stepIndex === 0 || stepIndex === 4) return false;
+    if (stepIndex === 1) return answers.anti_capper_pains.length > 0;
+    if (stepIndex === 2) return Boolean(answers.experience_level && answers.bankroll_size);
+    if (stepIndex === 3) return Boolean(answers.risk_tolerance && answers.bookmaker_codes.length);
     return manifestAccepted && !finishing;
-  }, [answers, finishing, manifestAccepted, recommendation, stepIndex, submitting]);
+  }, [answers, finishing, manifestAccepted, stepIndex]);
 
   useEffect(() => {
     let mounted = true;
@@ -267,7 +302,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   }, []);
 
   useEffect(() => {
-    if (stepIndex !== 3) return;
+    if (stepIndex !== 4) return;
     setCalibrationIndex(0);
     const timer = window.setInterval(() => {
       setCalibrationIndex((current) => Math.min(current + 1, calibrationLogs.length - 1));
@@ -303,24 +338,39 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     });
   };
 
-  const submitCalibration = async () => {
+  const handleOtherBookmakerName = (value: string) => {
+    setErrorMessage(null);
+    setAnswers((current) => ({ ...current, other_bookmaker_name: value }));
+  };
+
+  const revealResults = () => {
+    setDirection(1);
+    setFlashActive(true);
+    setStepIndex(5);
+    window.setTimeout(() => setFlashActive(false), 760);
+  };
+
+  const submitCalibration = async (nextVkUserId = answers.vk_user_id) => {
     if (!answers.experience_level || !answers.bankroll_size || !answers.risk_tolerance || !answers.bookmaker_codes.length) return;
 
     try {
       setSubmitting(true);
       setErrorMessage(null);
       setDirection(1);
-      setStepIndex(3);
+      setStepIndex(4);
 
       const [response] = await Promise.all([
         apiFetch<OnboardingResponse>(userId ? `/users/${userId}/onboard` : '/users/me/onboard', {
           method: 'POST',
           body: JSON.stringify({
+            anti_capper_pains: answers.anti_capper_pains,
             experience_level: answers.experience_level,
             bankroll_size: answers.bankroll_size,
             risk_tolerance: answers.risk_tolerance,
             bookmakers: answers.bookmaker_codes,
             primary_bookmaker: answers.bookmaker_codes[0],
+            other_bookmaker_name: answers.other_bookmaker_name.trim() || null,
+            vk_user_id: nextVkUserId,
             currency_preference: currency,
           }),
         }),
@@ -329,32 +379,71 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
 
       setRecommendation(response.recommendation);
       setCurrency(response.recommendation.currency || currency);
+      revealResults();
     } catch (error: any) {
-      setStepIndex(2);
+      setStepIndex(3);
       setErrorMessage(error?.message || 'Не удалось завершить калибровку Shamrai');
     } finally {
       setSubmitting(false);
     }
   };
 
+  const handleVkLink = async () => {
+      if (!vkReady) {
+        setVkLinkStatus('error');
+        setVkLinkError('VK ID не настроен. Обратитесь к администратору Shamrai.');
+        return;
+      }
+
+    try {
+      setVkLinkStatus('loading');
+      setVkLinkError(null);
+      const linkedProfile = await linkVkProfile();
+      setAnswers((current) => ({ ...current, vk_user_id: linkedProfile.vk_user_id }));
+      setVkDisplayName(linkedProfile.vk_display_name || `VK ID ${linkedProfile.vk_user_id}`);
+      setVkLinkStatus('linked');
+      window.setTimeout(() => {
+        setDirection(1);
+        setStepIndex(1);
+      }, 800);
+    } catch (error: any) {
+      if (isVkRedirectStartedError(error)) return;
+      setVkLinkStatus('error');
+      setVkLinkError(error?.message || 'Не удалось привязать VK. Попробуйте еще раз.');
+    }
+  };
+
+  const handleSkipVk = () => {
+    setVkLinkError(null);
+    setVkLinkStatus('idle');
+    setDirection(1);
+    setStepIndex(1);
+  };
+
+  const handleSkip = async () => {
+    try {
+      setSkipping(true);
+      setErrorMessage(null);
+      await apiFetch('/users/me/onboard/skip', { method: 'POST' });
+      await onCompleted();
+    } catch (error: any) {
+      setErrorMessage(error?.message || 'Не удалось пропустить опрос');
+    } finally {
+      setSkipping(false);
+    }
+  };
+
   const handleNext = async () => {
-    if (stepIndex === 0 || stepIndex === 1) {
+    if (stepIndex === 1 || stepIndex === 2) {
       setDirection(1);
       setStepIndex((current) => current + 1);
       return;
     }
-    if (stepIndex === 2) {
+    if (stepIndex === 3) {
       await submitCalibration();
       return;
     }
-    if (stepIndex === 3 && recommendation) {
-      setDirection(1);
-      setFlashActive(true);
-      setStepIndex(4);
-      window.setTimeout(() => setFlashActive(false), 760);
-      return;
-    }
-    if (stepIndex === 4 && manifestAccepted) {
+    if (stepIndex === 5 && manifestAccepted) {
       try {
         setFinishing(true);
         await onCompleted();
@@ -367,10 +456,6 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const handleBack = () => {
     if (stepIndex === 0 || submitting || finishing) return;
     setDirection(-1);
-    if (stepIndex === 3) {
-      setStepIndex(2);
-      return;
-    }
     setStepIndex((current) => current - 1);
   };
 
@@ -418,16 +503,27 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
               exit="exit"
               transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
               className={`min-h-[520px] rounded-[1.45rem] ${GLASS_SURFACE} p-4 shadow-glass`}
-              style={{ boxShadow: stepIndex === 4 ? secondaryGlow : undefined }}
+              style={{ boxShadow: stepIndex === 5 ? secondaryGlow : undefined }}
             >
               {stepIndex === 0 && (
+                <VkLinkStep
+                  status={vkLinkStatus}
+                  displayName={vkDisplayName}
+                  error={vkLinkError}
+                  vkReady={vkReady}
+                  glow={glow}
+                  onLink={handleVkLink}
+                  onSkip={handleSkipVk}
+                />
+              )}
+              {stepIndex === 1 && (
                 <AntiCapperStep
                   selectedPains={answers.anti_capper_pains}
                   onTogglePain={togglePain}
                   glow={glow}
                 />
               )}
-              {stepIndex === 1 && (
+              {stepIndex === 2 && (
                 <ExperienceBankrollStep
                   experience={answers.experience_level}
                   bankroll={answers.bankroll_size}
@@ -437,22 +533,24 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                   onBankroll={(value) => updateAnswer('bankroll_size', value)}
                 />
               )}
-              {stepIndex === 2 && (
+              {stepIndex === 3 && (
                 <RiskBookmakerStep
                   risk={answers.risk_tolerance}
                   bookmakers={visibleBookmakers}
                   selectedBookmakerCodes={answers.bookmaker_codes}
+                  otherBookmakerName={answers.other_bookmaker_name}
                   bookmakersLoading={bookmakersLoading}
                   proMode={proMode}
                   glow={glow}
                   onRisk={(value) => updateAnswer('risk_tolerance', value)}
                   onBookmaker={toggleBookmaker}
+                  onOtherBookmakerName={handleOtherBookmakerName}
                 />
               )}
-              {stepIndex === 3 && (
+              {stepIndex === 4 && (
                 <CalibrationScreen activeIndex={calibrationIndex} proMode={proMode} glow={glow} />
               )}
-              {stepIndex === 4 && (
+              {stepIndex === 5 && (
                 <FinalScreen
                   recommendation={recommendation}
                   currency={currency}
@@ -483,22 +581,24 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
             )}
           </AnimatePresence>
 
-          {stepIndex < 4 ? (
-            <div className="grid grid-cols-[0.82fr_1.35fr] gap-2">
+          {stepIndex > 0 && stepIndex < 4 ? (
+            <div className={`grid gap-2 ${stepIndex === 1 ? 'grid-cols-2' : 'grid-cols-[0.82fr_1.35fr]'}`}>
               <ElectricButton
-                label="Назад"
-                icon={ChevronLeft}
-                disabled={stepIndex === 0 || submitting}
+                label={stepIndex === 1 ? 'Пропустить опрос' : 'Назад'}
+                icon={stepIndex === 1 ? ChevronRight : ChevronLeft}
+                iconAfter={stepIndex === 1}
+                disabled={submitting || skipping}
+                loading={stepIndex === 1 && skipping}
                 glow={glow}
-                onClick={handleBack}
+                onClick={stepIndex === 1 ? handleSkip : handleBack}
               />
               <ElectricButton
-                label={stepIndex === 2 ? 'Запустить калибровку' : stepIndex === 3 ? 'Показать результат' : 'Далее'}
+                label="Далее"
                 icon={submitting ? Loader2 : ChevronRight}
                 iconAfter
                 highlighted={canContinue}
                 loading={submitting}
-                disabled={!canContinue || submitting}
+                disabled={!canContinue || submitting || skipping}
                 glow={glow}
                 onClick={handleNext}
               />
@@ -520,7 +620,7 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
           <p className="text-[10px] font-black uppercase tracking-[0.22em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>
             Shamrai Neural Gate
           </p>
-          <h1 className="mt-1 font-display text-xl font-black leading-none text-white">Onboarding первого входа</h1>
+          <h1 className="mt-1 font-display text-xl font-black leading-none text-white">Добро пожаловать</h1>
         </div>
         <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${GLASS_SURFACE}`}>
           <img
@@ -531,8 +631,8 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
           />
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-5 gap-2">
-        {[0, 1, 2, 3, 4].map((index) => (
+      <div className="mt-3 grid grid-cols-6 gap-2">
+        {[0, 1, 2, 3, 4, 5].map((index) => (
           <span
             key={index}
             className={`h-1.5 rounded-full ${GLASS_SURFACE}`}
@@ -555,7 +655,7 @@ function AntiCapperStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="01" title="Что вас больше всего раздражает в других капперах или каналах?" caption="Выберите хотя бы один пункт. Это триггер честности Shamrai." />
+      <StepTitle index="02" title="Что вас больше всего раздражает в других капперах или каналах?" caption="Выберите хотя бы один пункт. Это триггер честности Shamrai." />
       <div className="space-y-2">
         {antiCapperPains.map((pain) => {
           const selected = selectedPains.includes(pain);
@@ -585,7 +685,7 @@ function AntiCapperStep({
             className={`rounded-2xl ${GLASS_SURFACE} p-4 text-sm font-bold leading-relaxed text-white`}
             style={{ boxShadow: glow }}
           >
-            Мы тоже это ненавидим. В Shamrai Analytics Hub вся статистика верифицирована, рекламы БК нет, а за честность отвечает алгоритм. Вы в правильном месте.
+            Мы тоже это ненавидим. В Shamrai вся статистика верифицирована, рекламы БК нет, а за честность отвечает алгоритм. Вы в правильном месте.
           </motion.div>
         )}
       </AnimatePresence>
@@ -610,7 +710,7 @@ function ExperienceBankrollStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="02" title="Опыт и рабочий банк" caption="Shamrai не выдает фрибеты. Он настраивает дисциплину пакета." />
+      <StepTitle index="03" title="Опыт и рабочий банк" caption="Shamrai не выдает фрибеты. Он настраивает дисциплину пакета." />
       <OptionGroup title="Оценка опыта" options={experienceOptions} value={experience} proMode={proMode} glow={glow} onSelect={onExperience} />
       <OptionGroup title="Размер банка" options={bankrollOptions} value={bankroll} proMode={proMode} glow={glow} onSelect={onBankroll} />
       <AnimatePresence>
@@ -634,24 +734,30 @@ function RiskBookmakerStep({
   risk,
   bookmakers,
   selectedBookmakerCodes,
+  otherBookmakerName,
   bookmakersLoading,
   proMode,
   glow,
   onRisk,
   onBookmaker,
+  onOtherBookmakerName,
 }: {
   risk: RiskTolerance | null;
   bookmakers: BookmakerResponse[];
   selectedBookmakerCodes: string[];
+  otherBookmakerName: string;
   bookmakersLoading: boolean;
   proMode: boolean;
   glow: string;
   onRisk: (value: RiskTolerance) => void;
   onBookmaker: (value: string) => void;
+  onOtherBookmakerName: (value: string) => void;
 }) {
+  const otherSelected = selectedBookmakerCodes.includes('other');
+
   return (
     <div className="space-y-4">
-      <StepTitle index="03" title="Стратегия рисков и выбор БК" caption="Выберите стиль и несколько контор, с которыми реально работаете." />
+      <StepTitle index="04" title="Стратегия рисков и выбор БК" caption="Выберите стиль и несколько контор, с которыми реально работаете." />
       <OptionGroup title="Стиль рисков" options={riskOptions} value={risk} proMode={proMode} glow={glow} onSelect={onRisk} />
       <div className="space-y-2">
         <SectionLabel>Букмекерские конторы</SectionLabel>
@@ -667,10 +773,139 @@ function RiskBookmakerStep({
             />
           ))}
         </div>
+        <AnimatePresence>
+          {otherSelected && (
+            <motion.div
+              initial={{ opacity: 0, y: 10, filter: 'blur(8px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: 8, filter: 'blur(8px)' }}
+              className={`rounded-2xl ${GLASS_SURFACE} p-3`}
+              style={{ boxShadow: glow }}
+            >
+              <label className="block text-[10px] font-black uppercase tracking-[0.16em] text-cyan-100">
+                Какие БК используете?
+              </label>
+              <EmojiTextField
+                multiline
+                value={otherBookmakerName}
+                onValueChange={onOtherBookmakerName}
+                rows={3}
+                maxLength={180}
+                placeholder="Например: 1xBet, Pinnacle, Bet365..."
+                className="mt-2 min-h-[88px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-sm font-bold leading-relaxed text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-200/60 focus:ring-2 focus:ring-cyan-300/25"
+              />
+              <p className="mt-2 text-[10px] font-semibold leading-snug text-slate-400">
+                Это поле только для информации. Рассылка останется по категории "Другие".
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
         {bookmakersLoading && (
           <p className="text-center text-[10px] font-bold text-cyan-100">Обновляем список БК...</p>
         )}
       </div>
+    </div>
+  );
+}
+
+function VkLinkStep({
+  status,
+  displayName,
+  error,
+  vkReady,
+  glow,
+  onLink,
+  onSkip,
+}: {
+  status: VkLinkStatus;
+  displayName: string | null;
+  error: string | null;
+  vkReady: boolean;
+  glow: string;
+  onLink: () => void;
+  onSkip: () => void;
+}) {
+  const linked = status === 'linked';
+  const loading = status === 'loading';
+
+  return (
+    <div className="flex min-h-[490px] flex-col justify-between gap-5">
+      <div className="space-y-5">
+        <StepTitle
+          index="01"
+          title="Дублирование сигналов в VK"
+          caption="Привяжи аккаунт ВКонтакте через VK ID. Для доставки анонсов в личные сообщения и VK-уведомления потребуется отдельно разрешить сообщения от сообщества Shamrai."
+        />
+
+        <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: linked ? '0 0 34px rgba(34,197,94,0.48), inset 0 1px 0 rgba(255,255,255,0.16)' : glow }}>
+          <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_0%,rgba(0,119,255,0.34),transparent_38%),linear-gradient(135deg,rgba(255,255,255,0.06),transparent)]" />
+          <div className="relative z-10 flex items-center gap-3">
+            <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/15 bg-[#0077ff]/90 text-lg font-black text-white shadow-[0_0_28px_rgba(0,119,255,0.46)]`}>
+              VK
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-black leading-tight text-white">VK ID secure link</p>
+              <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
+                VK ID связывает профиль; разрешения на доставку можно включить в профиле после привязки.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <AnimatePresence mode="wait">
+          {linked ? (
+            <motion.div
+              key="vk-linked"
+              initial={{ opacity: 0, y: 12, filter: 'blur(10px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: 8, filter: 'blur(10px)' }}
+              className="rounded-2xl border border-emerald-200/20 bg-emerald-400/12 p-4 text-center text-sm font-black leading-relaxed text-emerald-50 shadow-[0_0_34px_rgba(34,197,94,0.32)]"
+            >
+              ✅ VK ID привязан: {displayName || 'профиль VK'}. Для доставки включите разрешения VK в профиле.
+            </motion.div>
+          ) : (
+            <motion.button
+              key="vk-link-button"
+              type="button"
+              disabled={!vkReady || loading}
+              onClick={onLink}
+              whileTap={vkReady && !loading ? { scale: 0.98 } : undefined}
+              className={`group relative min-h-[64px] w-full overflow-hidden rounded-2xl border border-white/12 bg-white/5 px-4 text-left transition duration-300 disabled:cursor-not-allowed disabled:opacity-45`}
+              style={vkReady ? { boxShadow: glow } : undefined}
+            >
+              <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.16),transparent)]" />
+              <span className="relative z-10 flex items-center justify-center gap-3 text-sm font-black uppercase tracking-[0.08em] text-white">
+                <span className="text-lg">{loading ? '⏳' : '🔗'}</span>
+                {loading ? 'Открываем VK ID...' : 'Связать профиль VK'}
+              </span>
+            </motion.button>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {(!vkReady || error) && !linked && (
+            <motion.p
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              className="rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-300"
+            >
+              {error || 'VK ID не настроен для этой сборки. Обратитесь к администратору Shamrai.'}
+            </motion.p>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {!linked && (
+        <button
+          type="button"
+          onClick={onSkip}
+          disabled={loading}
+          className="mx-auto rounded-full border border-white/5 bg-white/[0.025] px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-500 transition hover:border-white/15 hover:bg-white/[0.055] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Пропустить привязку VK
+        </button>
+      )}
     </div>
   );
 }
@@ -794,12 +1029,16 @@ function BookmakerChoiceCard({
     >
       <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.12),transparent)]" />
       <span className="relative z-10 flex h-full items-center gap-3">
-        <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="h-10 w-12" />
+        {bookmaker.code !== 'other' && (
+          <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="h-10 w-12" />
+        )}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-black leading-tight">{bookmaker.name}</span>
-          <span className="mt-1 block text-[10px] font-semibold leading-snug text-slate-400">
-            {selected ? 'Добавлена в профиль' : 'Multi-select'}
-          </span>
+          <span className="block break-words text-sm font-black leading-tight">{bookmaker.name}</span>
+          {bookmaker.code !== 'other' && (
+            <span className="mt-1 block text-[10px] font-semibold leading-snug text-slate-400">
+              {selected ? 'Добавлена в профиль' : 'Multi-select'}
+            </span>
+          )}
         </span>
         <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${GLASS_SURFACE}`} style={selected ? { boxShadow: glow, color: proMode ? GOLD : CYAN } : undefined}>
           {selected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
@@ -1068,7 +1307,7 @@ function ElectricButton({
       style={highlighted && !disabled ? { boxShadow: glow } : undefined}
     >
       {!iconAfter && <Icon className={`relative z-10 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
-      <span className="relative z-10">{label}</span>
+      <span className="relative z-10 text-center leading-tight">{label}</span>
       {iconAfter && <Icon className={`relative z-10 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
     </button>
   );

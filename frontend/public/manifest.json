@@ -1,0 +1,26 @@
+{
+  "name": "Shamrai Analytics Hub",
+  "short_name": "Shamrai",
+  "description": "Закрытые сигналы Shamrai Analytics Hub в отдельном web/PWA-канале.",
+  "start_url": "/app?open=web-bot-chat",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070B19",
+  "theme_color": "#070B19",
+  "categories": ["sports", "finance", "productivity"],
+  "icons": [
+    {
+      "src": "/brand/shamrai-favicon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/brand-logo-poster.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,8 +1,27 @@
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
-const DEBUG_AUTH_ENABLED = import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+const DEBUG_AUTH_ENABLED = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
 const DEBUG_ROLE_STORAGE_KEY = 'bet_tma_debug_role';
+export const API_BASE_URL = API_URL;
+export const AUTH_TOKEN_STORAGE_KEY = 'bet_tma_jwt_token';
 
 export const AUTH_EXPIRED_EVENT = 'shamrai:auth-expired';
+
+export function buildApiUrl(path: string): string {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  if (API_URL) return `${API_URL}${cleanPath}`;
+  return cleanPath;
+}
+
+export function buildApiWebSocketUrl(path: string, params: Record<string, string> = {}): string {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const base = API_URL || window.location.origin;
+  const url = new URL(cleanPath, base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) url.searchParams.set(key, value);
+  });
+  return url.toString();
+}
 
 function formatApiErrorDetail(detail: unknown): string | null {
   if (!detail) return null;
@@ -37,6 +56,37 @@ const MOCK_BOOKMAKERS = [
 ];
 
 const nowIso = () => new Date().toISOString();
+const MOCK_PREFS_STORAGE_KEY = 'bet_tma_mock_preferences';
+
+const DEFAULT_MOCK_PREFERENCES = {
+  alert_min_coef: 1.5,
+  is_night_mode: false,
+  night_mode_start: '23:00',
+  night_mode_end: '08:00',
+  preferred_sports: [],
+  stats_display_mode: 'percent',
+};
+
+function getMockPreferences() {
+  try {
+    const stored = localStorage.getItem(MOCK_PREFS_STORAGE_KEY);
+    return {
+      ...DEFAULT_MOCK_PREFERENCES,
+      ...(stored ? JSON.parse(stored) : {}),
+    };
+  } catch {
+    return DEFAULT_MOCK_PREFERENCES;
+  }
+}
+
+function saveMockPreferences(preferences: Record<string, any>) {
+  const nextPreferences = {
+    ...getMockPreferences(),
+    ...preferences,
+  };
+  localStorage.setItem(MOCK_PREFS_STORAGE_KEY, JSON.stringify(nextPreferences));
+  return nextPreferences;
+}
 
 function readMockBookmakerLinks(body: FormData | null, fallback: any[] = []) {
   const rawValues = body
@@ -78,6 +128,10 @@ function readMockBookmakerLinks(body: FormData | null, fallback: any[] = []) {
 function buildMockBet(id: string, overrides: Record<string, any> = {}) {
   const bookmakerIds = overrides.bookmakerIds ?? [1, 4];
   const bookmakers = MOCK_BOOKMAKERS.filter((bookmaker) => bookmakerIds.includes(bookmaker.id));
+  const bookmakerLinks = bookmakers.map((bookmaker) => ({
+    bookmaker_id: bookmaker.id,
+    url: `https://example.com/bookmakers/${bookmaker.code}`,
+  }));
 
   return {
     id,
@@ -105,9 +159,30 @@ function buildMockBet(id: string, overrides: Record<string, any> = {}) {
     outcome: 'П1 с форой 0',
     coupon_image_url: null,
     match_link: 'https://example.com/match',
-    bookmaker_links: [],
+    bookmaker_links: bookmakerLinks,
     delivery_mode: 'feed',
+    auto_send_on_interest: false,
+    odds_dropped_to: null,
+    odds_drop_notified_at: null,
     ...overrides,
+  };
+}
+
+function withMockBookmakerLinks(bet: any) {
+  if (Array.isArray(bet.bookmaker_links) && bet.bookmaker_links.length > 0) return bet;
+  const betBookmakers = Array.isArray(bet.bookmakers) && bet.bookmakers.length
+    ? bet.bookmakers
+    : MOCK_BOOKMAKERS.filter((bookmaker) => {
+        const ids = Array.isArray(bet.bookmakerIds) ? bet.bookmakerIds : [bet.bookmaker_id];
+        return ids.includes(bookmaker.id);
+      });
+
+  return {
+    ...bet,
+    bookmaker_links: betBookmakers.map((bookmaker: any) => ({
+      bookmaker_id: bookmaker.id,
+      url: `https://example.com/bookmakers/${bookmaker.code}`,
+    })),
   };
 }
 
@@ -116,7 +191,7 @@ function getMockBets() {
   if (stored) {
     try {
       const bets = JSON.parse(stored);
-      if (Array.isArray(bets)) return bets;
+      if (Array.isArray(bets)) return bets.map(withMockBookmakerLinks);
     } catch {
       // Fall back to seeded data.
     }
@@ -186,7 +261,12 @@ function getMockForecastRequests() {
   if (stored) {
     try {
       const requests = JSON.parse(stored);
-      if (Array.isArray(requests)) return requests;
+      if (Array.isArray(requests)) {
+        return requests.map((request: any) => ({
+          ...request,
+          bet: request.bet ? withMockBookmakerLinks(request.bet) : request.bet,
+        }));
+      }
     } catch {
       // Fall back to seeded data.
     }
@@ -279,6 +359,24 @@ function buildMockUsers() {
     {
       ...baseUser,
       telegram_id: 223344556,
+      username: 'Gold_ForzaJuve',
+      first_name: 'Тимур',
+      last_name: 'Голдобин',
+      role: 'user',
+      purchased_bets_balance: -3,
+      matches_remaining: -3,
+      guarantee_active: false,
+      has_active_subscription: false,
+      subscription_end_date: null,
+      bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [1].includes(bookmaker.id)),
+      other_bookmaker_name: null,
+      client_group: null,
+      client_tag: null,
+      recent_match_results: buildMockRecentResults(['win', 'win', 'win', 'loss', 'win']),
+    },
+    {
+      ...baseUser,
+      telegram_id: 223344557,
       username: 'new_client',
       first_name: 'Мария',
       last_name: 'Новикова',
@@ -375,12 +473,16 @@ function getMockUser() {
   const bookmakerIds = getMockBookmakerIds();
   const onboardedOverride = localStorage.getItem('bet_tma_mock_is_onboarded');
   const isOnboarded = onboardedOverride === null ? false : onboardedOverride === 'true';
+  const preferences = getMockPreferences();
 
   return {
     telegram_id: isAdmin ? 987654321 : 123456789,
     username: isAdmin ? 'debug_admin' : 'debug_user',
     first_name: isAdmin ? 'Алексей' : 'Иван',
     last_name: isAdmin ? 'Админ' : 'Подписчик',
+    phone: null,
+    photo_url: null,
+    is_web_only: false,
     role: isAdmin ? 'admin' : 'user',
     stats_display_mode: 'percent',
     bankroll: 50000,
@@ -390,6 +492,10 @@ function getMockUser() {
     favorite_sports: [],
     risk_tolerance: 'balanced',
     primary_bookmaker: 'fonbet',
+    vk_user_id: localStorage.getItem('bet_tma_mock_vk_user_id'),
+    vk_group_member: localStorage.getItem('bet_tma_mock_vk_group_member') === 'true',
+    vk_messages_allowed: localStorage.getItem('bet_tma_mock_vk_messages_allowed') === 'true',
+    vk_notifications_allowed: localStorage.getItem('bet_tma_mock_vk_notifications_allowed') === 'true',
     currency_preference: 'RUB',
     purchased_bets_balance: 12,
     free_bets_available: 0,
@@ -401,9 +507,11 @@ function getMockUser() {
     ab_group: null,
     tg_chat_joined: true,
     has_used_shield: false,
-    alert_min_coef: 1.5,
-    is_night_mode: false,
-    preferred_sports: [],
+    alert_min_coef: preferences.alert_min_coef,
+    is_night_mode: preferences.is_night_mode,
+    night_mode_start: preferences.night_mode_start,
+    night_mode_end: preferences.night_mode_end,
+    preferred_sports: preferences.preferred_sports,
     other_bookmaker_name: localStorage.getItem('bet_tma_mock_other_bookmaker_name'),
     client_group: null,
     client_tag: null,
@@ -415,8 +523,105 @@ function getMockUser() {
 }
 
 function mockApiFetch(endpoint: string, options: RequestInit) {
-  if (!DEBUG_AUTH_ENABLED || localStorage.getItem('bet_tma_jwt_token') !== 'mock_debug_access_token') {
+  if (DEBUG_AUTH_ENABLED && endpoint === '/auth/vk/login') {
+    const vkUserId = 'vk_mock_741852963';
+    localStorage.setItem('bet_tma_mock_vk_user_id', vkUserId);
+    return {
+      access_token: 'mock_debug_access_token',
+      token_type: 'bearer',
+      user: {
+        ...getMockUser(),
+        telegram_id: -1000741852963,
+        username: null,
+        first_name: 'VK',
+        last_name: 'Client',
+        is_web_only: true,
+        role: 'user',
+        tg_chat_joined: false,
+        vk_user_id: vkUserId,
+      },
+    };
+  }
+
+  if (endpoint === '/users/me/vk-delivery-status') {
+    if (options.method === 'PUT') {
+      const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+      if (typeof body.group_member === 'boolean') {
+        localStorage.setItem('bet_tma_mock_vk_group_member', String(body.group_member));
+      }
+      if (typeof body.messages_allowed === 'boolean') {
+        localStorage.setItem('bet_tma_mock_vk_messages_allowed', String(body.messages_allowed));
+      }
+      if (typeof body.notifications_allowed === 'boolean') {
+        localStorage.setItem('bet_tma_mock_vk_notifications_allowed', String(body.notifications_allowed));
+      }
+    }
+    return {
+      status: 'success',
+      vk_user_id: localStorage.getItem('bet_tma_mock_vk_user_id'),
+      group_id: Number(import.meta.env.VITE_VK_GROUP_ID || 0) || null,
+      configured: Boolean(import.meta.env.VITE_VK_GROUP_ID),
+      group_member: localStorage.getItem('bet_tma_mock_vk_group_member') === 'true',
+      messages_allowed: localStorage.getItem('bet_tma_mock_vk_messages_allowed') === 'true',
+      notifications_allowed: localStorage.getItem('bet_tma_mock_vk_notifications_allowed') === 'true',
+    };
+  }
+
+  if (DEBUG_AUTH_ENABLED && endpoint === '/auth/telegram-widget') {
+    return {
+      access_token: 'mock_debug_access_token',
+      token_type: 'bearer',
+      user: getMockUser(),
+    };
+  }
+
+  if (DEBUG_AUTH_ENABLED && endpoint === '/auth/telegram/bot-session') {
+    return {
+      auth_token: 'mock_telegram_bot_auth',
+      bot_url: 'https://t.me/Shamra1_bot?start=auth_mock_telegram_bot_auth',
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    };
+  }
+
+  if (DEBUG_AUTH_ENABLED && endpoint.startsWith('/auth/telegram/bot-session/')) {
+    return {
+      status: 'confirmed',
+      access_token: 'mock_debug_access_token',
+      token_type: 'bearer',
+      user: getMockUser(),
+    };
+  }
+
+  if (!DEBUG_AUTH_ENABLED || localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) !== 'mock_debug_access_token') {
     return null;
+  }
+
+  if (endpoint === '/signals/web-push/public-key') {
+    return {
+      public_key: import.meta.env.VITE_WEB_PUSH_VAPID_PUBLIC_KEY || '',
+      configured: Boolean(import.meta.env.VITE_WEB_PUSH_VAPID_PUBLIC_KEY),
+    };
+  }
+  if (endpoint === '/signals/web-push/subscription') {
+    return { status: options.method === 'DELETE' ? 'deleted' : 'saved', configured: false };
+  }
+  if (endpoint === '/signals/history') {
+    return [
+      {
+        id: 1,
+        user_id: getMockUser().telegram_id,
+        text: '⚡ Shamrai Web Bot подключен. Здесь будут дублироваться live-сигналы вне Telegram.',
+        type: 'system',
+        created_at: new Date(Date.now() - 7 * 60 * 1000).toISOString(),
+      },
+      {
+        id: 2,
+        user_id: getMockUser().telegram_id,
+        text: 'LIVE: Зенит - Спартак, коэффициент 1.92. Проверьте линию в своей БК.',
+        type: 'live_signal',
+        created_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+      },
+    ];
   }
 
   if (endpoint === '/bookmakers') return MOCK_BOOKMAKERS;
@@ -434,9 +639,33 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
     }
     return { status: 'success', message: 'Mock bookmakers list updated successfully' };
   }
+  if (endpoint === '/users/me/onboard/skip') {
+    const bookmakerIds = MOCK_BOOKMAKERS.map((bookmaker) => bookmaker.id);
+    localStorage.setItem('bet_tma_mock_is_onboarded', 'true');
+    localStorage.setItem('bet_tma_mock_bookmaker_ids', JSON.stringify(bookmakerIds));
+    return {
+      ...getMockUser(),
+      is_onboarded: true,
+      free_bets_available: 0,
+      bookmakers: MOCK_BOOKMAKERS,
+    };
+  }
+  if (DEBUG_AUTH_ENABLED && endpoint === '/auth/vk/link') {
+    const vkUserId = 'vk_mock_741852963';
+    localStorage.setItem('bet_tma_mock_vk_user_id', vkUserId);
+    return {
+      status: 'success',
+      vk_user_id: vkUserId,
+      vk_display_name: 'Иван VK',
+    };
+  }
   if (endpoint === '/users/me') return getMockUser();
   if (endpoint === '/users/me/onboard' || /^\/users\/\d+\/onboard$/.test(endpoint)) {
+    const linkedVkUserId = localStorage.getItem('bet_tma_mock_vk_user_id');
     const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    if (body.vk_user_id && body.vk_user_id !== linkedVkUserId) {
+      throw new Error('vk_user_id must match the linked VK profile');
+    }
     const bookmakerCodes = Array.isArray(body.bookmakers) ? body.bookmakers : [];
     const idsFromCodes = MOCK_BOOKMAKERS
       .filter((bookmaker) => bookmakerCodes.includes(bookmaker.code))
@@ -456,6 +685,8 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
       bankroll_size: body.bankroll_size ?? 'mid',
       risk_tolerance: body.risk_tolerance ?? 'balanced',
       primary_bookmaker: selectedBookmakers[0]?.code ?? body.primary_bookmaker ?? 'fonbet',
+      vk_user_id: linkedVkUserId,
+      other_bookmaker_name: bookmakerCodes.includes('other') ? (body.other_bookmaker_name ?? null) : null,
       currency_preference: body.currency_preference ?? 'RUB',
       purchased_bets_balance: 12,
       free_bets_available: 0,
@@ -513,6 +744,72 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/admin/bets/pending') {
     return [...getMockBets(), ...getMockPrivateForecastBets()].filter((bet: any) => bet.status === 'pending');
   }
+  if (endpoint.startsWith('/admin/bets/') && options.method === 'DELETE') {
+    const betId = endpoint.split('/')[3];
+    let revokedCount = 0;
+    let balanceDeltaTotal = 0;
+    const bets = getMockBets().map((bet: any) => (
+      bet.id === betId ? { ...bet, status: 'deleted', is_taken: false, is_unlocked: false } : bet
+    ));
+    saveMockBets(bets);
+    const requests = getMockForecastRequests().map((request: any) => {
+      if (request.bet_id !== betId && request.bet?.id !== betId) return request;
+      const hadAccess = request.status === 'sent' || request.status === 'manual_sent';
+      const balanceDelta = hadAccess ? 1 : 0;
+      const currentBalance = request.balance_after ?? request.user.matches_remaining ?? 0;
+      const nextBalance = currentBalance + balanceDelta;
+      if (hadAccess) {
+        revokedCount += 1;
+        balanceDeltaTotal += balanceDelta;
+      }
+      return {
+        ...request,
+        status: 'removed',
+        balance_after: hadAccess ? nextBalance : request.balance_after,
+        no_balance_warning: false,
+        updated_at: nowIso(),
+        bet: request.bet
+          ? { ...request.bet, status: 'deleted', is_taken: false, is_unlocked: false }
+          : request.bet,
+        user: hadAccess ? { ...request.user, matches_remaining: nextBalance } : request.user,
+      };
+    });
+    saveMockForecastRequests(requests);
+    return {
+      status: 'success',
+      bet_id: betId,
+      revoked_count: revokedCount,
+      marked_requests: requests.filter((request: any) => request.bet_id === betId || request.bet?.id === betId).length,
+      balance_delta_total: balanceDeltaTotal,
+    };
+  }
+  if (endpoint.match(/^\/admin\/forecast-broadcast\/([^/]+)\/stop$/) && options.method === 'POST') {
+    const betId = endpoint.split('/')[3];
+    let stoppedRequests = 0;
+    let skippedProcessing = 0;
+    const requests = getMockForecastRequests().map((request: any) => {
+      if (request.bet_id !== betId && request.bet?.id !== betId) return request;
+      if (request.status === 'processing') {
+        skippedProcessing += 1;
+        return request;
+      }
+      const shouldRemove = ['announced', 'interested', 'declined', 'cancelled'].includes(request.status);
+      if (shouldRemove) stoppedRequests += 1;
+      return {
+        ...request,
+        status: shouldRemove ? 'removed' : request.status,
+        bet: request.bet ? { ...request.bet, status: 'deleted', auto_send_on_interest: false } : request.bet,
+      };
+    });
+    saveMockForecastRequests(requests);
+    return {
+      status: 'success',
+      bet_id: betId,
+      already_stopped: false,
+      stopped_requests: stoppedRequests,
+      skipped_processing: skippedProcessing,
+    };
+  }
   if (endpoint.startsWith('/admin/forecast-requests') && (!options.method || options.method === 'GET')) {
     const [, queryString = ''] = endpoint.split('?');
     const params = new URLSearchParams(queryString);
@@ -553,7 +850,21 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
       bet: teaserBet,
     });
     saveMockForecastRequests([nextRequest, ...getMockForecastRequests()]);
-    return { sent: 18, failed: 0, errors: [], total_audience: 18, status: 'success', bet_id: nextRequest.bet_id };
+    return {
+      sent: 18,
+      failed: 0,
+      errors: [],
+      total_audience: 18,
+      status: 'success',
+      bet_id: nextRequest.bet_id,
+      delivery: {
+        sent: 18,
+        failed: 0,
+        telegram: { sent: 12, failed: 0 },
+        vk_messages: { sent: 6, failed: 0 },
+        vk_notifications: { requested: 4, sent: 0, failed: 0 },
+      },
+    };
   }
   if (endpoint.startsWith('/admin/forecast-broadcast/') && options.method === 'POST') {
     const match = endpoint.match(/^\/admin\/forecast-broadcast\/([^/]+)\/full-forecast$/);
@@ -568,6 +879,7 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
         ? '/static/coupons/mock-prepared-coupon.png'
         : targetRequest.bet.coupon_image_url;
       if (!couponImageUrl) throw new Error('Загрузите скрин купона для полной ставки');
+      const autoSendEnabled = String(body?.get('auto_send_interested') || 'false') === 'true';
 
       const preparedBet = {
         ...targetRequest.bet,
@@ -580,15 +892,58 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
         match_link: body?.get('match_link') ? String(body.get('match_link')) : null,
         bookmaker_links: readMockBookmakerLinks(body, targetRequest.bet.bookmaker_links),
         coupon_image_url: couponImageUrl,
+        auto_send_on_interest: autoSendEnabled,
       };
 
+      let sent = 0;
+      let failed = 0;
+      let autoSendTotal = 0;
+      const errors: string[] = [];
       const requests = currentRequests.map((request: any) => (
         request.bet_id === betId
-          ? { ...request, bet: preparedBet, updated_at: nowIso() }
+          ? (() => {
+              if (!autoSendEnabled || request.status !== 'interested') {
+                return { ...request, bet: preparedBet, updated_at: nowIso() };
+              }
+              autoSendTotal += 1;
+              const balanceBefore = request.user.matches_remaining ?? 0;
+              if (balanceBefore <= 0) {
+                failed += 1;
+                errors.push(`ID ${request.user_id}: 0 матчей, оставлено в ручной обработке`);
+                return { ...request, bet: preparedBet, updated_at: nowIso() };
+              }
+              const balanceAfter = balanceBefore - 1;
+              sent += 1;
+              return {
+                ...request,
+                status: 'sent',
+                delivery_method: 'bot',
+                delivered_at: nowIso(),
+                balance_before: balanceBefore,
+                balance_after: balanceAfter,
+                no_balance_warning: balanceBefore <= 0 && !request.user.guarantee_active,
+                bet: { ...preparedBet, is_taken: true, is_unlocked: true },
+                user: { ...request.user, matches_remaining: balanceAfter },
+                updated_at: nowIso(),
+              };
+            })()
           : request
       ));
       saveMockForecastRequests(requests);
-      return preparedBet;
+      const autoSend = autoSendEnabled
+        ? {
+            status: failed === 0 ? 'success' : sent ? 'partial' : 'failed',
+            total: autoSendTotal,
+            sent,
+            failed,
+            errors,
+          }
+        : null;
+      return {
+        bet: preparedBet,
+        auto_send_enabled: autoSendEnabled,
+        auto_send: autoSend,
+      };
     }
   }
   if (endpoint === '/admin/forecast-requests/bulk-send' && options.method === 'POST') {
@@ -667,26 +1022,32 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
     };
   }
   if (endpoint.startsWith('/admin/forecast-requests/') && options.method === 'POST') {
-    const match = endpoint.match(/^\/admin\/forecast-requests\/([^/]+)\/(send|mark-manual|cancel)$/);
+    const match = endpoint.match(/^\/admin\/forecast-requests\/([^/]+)\/(send|send-saved|mark-manual|cancel|remove-client)$/);
     if (match) {
       const [, requestId, action] = match;
       const currentRequests = getMockForecastRequests();
       const targetRequest = currentRequests.find((request: any) => request.id === requestId);
       if (!targetRequest) throw new Error('Заявка не найдена');
-      if ((action === 'send' || action === 'mark-manual') && targetRequest.status !== 'interested') {
+      if ((action === 'send' || action === 'send-saved' || action === 'mark-manual') && targetRequest.status !== 'interested') {
         throw new Error('Клиент еще не нажал «Беру» или заявка уже обработана');
       }
-      if (action === 'cancel' && ['processing', 'sent', 'manual_sent', 'cancelled'].includes(targetRequest.status)) {
+      if (action === 'cancel' && ['processing', 'sent', 'manual_sent', 'cancelled', 'removed'].includes(targetRequest.status)) {
         throw new Error('Эту заявку нельзя отменить');
       }
+      if (action === 'remove-client' && targetRequest.status === 'processing') {
+        throw new Error('Заявка уже обрабатывается, удаление клиента недоступно');
+      }
 
-      const isDeliveryAction = action === 'send' || action === 'mark-manual';
+      const isDeliveryAction = action === 'send' || action === 'send-saved' || action === 'mark-manual';
+      const isRemoveAction = action === 'remove-client';
       const body = options.body instanceof FormData ? options.body : null;
       const balanceBefore = targetRequest.user.matches_remaining ?? 0;
       const balanceAfter = balanceBefore - 1;
-      const nextStatus = action === 'send' ? 'sent' : action === 'mark-manual' ? 'manual_sent' : 'cancelled';
-      const deliveryMethod = action === 'send' ? 'bot' : action === 'mark-manual' ? 'manual' : null;
-      const sentBet = action === 'send'
+      const removalHadAccess = targetRequest.status === 'sent' || targetRequest.status === 'manual_sent';
+      const removalBalance = (targetRequest.balance_after ?? targetRequest.user.matches_remaining ?? 0) + (removalHadAccess ? 1 : 0);
+      const nextStatus = action === 'send' || action === 'send-saved' ? 'sent' : action === 'mark-manual' ? 'manual_sent' : isRemoveAction ? 'removed' : 'cancelled';
+      const deliveryMethod = action === 'send' || action === 'send-saved' ? 'bot' : action === 'mark-manual' ? 'manual' : targetRequest.delivery_method;
+      const sentBet = action === 'send' || action === 'send-saved'
         ? {
             ...targetRequest.bet,
             event_name: String(body?.get('event_name') || targetRequest.bet.event_name),
@@ -708,12 +1069,20 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
               ...request,
               status: nextStatus,
               delivery_method: deliveryMethod,
-              delivered_at: action === 'cancel' ? request.delivered_at : nowIso(),
+              delivered_at: isDeliveryAction ? nowIso() : request.delivered_at,
               balance_before: isDeliveryAction ? balanceBefore : request.balance_before,
-              balance_after: isDeliveryAction ? balanceAfter : request.balance_after,
-              no_balance_warning: isDeliveryAction ? balanceBefore <= 0 && !request.user.guarantee_active : request.no_balance_warning,
-              bet: isDeliveryAction ? sentBet : request.bet,
-              user: isDeliveryAction ? { ...request.user, matches_remaining: balanceAfter } : request.user,
+              balance_after: isDeliveryAction ? balanceAfter : isRemoveAction && removalHadAccess ? removalBalance : request.balance_after,
+              no_balance_warning: isDeliveryAction ? balanceBefore <= 0 && !request.user.guarantee_active : isRemoveAction ? false : request.no_balance_warning,
+              bet: isDeliveryAction
+                ? sentBet
+                : isRemoveAction
+                  ? { ...request.bet, is_taken: false, is_unlocked: false }
+                  : request.bet,
+              user: isDeliveryAction
+                ? { ...request.user, matches_remaining: balanceAfter }
+                : isRemoveAction && removalHadAccess
+                  ? { ...request.user, matches_remaining: removalBalance }
+                  : request.user,
             }
           : request
       ));
@@ -781,15 +1150,11 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
     };
   }
   if (endpoint === '/users/me/preferences' && (!options.method || options.method === 'GET')) {
-    return {
-      alert_min_coef: 1.5,
-      is_night_mode: false,
-      preferred_sports: [],
-      stats_display_mode: 'percent',
-    };
+    return getMockPreferences();
   }
   if (endpoint === '/users/me/preferences' && options.method === 'PUT') {
-    return { status: 'success' };
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    return { status: 'success', preferences: saveMockPreferences(body) };
   }
   if (endpoint === '/users/me/referral') {
     return {
@@ -856,14 +1221,73 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
     saveMockBets(bets);
     return { status: 'success' };
   }
+  if (endpoint.endsWith('/odds-drop') && endpoint.startsWith('/bets/') && options.method === 'PUT') {
+    const betId = endpoint.split('/')[2];
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    let updatedBet: any = null;
+    const patchBet = (bet: any) => {
+      if (bet.id !== betId) return bet;
+      updatedBet = {
+        ...bet,
+        odds_dropped_to: body.odds_dropped_to ? Number(body.odds_dropped_to) : null,
+      };
+      return updatedBet;
+    };
+    saveMockBets(getMockBets().map(patchBet));
+    saveMockForecastRequests(getMockForecastRequests().map((request: any) => (
+      request.bet?.id === betId ? { ...request, bet: patchBet(request.bet) } : request
+    )));
+    return updatedBet;
+  }
+  if (endpoint.endsWith('/odds-drop/notify') && endpoint.startsWith('/bets/') && options.method === 'POST') {
+    const betId = endpoint.split('/')[2];
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    let updatedBet: any = null;
+    const notifiedAt = nowIso();
+    const patchBet = (bet: any) => {
+      if (bet.id !== betId) return bet;
+      updatedBet = {
+        ...bet,
+        odds_dropped_to: Number(body.odds_dropped_to),
+        odds_drop_notified_at: notifiedAt,
+      };
+      return updatedBet;
+    };
+    saveMockBets(getMockBets().map(patchBet));
+    saveMockForecastRequests(getMockForecastRequests().map((request: any) => (
+      request.bet?.id === betId ? { ...request, bet: patchBet(request.bet) } : request
+    )));
+    return {
+      bet: updatedBet,
+      total: 3,
+      sent: 3,
+      failed: 0,
+      errors: [],
+    };
+  }
   if (endpoint.endsWith('/resolve') && endpoint.startsWith('/bets/')) {
     const betId = endpoint.split('/')[2];
     const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
-    const bets = getMockBets().map((bet: any) => (
-      bet.id === betId ? { ...bet, status: body.status ?? 'win', resolved_at: nowIso() } : bet
-    ));
+    let resolvedBet: any = null;
+    const nextStatus = body.status ?? 'win';
+    const bets = getMockBets().map((bet: any) => {
+      if (bet.id !== betId) return bet;
+      resolvedBet = { ...bet, status: nextStatus, resolved_at: nowIso() };
+      return resolvedBet;
+    });
     saveMockBets(bets);
-    return { status: 'success', guarantee_count: body.status === 'loss' ? 3 : 0, refund_count: body.status === 'refund' ? 3 : 0 };
+    const requests = getMockForecastRequests().map((request: any) => {
+      if (request.bet?.id !== betId) return request;
+      resolvedBet = { ...request.bet, status: nextStatus, resolved_at: nowIso() };
+      return { ...request, bet: resolvedBet };
+    });
+    saveMockForecastRequests(requests);
+    return {
+      ...(resolvedBet || {}),
+      status: nextStatus,
+      guarantee_count: nextStatus === 'loss' ? 3 : 0,
+      refund_count: nextStatus === 'refund' ? 3 : 0,
+    };
   }
   if (endpoint === '/bets' || endpoint === '/bets/with-coupon') {
     const body = options.body instanceof FormData ? options.body : null;
@@ -902,6 +1326,12 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/admin/users') return getMockUsers().filter((user: any) => user.role === 'user');
   if (endpoint === '/admin/admins') return getMockUsers().filter((user: any) => user.role !== 'user');
+  if (endpoint.startsWith('/admin/users/') && options.method === 'DELETE') {
+    const userId = Number(endpoint.split('/')[3]);
+    const users = getMockUsers().filter((user: any) => user.telegram_id !== userId);
+    saveMockUsers(users);
+    return { status: 'success', deleted_user_id: userId };
+  }
   if (endpoint.startsWith('/admin/users/') && options.method === 'PUT') {
     const userId = Number(endpoint.split('/')[3]);
     const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
@@ -912,7 +1342,10 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
         ? body.bookmaker_ids
         : user.bookmakers.map((bookmaker: any) => bookmaker.id);
       const matchesDelta = Number.isInteger(body.matches_delta) ? body.matches_delta : 0;
-      const nextMatches = Math.max(0, (user.matches_remaining || 0) + matchesDelta);
+      const currentMatches = (user.purchased_bets_balance || 0) !== 0
+        ? user.purchased_bets_balance
+        : user.matches_remaining || 0;
+      const nextMatches = Math.max(0, currentMatches + matchesDelta);
       const nextGuarantee = body.close_guarantee ? false : user.guarantee_active;
       const selectedBookmakers = MOCK_BOOKMAKERS.filter((bookmaker) => bookmakerIds.includes(bookmaker.id));
       const hasOtherBookmaker = selectedBookmakers.some((bookmaker) => bookmaker.code === 'other');
@@ -920,6 +1353,7 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
       return {
         ...user,
         stats_display_mode: body.stats_display_mode ?? user.stats_display_mode,
+        purchased_bets_balance: nextMatches,
         matches_remaining: nextMatches,
         guarantee_active: nextGuarantee,
         has_active_subscription: nextMatches > 0 || nextGuarantee,
@@ -937,7 +1371,18 @@ function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint.startsWith('/admin/audit-log')) return [];
   if (endpoint.startsWith('/admin/announcements/audience-count')) return { total_audience: 18, count: 18 };
   if (endpoint === '/admin/announcements' || endpoint === '/admin/broadcast') {
-    return { sent: 18, failed: 0, status: 'success' };
+    return {
+      sent: 18,
+      failed: 0,
+      status: 'success',
+      delivery: {
+        sent: 18,
+        failed: 0,
+        telegram: { sent: 12, failed: 0 },
+        vk_messages: { sent: 6, failed: 0 },
+        vk_notifications: { requested: 4, sent: 0, failed: 0 },
+      },
+    };
   }
   if (endpoint === '/admin/promo/list') return [];
   if (endpoint === '/admin/promo' || endpoint.startsWith('/admin/promo/')) return { status: 'success' };
@@ -954,7 +1399,7 @@ export async function apiFetch<T = any>(endpoint: string, options: RequestInit =
   const mockResponse = mockApiFetch(endpoint, options);
   if (mockResponse !== null) return mockResponse as T;
 
-  const token = localStorage.getItem('bet_tma_jwt_token');
+  const token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
   const isFormData = options.body instanceof FormData;
 
   const headers = {
@@ -973,7 +1418,7 @@ export async function apiFetch<T = any>(endpoint: string, options: RequestInit =
     const message = formatApiErrorDetail(errorData.detail) || `HTTP error! Status: ${response.status}`;
 
     if (response.status === 401) {
-      localStorage.removeItem('bet_tma_jwt_token');
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { endpoint, message } }));
     }
 

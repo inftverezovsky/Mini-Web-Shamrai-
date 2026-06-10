@@ -3,7 +3,7 @@ param(
   [string]$Target = "all",
   [string]$Workspace = "C:\Users\Sa1z1ngr0z\Desktop\Mini-Web(Shamrai)",
   [string]$Server = "root@82.147.67.245",
-  [string]$HostKey = "ssh-ed25519 255 SHA256:Z/TH+aQSfVnBlCUZHg4dsEut92ppbZpHgZP63vIjQGw",
+  [string]$HostKey = "ssh-ed25519 255 SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
   [switch]$RepairShamraiConflicts,
@@ -143,9 +143,17 @@ if ([string]::IsNullOrWhiteSpace($password)) {
   throw "Set SHAMRAI_SSH_PASSWORD for this run. Do not store it in files."
 }
 
+function Invoke-RemoteSh {
+  param([string]$Script)
+  $normalizedScript = ((($Script -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
+  $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedScript))
+  $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | sh"
+  & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
+}
+
 Invoke-Step "Server port/project guard" {
   $guardScript = New-ShamraiServerGuardScript -Repair:$RepairShamraiConflicts
-  & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $guardScript
+  Invoke-RemoteSh -Script $guardScript
 }
 
 $deployDir = Join-Path $Workspace ".deploy"
@@ -225,8 +233,72 @@ rm -f '$RemotePath/$service/.env.local'
     } else {
       $remote += "`nrm -f '$RemotePath/frontend/.env' '$RemotePath/frontend/.env.local'"
     }
-    & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+    Invoke-RemoteSh -Script $remote
   }
+}
+
+Invoke-Step "Upload compose file" {
+  & $pscp -batch -pw $password -hostkey $HostKey (Join-Path $Workspace "docker-compose.yml") "${Server}:/tmp/shamrai-docker-compose.yml"
+  $remote = @"
+set -e
+install -m 0644 /tmp/shamrai-docker-compose.yml '$RemotePath/docker-compose.yml'
+"@
+  Invoke-RemoteSh -Script $remote
+}
+
+Invoke-Step "Patch server runtime config" {
+  $remote = @"
+set -e
+cd '$RemotePath'
+python3 - .env backend/.env <<'PY'
+from pathlib import Path
+import sys
+
+def patch_env(path, values):
+    p = Path(path)
+    lines = p.read_text().splitlines() if p.exists() else []
+    seen = set()
+    out = []
+    for line in lines:
+        if "=" in line and not line.lstrip().startswith("#"):
+            key = line.split("=", 1)[0]
+            if key in values:
+                out.append(f"{key}={values[key]}")
+                seen.add(key)
+                continue
+        out.append(line)
+    for key, value in values.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+    p.write_text("\n".join(out).rstrip() + "\n")
+
+patch_env(Path(sys.argv[1]), {
+    "APP_ENV": "local",
+    "DEBUG_MODE": "false",
+    "ALLOW_DEBUG_AUTH_BYPASS": "false",
+    "FRONTEND_PORT": "8082",
+    "VITE_API_URL": "",
+    "VITE_ENABLE_DEBUG_AUTH": "false",
+    "VITE_VK_ID_APP_ID": "54626979",
+    "VITE_VK_ID_REDIRECT_URI": "https://shamra1.pro",
+    "VITE_VK_GROUP_ID": "239419819",
+    "VITE_TELEGRAM_BOT_USERNAME": "Shamra1_bot",
+})
+patch_env(Path(sys.argv[2]), {
+    "DEBUG_MODE": "false",
+    "ALLOW_DEBUG_AUTH_BYPASS": "false",
+    "TELEGRAM_USE_POLLING": "true",
+    "TELEGRAM_START_RESPONSE_TIMEOUT_SECONDS": "4.0",
+    "TELEGRAM_WEBHOOK_IP_ADDRESS": "82.147.67.245",
+    "API_BASE_URL": "https://shamra1.pro",
+    "FRONTEND_BASE_URL": "https://shamra1.pro/app",
+    "CORS_ALLOWED_ORIGINS": "https://shamra1.pro,https://www.shamra1.pro",
+    "VK_ID_APP_ID": "54626979",
+    "VK_ID_REDIRECT_URI": "https://shamra1.pro",
+})
+PY
+"@
+  Invoke-RemoteSh -Script $remote
 }
 
 Invoke-Step "Docker compose rebuild: $($services -join ', ')" {
@@ -236,7 +308,63 @@ set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' up -d --build $serviceArgs
 "@
-  & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+  Invoke-RemoteSh -Script $remote
+}
+
+if ($Target -eq "backend" -or $Target -eq "all") {
+  Invoke-Step "Reset Telegram delivery state" {
+    $remote = @"
+set -e
+cd '$RemotePath'
+docker compose -p '$ComposeProject' exec -T backend python - <<'PY'
+import re
+import time
+
+from src.api.payments import call_telegram_api
+from src.core.config import settings
+
+if not settings.has_real_telegram_token:
+    raise SystemExit("Telegram bot token is not configured")
+
+if settings.TELEGRAM_USE_POLLING:
+    result = call_telegram_api(
+        "deleteWebhook",
+        {"drop_pending_updates": False},
+        settings.TELEGRAM_API_TIMEOUT_SECONDS,
+        1,
+    )
+    if not result.get("ok"):
+        raise SystemExit(f"Telegram deleteWebhook failed: {result.get('description', 'unknown error')}")
+    print("telegram_polling_delivery_ok")
+    raise SystemExit(0)
+
+webhook_base = settings.API_BASE_URL.strip() or settings.FRONTEND_BASE_URL.strip()
+webhook_url = f"{webhook_base.rstrip('/')}/api/telegram/webhook"
+payload = {
+    "url": webhook_url,
+    "drop_pending_updates": True,
+    "max_connections": 100,
+    "allowed_updates": ["message", "callback_query", "pre_checkout_query"],
+}
+if settings.TELEGRAM_WEBHOOK_SECRET_TOKEN:
+    payload["secret_token"] = settings.TELEGRAM_WEBHOOK_SECRET_TOKEN
+
+result = {}
+for attempt in range(1, 4):
+    result = call_telegram_api("setWebhook", payload, settings.TELEGRAM_API_TIMEOUT_SECONDS, 1)
+    if result.get("ok"):
+        break
+    description = result.get("description", "unknown error")
+    retry_match = re.search(r"retry after\s+(\d+)", description, re.IGNORECASE)
+    if attempt >= 3 or not retry_match:
+        raise SystemExit(f"Telegram setWebhook failed: {description}")
+    time.sleep(max(1, int(retry_match.group(1))) + 1)
+
+print("telegram_webhook_reset_ok")
+PY
+"@
+    Invoke-RemoteSh -Script $remote
+  }
 }
 
 Invoke-Step "Health verification" {
@@ -245,9 +373,10 @@ set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' ps
 curl -fsS http://127.0.0.1:8082/api/health
+curl -fsS http://127.0.0.1:8082/api/health/telegram
 curl -fsS -I http://127.0.0.1:8082/ | head -n 8
 "@
-  & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+  Invoke-RemoteSh -Script $remote
 }
 
 Write-Host ""

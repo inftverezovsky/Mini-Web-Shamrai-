@@ -11,6 +11,16 @@ from src.core.config import settings
 # JWT configuration settings
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
+TELEGRAM_LOGIN_WIDGET_SIGNED_FIELDS = {
+    "id",
+    "first_name",
+    "last_name",
+    "username",
+    "phone",
+    "phone_number",
+    "photo_url",
+    "auth_date",
+}
 
 def create_access_token(data: dict) -> str:
     """Generates a secure JWT token for authenticated requests."""
@@ -153,3 +163,88 @@ def verify_telegram_init_data(init_data: str) -> dict:
         user_data["start_param"] = parsed_data["start_param"]
 
     return user_data
+
+
+def verify_telegram_login_widget(payload: dict) -> dict:
+    """
+    Validate Telegram Login Widget payload and return normalized user data.
+
+    The browser Login Widget uses a different HMAC key from Mini App initData:
+    sha256(bot_token) is used directly as the secret key.
+    """
+    if settings.allow_debug_auth_bypass and payload.get("_debug_mock"):
+        return {
+            "id": int(payload.get("id") or 123456789),
+            "username": payload.get("username") or "debug_user",
+            "first_name": payload.get("first_name") or "Иван",
+            "last_name": payload.get("last_name") or "Подписчик",
+            "role": payload.get("role") or "user",
+            "_debug_mock": True,
+        }
+
+    received_hash = str(payload.get("hash") or "")
+    if not received_hash:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram Login Widget security hash missing",
+        )
+
+    cleaned_payload = {
+        key: value
+        for key, value in payload.items()
+        if key in TELEGRAM_LOGIN_WIDGET_SIGNED_FIELDS and value is not None and value != ""
+    }
+    data_check_string = "\n".join(
+        f"{key}={cleaned_payload[key]}" for key in sorted(cleaned_payload.keys())
+    )
+
+    secret_key = hashlib.sha256(settings.TELEGRAM_BOT_TOKEN.encode()).digest()
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram Login Widget credentials validation failed",
+        )
+
+    try:
+        auth_date = int(cleaned_payload.get("auth_date", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram authorization timestamp is invalid",
+        )
+
+    now = datetime.now(timezone.utc).timestamp()
+    if auth_date - now > 300:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram authorization timestamp is invalid",
+        )
+
+    if now - auth_date > 86400:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Telegram authorization session expired",
+        )
+
+    try:
+        telegram_id = int(cleaned_payload["id"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing Telegram ID in Login Widget payload",
+        )
+
+    return {
+        "id": telegram_id,
+        "username": cleaned_payload.get("username"),
+        "first_name": cleaned_payload.get("first_name"),
+        "last_name": cleaned_payload.get("last_name"),
+        "phone": cleaned_payload.get("phone") or cleaned_payload.get("phone_number"),
+        "photo_url": cleaned_payload.get("photo_url"),
+    }

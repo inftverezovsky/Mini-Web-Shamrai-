@@ -6,6 +6,12 @@ export function getTelegramWebApp<T = any>(): T | undefined {
   return (window as any).Telegram?.WebApp as T | undefined;
 }
 
+export function isTelegramMiniApp(): boolean {
+  if (typeof window === 'undefined') return false;
+  const webApp = getTelegramWebApp<{ initData?: string; initDataUnsafe?: { user?: unknown } }>();
+  return Boolean(webApp && typeof webApp === 'object' && (webApp.initData || webApp.initDataUnsafe?.user));
+}
+
 export async function ensureTelegramSdk(timeoutMs = 2200): Promise<void> {
   if (getTelegramWebApp()) return;
   if (typeof document === 'undefined') return;

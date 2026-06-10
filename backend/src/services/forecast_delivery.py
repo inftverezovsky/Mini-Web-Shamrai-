@@ -15,11 +15,24 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from src.api.payments import call_telegram_api, call_telegram_api_multipart
+from src.api.go import bookmaker_match_url_for_bet
+from src.core.bookmaker_links import normalize_match_url as normalize_bookmaker_match_url
 from src.core.config import settings
-from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji, sport_custom_emoji
+from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
+from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
 from src.models.database import AsyncSessionLocal
 from src.models.models import Bet, ForecastRequest, User
 from src.services.match_access import UserBetAccessResult, record_user_bet_access
+from src.services.signals import deliver_personal_signal
+from src.services.vk_delivery import (
+    html_to_vk_text,
+    is_vk_message_permission_error,
+    local_static_asset_path as vk_local_static_asset_path,
+    mark_vk_messages_denied,
+    refresh_vk_delivery_status,
+    send_vk_message_to_user,
+    user_can_receive_vk_messages,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -30,13 +43,32 @@ FORECAST_STATUS_PROCESSING = "processing"
 FORECAST_STATUS_SENT = "sent"
 FORECAST_STATUS_MANUAL_SENT = "manual_sent"
 FORECAST_STATUS_CANCELLED = "cancelled"
+FORECAST_STATUS_REMOVED = "removed"
 
 DELIVERED_STATUSES = {FORECAST_STATUS_SENT, FORECAST_STATUS_MANUAL_SENT}
 PLACEHOLDER_EVENT_NAME = "Закрытый прогноз"
+FULL_FORECAST_LINKS_REQUIRED_MESSAGE = "Добавьте хотя бы одну ссылку по БК"
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
+TELEGRAM_MESSAGE_TEXT_LIMIT = 4096
 STATIC_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static")
 )
+BOOKMAKER_LOGO_PATHS = {
+    "fonbet": "/bookmakers/transparent/fonbet.png",
+    "betboom": "/bookmakers/transparent/betboom.png",
+    "winline": "/bookmakers/transparent/winline.png",
+    "pari": "/bookmakers/transparent/pari.png",
+    "ligastavok": "/bookmakers/transparent/ligastavok.png",
+    "marathon": "/bookmakers/transparent/marathon.png",
+    "betcity": "/bookmakers/transparent/betcity.png",
+    "melbet": "/bookmakers/transparent/melbet.png",
+    "leon": "/bookmakers/transparent/leon.png",
+    "olimpbet": "/bookmakers/transparent/olimpbet.png",
+    "olimp": "/bookmakers/transparent/olimpbet.png",
+    "zenit": "/bookmakers/transparent/zenit.png",
+    "bettery": "/bookmakers/transparent/bettery.png",
+    "other": "/bookmakers/other.svg",
+}
 
 
 def _now() -> datetime:
@@ -67,7 +99,7 @@ def bookmaker_names_for_bet(bet: Bet) -> str:
 
 
 def _bookmaker_label(bookmaker) -> str:
-    emoji = bookmaker_custom_emoji(getattr(bookmaker, "code", None))
+    emoji = _bookmaker_emoji(bookmaker)
     prefix = f"{emoji} " if emoji else ""
     return f"{prefix}<b>{_html(getattr(bookmaker, 'name', None))}</b>"
 
@@ -79,49 +111,85 @@ def _bookmaker_labels_for_bet(bet: Bet) -> str:
     return ", ".join(_bookmaker_label(bookmaker) for bookmaker in bookmakers)
 
 
-def _sport_label(sport_type: Optional[str]) -> str:
-    clean_sport = str(sport_type or "").strip()
-    if not clean_sport:
-        return ""
-    emoji = sport_custom_emoji(clean_sport)
-    prefix = f"{emoji} " if emoji else ""
-    return f"{prefix}<b>{_html(clean_sport)}</b>"
-
-
 def _normalize_match_url(raw_url: Optional[object]) -> str:
-    url = str(raw_url or "").strip()
-    if not url:
+    return normalize_bookmaker_match_url(raw_url)
+
+
+def _bookmaker_emoji(bookmaker: Optional[object]) -> str:
+    if not bookmaker:
         return ""
-    if not url.lower().startswith(("http://", "https://")):
-        url = re.sub(r"^[a-z][a-z0-9+.-]*://", "", url, flags=re.IGNORECASE)
-        url = f"https://{url}"
-    return url
+    return bookmaker_custom_emoji(
+        getattr(bookmaker, "code", None),
+        getattr(bookmaker, "name", None),
+    )
 
 
 def _bookmaker_button_name(bookmaker: Optional[object]) -> str:
     if not bookmaker:
-        return "Ссылка"
+        return "Открыть"
     name = str(getattr(bookmaker, "name", None) or getattr(bookmaker, "code", None) or "").strip()
     if not name:
-        return "Ссылка"
-    text = f"Ссылка {name}"
-    return f"{text[:61]}..." if len(text) > 64 else text
+        return "Открыть"
+    return f"{name[:61]}..." if len(name) > 64 else name
+
+
+def _bookmaker_display_name(bookmaker: Optional[object]) -> str:
+    if not bookmaker:
+        return "Ссылка на матч"
+    name = str(getattr(bookmaker, "name", None) or getattr(bookmaker, "code", None) or "").strip()
+    return name or "Ссылка на матч"
+
+
+def _bookmaker_logo_url(bookmaker: Optional[object]) -> str:
+    code = str(getattr(bookmaker, "code", None) or "other").strip().lower()
+    return BOOKMAKER_LOGO_PATHS.get(code, BOOKMAKER_LOGO_PATHS["other"])
+
+
+def _bookmaker_link_items(bet: Bet) -> list[tuple[Optional[int], str]]:
+    link_items: list[tuple[Optional[int], str]] = []
+    seen_items: set[tuple[Optional[int], str]] = set()
+
+    def add_item(raw_bookmaker_id: Optional[object], raw_url: Optional[object]) -> None:
+        bookmaker_id: Optional[int] = None
+        if raw_bookmaker_id not in (None, ""):
+            try:
+                bookmaker_id = int(raw_bookmaker_id)
+            except (TypeError, ValueError):
+                bookmaker_id = None
+        url = _normalize_match_url(raw_url)
+        item_key = (bookmaker_id, url)
+        if url and item_key not in seen_items:
+            link_items.append((bookmaker_id, url))
+            seen_items.add(item_key)
+
+    for item in bet.bookmaker_links or []:
+        if isinstance(item, dict):
+            raw_bookmaker_id = item.get("bookmaker_id") or item.get("bookmakerId") or item.get("id")
+            raw_url = item.get("url") or item.get("link") or item.get("match_link")
+            add_item(raw_bookmaker_id, raw_url)
+            continue
+        if hasattr(item, "bookmaker_id") or hasattr(item, "url"):
+            add_item(getattr(item, "bookmaker_id", None), getattr(item, "url", None))
+            continue
+        if isinstance(item, str):
+            add_item(None, item)
+
+    fallback_match_url = _normalize_match_url(getattr(bet, "match_link", None))
+    if fallback_match_url:
+        add_item(getattr(bet, "bookmaker_id", None), fallback_match_url)
+
+    return link_items
 
 
 def _bookmaker_link_targets(bet: Bet) -> list[dict[str, object]]:
     links_by_bookmaker_id: dict[int, str] = {}
-    link_items: list[tuple[int, str]] = []
-    for item in bet.bookmaker_links or []:
-        if not isinstance(item, dict):
+    untargeted_urls: list[str] = []
+    link_items = _bookmaker_link_items(bet)
+    for bookmaker_id, url in link_items:
+        if bookmaker_id is None:
+            untargeted_urls.append(url)
             continue
-        try:
-            bookmaker_id = int(item.get("bookmaker_id"))
-        except (TypeError, ValueError):
-            continue
-        url = _normalize_match_url(item.get("url"))
-        if url:
-            links_by_bookmaker_id[bookmaker_id] = url
-            link_items.append((bookmaker_id, url))
+        links_by_bookmaker_id[bookmaker_id] = url
 
     targets: list[dict[str, object]] = []
     used_bookmaker_ids: set[int] = set()
@@ -129,8 +197,8 @@ def _bookmaker_link_targets(bet: Bet) -> list[dict[str, object]]:
     bookmakers = _bookmakers_for_bet(bet)
     for bookmaker in bookmakers:
         url = links_by_bookmaker_id.get(bookmaker.id)
-        if not url and len(bookmakers) == 1 and len(link_items) == 1:
-            url = link_items[0][1]
+        if not url and len(bookmakers) == 1 and untargeted_urls:
+            url = untargeted_urls.pop(0)
         if not url:
             continue
         targets.append({"bookmaker": bookmaker, "url": url})
@@ -144,15 +212,61 @@ def _bookmaker_link_targets(bet: Bet) -> list[dict[str, object]]:
     return targets
 
 
-def _bookmaker_link_lines(bet: Bet) -> list[str]:
-    lines: list[str] = []
-    for target in _bookmaker_link_targets(bet):
+def _bookmaker_web_items(bet: Bet) -> list[dict[str, object]]:
+    targets = _bookmaker_link_targets(bet)
+    target_url_by_bookmaker_id: dict[int, str] = {}
+    untargeted_urls: list[str] = []
+    for target in targets:
         bookmaker = target.get("bookmaker")
         url = str(target.get("url") or "").strip()
         if not url:
             continue
-        prefix = bookmaker_custom_emoji(getattr(bookmaker, "code", None)) if bookmaker else ""
-        lines.append(f"{prefix or '🔗'} <a href=\"{_html(url)}\">Ссылка</a>")
+        if bookmaker:
+            try:
+                target_url_by_bookmaker_id[int(getattr(bookmaker, "id"))] = url
+            except (TypeError, ValueError):
+                untargeted_urls.append(url)
+        else:
+            untargeted_urls.append(url)
+
+    items: list[dict[str, object]] = []
+    used_urls: set[str] = set()
+    for bookmaker in _bookmakers_for_bet(bet):
+        try:
+            bookmaker_id = int(getattr(bookmaker, "id"))
+        except (TypeError, ValueError):
+            continue
+        url = target_url_by_bookmaker_id.get(bookmaker_id, "")
+        if url:
+            used_urls.add(url)
+        items.append({
+            "id": bookmaker_id,
+            "name": _bookmaker_display_name(bookmaker),
+            "code": str(getattr(bookmaker, "code", None) or "other"),
+            "logo_url": _bookmaker_logo_url(bookmaker),
+            "url": url,
+        })
+
+    for index, url in enumerate(untargeted_urls):
+        if url in used_urls:
+            continue
+        items.append({
+            "id": f"link-{index}",
+            "name": "Ссылка на матч",
+            "code": "other",
+            "logo_url": BOOKMAKER_LOGO_PATHS["other"],
+            "url": url,
+        })
+    return items
+
+
+def _bookmaker_link_lines(bet: Bet) -> list[str]:
+    lines: list[str] = []
+    for target in _bookmaker_link_targets(bet):
+        bookmaker = target.get("bookmaker")
+        prefix = _bookmaker_emoji(bookmaker) if bookmaker else ""
+        label = _bookmaker_display_name(bookmaker)
+        lines.append(f"{prefix or '🔗'} <b>{_html(label)}</b>\nНажмите кнопку ниже, чтобы открыть матч")
     return lines
 
 
@@ -160,31 +274,63 @@ def _bookmaker_links_message(bet: Bet) -> Optional[str]:
     lines = ["<b>Ссылки на матч</b>"]
     for target in _bookmaker_link_targets(bet):
         bookmaker = target.get("bookmaker")
-        url = str(target.get("url") or "").strip()
-        if not url:
-            continue
-        prefix = bookmaker_custom_emoji(getattr(bookmaker, "code", None)) if bookmaker else ""
-        lines.append(f"{prefix or '🔗'} <a href=\"{_html(url)}\">Ссылка</a>\n{_html(url)}")
+        prefix = _bookmaker_emoji(bookmaker) if bookmaker else ""
+        label = _bookmaker_display_name(bookmaker)
+        lines.append(f"{prefix or '🔗'} <b>{_html(label)}</b>\nНажмите кнопку ниже, чтобы открыть матч")
     if len(lines) == 1:
         return None
     return _join_forecast_lines(lines)
 
 
+def _bookmaker_links_plain_text(bet: Bet) -> Optional[str]:
+    lines = ["Ссылки на матч"]
+    for target in _bookmaker_link_targets(bet):
+        bookmaker = target.get("bookmaker")
+        url = str(target.get("url") or "").strip()
+        if not url:
+            continue
+        label = _bookmaker_display_name(bookmaker)
+        lines.append(f"{label}: {url}")
+    if len(lines) == 1:
+        return None
+    return "\n".join(lines)
+
+
 def _bookmaker_link_reply_markup(bet: Bet) -> Optional[dict]:
     buttons = []
     for target in _bookmaker_link_targets(bet):
-        url = str(target.get("url") or "").strip()
+        bookmaker = target.get("bookmaker")
+        url = _bookmaker_redirect_url(bet, bookmaker)
         if not url:
             continue
         buttons.append([
             {
-                "text": _bookmaker_button_name(target.get("bookmaker")),
+                "text": _bookmaker_button_name(bookmaker),
                 "url": url,
             }
         ])
     if not buttons:
         return None
     return {"inline_keyboard": buttons}
+
+
+def _bookmaker_redirect_url(bet: Bet, bookmaker: Optional[object]) -> str:
+    if not bookmaker:
+        return ""
+    try:
+        bookmaker_id = int(getattr(bookmaker, "id", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not bookmaker_id or not bookmaker_match_url_for_bet(bet, bookmaker_id):
+        return ""
+
+    bet_id = str(getattr(bet, "id", "") or "").strip()
+    if not bet_id:
+        return ""
+    base_url = (settings.API_BASE_URL or settings.FRONTEND_BASE_URL or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    return f"{base_url}/api/go/bets/{bet_id}/bookmakers/{bookmaker_id}"
 
 
 def _join_forecast_lines(lines: list[str]) -> str:
@@ -201,6 +347,26 @@ def _fits_photo_caption(html_text: str) -> bool:
     return _plain_text_length(html_text) <= TELEGRAM_PHOTO_CAPTION_LIMIT
 
 
+def _fits_text_message(html_text: str) -> bool:
+    return _plain_text_length(html_text) <= TELEGRAM_MESSAGE_TEXT_LIMIT
+
+
+def _short_coupon_caption(event_name: Optional[object]) -> str:
+    base = "Купон к прогнозу"
+    clean_event_name = str(event_name or "").strip()
+    if not clean_event_name:
+        return base
+    caption = f"{base}: {clean_event_name}"
+    if len(caption) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+        return caption
+    suffix = "..."
+    prefix = f"{base}: "
+    event_limit = TELEGRAM_PHOTO_CAPTION_LIMIT - len(prefix) - len(suffix)
+    if event_limit <= 0:
+        return base[:TELEGRAM_PHOTO_CAPTION_LIMIT]
+    return f"{prefix}{clean_event_name[:event_limit].rstrip()}{suffix}"
+
+
 def _send_bookmaker_links_message(chat_id: int, bet: Bet) -> Optional[dict]:
     links_message = _bookmaker_links_message(bet)
     if not links_message:
@@ -213,6 +379,53 @@ def _send_bookmaker_links_message(chat_id: int, bet: Bet) -> Optional[dict]:
         "disable_web_page_preview": True,
         **({"reply_markup": reply_markup} if reply_markup else {}),
     })
+
+
+def _is_photo_dimensions_error(result: dict) -> bool:
+    description = str(result.get("description") or "").upper()
+    return "PHOTO_INVALID_DIMENSIONS" in description
+
+
+def _send_coupon_document_to_telegram(
+    *,
+    chat_id: int,
+    coupon_caption: str,
+    coupon_file_path: Optional[str],
+    coupon_url: Optional[str],
+    parse_mode: Optional[str],
+    reply_markup: Optional[dict] = None,
+) -> dict:
+    payload = {
+        "chat_id": chat_id,
+        "caption": coupon_caption,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    if coupon_file_path:
+        filename = os.path.basename(coupon_file_path)
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        with open(coupon_file_path, "rb") as file_obj:
+            return call_telegram_api_multipart(
+                "sendDocument",
+                payload,
+                {
+                    "document": (filename, file_obj.read(), content_type),
+                },
+            )
+
+    if coupon_url:
+        return call_telegram_api(
+            "sendDocument",
+            {
+                **payload,
+                "document": coupon_url,
+            },
+        )
+
+    return {"ok": False, "description": "Coupon file is missing"}
 
 
 def _public_asset_url(path: Optional[str]) -> Optional[str]:
@@ -251,7 +464,7 @@ def _client_display(user: User) -> str:
 
 
 def _already_taken_access_result(forecast_request: ForecastRequest) -> UserBetAccessResult:
-    current_balance = int(forecast_request.user.purchased_bets_balance or forecast_request.user.matches_remaining or 0)
+    current_balance = user_match_balance(forecast_request.user)
     return UserBetAccessResult(
         status="already_taken",
         already_recorded=True,
@@ -261,6 +474,10 @@ def _already_taken_access_result(forecast_request: ForecastRequest) -> UserBetAc
         balance_after=forecast_request.balance_after if forecast_request.balance_after is not None else current_balance,
         no_balance_warning=bool(forecast_request.no_balance_warning),
     )
+
+
+def user_match_balance(user: User) -> int:
+    return int(user.purchased_bets_balance or user.matches_remaining or 0)
 
 
 async def load_forecast_request(db: AsyncSession, request_id: UUID) -> ForecastRequest:
@@ -288,7 +505,6 @@ def build_teaser_message(forecast_request: ForecastRequest, teaser_text: Optiona
     lines = [
         "<b>Закрытый анонс прогноза</b>",
         f"БК: {_bookmaker_labels_for_bet(bet)}",
-        f"Спорт: {_sport_label(bet.sport_type) or '<b>не указан</b>'}",
         f"Коэффициент: <b>{_html(_coefficient_text(bet))}</b>",
         _html(teaser),
     ]
@@ -319,27 +535,51 @@ def build_forecast_teaser_payload(forecast_request: ForecastRequest, teaser_text
 
 
 def send_forecast_teaser(forecast_request: ForecastRequest, teaser_text: Optional[str]) -> dict:
+    if not is_personal_telegram_user_id(forecast_request.user_id):
+        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
     return call_telegram_api("sendMessage", build_forecast_teaser_payload(forecast_request, teaser_text))
 
 
-def _build_full_forecast_message(forecast_request: ForecastRequest) -> str:
+def _build_full_forecast_message(
+    forecast_request: ForecastRequest,
+    *,
+    include_bookmaker: bool = True,
+    include_bookmaker_links: bool = False,
+) -> str:
     bet = forecast_request.bet
     lines = [
         f"Матч: <b>{_html(bet.event_name)}</b>",
         f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>",
         f"Коэффициент: <b>{_html(_coefficient_text(bet))}</b>",
     ]
+    if include_bookmaker:
+        lines.append(f"БК: {_bookmaker_labels_for_bet(bet)}")
     if bet.description:
         lines.append(_html(bet.description))
+    if include_bookmaker_links:
+        lines.extend(_bookmaker_link_lines(bet))
 
     return append_contact_footer(_join_forecast_lines(lines))
 
 
 def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
+    if not is_personal_telegram_user_id(forecast_request.user_id):
+        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
+
     bet = forecast_request.bet
-    full_message = _build_full_forecast_message(forecast_request)
+    base_full_message = _build_full_forecast_message(forecast_request)
+    full_message_with_links = _build_full_forecast_message(
+        forecast_request,
+        include_bookmaker_links=True,
+    )
+    links_inline = bool(_bookmaker_link_targets(bet)) and _fits_photo_caption(full_message_with_links)
+    reply_markup = _bookmaker_link_reply_markup(bet)
+    has_coupon = bool(bet.coupon_image_url)
+    # Telegram clients can render long URLs in media captions inconsistently.
+    # Keep coupon captions focused on the forecast and always send match links as a separate message.
+    full_message = base_full_message if has_coupon else full_message_with_links if links_inline else base_full_message
     use_full_caption = _fits_photo_caption(full_message)
-    coupon_caption = full_message if use_full_caption else f"Купон к прогнозу: {bet.event_name}"
+    coupon_caption = full_message if use_full_caption else _short_coupon_caption(bet.event_name)
     coupon_file_path = _local_static_asset_path(bet.coupon_image_url)
     coupon_url = None if coupon_file_path else _public_asset_url(bet.coupon_image_url)
 
@@ -353,12 +593,23 @@ def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
             }
             if use_full_caption:
                 payload["parse_mode"] = "HTML"
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
             photo_result = call_telegram_api_multipart(
                 "sendPhoto",
                 payload,
                 {
                     "photo": (filename, file_obj.read(), content_type),
                 },
+            )
+        if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
+            photo_result = _send_coupon_document_to_telegram(
+                chat_id=forecast_request.user_id,
+                coupon_caption=coupon_caption,
+                coupon_file_path=coupon_file_path,
+                coupon_url=None,
+                parse_mode="HTML" if use_full_caption else None,
+                reply_markup=reply_markup,
             )
         if not photo_result.get("ok"):
             return photo_result
@@ -370,27 +621,41 @@ def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
         }
         if use_full_caption:
             payload["parse_mode"] = "HTML"
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         photo_result = call_telegram_api("sendPhoto", payload)
+        if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
+            photo_result = _send_coupon_document_to_telegram(
+                chat_id=forecast_request.user_id,
+                coupon_caption=coupon_caption,
+                coupon_file_path=None,
+                coupon_url=coupon_url,
+                parse_mode="HTML" if use_full_caption else None,
+                reply_markup=reply_markup,
+            )
         if not photo_result.get("ok"):
             return photo_result
 
     if coupon_file_path or coupon_url:
         if use_full_caption:
-            links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
-            if links_result and not links_result.get("ok"):
-                return links_result
+            if not reply_markup:
+                links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+                if links_result and not links_result.get("ok"):
+                    return links_result
             return photo_result
         text_result = call_telegram_api("sendMessage", {
             "chat_id": forecast_request.user_id,
             "text": full_message,
             "parse_mode": "HTML",
             "disable_web_page_preview": False,
+            **({"reply_markup": reply_markup} if reply_markup else {}),
         })
         if not text_result.get("ok"):
             return text_result
-        links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
-        if links_result and not links_result.get("ok"):
-            return links_result
+        if not reply_markup:
+            links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+            if links_result and not links_result.get("ok"):
+                return links_result
         return text_result
 
     text_result = call_telegram_api("sendMessage", {
@@ -398,13 +663,129 @@ def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
         "text": full_message,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
+        **({"reply_markup": reply_markup} if links_inline and reply_markup else {}),
     })
     if not text_result.get("ok"):
         return text_result
-    links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
-    if links_result and not links_result.get("ok"):
-        return links_result
+    if not links_inline:
+        links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+        if links_result and not links_result.get("ok"):
+            return links_result
     return text_result
+
+
+def send_full_forecast_to_vk_client(forecast_request: ForecastRequest) -> dict:
+    if not user_can_receive_vk_messages(forecast_request.user):
+        return {"ok": False, "description": "Client has not allowed VK messages"}
+
+    bet = forecast_request.bet
+    full_message = html_to_vk_text(_build_full_forecast_message(forecast_request))
+    links_message = _bookmaker_links_plain_text(bet) or ""
+    coupon_file_path = vk_local_static_asset_path(bet.coupon_image_url)
+    coupon_url = None if coupon_file_path else _public_asset_url(bet.coupon_image_url)
+
+    message_parts = [full_message]
+    if links_message:
+        message_parts.append(links_message)
+    if coupon_url:
+        message_parts.append(f"Купон: {coupon_url}")
+
+    return send_vk_message_to_user(
+        forecast_request.user,
+        "\n\n".join(part for part in message_parts if part),
+        image_path=coupon_file_path,
+    )
+
+
+def build_web_full_forecast_text(forecast_request: ForecastRequest) -> str:
+    return html_to_vk_text(_build_full_forecast_message(forecast_request, include_bookmaker=False))
+
+
+def build_web_forecast_signal_data(
+    forecast_request: ForecastRequest,
+    *,
+    status_value: Optional[str] = None,
+) -> dict[str, object]:
+    bet = forecast_request.bet
+    return {
+        "message_html": _build_full_forecast_message(forecast_request, include_bookmaker=False),
+        "message_text": build_web_full_forecast_text(forecast_request),
+        "coupon_image_url": bet.coupon_image_url,
+        "bookmakers": _bookmaker_web_items(bet),
+        "event_name": bet.event_name,
+        "outcome": bet.outcome,
+        "coefficient": _coefficient_text(bet),
+        "sport_type": bet.sport_type,
+        "description": bet.description,
+        "forecast_request_id": str(forecast_request.id),
+        "forecast_status": status_value or forecast_request.status,
+        "bet_id": str(getattr(forecast_request, "bet_id", None) or getattr(bet, "id", "")),
+    }
+
+
+def build_web_teaser_signal_data(
+    forecast_request: ForecastRequest,
+    teaser_text: Optional[str],
+) -> dict[str, object]:
+    bet = forecast_request.bet
+    return {
+        "message_html": build_teaser_message(forecast_request, teaser_text),
+        "message_text": html_to_vk_text(build_teaser_message(forecast_request, teaser_text)),
+        "coupon_image_url": bet.coupon_image_url,
+        "bookmakers": _bookmaker_web_items(bet),
+        "event_name": bet.event_name,
+        "coefficient": _coefficient_text(bet),
+        "sport_type": bet.sport_type,
+        "forecast_request_id": str(forecast_request.id),
+        "forecast_status": forecast_request.status,
+        "bet_id": str(getattr(forecast_request, "bet_id", None) or getattr(bet, "id", "")),
+        "actions": ["take", "decline"],
+    }
+
+
+async def deliver_full_forecast_to_web_chat(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> None:
+    await deliver_personal_signal(
+        db,
+        user=forecast_request.user,
+        text=build_web_full_forecast_text(forecast_request),
+        signal_type="forecast_full",
+        data=build_web_forecast_signal_data(forecast_request),
+        send_telegram=False,
+        send_web_push=True,
+    )
+
+
+def client_delivery_method(user: User) -> str:
+    can_receive_telegram = user_can_receive_personal_telegram(user)
+    can_receive_vk = user_can_receive_vk_messages(user)
+    if can_receive_telegram and can_receive_vk:
+        return "vk_bot"
+    if can_receive_vk:
+        return "vk"
+    if can_receive_telegram:
+        return "bot"
+    return "web"
+
+
+def _best_client_delivery_method(user: User) -> str:
+    return client_delivery_method(user)
+
+
+async def refreshed_client_delivery_method(db: AsyncSession, user: User) -> str:
+    if getattr(user, "vk_user_id", None):
+        await refresh_vk_delivery_status(db, user, refresh_group=False)
+    return client_delivery_method(user)
+
+
+def _status_for_delivery_method(delivery_method: str) -> str:
+    return (
+        FORECAST_STATUS_SENT
+        if delivery_method in {"bot", "vk", "vk_bot", "web"}
+        else FORECAST_STATUS_MANUAL_SENT
+    )
 
 
 def _ensure_full_forecast_ready(forecast_request: ForecastRequest) -> None:
@@ -426,6 +807,24 @@ def _ensure_full_forecast_ready(forecast_request: ForecastRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Загрузите скрин купона перед отправкой прогноза",
         )
+    if not _fits_text_message(_build_full_forecast_message(forecast_request)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сократите текст полного прогноза до 4096 символов",
+        )
+    if not _bookmaker_link_targets(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=FULL_FORECAST_LINKS_REQUIRED_MESSAGE,
+        )
+
+
+def _full_forecast_ready_error(forecast_request: ForecastRequest) -> Optional[str]:
+    try:
+        _ensure_full_forecast_ready(forecast_request)
+    except HTTPException as exc:
+        return str(exc.detail)
+    return None
 
 
 def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
@@ -435,7 +834,7 @@ def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
 
     user = forecast_request.user
     bet = forecast_request.bet
-    balance = int(user.purchased_bets_balance or user.matches_remaining or 0)
+    balance = user_match_balance(user)
     no_balance_warning = balance <= 0 and not bool(user.guarantee_active)
     warning = ""
     if no_balance_warning:
@@ -493,12 +892,63 @@ async def notify_sales_manager_for_request(request_id: UUID) -> dict:
         return notify_result
 
 
+def forecast_request_should_auto_deliver(forecast_request: ForecastRequest) -> bool:
+    return bool(
+        getattr(forecast_request.bet, "status", None) != "deleted"
+        and getattr(forecast_request.bet, "auto_send_on_interest", False)
+        and _full_forecast_ready_error(forecast_request) is None
+    )
+
+
+async def auto_deliver_forecast_request_for_request(
+    request_id: UUID,
+    *,
+    delivery_method: str = "auto",
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        forecast_request = await load_forecast_request(db, request_id)
+        if not forecast_request_should_auto_deliver(forecast_request):
+            return {"ok": False, "description": "Auto delivery is not ready"}
+        resolved_delivery_method = (
+            await refreshed_client_delivery_method(db, forecast_request.user)
+            if delivery_method == "auto"
+            else delivery_method
+        )
+        try:
+            _, access_result = await deliver_forecast_request(
+                db,
+                forecast_request=forecast_request,
+                handled_by=None,
+                delivery_method=resolved_delivery_method,
+                send_to_client=True,
+            )
+            return {"ok": True, "already_recorded": access_result.already_recorded}
+        except HTTPException as exc:
+            logger.warning(
+                "[ForecastDelivery] Auto delivery failed for request %s via %s: %s",
+                request_id,
+                resolved_delivery_method,
+                exc.detail,
+            )
+            try:
+                await notify_sales_manager_for_request(request_id)
+            except Exception as notify_exc:
+                logger.exception(
+                    "[ForecastDelivery] Sales fallback failed for request %s: %s",
+                    request_id,
+                    notify_exc,
+                )
+            return {"ok": False, "description": str(exc.detail)}
+
+
 async def set_forecast_request_interested(
     db: AsyncSession,
     *,
     request_id: UUID,
     actor_user_id: int,
     notify_sales_manager_now: bool = True,
+    auto_delivery_method: str = "auto",
+    auto_delivery_now: bool = True,
 ) -> tuple[ForecastRequest, str, bool]:
     forecast_request = await load_forecast_request(db, request_id)
     if forecast_request.user_id != actor_user_id:
@@ -506,6 +956,8 @@ async def set_forecast_request_interested(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
+    if getattr(forecast_request.bet, "status", None) == "deleted":
+        return forecast_request, "Прогноз остановлен администратором.", False
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен.", False
@@ -517,6 +969,8 @@ async def set_forecast_request_interested(
         return forecast_request, "Отказ уже учтен.", False
     if forecast_request.status == FORECAST_STATUS_CANCELLED:
         return forecast_request, "Заявка отменена.", False
+    if forecast_request.status == FORECAST_STATUS_REMOVED:
+        return forecast_request, "Заявка удалена администратором.", False
 
     responded_at = forecast_request.responded_at or _now()
     lock_result = await db.execute(
@@ -542,6 +996,8 @@ async def set_forecast_request_interested(
             return latest_request, "Заявка уже обрабатывается.", False
         if latest_request.status == FORECAST_STATUS_CANCELLED:
             return latest_request, "Заявка отменена.", False
+        if latest_request.status == FORECAST_STATUS_REMOVED:
+            return latest_request, "Заявка удалена администратором.", False
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Заявка уже изменила статус",
@@ -549,6 +1005,43 @@ async def set_forecast_request_interested(
 
     forecast_request.status = FORECAST_STATUS_INTERESTED
     forecast_request.responded_at = responded_at
+    if forecast_request_should_auto_deliver(forecast_request):
+        resolved_auto_delivery_method = (
+            await refreshed_client_delivery_method(db, forecast_request.user)
+            if auto_delivery_method == "auto"
+            else auto_delivery_method
+        )
+        if not auto_delivery_now:
+            return forecast_request, "Принято. Готовим прогноз.", False
+        try:
+            forecast_request, access_result = await deliver_forecast_request(
+                db,
+                forecast_request=forecast_request,
+                handled_by=None,
+                delivery_method=resolved_auto_delivery_method,
+                send_to_client=True,
+            )
+            if access_result.already_recorded:
+                return forecast_request, "Прогноз уже был отправлен.", False
+            channel_name = (
+                "VK и личные сообщения"
+                if resolved_auto_delivery_method == "vk_bot"
+                else "VK"
+                if resolved_auto_delivery_method == "vk"
+                else "личный веб-чат"
+                if resolved_auto_delivery_method == "web"
+                else "личные сообщения"
+            )
+            return forecast_request, f"Прогноз отправлен в {channel_name}.", False
+        except HTTPException as exc:
+            if exc.status_code < 500:
+                raise
+            logger.warning(
+                "[ForecastDelivery] Auto-send failed for request %s, falling back to sales manager: %s",
+                request_id,
+                exc.detail,
+            )
+
     if notify_sales_manager_now:
         notify_result = await asyncio.to_thread(notify_sales_manager, forecast_request)
         if not notify_result.get("ok"):
@@ -572,6 +1065,8 @@ async def set_forecast_request_declined(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
+    if getattr(forecast_request.bet, "status", None) == "deleted":
+        return forecast_request, "Прогноз остановлен администратором."
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен."
@@ -583,6 +1078,8 @@ async def set_forecast_request_declined(
         return forecast_request, "Отказ уже учтен."
     if forecast_request.status == FORECAST_STATUS_CANCELLED:
         return forecast_request, "Заявка отменена."
+    if forecast_request.status == FORECAST_STATUS_REMOVED:
+        return forecast_request, "Заявка удалена администратором."
 
     forecast_request.status = FORECAST_STATUS_DECLINED
     forecast_request.responded_at = forecast_request.responded_at or _now()
@@ -597,6 +1094,9 @@ async def deliver_forecast_request(
     delivery_method: str,
     send_to_client: bool,
 ) -> tuple[ForecastRequest, UserBetAccessResult]:
+    if delivery_method == "auto":
+        delivery_method = await refreshed_client_delivery_method(db, forecast_request.user)
+
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, _already_taken_access_result(forecast_request)
 
@@ -612,14 +1112,37 @@ async def deliver_forecast_request(
             detail="Клиент еще не нажал «Беру»",
         )
 
-    if forecast_request.status in {FORECAST_STATUS_DECLINED, FORECAST_STATUS_CANCELLED}:
+    if forecast_request.status in {FORECAST_STATUS_DECLINED, FORECAST_STATUS_CANCELLED, FORECAST_STATUS_REMOVED}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Эту заявку нельзя доставить: клиент отказался или заявка отменена",
+            detail="Эту заявку нельзя доставить: клиент отказался, заявка отменена или удалена",
+        )
+    if getattr(forecast_request.bet, "status", None) == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Прогноз остановлен администратором",
         )
 
     if send_to_client:
         _ensure_full_forecast_ready(forecast_request)
+        if delivery_method in {"vk", "vk_bot"}:
+            await refresh_vk_delivery_status(db, forecast_request.user, refresh_group=False)
+            if not user_can_receive_vk_messages(forecast_request.user):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="У клиента нет разрешения на доставку VK",
+                )
+        if delivery_method in {"bot", "vk_bot"}:
+            if not is_personal_telegram_user_id(forecast_request.user_id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="У клиента нет Telegram-чата для доставки ботом",
+                )
+        if delivery_method not in {"bot", "vk", "vk_bot", "web"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Неизвестный способ доставки прогноза",
+            )
 
     lock_result = await db.execute(
         update(ForecastRequest)
@@ -648,11 +1171,40 @@ async def deliver_forecast_request(
 
     try:
         if send_to_client:
-            send_result = send_full_forecast_to_client(forecast_request)
+            if delivery_method == "vk":
+                send_result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request)
+                delivery_label = "VK"
+            elif delivery_method == "vk_bot":
+                send_result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request)
+                delivery_label = "VK"
+                if send_result.get("ok"):
+                    telegram_result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request)
+                    if not telegram_result.get("ok"):
+                        logger.warning(
+                            "[ForecastDelivery] Telegram duplicate failed for request %s after VK success: %s",
+                            forecast_request.id,
+                            telegram_result.get("description", "unknown error"),
+                        )
+            elif delivery_method == "bot":
+                send_result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request)
+                delivery_label = "Telegram"
+            else:
+                send_result = {"ok": True}
+                delivery_label = "Web"
             if not send_result.get("ok"):
+                if delivery_method in {"vk", "vk_bot"} and is_vk_message_permission_error(send_result):
+                    await mark_vk_messages_denied(db, forecast_request.user)
+                    await db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=(
+                            "VK не разрешает отправлять этому клиенту личные сообщения. "
+                            "Попросите клиента открыть диалог VK и нажать проверку доступа."
+                        ),
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Telegram не доставил прогноз клиенту: {send_result.get('description', 'unknown error')}",
+                    detail=f"{delivery_label} не доставил прогноз клиенту: {send_result.get('description', 'unknown error')}",
                 )
 
         access_result = await record_user_bet_access(
@@ -663,13 +1215,15 @@ async def deliver_forecast_request(
             allow_negative_balance=True,
             note=f"Private forecast activated via {delivery_method}",
         )
-        forecast_request.status = FORECAST_STATUS_SENT if delivery_method == "bot" else FORECAST_STATUS_MANUAL_SENT
+        forecast_request.status = _status_for_delivery_method(delivery_method)
         forecast_request.delivery_method = delivery_method
         forecast_request.handled_by = handled_by
         forecast_request.delivered_at = forecast_request.delivered_at or _now()
         forecast_request.balance_before = access_result.balance_before
         forecast_request.balance_after = access_result.balance_after
         forecast_request.no_balance_warning = access_result.no_balance_warning
+        if send_to_client:
+            await deliver_full_forecast_to_web_chat(db, forecast_request)
         await db.commit()
         return forecast_request, access_result
     except Exception:
@@ -690,6 +1244,8 @@ async def cancel_forecast_request(
         return forecast_request, "Заявка уже доставлена."
     if forecast_request.status == FORECAST_STATUS_CANCELLED:
         return forecast_request, "Заявка уже отменена."
+    if forecast_request.status == FORECAST_STATUS_REMOVED:
+        return forecast_request, "Заявка удалена администратором."
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -721,7 +1277,7 @@ async def handle_sales_callback(
             db,
             forecast_request=forecast_request,
             handled_by=actor_user_id,
-            delivery_method="bot",
+            delivery_method=await refreshed_client_delivery_method(db, forecast_request.user),
             send_to_client=True,
         )
         if access_result.already_recorded:

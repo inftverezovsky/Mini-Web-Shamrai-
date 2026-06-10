@@ -33,6 +33,9 @@ class UserBase(BaseModel):
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    phone: Optional[str] = None
+    photo_url: Optional[str] = None
+    is_web_only: bool = False
 
 class UserCreate(UserBase):
     role: str = "user"
@@ -47,6 +50,10 @@ class UserResponse(UserBase):
     favorite_sports: List[str] = Field(default_factory=list)
     risk_tolerance: Optional[str] = None
     primary_bookmaker: Optional[str] = None
+    vk_user_id: Optional[str] = None
+    vk_group_member: bool = False
+    vk_messages_allowed: bool = False
+    vk_notifications_allowed: bool = False
     currency_preference: str = "RUB"
     purchased_bets_balance: int = 0
     free_bets_available: int = 0
@@ -60,6 +67,8 @@ class UserResponse(UserBase):
     has_used_shield: bool = False
     alert_min_coef: float = 1.0
     is_night_mode: bool = False
+    night_mode_start: str = "23:00"
+    night_mode_end: str = "08:00"
     preferred_sports: List[str] = Field(default_factory=list)
     other_bookmaker_name: Optional[str] = None
     client_group: Optional[str] = None
@@ -73,11 +82,14 @@ class UserResponse(UserBase):
         from_attributes = True
 
 class OnboardRequest(BaseModel):
+    anti_capper_pains: List[str] = Field(default_factory=list)
     experience_level: str
     bankroll_size: str
     risk_tolerance: str
     bookmakers: List[str] = Field(default_factory=list)
     primary_bookmaker: Optional[str] = None
+    vk_user_id: Optional[str] = None
+    other_bookmaker_name: Optional[str] = None
     bookmaker_ids: List[int] = Field(default_factory=list)
     currency_preference: str = "RUB"
 
@@ -193,6 +205,7 @@ class BetBase(BaseModel):
     match_link: Optional[str] = None
     bookmaker_links: List[BookmakerLink] = Field(default_factory=list)
     delivery_mode: str = "feed"
+    auto_send_on_interest: bool = False
 
 class BetCreate(BetBase):
     target_bookmaker_ids: Optional[List[int]] = None  # Specific list of bookmaker IDs for target audience filtering (optional)
@@ -200,6 +213,11 @@ class BetCreate(BetBase):
 
 class BetResolve(BaseModel):
     status: str  # "win" | "loss" | "refund"
+
+
+class BetOddsDropUpdate(BaseModel):
+    odds_dropped_to: Optional[Decimal] = None
+
 
 class BetResponse(BetBase):
     id: UUID
@@ -215,9 +233,19 @@ class BetResponse(BetBase):
     guarantee_count: int = 0
     supercompensation_count: int = 0
     refund_count: int = 0
+    odds_dropped_to: Optional[Decimal] = None
+    odds_drop_notified_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class BetOddsDropNotifyResponse(BaseModel):
+    bet: BetResponse
+    total: int
+    sent: int
+    failed: int
+    errors: List[str] = Field(default_factory=list)
 
 
 class ForecastRequestUserResponse(BaseModel):
@@ -225,6 +253,8 @@ class ForecastRequestUserResponse(BaseModel):
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    photo_url: Optional[str] = None
+    is_web_only: bool = False
     matches_remaining: int = 0
     guarantee_active: bool = False
     bookmakers: List[BookmakerResponse] = Field(default_factory=list)
@@ -448,10 +478,13 @@ class AdminUserListResponse(BaseModel):
     username: Optional[str]
     first_name: Optional[str]
     last_name: Optional[str]
+    photo_url: Optional[str] = None
+    is_web_only: bool = False
     role: str
     stats_display_mode: str
     has_active_subscription: bool
     subscription_end_date: Optional[datetime]
+    purchased_bets_balance: int = 0
     matches_remaining: int = 0
     guarantee_active: bool = False
     guarantee_opened_from_bet_id: Optional[UUID] = None
@@ -492,8 +525,10 @@ class AdminAuditLogResponse(BaseModel):
 
 # --- USER PREFERENCES SCHEMAS ---
 class UserPreferencesUpdate(BaseModel):
-    alert_min_coef: Optional[float] = None
+    alert_min_coef: Optional[float] = Field(default=None, ge=1.0, le=1.6)
     is_night_mode: Optional[bool] = None
+    night_mode_start: Optional[str] = None
+    night_mode_end: Optional[str] = None
     preferred_sports: Optional[List[str]] = None
     stats_display_mode: Optional[str] = None  # "percent" | "flat"
 
@@ -501,6 +536,8 @@ class UserPreferencesUpdate(BaseModel):
 class UserPreferencesResponse(BaseModel):
     alert_min_coef: float
     is_night_mode: bool
+    night_mode_start: str
+    night_mode_end: str
     preferred_sports: List[str]
     stats_display_mode: str
 

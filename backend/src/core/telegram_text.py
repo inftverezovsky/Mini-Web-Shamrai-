@@ -6,6 +6,22 @@ from typing import Optional
 from src.core.config import settings
 
 SHAMRAI_CONTACT_USERNAME = "@Shamrai_Osnova"
+BOOKMAKER_FALLBACK_EMOJI = "🏦"
+BOOKMAKER_EMOJI_KEY_ALIASES = {
+    "fonbet": ("fonbet", "фонбет", "фонбет (fonbet)"),
+    "betboom": ("betboom", "бетбум", "бетбум (betboom)"),
+    "winline": ("winline", "винлайн", "винлайн (winline)"),
+    "pari": ("pari", "пари", "пари (pari)", "pari (pari)"),
+    "ligastavok": ("ligastavok", "liga stavok", "лига ставок", "лига ставок (ligastavok)"),
+    "marathon": ("marathon", "марафон", "марафонбет"),
+    "betcity": ("betcity", "бетсити", "бетсити (betcity)"),
+    "bettery": ("bettery", "беттери", "беттери (bettery)"),
+    "melbet": ("melbet", "мелбет", "мелбет (melbet)"),
+    "leon": ("leon", "леон", "леон (leon)"),
+    "olimpbet": ("olimpbet", "olimp", "олимп", "олимпбет", "олимпбет (olimpbet)"),
+    "zenit": ("zenit", "зенит", "зенит (zenit)"),
+    "other": ("other", "другие"),
+}
 
 
 def custom_emoji(custom_emoji_id: Optional[str], fallback: str) -> str:
@@ -41,9 +57,48 @@ def _parse_custom_emoji_map(raw_value: str) -> dict[str, str]:
     }
 
 
-def bookmaker_custom_emoji(code: Optional[str]) -> str:
+def _emoji_key(value: Optional[str]) -> str:
+    return str(value or "").strip().lower()
+
+
+def _bookmaker_emoji_keys(code: Optional[str], name: Optional[str] = None) -> list[str]:
+    keys: list[str] = []
+
+    def add(value: Optional[str]) -> None:
+        key = _emoji_key(value)
+        if key and key not in keys:
+            keys.append(key)
+
+    add(code)
+    add(name)
+
+    name_key = _emoji_key(name)
+    if "(" in name_key and ")" in name_key:
+        add(name_key.split("(", 1)[0])
+        add(name_key.split("(", 1)[1].split(")", 1)[0])
+
+    code_key = _emoji_key(code)
+    aliases = BOOKMAKER_EMOJI_KEY_ALIASES.get(code_key, ())
+    for alias in aliases:
+        add(alias)
+
+    if name_key:
+        for alias_code, alias_values in BOOKMAKER_EMOJI_KEY_ALIASES.items():
+            if name_key in alias_values:
+                add(alias_code)
+                for alias in alias_values:
+                    add(alias)
+
+    return keys
+
+
+def bookmaker_custom_emoji(code: Optional[str], name: Optional[str] = None) -> str:
     emoji_map = _parse_custom_emoji_map(settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS)
-    return custom_emoji(emoji_map.get(str(code or "").strip().lower()), "🏦")
+    for key in _bookmaker_emoji_keys(code, name):
+        emoji = custom_emoji(emoji_map.get(key), BOOKMAKER_FALLBACK_EMOJI)
+        if emoji:
+            return emoji
+    return BOOKMAKER_FALLBACK_EMOJI
 
 
 def sport_custom_emoji(label: Optional[str]) -> str:

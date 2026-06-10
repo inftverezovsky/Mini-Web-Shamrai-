@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { apiFetch } from '../../utils/api';
 import { BetResponse } from '../../schemas/schemas';
 import { useAuth } from '../../context/AuthContext';
+import { useLayoutMode } from '../../context/LayoutModeContext';
 import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, ExternalLink, Star, Image as ImageIcon } from 'lucide-react';
 import MarathonWidget from './MarathonWidget';
 import LiveTracker from './LiveTracker';
@@ -64,7 +65,8 @@ interface BetFeedProps {
 
 export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   const { user: userProfile } = useAuth();
-  const debugCheckoutEnabled = import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const { isCompact } = useLayoutMode();
+  const debugCheckoutEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
   
   const [bets, setBets] = useState<BetResponse[]>([]);
   const [takenBetIds, setTakenBetIds] = useState<string[]>([]);
@@ -193,7 +195,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   }
 
   return (
-    <div className="space-y-4 max-w-md mx-auto animate-slide-up pb-10">
+    <div className={`${isCompact ? 'mx-auto max-w-md space-y-4' : 'space-y-5'} animate-slide-up pb-10`}>
       
       {promoFlags.marathon && <MarathonWidget />}
       {promoFlags.swipe && <SwipeCard />}
@@ -210,9 +212,12 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
       {!active && (
         <div className="promo-status-panel motion-card shimmer-border spark-field bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 border border-indigo-500/20 backdrop-blur-md p-4 rounded-2xl flex items-center justify-between text-xs text-slate-200 shadow-glass relative overflow-hidden">
           <div className="space-y-0.5">
-            <p className="font-extrabold text-white flex items-center">
+            <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
               <Sparkles className="iridescent-icon w-3.5 h-3.5 mr-1.5 shrink-0" />
               Нужен абонемент
+              <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[8px] font-black uppercase tracking-wider text-cyan-300">
+                В разработке
+              </span>
             </p>
             <p className="text-[10px] text-slate-400">
               Купите пакет матчей, чтобы открыть премиум-ленту прогнозов.
@@ -239,7 +244,8 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
           </p>
         </div>
       ) : (
-        bets.map((bet, idx) => {
+        <div className={isCompact ? 'space-y-4' : 'grid grid-cols-1 gap-4 xl:grid-cols-2'}>
+          {bets.map((bet, idx) => {
           const isTaken = bet.is_taken || takenBetIds.includes(bet.id);
           const unlocked = bet.is_unlocked;
           const isActionLoading = actionLoadingId === bet.id;
@@ -425,7 +431,8 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
               </div>
             </div>
           );
-        })
+        })}
+        </div>
       )}
     </div>
   );

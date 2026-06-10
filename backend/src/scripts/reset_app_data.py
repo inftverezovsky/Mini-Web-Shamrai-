@@ -1,11 +1,11 @@
 import argparse
 import asyncio
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from src.core.bookmakers import ensure_standard_bookmakers
 from src.models.database import AsyncSessionLocal
-from src.scripts.seed_defaults import seed_plans
+from src.scripts.seed_defaults import DEFAULT_PLANS, seed_plans
 
 
 ADMIN_ROLES = ("admin", "owner")
@@ -18,6 +18,7 @@ RESET_TABLES = [
     "pvp_battle_votes",
     "crowd_bet_participants",
     "forecast_requests",
+    "personal_signals",
     "match_balance_logs",
     "payment_attempts",
     "subscriptions",
@@ -56,6 +57,8 @@ ADMIN_RESET_COLUMNS = {
     "has_used_shield": "false",
     "alert_min_coef": "1.0",
     "is_night_mode": "false",
+    "night_mode_start": "'23:00'",
+    "night_mode_end": "'08:00'",
     "preferred_sports": "'[]'",
     "other_bookmaker_name": "NULL",
     "client_group": "NULL",
@@ -93,6 +96,9 @@ async def collect_counts(db) -> dict[str, int]:
     counts["schema_ready"] = 1
     counts["users_non_admin"] = await _count(db, "users", "WHERE role NOT IN ('admin', 'owner')")
     counts["users_admin_kept"] = await _count(db, "users", "WHERE role IN ('admin', 'owner')")
+    for table_name in ("subscription_plans", "bookmakers"):
+        if await _table_exists(db, table_name):
+            counts[table_name] = await _count(db, table_name)
     for table_name in RESET_TABLES:
         if await _table_exists(db, table_name):
             counts[table_name] = await _count(db, table_name)
@@ -117,6 +123,15 @@ async def reset_database(*, dry_run: bool, seed: bool) -> dict[str, int | bool]:
         for table_name in RESET_TABLES:
             if await _table_exists(db, table_name):
                 await db.execute(text(f"DELETE FROM {table_name}"))
+
+        if await _table_exists(db, "subscription_plans"):
+            default_plan_names = [plan["name"] for plan in DEFAULT_PLANS]
+            await db.execute(
+                text("DELETE FROM subscription_plans WHERE name NOT IN :default_plan_names").bindparams(
+                    bindparam("default_plan_names", expanding=True)
+                ),
+                {"default_plan_names": default_plan_names},
+            )
 
         reset_assignments = ", ".join(f"{column} = {value}" for column, value in ADMIN_RESET_COLUMNS.items())
         await db.execute(

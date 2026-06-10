@@ -18,6 +18,9 @@ export interface UserResponse {
   username: string | null;
   first_name: string | null;
   last_name: string | null;
+  phone: string | null;
+  photo_url: string | null;
+  is_web_only: boolean;
   role: 'owner' | 'admin' | 'moderator' | 'user';
   stats_display_mode: 'percent' | 'flat';
   bankroll: number;
@@ -27,6 +30,10 @@ export interface UserResponse {
   favorite_sports: string[];
   risk_tolerance: 'cautious' | 'balanced' | 'aggressive' | null;
   primary_bookmaker: string | null;
+  vk_user_id: string | null;
+  vk_group_member: boolean;
+  vk_messages_allowed: boolean;
+  vk_notifications_allowed: boolean;
   currency_preference: string;
   purchased_bets_balance: number;
   free_bets_available: number;
@@ -40,6 +47,8 @@ export interface UserResponse {
   has_used_shield: boolean;
   alert_min_coef: number;
   is_night_mode: boolean;
+  night_mode_start: string;
+  night_mode_end: string;
   preferred_sports: string[];
   other_bookmaker_name: string | null;
   client_group: string | null;
@@ -85,7 +94,7 @@ export interface BetResponse {
   coefficient: string | number;
   bookmaker_id: number | null;
   description: string | null;
-  status: 'pending' | 'win' | 'loss' | 'refund';
+  status: 'pending' | 'win' | 'loss' | 'refund' | 'deleted';
   author_id: number | null;
   created_at: string;
   resolved_at: string | null;
@@ -107,6 +116,9 @@ export interface BetResponse {
   match_link: string | null;
   bookmaker_links: BookmakerLink[];
   delivery_mode: 'feed' | 'sales_private';
+  auto_send_on_interest: boolean;
+  odds_dropped_to: string | number | null;
+  odds_drop_notified_at: string | null;
 }
 
 export interface ForecastRequestUserResponse {
@@ -114,6 +126,8 @@ export interface ForecastRequestUserResponse {
   username: string | null;
   first_name: string | null;
   last_name: string | null;
+  photo_url: string | null;
+  is_web_only: boolean;
   matches_remaining: number;
   guarantee_active: boolean;
   bookmakers: BookmakerResponse[];
@@ -123,8 +137,8 @@ export interface ForecastRequestResponse {
   id: string;
   bet_id: string;
   user_id: number;
-  status: 'announced' | 'interested' | 'processing' | 'declined' | 'sent' | 'manual_sent' | 'cancelled';
-  delivery_method: 'bot' | 'manual' | null;
+  status: 'announced' | 'interested' | 'processing' | 'declined' | 'sent' | 'manual_sent' | 'cancelled' | 'removed';
+  delivery_method: 'bot' | 'vk' | 'vk_bot' | 'web' | 'manual' | null;
   handled_by: number | null;
   responded_at: string | null;
   delivered_at: string | null;

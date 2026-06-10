@@ -54,6 +54,7 @@ const actionLabels: Record<string, string> = {
   role_changed: 'Изменение роли',
   staff_granted: 'Выдача доступа',
   user_updated: 'Обновление CRM',
+  user_deleted: 'Удаление клиента',
 };
 
 const roleOptions: StaffRole[] = ['owner', 'admin', 'moderator'];
@@ -71,6 +72,10 @@ function formatAuditDetails(log: AuditLog) {
   const matches = log.details.matches_remaining as { from?: number; to?: number; delta?: number } | undefined;
   if (matches && typeof matches.delta === 'number') {
     return `Матчи: ${matches.from ?? 0} -> ${matches.to ?? 0}`;
+  }
+
+  if (typeof log.details.deleted_user_id === 'number') {
+    return `Удален клиент ID ${log.details.deleted_user_id}`;
   }
 
   const keys = Object.keys(log.details || {});

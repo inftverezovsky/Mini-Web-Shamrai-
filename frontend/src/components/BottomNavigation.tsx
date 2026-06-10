@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  MessageCircle,
   Newspaper,
   Settings2,
   TrendingUp,
@@ -9,7 +10,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 
-export type UserTabId = 'feed' | 'stats' | 'my_bets' | 'profile' | 'billing';
+export type UserTabId = 'feed' | 'chat' | 'stats' | 'my_bets' | 'profile' | 'billing';
 export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'profile';
 type BottomTabId = UserTabId | AdminShellTabId;
 
@@ -17,6 +18,7 @@ interface BottomNavigationProps {
   role: 'user' | 'admin';
   activeTab: BottomTabId;
   onChangeTab: (tab: BottomTabId) => void;
+  showWebChat?: boolean;
 }
 
 interface TabConfig<T extends BottomTabId> {
@@ -25,22 +27,25 @@ interface TabConfig<T extends BottomTabId> {
   Icon: LucideIcon;
 }
 
-const userTabs: TabConfig<UserTabId>[] = [
+export const userTabs: TabConfig<UserTabId>[] = [
   { id: 'feed', label: 'Лента', Icon: Newspaper },
+  { id: 'chat', label: 'ЧАТ', Icon: MessageCircle },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp },
   { id: 'my_bets', label: 'Мои ставки', Icon: Trophy },
   { id: 'profile', label: 'Профиль', Icon: UserIcon },
 ];
 
-const adminTabs: TabConfig<AdminShellTabId>[] = [
+export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'manage_bets', label: 'Панель', Icon: Settings2 },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp },
   { id: 'clients', label: 'Клиенты', Icon: Users },
   { id: 'profile', label: 'Профиль', Icon: UserIcon },
 ];
 
-export default function BottomNavigation({ role, activeTab, onChangeTab }: BottomNavigationProps) {
-  const tabs = role === 'user' ? userTabs : adminTabs;
+export default function BottomNavigation({ role, activeTab, onChangeTab, showWebChat = false }: BottomNavigationProps) {
+  const tabs = role === 'user'
+    ? userTabs.filter((tab) => showWebChat || tab.id !== 'chat')
+    : adminTabs;
 
   const getTabStyles = (isActive: boolean) => {
     if (isActive) {

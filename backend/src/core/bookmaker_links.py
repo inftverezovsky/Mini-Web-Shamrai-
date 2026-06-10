@@ -1,5 +1,65 @@
 import json
+import ipaddress
+import re
 from typing import Any, Iterable, Optional
+from urllib.parse import urlparse, urlunparse
+
+
+def _valid_hostname(hostname: str) -> bool:
+    hostname = hostname.rstrip(".")
+    if not hostname or not any(char.isalnum() for char in hostname):
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    if ":" in hostname:
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            return False
+        return True
+    if "." not in hostname:
+        return False
+    labels = hostname.split(".")
+    return all(
+        bool(re.fullmatch(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)", label))
+        for label in labels
+    )
+
+
+def normalize_match_url(raw_url: Optional[object]) -> str:
+    url = str(raw_url or "").strip()
+    if not url:
+        return ""
+
+    url = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", url)
+    if not url or re.search(r"[<>\s]", url):
+        return ""
+
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url}")
+
+    hostname = parsed.hostname or ""
+    if not _valid_hostname(hostname):
+        return ""
+    if parsed.username or parsed.password:
+        return ""
+
+    try:
+        parsed.port
+    except ValueError:
+        return ""
+
+    return urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc,
+        parsed.path or "",
+        parsed.params or "",
+        parsed.query or "",
+        parsed.fragment or "",
+    ))
 
 
 def normalize_bookmaker_links(
@@ -33,7 +93,7 @@ def normalize_bookmaker_links(
             return
         if allowed_ids and bookmaker_id not in allowed_ids:
             return
-        url = str(raw_url or "").strip()
+        url = normalize_match_url(raw_url)
         if not url:
             return
         normalized_by_id[bookmaker_id] = {

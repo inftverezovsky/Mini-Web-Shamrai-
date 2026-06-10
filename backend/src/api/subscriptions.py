@@ -20,6 +20,7 @@ from src.api.deps import get_current_user, get_current_privileged_admin, get_opt
 from src.core.roles import is_admin_role, is_staff_role
 from src.core.config import settings
 from src.services.match_access import activate_match_package
+from src.api.payments import call_telegram_api_async
 
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
 
@@ -294,12 +295,11 @@ async def generate_vip_invite_link(
         
     chat_id = settings.TELEGRAM_VIP_CHAT_ID
     
-    from src.api.payments import call_telegram_api
     payload = {
         "chat_id": chat_id,
         "member_limit": 1
     }
-    res = call_telegram_api("createChatInviteLink", payload)
+    res = await call_telegram_api_async("createChatInviteLink", payload)
     
     if res.get("ok"):
         invite_link = res["result"]["invite_link"]

@@ -1,23 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../../utils/api';
-import { BookmakerResponse, BetResponse } from '../../schemas/schemas';
-import { Send, HelpCircle, Calendar, Check, X, RefreshCw, Loader2, ListFilter, Upload, Link as LinkIcon } from 'lucide-react';
+import { BookmakerResponse } from '../../schemas/schemas';
+import { Send, X, Loader2, ListFilter, Upload, Link as LinkIcon } from 'lucide-react';
 import { SPORT_OPTIONS } from '../../constants/sports';
-import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
+import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
+import EmojiTextField from '../../components/EmojiTextField';
 import { notifyError, notifySuccess } from '../../utils/notify';
 
 interface AdminBetsProps {
   onBetsUpdated?: () => void;
 }
 
-interface ExtendedBetResponse extends BetResponse {
-  isFading?: boolean;
-}
-
 export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
-  const [pendingBets, setPendingBets] = useState<ExtendedBetResponse[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Form states
@@ -64,18 +60,11 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
     };
   }, [couponPreview]);
 
-  // Settle loading states
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
-
   const loadData = async () => {
     try {
       setLoading(true);
-      const [bkList, betsList] = await Promise.all([
-        apiFetch('/bookmakers'),
-        apiFetch('/admin/bets/pending')
-      ]);
+      const bkList = await apiFetch('/bookmakers');
       setBookmakers(bkList);
-      setPendingBets(betsList);
     } catch (err) {
       console.error('Failed to load bets data:', err);
     } finally {
@@ -169,9 +158,6 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       setCouponImage(null);
       setCouponPreview(null);
 
-      // Refresh list
-      const freshBets = await apiFetch('/admin/bets/pending');
-      setPendingBets(freshBets);
       if (onBetsUpdated) onBetsUpdated();
 
       setTimeout(() => setSuccessMsg(''), 3000);
@@ -180,40 +166,6 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       notifyError(err.message || 'Ошибка создания прогноза');
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  const handleResolve = async (betId: string, status: 'win' | 'loss' | 'refund') => {
-    try {
-      setResolvingId(betId);
-      
-      const result = await apiFetch(`/bets/${betId}/resolve`, {
-        method: 'PUT',
-        body: JSON.stringify({ status })
-      });
-
-      if (status === 'loss' && result.guarantee_count > 0) {
-        setSuccessMsg(`Гарантия открыта/продлена для ${result.guarantee_count} клиентов`);
-        setTimeout(() => setSuccessMsg(''), 4000);
-      }
-      if (status === 'refund' && result.refund_count > 0) {
-        setSuccessMsg(`Возвращено ${result.refund_count} матчей клиентам`);
-        setTimeout(() => setSuccessMsg(''), 4000);
-      }
-
-      setPendingBets(prev =>
-        prev.map(bet => (bet.id === betId ? { ...bet, isFading: true } : bet))
-      );
-
-      setTimeout(() => {
-        setPendingBets(prev => prev.filter(bet => bet.id !== betId));
-        if (onBetsUpdated) onBetsUpdated();
-      }, 350);
-
-    } catch (err: any) {
-      notifyError(err.message || 'Не удалось рассчитать ставку');
-    } finally {
-      setResolvingId(null);
     }
   };
 
@@ -237,10 +189,10 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
         <form onSubmit={handlePublish} className="space-y-3.5 text-xs text-slate-300">
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Событие</label>
-            <input
+            <EmojiTextField
               type="text"
               value={eventName}
-              onChange={e => setEventName(e.target.value)}
+              onValueChange={setEventName}
               placeholder="Реал Мадрид - Барселона"
               className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
             />
@@ -248,10 +200,10 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
 
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Исход</label>
-            <input
+            <EmojiTextField
               type="text"
               value={outcome}
-              onChange={e => setOutcome(e.target.value)}
+              onValueChange={setOutcome}
               placeholder="П1 / победа Реала / тотал больше 2.5"
               className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
             />
@@ -371,9 +323,10 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
               Описание / Обоснование <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
             </label>
-            <textarea
+            <EmojiTextField
+              multiline
               value={description}
-              onChange={e => setDescription(e.target.value)}
+              onValueChange={setDescription}
               placeholder="Введите аналитический разбор матча..."
               rows={3}
               className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all"
@@ -453,89 +406,6 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             </p>
           )}
         </form>
-      </div>
-
-      <div className="space-y-3.5">
-        <h3 className="text-xs font-black text-slate-400 flex items-center uppercase tracking-wider">
-          <HelpCircle className="w-4.5 h-4.5 text-amber-400 mr-2 shrink-0" />
-          Расчет результатов
-        </h3>
-
-        <div className="space-y-3">
-          {pendingBets.length === 0 ? (
-            <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-6 text-center text-slate-500 text-xs rounded-2xl select-none">
-              Нет активных прогнозов, требующих расчета.
-            </div>
-          ) : (
-            pendingBets.map(bet => (
-                <div 
-                  key={bet.id}
-                  className={`bg-white/5 border border-white/10 backdrop-blur-lg p-4.5 rounded-2xl space-y-3.5 transition-all duration-300 transform ${
-                    bet.isFading ? 'opacity-0 scale-95 -translate-y-4' : 'opacity-100 scale-100'
-                  }`}
-                >
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h4 className="text-xs font-bold text-white leading-snug">{bet.event_name}</h4>
-                      {bet.outcome && (
-                        <div className="mt-1 text-[10px] font-black uppercase tracking-wider text-indigo-300">
-                          {bet.outcome}
-                        </div>
-                      )}
-                      <div className="flex items-center space-x-2 mt-1">
-                        <span className="text-[9px] text-slate-500 flex items-center">
-                          <Calendar className="w-3 h-3 mr-1" />
-                          {new Date(bet.created_at).toLocaleDateString('ru-RU')}
-                        </span>
-                        {bet.category === 'live' && (
-                          <span className="bg-rose-500/10 text-rose-400 text-[8.5px] border border-rose-500/20 px-1.5 py-0.2 rounded font-black uppercase">Live</span>
-                        )}
-                        {bet.sport_type && (
-                          <span className="bg-white/5 border border-white/10 text-slate-300 text-[8.5px] px-1.5 py-0.5 rounded font-black uppercase flex items-center gap-1">
-                            <SportIconFrame label={bet.sport_type} size="tiny" />
-                            {bet.sport_type}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <span className="bg-emerald-500/15 border border-emerald-500/25 text-emerald-400 text-xs font-black px-2.5 py-0.5 rounded-lg shadow-neon-green shrink-0 select-none">
-                      кф. {parseFloat(bet.coefficient as any).toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center space-x-2.5">
-                    <button
-                      onClick={() => handleResolve(bet.id, 'win')}
-                      disabled={resolvingId === bet.id || bet.isFading}
-                      className="flex-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500 hover:text-slate-950 active:scale-95 text-[10px] font-black py-2 rounded-xl flex items-center justify-center space-x-1 transition-all duration-200"
-                    >
-                      <Check className="w-3.5 h-3.5 shrink-0" />
-                      <span>Выигрыш</span>
-                    </button>
-                    
-                    <button
-                      onClick={() => handleResolve(bet.id, 'loss')}
-                      disabled={resolvingId === bet.id || bet.isFading}
-                      className="flex-1 bg-rose-500/15 border border-rose-500/30 text-rose-400 hover:bg-rose-500 hover:text-white active:scale-95 text-[10px] font-black py-2 rounded-xl flex items-center justify-center space-x-1 transition-all duration-200"
-                    >
-                      <X className="w-3.5 h-3.5 shrink-0" />
-                      <span>Проигрыш</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleResolve(bet.id, 'refund')}
-                      disabled={resolvingId === bet.id || bet.isFading}
-                      className="flex-1 bg-slate-800 border border-slate-700/60 text-slate-400 hover:bg-slate-700 hover:text-white active:scale-95 text-[10px] font-black py-2 rounded-xl flex items-center justify-center space-x-1 transition-all duration-200"
-                    >
-                      <RefreshCw className="w-3 h-3 shrink-0" />
-                      <span>Возврат</span>
-                    </button>
-                  </div>
-
-                </div>
-              ))
-          )}
-        </div>
       </div>
 
     </div>
