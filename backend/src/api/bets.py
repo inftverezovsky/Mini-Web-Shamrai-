@@ -23,6 +23,7 @@ from src.schemas.schemas import (
     BetOddsDropUpdate,
     BetResolve,
     BetResponse,
+    BetUpdate,
     UserStats,
 )
 from src.api.deps import get_current_user, get_current_admin
@@ -659,6 +660,109 @@ async def create_bet_with_coupon(
         )
 
     return bet
+
+
+@router.put("/{bet_id}", response_model=BetResponse)
+async def update_bet(
+    bet_id: UUID,
+    bet_data: BetUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only: Edit forecast details before the result is settled."""
+    result = await db.execute(
+        select(Bet)
+        .filter(Bet.id == bet_id)
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+    )
+    bet = result.scalars().first()
+    if not bet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Прогноз не найден",
+        )
+    if bet.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Можно редактировать только прогнозы без результата",
+        )
+
+    update_payload = bet_data.model_dump(exclude_unset=True)
+
+    if "event_name" in update_payload:
+        event_name = str(bet_data.event_name or "").strip()
+        if not event_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Укажите матч",
+            )
+        bet.event_name = event_name
+
+    if "coefficient" in update_payload:
+        if bet_data.coefficient is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Укажите коэффициент",
+            )
+        coefficient = _validate_odds_dropped_to(bet_data.coefficient)
+        if coefficient is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Укажите коэффициент",
+            )
+        bet.coefficient = coefficient
+
+    text_fields = ("sport_type", "outcome", "description", "match_link")
+    for field_name in text_fields:
+        if field_name in update_payload:
+            value = getattr(bet_data, field_name)
+            clean_value = str(value).strip() if value is not None else ""
+            setattr(bet, field_name, clean_value or None)
+
+    selected_bookmaker_ids: Optional[List[int]] = None
+    if "bookmaker_id" in update_payload or "bookmaker_ids" in update_payload:
+        selected_bookmaker_ids = _merge_bookmaker_ids(
+            bet_data.bookmaker_id,
+            bet_data.bookmaker_ids or [],
+        )
+        selected_bookmakers: List[Bookmaker] = []
+        if selected_bookmaker_ids:
+            bookmakers_result = await db.execute(
+                select(Bookmaker).filter(Bookmaker.id.in_(selected_bookmaker_ids))
+            )
+            bookmakers_by_id = {bookmaker.id: bookmaker for bookmaker in bookmakers_result.scalars().all()}
+            missing_ids = [
+                selected_id
+                for selected_id in selected_bookmaker_ids
+                if selected_id not in bookmakers_by_id
+            ]
+            if missing_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Букмекер не найден: {', '.join(map(str, missing_ids))}",
+                )
+            selected_bookmakers = [bookmakers_by_id[selected_id] for selected_id in selected_bookmaker_ids]
+        bet.bookmaker_id = selected_bookmaker_ids[0] if selected_bookmaker_ids else None
+        bet.bookmakers = selected_bookmakers
+
+    allowed_link_bookmaker_ids = (
+        selected_bookmaker_ids
+        if selected_bookmaker_ids is not None
+        else [bookmaker.id for bookmaker in bet.bookmakers]
+    )
+    if "bookmaker_links" in update_payload:
+        bet.bookmaker_links = normalize_bookmaker_links(
+            bet_data.bookmaker_links or [],
+            allowed_bookmaker_ids=allowed_link_bookmaker_ids,
+        )
+    elif "bookmaker_id" in update_payload or "bookmaker_ids" in update_payload:
+        bet.bookmaker_links = normalize_bookmaker_links(
+            bet.bookmaker_links or [],
+            allowed_bookmaker_ids=allowed_link_bookmaker_ids,
+        )
+
+    await db.commit()
+    return await _load_bet_for_admin(db, bet_id)
 
 
 @router.put("/{bet_id}/odds-drop", response_model=BetResponse)

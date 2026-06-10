@@ -10,8 +10,8 @@ from sqlalchemy.future import select
 
 from src.api import bets
 from src.models.database import Base
-from src.models.models import Bet, User, user_bets
-from src.schemas.schemas import BetOddsDropUpdate
+from src.models.models import Bet, Bookmaker, User, user_bets
+from src.schemas.schemas import BetOddsDropUpdate, BetUpdate
 
 
 class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +83,47 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(response.odds_dropped_to, Decimal("1.50"))
+
+    async def test_update_bet_edits_main_fields_bookmakers_and_links(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            bet = self._bet()
+            fonbet = Bookmaker(id=1, name="Фонбет (Fonbet)", code="fonbet", is_active=True)
+            pari = Bookmaker(id=2, name="Пари (Pari)", code="pari", is_active=True)
+            session.add_all([admin, bet, fonbet, pari])
+            await session.commit()
+
+            response = await bets.update_bet(
+                bet.id,
+                BetUpdate(
+                    event_name="Team A - Team B",
+                    coefficient=Decimal("2.75"),
+                    outcome="П1",
+                    sport_type="Футбол",
+                    bookmaker_id=fonbet.id,
+                    bookmaker_ids=[fonbet.id, pari.id],
+                    bookmaker_links=[
+                        {"bookmaker_id": fonbet.id, "url": "fonbet.ru/match/123"},
+                        {"bookmaker_id": pari.id, "url": "https://pari.example/match"},
+                    ],
+                ),
+                admin=admin,
+                db=session,
+            )
+
+            self.assertEqual(response.event_name, "Team A - Team B")
+            self.assertEqual(response.coefficient, Decimal("2.75"))
+            self.assertEqual(response.outcome, "П1")
+            self.assertEqual(response.sport_type, "Футбол")
+            self.assertEqual(response.bookmaker_id, fonbet.id)
+            self.assertEqual([bookmaker.id for bookmaker in response.bookmakers], [fonbet.id, pari.id])
+            self.assertEqual(
+                response.bookmaker_links,
+                [
+                    {"bookmaker_id": fonbet.id, "url": "https://fonbet.ru/match/123"},
+                    {"bookmaker_id": pari.id, "url": "https://pari.example/match"},
+                ],
+            )
 
     async def test_notify_odds_drop_sends_only_to_users_with_access(self):
         async with self.Session() as session:

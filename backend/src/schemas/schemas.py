@@ -215,6 +215,18 @@ class BetResolve(BaseModel):
     status: str  # "win" | "loss" | "refund"
 
 
+class BetUpdate(BaseModel):
+    event_name: Optional[str] = None
+    coefficient: Optional[Decimal] = None
+    bookmaker_id: Optional[int] = None
+    bookmaker_ids: Optional[List[int]] = None
+    sport_type: Optional[str] = None
+    outcome: Optional[str] = None
+    description: Optional[str] = None
+    match_link: Optional[str] = None
+    bookmaker_links: Optional[List[BookmakerLink]] = None
+
+
 class BetOddsDropUpdate(BaseModel):
     odds_dropped_to: Optional[Decimal] = None
 

@@ -4,7 +4,9 @@ import {
   Check,
   ExternalLink,
   HelpCircle,
+  Link as LinkIcon,
   Loader2,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Save,
@@ -15,6 +17,7 @@ import {
 import { apiFetch } from '../../utils/api';
 import { BetResponse, BookmakerResponse } from '../../schemas/schemas';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
+import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
 import { notifyError, notifySuccess } from '../../utils/notify';
 
 interface ResultBet extends BetResponse {
@@ -27,6 +30,15 @@ interface OddsDropNotifyResponse {
   sent: number;
   failed: number;
   errors: string[];
+}
+
+interface EditDraft {
+  event_name: string;
+  coefficient: string;
+  outcome: string;
+  sport_type: string;
+  selectedBookmakerIds: number[];
+  bookmakerLinks: Record<number, string>;
 }
 
 const resultActions: Array<{
@@ -86,12 +98,38 @@ function normalizeOddsInput(value: string) {
   return value.trim().replace(',', '.');
 }
 
+function buildEditDraft(bet: BetResponse): EditDraft {
+  const selectedBookmakerIds = getBetBookmakers(bet)
+    .map((bookmaker) => bookmaker.id)
+    .filter((bookmakerId, index, ids) => bookmakerId && ids.indexOf(bookmakerId) === index);
+
+  const bookmakerLinks = (bet.bookmaker_links || []).reduce<Record<number, string>>((acc, link) => {
+    if (link.bookmaker_id && link.url) {
+      acc[Number(link.bookmaker_id)] = link.url;
+    }
+    return acc;
+  }, {});
+
+  return {
+    event_name: bet.event_name || '',
+    coefficient: formatOddsInput(bet.coefficient),
+    outcome: bet.outcome || '',
+    sport_type: bet.sport_type || '',
+    selectedBookmakerIds,
+    bookmakerLinks,
+  };
+}
+
 export default function AdminResults() {
   const [bets, setBets] = useState<ResultBet[]>([]);
+  const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [savingEditId, setSavingEditId] = useState<string | null>(null);
+  const [editDrafts, setEditDrafts] = useState<Record<string, EditDraft>>({});
   const [oddsDropInputs, setOddsDropInputs] = useState<Record<string, string>>({});
   const [savingOddsDropId, setSavingOddsDropId] = useState<string | null>(null);
   const [sendingOddsDropId, setSendingOddsDropId] = useState<string | null>(null);
@@ -133,8 +171,18 @@ export default function AdminResults() {
     }
   };
 
+  const loadBookmakers = async () => {
+    try {
+      const data = await apiFetch<BookmakerResponse[]>('/bookmakers');
+      setBookmakers(data);
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось загрузить список БК для редактирования');
+    }
+  };
+
   useEffect(() => {
     loadResults();
+    loadBookmakers();
   }, []);
 
   const handleResolve = async (betId: string, status: 'win' | 'loss' | 'refund') => {
@@ -174,6 +222,124 @@ export default function AdminResults() {
       ...current,
       [updatedBet.id]: formatOddsInput(updatedBet.odds_dropped_to),
     }));
+  };
+
+  const handleStartEdit = (bet: BetResponse) => {
+    setEditDrafts((current) => ({
+      ...current,
+      [bet.id]: current[bet.id] || buildEditDraft(bet),
+    }));
+    setEditingId((current) => (current === bet.id ? null : bet.id));
+  };
+
+  const handleCancelEdit = (bet: BetResponse) => {
+    setEditDrafts((current) => ({
+      ...current,
+      [bet.id]: buildEditDraft(bet),
+    }));
+    setEditingId(null);
+  };
+
+  const updateEditDraft = (betId: string, patch: Partial<EditDraft>) => {
+    setEditDrafts((current) => {
+      const sourceBet = bets.find((bet) => bet.id === betId);
+      const currentDraft = current[betId] || (sourceBet ? buildEditDraft(sourceBet) : null);
+      if (!currentDraft) return current;
+      return {
+        ...current,
+        [betId]: { ...currentDraft, ...patch },
+      };
+    });
+  };
+
+  const handleEditBookmakers = (betId: string, selectedBookmakerIds: number[]) => {
+    setEditDrafts((current) => {
+      const sourceBet = bets.find((bet) => bet.id === betId);
+      const currentDraft = current[betId] || (sourceBet ? buildEditDraft(sourceBet) : null);
+      if (!currentDraft) return current;
+      const selectedSet = new Set(selectedBookmakerIds);
+      const bookmakerLinks = Object.entries(currentDraft.bookmakerLinks).reduce<Record<number, string>>(
+        (acc, [rawId, url]) => {
+          const bookmakerId = Number(rawId);
+          if (selectedSet.has(bookmakerId)) acc[bookmakerId] = url;
+          return acc;
+        },
+        {},
+      );
+      return {
+        ...current,
+        [betId]: {
+          ...currentDraft,
+          selectedBookmakerIds,
+          bookmakerLinks,
+        },
+      };
+    });
+  };
+
+  const handleEditBookmakerLink = (betId: string, bookmakerId: number, url: string) => {
+    setEditDrafts((current) => {
+      const sourceBet = bets.find((bet) => bet.id === betId);
+      const currentDraft = current[betId] || (sourceBet ? buildEditDraft(sourceBet) : null);
+      if (!currentDraft) return current;
+      return {
+        ...current,
+        [betId]: {
+          ...currentDraft,
+          bookmakerLinks: {
+            ...currentDraft.bookmakerLinks,
+            [bookmakerId]: url,
+          },
+        },
+      };
+    });
+  };
+
+  const handleSaveEdit = async (bet: BetResponse) => {
+    const draft = editDrafts[bet.id] || buildEditDraft(bet);
+    const eventName = draft.event_name.trim();
+    const coefficient = normalizeOddsInput(draft.coefficient);
+
+    if (!eventName) {
+      notifyError('Укажите матч');
+      return;
+    }
+    if (!coefficient) {
+      notifyError('Укажите коэффициент');
+      return;
+    }
+
+    try {
+      setSavingEditId(bet.id);
+      const updatedBet = await apiFetch<BetResponse>(`/bets/${bet.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          event_name: eventName,
+          coefficient,
+          outcome: draft.outcome.trim() || null,
+          sport_type: draft.sport_type.trim() || null,
+          bookmaker_id: draft.selectedBookmakerIds[0] || null,
+          bookmaker_ids: draft.selectedBookmakerIds,
+          bookmaker_links: draft.selectedBookmakerIds
+            .map((bookmakerId) => ({
+              bookmaker_id: bookmakerId,
+              url: (draft.bookmakerLinks[bookmakerId] || '').trim(),
+            }))
+            .filter((link) => link.url),
+        }),
+      });
+      updateBetFromResponse(updatedBet);
+      setEditDrafts((current) => ({
+        ...current,
+        [updatedBet.id]: buildEditDraft(updatedBet),
+      }));
+      setEditingId(null);
+      notifySuccess('Прогноз обновлен');
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось сохранить прогноз');
+    } finally {
+      setSavingEditId(null);
+    }
   };
 
   const handleOddsDropInput = (betId: string, value: string) => {
@@ -304,11 +470,17 @@ export default function AdminResults() {
             const betBookmakers = getBetBookmakers(bet);
             const isResolving = resolvingId === bet.id;
             const isDeleting = deletingId === bet.id;
-            const isBusy = isResolving || isDeleting;
+            const isEditing = editingId === bet.id;
+            const isSavingEdit = savingEditId === bet.id;
+            const isBusy = isResolving || isDeleting || isSavingEdit;
             const isSavingOddsDrop = savingOddsDropId === bet.id;
             const isSendingOddsDrop = sendingOddsDropId === bet.id;
             const oddsDropValue = oddsDropInputs[bet.id] ?? formatOddsInput(bet.odds_dropped_to);
             const hasOddsDropValue = normalizeOddsInput(oddsDropValue).length > 0;
+            const editDraft = editDrafts[bet.id] || buildEditDraft(bet);
+            const editSelectedBookmakers = bookmakers.filter((bookmaker) =>
+              editDraft.selectedBookmakerIds.includes(bookmaker.id),
+            );
 
             return (
               <div
@@ -385,6 +557,134 @@ export default function AdminResults() {
                   </div>
                 )}
 
+                {isEditing && (
+                  <div className="mt-3 rounded-xl border border-indigo-300/18 bg-slate-950/42 p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider text-indigo-200">
+                        <Pencil className="h-3.5 w-3.5" />
+                        Редактирование
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelEdit(bet)}
+                        disabled={isSavingEdit}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-slate-400 transition-all hover:bg-white/10 hover:text-white disabled:opacity-50"
+                      >
+                        Отмена
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-2">
+                      <label className="grid gap-1">
+                        <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                          Матч
+                        </span>
+                        <input
+                          type="text"
+                          value={editDraft.event_name}
+                          onChange={(event) => updateEditDraft(bet.id, { event_name: event.target.value })}
+                          disabled={isSavingEdit || bet.isFading}
+                          className="h-10 rounded-xl border border-white/10 bg-black/[0.24] px-3 text-xs font-black text-white outline-none transition-all placeholder:text-slate-600 focus:border-indigo-300/55 disabled:opacity-55"
+                        />
+                      </label>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="grid gap-1">
+                          <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                            Исход
+                          </span>
+                          <input
+                            type="text"
+                            value={editDraft.outcome}
+                            onChange={(event) => updateEditDraft(bet.id, { outcome: event.target.value })}
+                            disabled={isSavingEdit || bet.isFading}
+                            className="h-10 min-w-0 rounded-xl border border-white/10 bg-black/[0.24] px-3 text-xs font-bold text-white outline-none transition-all placeholder:text-slate-600 focus:border-indigo-300/55 disabled:opacity-55"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                            Кэф
+                          </span>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={editDraft.coefficient}
+                            onChange={(event) => updateEditDraft(bet.id, { coefficient: event.target.value })}
+                            disabled={isSavingEdit || bet.isFading}
+                            className="h-10 min-w-0 rounded-xl border border-emerald-300/20 bg-black/[0.24] px-3 text-xs font-black text-emerald-100 outline-none transition-all placeholder:text-slate-600 focus:border-emerald-300/55 disabled:opacity-55"
+                          />
+                        </label>
+                      </div>
+
+                      <label className="grid gap-1">
+                        <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                          Вид спорта
+                        </span>
+                        <input
+                          type="text"
+                          value={editDraft.sport_type}
+                          onChange={(event) => updateEditDraft(bet.id, { sport_type: event.target.value })}
+                          disabled={isSavingEdit || bet.isFading}
+                          placeholder="Футбол"
+                          className="h-10 rounded-xl border border-white/10 bg-black/[0.24] px-3 text-xs font-bold text-white outline-none transition-all placeholder:text-slate-600 focus:border-cyan-300/55 disabled:opacity-55"
+                        />
+                      </label>
+
+                      <div className="rounded-xl border border-white/10 bg-black/[0.16] p-2.5">
+                        <BookmakerMultiSelect
+                          label="Букмекеры"
+                          hint="Кнопки контор под прогнозом"
+                          bookmakers={bookmakers}
+                          selectedIds={editDraft.selectedBookmakerIds}
+                          onChange={(ids) => handleEditBookmakers(bet.id, ids)}
+                          disabled={isSavingEdit || bet.isFading}
+                          allowAll={false}
+                        />
+                      </div>
+
+                      {editSelectedBookmakers.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider text-cyan-200">
+                            <LinkIcon className="h-3.5 w-3.5" />
+                            Ссылки БК
+                          </div>
+                          {editSelectedBookmakers.map((bookmaker) => (
+                            <div
+                              key={bookmaker.id}
+                              className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] gap-2"
+                            >
+                              <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-black/[0.18] px-2 py-1.5">
+                                <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="h-7 shrink-0" />
+                                <span className="min-w-0 truncate text-[10px] font-black text-slate-100">
+                                  {bookmaker.name}
+                                </span>
+                              </div>
+                              <input
+                                type="url"
+                                value={editDraft.bookmakerLinks[bookmaker.id] || ''}
+                                onChange={(event) => handleEditBookmakerLink(bet.id, bookmaker.id, event.target.value)}
+                                disabled={isSavingEdit || bet.isFading}
+                                placeholder="https://..."
+                                className="h-10 min-w-0 rounded-xl border border-white/10 bg-black/[0.24] px-3 text-xs font-semibold text-white outline-none transition-all placeholder:text-slate-600 focus:border-cyan-300/55 disabled:opacity-55"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleSaveEdit(bet)}
+                        disabled={isSavingEdit || bet.isFading}
+                        className="mt-1 flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-300/30 bg-indigo-500/16 px-3 text-[10px] font-black uppercase tracking-wider text-indigo-100 transition-all hover:border-indigo-300/60 hover:bg-indigo-500/24 disabled:cursor-not-allowed disabled:opacity-55"
+                      >
+                        {isSavingEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                        <span>Сохранить изменения</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-3 rounded-xl border border-emerald-400/15 bg-slate-950/38 p-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[9px] font-black uppercase tracking-wider text-emerald-200">
@@ -443,15 +743,30 @@ export default function AdminResults() {
                     </button>
                   ))}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => handleDelete(bet)}
-                  disabled={isBusy || bet.isFading}
-                  className="mt-2 flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 text-[10px] font-black uppercase tracking-wider text-rose-300 transition-all hover:border-rose-400/45 hover:bg-rose-500/18 disabled:cursor-not-allowed disabled:opacity-55"
-                >
-                  {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                  <span>Удалить прогноз</span>
-                </button>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleStartEdit(bet)}
+                    disabled={isBusy || bet.isFading}
+                    className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2 text-[9px] font-black uppercase tracking-wider transition-all disabled:cursor-not-allowed disabled:opacity-55 ${
+                      isEditing
+                        ? 'border-indigo-300/50 bg-indigo-500/22 text-indigo-100'
+                        : 'border-indigo-300/25 bg-indigo-500/10 text-indigo-200 hover:border-indigo-300/45 hover:bg-indigo-500/18'
+                    }`}
+                  >
+                    {isSavingEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
+                    <span className="truncate">Редактировать</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(bet)}
+                    disabled={isBusy || bet.isFading}
+                    className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-2 text-[9px] font-black uppercase tracking-wider text-rose-300 transition-all hover:border-rose-400/45 hover:bg-rose-500/18 disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    <span className="truncate">Удалить прогноз</span>
+                  </button>
+                </div>
               </div>
             );
           })}

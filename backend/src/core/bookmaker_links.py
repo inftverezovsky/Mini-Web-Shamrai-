@@ -122,5 +122,7 @@ def normalize_bookmaker_links(
             else:
                 for bookmaker_id, url in parsed_value.items():
                     add_candidate({"bookmaker_id": bookmaker_id, "url": url})
+        else:
+            add_candidate(parsed_value)
 
     return list(normalized_by_id.values())
