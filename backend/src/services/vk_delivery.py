@@ -105,6 +105,21 @@ def is_vk_message_permission_error(result: dict) -> bool:
     )
 
 
+def _vk_error_code(result: dict) -> Optional[int]:
+    error = result.get("error") or {}
+    code = error.get("error_code") or error.get("code")
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_vk_chat_bot_feature_error(result: dict) -> bool:
+    error = result.get("error") or {}
+    description = str(result.get("description") or error.get("error_msg") or "").lower()
+    return _vk_error_code(result) == 912 or "chat bot feature" in description
+
+
 async def refresh_vk_delivery_status(
     db: Any,
     user: Any,
@@ -406,6 +421,28 @@ def send_vk_message(
             "attachment": attachment,
         },
     )
+    if keyboard and is_vk_chat_bot_feature_error(result):
+        fallback_random_id = generate_vk_random_id()
+        logger.warning(
+            "[VKDelivery] VK rejected inline keyboard because chat bot features are disabled; "
+            "retrying messages.send without keyboard user_id=%s random_id=%s",
+            normalized_user_id,
+            fallback_random_id,
+        )
+        fallback_result = _vk_api_request(
+            "messages.send",
+            {
+                "user_id": normalized_user_id,
+                "random_id": fallback_random_id,
+                "message": message[:4096],
+                "keyboard": None,
+                "attachment": attachment,
+            },
+        )
+        if fallback_result.get("ok"):
+            fallback_result["fallback_without_keyboard"] = True
+            fallback_result["original_error"] = result.get("error")
+        return fallback_result
     return result
 
 

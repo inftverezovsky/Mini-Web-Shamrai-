@@ -71,6 +71,32 @@ class VkDeliveryTests(unittest.TestCase):
         randint_mock.assert_not_called()
         self.assertEqual(request_mock.call_args.args[1]["random_id"], 777)
 
+    def test_send_vk_message_retries_without_keyboard_when_bot_feature_disabled(self):
+        keyboard = {"inline": True, "buttons": []}
+        vk_error = {
+            "ok": False,
+            "description": "This is a chat bot feature, change this status in settings: Chat bot feature",
+            "error": {"error_code": 912, "error_msg": "This is a chat bot feature"},
+        }
+        with (
+            patch.object(vk_delivery.random, "randint", side_effect=[111, 222]),
+            patch.object(
+                vk_delivery,
+                "_vk_api_request",
+                side_effect=[vk_error, {"ok": True, "response": 1}],
+            ) as request_mock,
+        ):
+            result = vk_delivery.send_vk_message(vk_user_id="123", message="Hello", keyboard=keyboard)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["fallback_without_keyboard"])
+        self.assertEqual(result["original_error"]["error_code"], 912)
+        self.assertEqual(request_mock.call_count, 2)
+        self.assertEqual(request_mock.call_args_list[0].args[1]["random_id"], 111)
+        self.assertEqual(request_mock.call_args_list[0].args[1]["keyboard"], keyboard)
+        self.assertEqual(request_mock.call_args_list[1].args[1]["random_id"], 222)
+        self.assertIsNone(request_mock.call_args_list[1].args[1]["keyboard"])
+
     def test_mask_secret_hides_middle_of_vk_token(self):
         masked = vk_delivery._mask_secret("abcdef1234567890")
 
