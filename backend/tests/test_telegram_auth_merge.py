@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -19,6 +20,21 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.engine.dispose()
+
+    def test_vk_oauth_urlopen_bypasses_process_proxy_environment(self):
+        request = auth.urllib.request.Request("https://id.vk.ru/oauth2/auth")
+        opener = SimpleNamespace(open=Mock(return_value="response"))
+
+        with (
+            patch.object(auth.urllib.request, "ProxyHandler", return_value="proxy-handler") as proxy_handler,
+            patch.object(auth.urllib.request, "build_opener", return_value=opener) as build_opener,
+        ):
+            result = auth._vk_urlopen(request, timeout=7)
+
+        self.assertEqual(result, "response")
+        proxy_handler.assert_called_once_with({})
+        build_opener.assert_called_once_with("proxy-handler")
+        opener.open.assert_called_once_with(request, timeout=7)
 
     async def test_vk_login_creates_web_only_profile_without_debug_bypass(self):
         async with self.Session() as db:

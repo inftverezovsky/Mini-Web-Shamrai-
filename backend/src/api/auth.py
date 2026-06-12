@@ -107,6 +107,11 @@ class VkOAuthError(Exception):
     pass
 
 
+def _vk_urlopen(request: urllib.request.Request, *, timeout: float):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(request, timeout=timeout)
+
+
 def _vk_oauth_request(path: str, query: dict, body: dict) -> dict:
     query_string = urllib.parse.urlencode(query)
     url = f"https://id.vk.ru/oauth2/{path}?{query_string}"
@@ -119,7 +124,7 @@ def _vk_oauth_request(path: str, query: dict, body: dict) -> dict:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=settings.TELEGRAM_API_TIMEOUT_SECONDS) as response:
+        with _vk_urlopen(request, timeout=settings.TELEGRAM_API_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         try:
