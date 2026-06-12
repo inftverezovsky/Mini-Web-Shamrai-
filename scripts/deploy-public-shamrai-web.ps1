@@ -6,6 +6,7 @@ param(
   [string]$ComposeProject = "shamrai",
   [string]$PublicWebRoot = "/var/www/shamrai_web/dist",
   [string]$VkGroupId = "239419819",
+  [string]$ExpectedVkCallbackConfirmationCode = $env:SHAMRAI_EXPECTED_VK_CALLBACK_CONFIRMATION_CODE,
   [switch]$SkipLocalChecks,
   [switch]$RepairShamraiConflicts,
   [switch]$PromptPassword
@@ -18,6 +19,18 @@ function Invoke-Step {
   Write-Host ""
   Write-Host "==> $Title" -ForegroundColor Cyan
   & $Script
+}
+
+function ConvertTo-ShellSingleQuoted {
+  param([string]$Value)
+  if ($null -eq $Value) { $Value = "" }
+  $singleQuote = [char]39
+  $doubleQuote = [char]34
+  $escaped = $Value.Replace(
+    "$singleQuote",
+    "$singleQuote$doubleQuote$singleQuote$doubleQuote$singleQuote"
+  )
+  return "$singleQuote$escaped$singleQuote"
 }
 
 function Find-Tool {
@@ -80,45 +93,130 @@ function New-ServerGuardScript {
   $template = @'
 set -e
 CANON_PROJECT='__COMPOSE_PROJECT__'
+CANON_PATH='__REMOTE_PATH__'
 CANON_PORT='8082'
 REPAIR_SHAMRAI_CONFLICTS='__REPAIR__'
 
 echo 'Shamrai server inventory:'
-docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+echo 'Compose labels:'
+docker ps -aq | while read -r id; do
+  [ -n "$id" ] || continue
+  name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##' || true)"
+  labels_json="$(docker inspect -f '{{json .Config.Labels}}' "$id" 2>/dev/null || echo '{}')"
+  project="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project', ''))" 2>/dev/null || true)"
+  workdir="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project.working_dir', ''))" 2>/dev/null || true)"
+  printf '%s\tproject=%s\tworkdir=%s\n' "$name" "$project" "$workdir"
+done
 echo 'Listening ports 80/443/8000/8081/8082:'
 ss -ltnp | grep -E ':(80|443|8000|8081|8082)\b' || true
 
-if [ "$REPAIR_SHAMRAI_CONFLICTS" = "1" ]; then
-  for project in sports-betting shamrai-preview shamrai-mini shamrai-mini-app mini-web mini-web-shamrai; do
-    if [ "$project" != "$CANON_PROJECT" ]; then
-      docker compose -p "$project" down --remove-orphans || true
+find_compose_workdir() {
+  target_project="$1"
+  docker ps -aq --filter "label=com.docker.compose.project=$target_project" | while read -r id; do
+    [ -n "$id" ] || continue
+    labels_json="$(docker inspect -f '{{json .Config.Labels}}' "$id" 2>/dev/null || echo '{}')"
+    workdir="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project.working_dir', ''))" 2>/dev/null || true)"
+    if [ -n "$workdir" ]; then
+      printf '%s\n' "$workdir"
+      break
     fi
   done
+}
 
-  docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS="$(printf '\t')" read -r id name; do
-    if [ "$name" = "shamrai-backend" ] || [ "$name" = "shamrai-frontend" ] || [ "$name" = "shamrai-postgres" ]; then
+stop_stale_compose_project() {
+  stale_project="$1"
+  if [ "$stale_project" = "$CANON_PROJECT" ]; then
+    return 0
+  fi
+  workdir="$(find_compose_workdir "$stale_project" | head -n 1)"
+  if [ -n "$workdir" ] && [ -d "$workdir" ]; then
+    echo "Stopping stale compose project $stale_project from $workdir"
+    docker compose --project-directory "$workdir" -p "$stale_project" down --remove-orphans || true
+    return 0
+  fi
+  docker compose -p "$stale_project" down --remove-orphans || true
+}
+
+if [ "$REPAIR_SHAMRAI_CONFLICTS" = "1" ]; then
+  for project in sports-betting shamrai-preview shamrai-mini shamrai-mini-app mini-web mini-web-shamrai; do
+    stop_stale_compose_project "$project"
+  done
+
+  docker ps -aq | while read -r id; do
+    [ -n "$id" ] || continue
+    name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##' || true)"
+    labels_json="$(docker inspect -f '{{json .Config.Labels}}' "$id" 2>/dev/null || echo '{}')"
+    project="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project', ''))" 2>/dev/null || true)"
+    if [ "$project" = "$CANON_PROJECT" ]; then
       continue
     fi
-    case "$name" in
+    case "$name:$project" in
       *shamrai*|*sports-betting*|*mini-web*|*Mini-Web*)
-        echo "Removing stale Shamrai-related container: $name"
+        echo "Removing stale Shamrai-related container: $name project=$project"
         docker rm -f "$id" || true
         ;;
     esac
   done
 fi
 
-conflicts="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | awk -F '\t' -v port="$CANON_PORT" 'index($3, ":" port "->") && $2 != "shamrai-frontend" {print $0}')"
+conflicts="$(
+  docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' | while IFS="$(printf '\t')" read -r id name ports; do
+    labels_json="$(docker inspect -f '{{json .Config.Labels}}' "$id" 2>/dev/null || echo '{}')"
+    project="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project', ''))" 2>/dev/null || true)"
+    case "$ports" in
+      *":$CANON_PORT->"*)
+        if [ "$project" != "$CANON_PROJECT" ]; then
+          printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$ports" "$project"
+        fi
+        ;;
+    esac
+  done
+)"
 if [ -n "$conflicts" ]; then
   echo "Port $CANON_PORT is owned by a non-canonical container. Do not deploy Shamrai to a new port." >&2
   echo "$conflicts" >&2
   echo "Rerun with -RepairShamraiConflicts only if those containers are stale Shamrai/sports-betting deployments." >&2
   exit 20
 fi
+
+listeners_8082="$(ss -ltnp | awk -v port="$CANON_PORT" 'NR > 1 { n=split($4, parts, ":"); if (parts[n] == port) print }' || true)"
+canonical_8082="$(
+  docker ps --filter "label=com.docker.compose.project=$CANON_PROJECT" --format '{{.Ports}}' | grep -F ":$CANON_PORT->" || true
+)"
+if [ -n "$listeners_8082" ] && [ -z "$canonical_8082" ]; then
+  echo "Port $CANON_PORT already has a listener, but it is not owned by the canonical Docker project." >&2
+  echo "$listeners_8082" >&2
+  exit 21
+fi
+
+if [ -f "$CANON_PATH/.env" ]; then
+  current_port="$(grep -E '^FRONTEND_PORT=' "$CANON_PATH/.env" | tail -n 1 | cut -d= -f2- || true)"
+  if [ -n "$current_port" ] && [ "$current_port" != "$CANON_PORT" ]; then
+    echo "Canonical preview .env had FRONTEND_PORT=$current_port; forcing FRONTEND_PORT=$CANON_PORT."
+    python3 - <<'PY'
+from pathlib import Path
+p = Path("__REMOTE_PATH__/.env")
+lines = p.read_text().splitlines() if p.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith("FRONTEND_PORT="):
+        out.append("FRONTEND_PORT=8082")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append("FRONTEND_PORT=8082")
+p.write_text("\n".join(out) + "\n")
+PY
+  fi
+fi
 '@
 
   return $template.
     Replace("__COMPOSE_PROJECT__", $ComposeProject).
+    Replace("__REMOTE_PATH__", $RemotePath).
     Replace("__REPAIR__", $repairValue)
 }
 
@@ -141,6 +239,7 @@ $nginxConfig = Join-Path $Workspace "deploy\nginx\shamrai.conf"
 $remoteGuardScript = Join-Path $deployDir "shamrai-public-guard.sh"
 $remoteDeployScript = Join-Path $deployDir "shamrai-public-remote-deploy.sh"
 $remotePublishScript = Join-Path $deployDir "shamrai-public-remote-publish.sh"
+$remoteRollbackScript = Join-Path $deployDir "shamrai-public-remote-rollback.sh"
 
 if (-not (Test-Path $nginxConfig)) {
   throw "Nginx config not found: $nginxConfig"
@@ -164,7 +263,7 @@ if (-not $SkipLocalChecks) {
       $env:VITE_VK_ID_REDIRECT_URI = "https://shamra1.pro"
       $env:VITE_VK_GROUP_ID = $VkGroupId
       $env:VITE_TELEGRAM_BOT_USERNAME = "Shamra1_bot"
-      npm run build
+      Invoke-NativeChecked "npm" "run" "build"
     } finally {
       foreach ($key in $previousEnv.Keys) {
         if ($null -eq $previousEnv[$key]) {
@@ -179,7 +278,7 @@ if (-not $SkipLocalChecks) {
 
   Invoke-Step "Backend compile" {
     Push-Location (Join-Path $Workspace "backend")
-    try { python -m compileall -q src alembic } finally { Pop-Location }
+    try { Invoke-NativeChecked "python" "-m" "compileall" "-q" "src" "alembic" } finally { Pop-Location }
   }
 }
 
@@ -189,34 +288,39 @@ Invoke-Step "Create deployment archives" {
 
   Push-Location $Workspace
   try {
-    tar `
-      --exclude="./.git" `
-      --exclude="./.deploy" `
-      --exclude="./.env" `
-      --exclude="./.env.local" `
-      --exclude="./.playwright-cli" `
-      --exclude="./deploy.tar.gz" `
-      --exclude="./remote.py" `
-      --exclude="./test_proxies.py" `
-      --exclude="./output" `
-      --exclude="./frontend/node_modules" `
-      --exclude="./frontend/dist" `
-      --exclude="./frontend/.vite" `
-      --exclude="./frontend/.env" `
-      --exclude="./frontend/.env.local" `
-      --exclude="./backend/.venv" `
-      --exclude="*/__pycache__" `
-      --exclude="*.pyc" `
-      --exclude="./backend/.env" `
-      --exclude="./backend/.env.local" `
-      -czf $repoArchive .
+    Invoke-NativeChecked "tar" `
+      "--exclude=./.git" `
+      "--exclude=./.deploy" `
+      "--exclude=./.env" `
+      "--exclude=./.env.local" `
+      "--exclude=./.env.*" `
+      "--exclude=./.playwright-cli" `
+      "--exclude=./deploy.tar.gz" `
+      "--exclude=./remote.py" `
+      "--exclude=./test_proxies.py" `
+      "--exclude=./output" `
+      "--exclude=./frontend/node_modules" `
+      "--exclude=./frontend/dist" `
+      "--exclude=./frontend/.vite" `
+      "--exclude=./frontend/.env" `
+      "--exclude=./frontend/.env.local" `
+      "--exclude=./backend/.venv" `
+      "--exclude=*/__pycache__" `
+      "--exclude=*.pyc" `
+      "--exclude=*.pem" `
+      "--exclude=./backend/.env" `
+      "--exclude=./backend/.env.local" `
+      "--exclude=./backend/.env.*" `
+      "--exclude=./backend/static/coupons" `
+      "--exclude=./backend/static/coupons/*" `
+      "-czf" $repoArchive "."
   } finally {
     Pop-Location
   }
 
   Push-Location (Join-Path $Workspace "frontend\dist")
   try {
-    tar -czf $webArchive .
+    Invoke-NativeChecked "tar" "-czf" $webArchive "."
   } finally {
     Pop-Location
   }
@@ -228,17 +332,22 @@ Invoke-Step "Create remote scripts" {
 
   $remoteDeployContent = @"
 set -e
-tmp_root_env="/tmp/shamrai-root.env.keep"
-tmp_backend_env="/tmp/shamrai-backend.env.keep"
-rm -f "`$tmp_root_env" "`$tmp_backend_env"
+deploy_id="`$(date +%Y%m%d%H%M%S)"
+stage_path="$RemotePath.stage.`$deploy_id"
+backup_path="$RemotePath.rollback.`$deploy_id"
+failed_path="$RemotePath.failed.`$deploy_id"
+tmp_root_env="/tmp/shamrai-root.env.keep.`$deploy_id"
+tmp_backend_env="/tmp/shamrai-backend.env.keep.`$deploy_id"
+backup_marker="/tmp/shamrai-public-code-backup.path"
+rm -rf "`$stage_path"
+rm -f "`$tmp_root_env" "`$tmp_backend_env" "`$backup_marker"
 [ -f "$RemotePath/.env" ] && cp "$RemotePath/.env" "`$tmp_root_env" || true
 [ -f "$RemotePath/backend/.env" ] && cp "$RemotePath/backend/.env" "`$tmp_backend_env" || true
-rm -rf "$RemotePath"
-mkdir -p "$RemotePath"
-tar -xzf /tmp/shamrai-public-repo.tar.gz -C "$RemotePath"
-[ -f "`$tmp_root_env" ] && cp "`$tmp_root_env" "$RemotePath/.env" || cp "$RemotePath/.env.example" "$RemotePath/.env"
-[ -f "`$tmp_backend_env" ] && cp "`$tmp_backend_env" "$RemotePath/backend/.env" || cp "$RemotePath/backend/.env.example" "$RemotePath/backend/.env"
-python3 - "$RemotePath/.env" "$RemotePath/backend/.env" <<'PY'
+mkdir -p "`$stage_path"
+tar -xzf /tmp/shamrai-public-repo.tar.gz -C "`$stage_path"
+[ -f "`$tmp_root_env" ] && cp "`$tmp_root_env" "`$stage_path/.env" || cp "`$stage_path/.env.example" "`$stage_path/.env"
+[ -f "`$tmp_backend_env" ] && cp "`$tmp_backend_env" "`$stage_path/backend/.env" || cp "`$stage_path/backend/.env.example" "`$stage_path/backend/.env"
+python3 - "`$stage_path/.env" "`$stage_path/backend/.env" <<'PY'
 from pathlib import Path
 import sys
 
@@ -263,7 +372,7 @@ def patch_env(path, values):
     path.write_text("\n".join(out).rstrip() + "\n")
 
 patch_env(root_env, {
-    "APP_ENV": "local",
+    "APP_ENV": "production",
     "DEBUG_MODE": "false",
     "ALLOW_DEBUG_AUTH_BYPASS": "false",
     "FRONTEND_PORT": "8082",
@@ -288,16 +397,107 @@ patch_env(backend_env, {
     "VK_ID_REDIRECT_URI": "https://shamra1.pro",
 })
 PY
+
+cd "`$stage_path"
+docker compose -p "$ComposeProject" config -q
+
+rollback_code() {
+  status="`$?"
+  echo "Preview deploy failed; rolling back code snapshot." >&2
+  if [ -d "$RemotePath" ]; then
+    rm -rf "`$failed_path"
+    mv "$RemotePath" "`$failed_path" || true
+  fi
+  if [ -d "`$backup_path" ]; then
+    mv "`$backup_path" "$RemotePath"
+    cd "$RemotePath"
+    docker compose -p "$ComposeProject" up -d --build || true
+  fi
+  exit "`$status"
+}
+
+if [ -d "$RemotePath" ]; then
+  mv "$RemotePath" "`$backup_path"
+  printf '%s\n' "`$backup_path" > "`$backup_marker"
+fi
+mv "`$stage_path" "$RemotePath"
+trap rollback_code ERR
 cd "$RemotePath"
 docker compose -p "$ComposeProject" up -d --build
+curl -fsS http://127.0.0.1:8082/api/health
+trap - ERR
 "@
   Set-Utf8NoBomLfContent -Path $remoteDeployScript -Content $remoteDeployContent
 
   $remotePublishContent = @"
 set -e
-mkdir -p "$PublicWebRoot"
-find "$PublicWebRoot" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-tar -xzf /tmp/shamrai-web-dist.tar.gz -C "$PublicWebRoot"
+deploy_id="`$(date +%Y%m%d%H%M%S)"
+web_stage="$PublicWebRoot.stage.`$deploy_id"
+web_backup="$PublicWebRoot.rollback.`$deploy_id"
+web_failed="$PublicWebRoot.failed.`$deploy_id"
+nginx_backup="/tmp/shamrai-public-nginx-backup.`$deploy_id"
+web_backup_marker="/tmp/shamrai-public-web-backup.path"
+nginx_backup_marker="/tmp/shamrai-public-nginx-backup.path"
+rm -rf "`$web_stage" "`$nginx_backup"
+rm -f "`$web_backup_marker" "`$nginx_backup_marker"
+mkdir -p "`$(dirname "$PublicWebRoot")" "`$web_stage" "`$nginx_backup"
+tar -xzf /tmp/shamrai-web-dist.tar.gz -C "`$web_stage"
+
+restore_public() {
+  status="`$?"
+  echo "Public publish failed; rolling back web root and nginx snapshot." >&2
+  if [ -e "$PublicWebRoot" ]; then
+    rm -rf "`$web_failed"
+    mv "$PublicWebRoot" "`$web_failed" || true
+  fi
+  if [ -d "`$web_backup" ]; then
+    mv "`$web_backup" "$PublicWebRoot"
+  fi
+  if [ -f "`$nginx_backup/shamrai.conf" ]; then
+    cp -a "`$nginx_backup/shamrai.conf" /etc/nginx/sites-available/shamrai.conf
+  else
+    rm -f /etc/nginx/sites-available/shamrai.conf
+  fi
+  rm -f /etc/nginx/sites-enabled/shamrai.conf
+  if [ -f "`$nginx_backup/enabled-manifest" ]; then
+    while IFS="$(printf '\t')" read -r kind name target; do
+      [ -n "`$name" ] || continue
+      rm -f "/etc/nginx/sites-enabled/`$name"
+      if [ "`$kind" = "symlink" ]; then
+        ln -s "`$target" "/etc/nginx/sites-enabled/`$name"
+      elif [ "`$kind" = "file" ]; then
+        cp -a "`$nginx_backup/enabled-`$name" "/etc/nginx/sites-enabled/`$name"
+      fi
+    done < "`$nginx_backup/enabled-manifest"
+  fi
+  nginx -t && systemctl reload nginx || true
+  exit "`$status"
+}
+
+trap restore_public ERR
+
+if [ -e "$PublicWebRoot" ]; then
+  mv "$PublicWebRoot" "`$web_backup"
+  printf '%s\n' "`$web_backup" > "`$web_backup_marker"
+fi
+if [ -f /etc/nginx/sites-available/shamrai.conf ]; then
+  cp -a /etc/nginx/sites-available/shamrai.conf "`$nginx_backup/shamrai.conf"
+fi
+for enabled in /etc/nginx/sites-enabled/*; do
+  [ -e "`$enabled" ] || continue
+  if grep -qE 'server_name .*shamra1\.pro' "`$enabled"; then
+    enabled_name="`$(basename "`$enabled")"
+    if [ -L "`$enabled" ]; then
+      printf 'symlink\t%s\t%s\n' "`$enabled_name" "`$(readlink "`$enabled")" >> "`$nginx_backup/enabled-manifest"
+    else
+      cp -a "`$enabled" "`$nginx_backup/enabled-`$enabled_name"
+      printf 'file\t%s\t\n' "`$enabled_name" >> "`$nginx_backup/enabled-manifest"
+    fi
+  fi
+done
+printf '%s\n' "`$nginx_backup" > "`$nginx_backup_marker"
+
+mv "`$web_stage" "$PublicWebRoot"
 install -m 0644 /tmp/shamrai.conf /etc/nginx/sites-available/shamrai.conf
 for enabled in /etc/nginx/sites-enabled/*; do
   [ -e "`$enabled" ] || continue
@@ -305,11 +505,67 @@ for enabled in /etc/nginx/sites-enabled/*; do
     rm -f "`$enabled"
   fi
 done
+rm -f /etc/nginx/sites-enabled/shamrai.conf
 ln -s /etc/nginx/sites-available/shamrai.conf /etc/nginx/sites-enabled/shamrai.conf
 nginx -t
 systemctl reload nginx
+curl -fsS -I https://shamra1.pro/app/ | head -n 8
+trap - ERR
 "@
   Set-Utf8NoBomLfContent -Path $remotePublishScript -Content $remotePublishContent
+
+  $remoteRollbackContent = @"
+set -e
+code_backup_marker="/tmp/shamrai-public-code-backup.path"
+web_backup_marker="/tmp/shamrai-public-web-backup.path"
+nginx_backup_marker="/tmp/shamrai-public-nginx-backup.path"
+
+if [ -f "`$code_backup_marker" ]; then
+  code_backup="`$(cat "`$code_backup_marker")"
+  if [ -d "`$code_backup" ]; then
+    failed_path="$RemotePath.failed.manual.`$(date +%Y%m%d%H%M%S)"
+    [ -d "$RemotePath" ] && mv "$RemotePath" "`$failed_path" || true
+    mv "`$code_backup" "$RemotePath"
+    cd "$RemotePath"
+    docker compose -p "$ComposeProject" up -d --build
+  fi
+fi
+
+if [ -f "`$web_backup_marker" ]; then
+  web_backup="`$(cat "`$web_backup_marker")"
+  if [ -d "`$web_backup" ]; then
+    web_failed="$PublicWebRoot.failed.manual.`$(date +%Y%m%d%H%M%S)"
+    [ -e "$PublicWebRoot" ] && mv "$PublicWebRoot" "`$web_failed" || true
+    mv "`$web_backup" "$PublicWebRoot"
+  fi
+fi
+
+if [ -f "`$nginx_backup_marker" ]; then
+  nginx_backup="`$(cat "`$nginx_backup_marker")"
+  if [ -f "`$nginx_backup/shamrai.conf" ]; then
+    cp -a "`$nginx_backup/shamrai.conf" /etc/nginx/sites-available/shamrai.conf
+  else
+    rm -f /etc/nginx/sites-available/shamrai.conf
+  fi
+  rm -f /etc/nginx/sites-enabled/shamrai.conf
+  if [ -f "`$nginx_backup/enabled-manifest" ]; then
+    while IFS="$(printf '\t')" read -r kind name target; do
+      [ -n "`$name" ] || continue
+      rm -f "/etc/nginx/sites-enabled/`$name"
+      if [ "`$kind" = "symlink" ]; then
+        ln -s "`$target" "/etc/nginx/sites-enabled/`$name"
+      elif [ "`$kind" = "file" ]; then
+        cp -a "`$nginx_backup/enabled-`$name" "/etc/nginx/sites-enabled/`$name"
+      fi
+    done < "`$nginx_backup/enabled-manifest"
+  fi
+  nginx -t
+  systemctl reload nginx
+fi
+
+curl -fsS http://127.0.0.1:8082/api/health
+"@
+  Set-Utf8NoBomLfContent -Path $remoteRollbackScript -Content $remoteRollbackContent
 }
 
 Invoke-Step "Upload server guard" {
@@ -326,28 +582,79 @@ Invoke-Step "Upload archives and nginx config" {
   Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $nginxConfig "${Server}:/tmp/shamrai.conf"
   Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remoteDeployScript "${Server}:/tmp/shamrai-public-remote-deploy.sh"
   Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remotePublishScript "${Server}:/tmp/shamrai-public-remote-publish.sh"
+  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remoteRollbackScript "${Server}:/tmp/shamrai-public-remote-rollback.sh"
 }
 
-Invoke-Step "Deploy code, preserve env, rebuild compose" {
-  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-deploy.sh"
-}
+try {
+  Invoke-Step "Deploy code through staging snapshot" {
+    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-deploy.sh"
+  }
 
-Invoke-Step "Publish host static web and reload nginx" {
-  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-publish.sh"
-}
+  Invoke-Step "Publish host static web with rollback snapshot" {
+    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-publish.sh"
+  }
 
-Invoke-Step "Health verification" {
-  $remote = @"
+  Invoke-Step "Health verification" {
+    $expectedVkCode = ConvertTo-ShellSingleQuoted $ExpectedVkCallbackConfirmationCode
+    if ($VkGroupId -notmatch "^\d+$") {
+      throw "VK group id must be numeric for deploy verification."
+    }
+    $vkCallbackPayload = ConvertTo-ShellSingleQuoted ('{"type":"confirmation","group_id":' + $VkGroupId + '}')
+    $remote = @"
 set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' ps
-curl -fsS http://127.0.0.1:8000/api/health
-curl -fsS http://127.0.0.1:8000/api/health/telegram
+curl -fsS http://127.0.0.1:8082/api/health
+curl -fsS http://127.0.0.1:8082/api/health/telegram
+curl -fsS http://127.0.0.1:8082/api/health/vk
+curl -fsS http://127.0.0.1:8082/api/health/vk/deep
+expected_vk_callback_confirmation=$expectedVkCode
+vk_callback_payload=$vkCallbackPayload
+runtime_vk_callback_confirmation="`$(python3 - <<'PY'
+from pathlib import Path
+value = ""
+path = Path("backend/.env")
+if path.exists():
+    for line in path.read_text().splitlines():
+        if line.startswith("VK_CALLBACK_CONFIRMATION_CODE="):
+            value = line.split("=", 1)[1].strip()
+print(value)
+PY
+)"
+if [ -z "`$runtime_vk_callback_confirmation" ]; then
+  echo 'VK callback confirmation code is missing in backend runtime env.' >&2
+  exit 30
+fi
+actual_runtime_vk_callback_confirmation="`$(curl -fsS -X POST -H 'Content-Type: application/json' --data "`$vk_callback_payload" https://shamra1.pro/api/vk/callback)"
+if [ "`$actual_runtime_vk_callback_confirmation" != "`$runtime_vk_callback_confirmation" ]; then
+  echo 'VK callback runtime confirmation mismatch.' >&2
+  exit 30
+fi
+echo 'vk_callback_runtime_confirmation_ok'
+if [ -n "`$expected_vk_callback_confirmation" ]; then
+  actual_vk_callback_confirmation="`$actual_runtime_vk_callback_confirmation"
+  if [ "`$actual_vk_callback_confirmation" != "`$expected_vk_callback_confirmation" ]; then
+    echo 'VK callback confirmation mismatch.' >&2
+    exit 31
+  fi
+  echo 'vk_callback_dashboard_confirmation_ok'
+else
+  echo 'WARNING: VK dashboard confirmation was not verified because expected code was not provided.' >&2
+fi
 curl -I -fsS http://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/app/ | head -n 8
 "@
-  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+  }
+} catch {
+  Write-Warning "Deploy verification failed; attempting remote rollback."
+  try {
+    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-rollback.sh"
+  } catch {
+    Write-Warning "Remote rollback command also failed. Manual server inspection is required."
+  }
+  throw
 }
 
 Write-Host ""

@@ -6,6 +6,8 @@ param(
   [string]$HostKey = "ssh-ed25519 255 SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
+  [string]$VkGroupId = "239419819",
+  [string]$ExpectedVkCallbackConfirmationCode = $env:SHAMRAI_EXPECTED_VK_CALLBACK_CONFIRMATION_CODE,
   [switch]$RepairShamraiConflicts,
   [switch]$SkipChecks
 )
@@ -27,6 +29,30 @@ function Invoke-Step {
   Write-Host ""
   Write-Host "==> $Title" -ForegroundColor Cyan
   & $Script
+}
+
+function ConvertTo-ShellSingleQuoted {
+  param([string]$Value)
+  if ($null -eq $Value) { $Value = "" }
+  $singleQuote = [char]39
+  $doubleQuote = [char]34
+  $escaped = $Value.Replace(
+    "$singleQuote",
+    "$singleQuote$doubleQuote$singleQuote$doubleQuote$singleQuote"
+  )
+  return "$singleQuote$escaped$singleQuote"
+}
+
+function Invoke-NativeChecked {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+  )
+
+  & $FilePath @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
+  }
 }
 
 function New-ShamraiServerGuardScript {
@@ -54,11 +80,36 @@ done
 echo 'Listening ports 80/443/8000/8081/8082:'
 ss -ltnp | grep -E ':(80|443|8000|8081|8082)\b' || true
 
+find_compose_workdir() {
+  target_project="$1"
+  docker ps -aq --filter "label=com.docker.compose.project=$target_project" | while read -r id; do
+    [ -n "$id" ] || continue
+    labels_json="$(docker inspect -f '{{json .Config.Labels}}' "$id" 2>/dev/null || echo '{}')"
+    workdir="$(printf '%s' "$labels_json" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('com.docker.compose.project.working_dir', ''))" 2>/dev/null || true)"
+    if [ -n "$workdir" ]; then
+      printf '%s\n' "$workdir"
+      break
+    fi
+  done
+}
+
+stop_stale_compose_project() {
+  stale_project="$1"
+  if [ "$stale_project" = "$CANON_PROJECT" ]; then
+    return 0
+  fi
+  workdir="$(find_compose_workdir "$stale_project" | head -n 1)"
+  if [ -n "$workdir" ] && [ -d "$workdir" ]; then
+    echo "Stopping stale compose project $stale_project from $workdir"
+    docker compose --project-directory "$workdir" -p "$stale_project" down --remove-orphans || true
+    return 0
+  fi
+  docker compose -p "$stale_project" down --remove-orphans || true
+}
+
 if [ "$REPAIR_SHAMRAI_CONFLICTS" = "1" ]; then
   for project in sports-betting shamrai-preview shamrai-mini shamrai-mini-app mini-web mini-web-shamrai; do
-    if [ "$project" != "$CANON_PROJECT" ]; then
-      docker compose -p "$project" down --remove-orphans || true
-    fi
+    stop_stale_compose_project "$project"
   done
 
   docker ps -aq | while read -r id; do
@@ -96,6 +147,16 @@ if [ -n "$conflicts" ]; then
   echo "$conflicts" >&2
   echo "Rerun with -RepairShamraiConflicts only if those containers are stale Shamrai/sports-betting deployments." >&2
   exit 20
+fi
+
+listeners_8082="$(ss -ltnp | awk -v port="$CANON_PORT" 'NR > 1 { n=split($4, parts, ":"); if (parts[n] == port) print }' || true)"
+canonical_8082="$(
+  docker ps --filter "label=com.docker.compose.project=$CANON_PROJECT" --format '{{.Ports}}' | grep -F ":$CANON_PORT->" || true
+)"
+if [ -n "$listeners_8082" ] && [ -z "$canonical_8082" ]; then
+  echo "Port $CANON_PORT already has a listener, but it is not owned by the canonical Docker project." >&2
+  echo "$listeners_8082" >&2
+  exit 21
 fi
 
 if [ -f "$CANON_PATH/.env" ]; then
@@ -149,6 +210,9 @@ function Invoke-RemoteSh {
   $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedScript))
   $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | sh"
   & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
+  if ($LASTEXITCODE -ne 0) {
+    throw "Remote command failed with exit code ${LASTEXITCODE}."
+  }
 }
 
 Invoke-Step "Server port/project guard" {
@@ -158,10 +222,59 @@ Invoke-Step "Server port/project guard" {
 
 $deployDir = Join-Path $Workspace ".deploy"
 New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
+$deployId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 
 $services = @()
 if ($Target -eq "backend" -or $Target -eq "all") { $services += "backend" }
 if ($Target -eq "frontend" -or $Target -eq "all") { $services += "frontend" }
+
+$rollbackArmed = $false
+
+function Invoke-FastRollback {
+  param([string[]]$RollbackServices)
+
+  $serviceArgs = $RollbackServices -join " "
+  if ([string]::IsNullOrWhiteSpace($serviceArgs)) {
+    return
+  }
+
+  $remote = @"
+set -e
+backup_root='$RemotePath/.deploy-backups/fast-$deployId'
+cd '$RemotePath'
+if [ ! -d "`$backup_root" ]; then
+  echo "Fast redeploy backup root was not found: `$backup_root" >&2
+  exit 41
+fi
+for service in $serviceArgs; do
+  if [ -d "`$backup_root/`$service" ]; then
+    rm -rf "$RemotePath/`$service"
+    cp -a "`$backup_root/`$service" "$RemotePath/`$service"
+  else
+    echo "No backup found for `$service; leaving current files in place." >&2
+  fi
+done
+if [ -f "`$backup_root/docker-compose.yml" ]; then
+  cp -a "`$backup_root/docker-compose.yml" "$RemotePath/docker-compose.yml"
+elif [ -f "`$backup_root/docker-compose.yml.absent" ]; then
+  rm -f "$RemotePath/docker-compose.yml"
+fi
+if [ -f "`$backup_root/root.env" ]; then
+  cp -a "`$backup_root/root.env" "$RemotePath/.env"
+elif [ -f "`$backup_root/root.env.absent" ]; then
+  rm -f "$RemotePath/.env"
+fi
+if [ -f "`$backup_root/backend.env" ]; then
+  mkdir -p "$RemotePath/backend"
+  cp -a "`$backup_root/backend.env" "$RemotePath/backend/.env"
+elif [ -f "`$backup_root/backend.env.absent" ]; then
+  rm -f "$RemotePath/backend/.env"
+fi
+docker compose -p '$ComposeProject' up -d --build $serviceArgs
+curl -fsS http://127.0.0.1:8082/api/health
+"@
+  Invoke-RemoteSh -Script $remote
+}
 
 if (-not $SkipChecks) {
   if ($Target -eq "backend" -or $Target -eq "all") {
@@ -170,8 +283,8 @@ if (-not $SkipChecks) {
       try {
         $python = Join-Path $PWD ".venv\Scripts\python.exe"
         if (-not (Test-Path $python)) { $python = "python" }
-        & $python -m compileall -q src alembic
-        & $python -c "import src.main; print('backend_import_ok')"
+        Invoke-NativeChecked $python "-m" "compileall" "-q" "src" "alembic"
+        Invoke-NativeChecked $python "-c" "import src.main; print('backend_import_ok')"
       } finally {
         Pop-Location
       }
@@ -181,73 +294,115 @@ if (-not $SkipChecks) {
   if ($Target -eq "frontend" -or $Target -eq "all") {
     Invoke-Step "Frontend build" {
       Push-Location (Join-Path $Workspace "frontend")
-      try { npm run build } finally { Pop-Location }
+      try { Invoke-NativeChecked "npm" "run" "build" } finally { Pop-Location }
     }
   }
 }
 
-foreach ($service in $services) {
-  $archive = Join-Path $deployDir "shamrai-$service-fast.tar.gz"
-  if (Test-Path $archive) {
-    Remove-Item -LiteralPath $archive -Force
-  }
-
-  Invoke-Step "Pack $service" {
-    Push-Location $Workspace
-    try {
-      if ($service -eq "backend") {
-        tar `
-          --exclude="./backend/.venv" `
-          --exclude="*/__pycache__" `
-          --exclude="*.pyc" `
-          --exclude="./backend/.env" `
-          --exclude="./backend/.env.local" `
-          -czf $archive backend
-      } else {
-        tar `
-          --exclude="./frontend/node_modules" `
-          --exclude="./frontend/dist" `
-          --exclude="./frontend/.vite" `
-          --exclude="./frontend/.env" `
-          --exclude="./frontend/.env.local" `
-          -czf $archive frontend
-      }
-    } finally {
-      Pop-Location
-    }
-  }
-
-  Invoke-Step "Upload $service archive" {
-    & $pscp -batch -pw $password -hostkey $HostKey $archive "${Server}:/tmp/shamrai-$service-fast.tar.gz"
-  }
-
-  Invoke-Step "Extract $service on server" {
+try {
+  Invoke-Step "Create fast redeploy server snapshot" {
     $remote = @"
 set -e
 cd '$RemotePath'
-tar -xzf /tmp/shamrai-$service-fast.tar.gz -C '$RemotePath'
-rm -f '$RemotePath/$service/.env.local'
+backup_root='$RemotePath/.deploy-backups/fast-$deployId'
+rm -rf "`$backup_root"
+mkdir -p "`$backup_root"
+if [ -f docker-compose.yml ]; then cp -a docker-compose.yml "`$backup_root/docker-compose.yml"; else touch "`$backup_root/docker-compose.yml.absent"; fi
+if [ -f .env ]; then cp -a .env "`$backup_root/root.env"; else touch "`$backup_root/root.env.absent"; fi
+if [ -f backend/.env ]; then cp -a backend/.env "`$backup_root/backend.env"; else touch "`$backup_root/backend.env.absent"; fi
 "@
-    if ($service -eq "backend") {
-      $remote += "`nrm -f '$RemotePath/backend/.env.local'"
-    } else {
-      $remote += "`nrm -f '$RemotePath/frontend/.env' '$RemotePath/frontend/.env.local'"
-    }
     Invoke-RemoteSh -Script $remote
   }
-}
 
-Invoke-Step "Upload compose file" {
-  & $pscp -batch -pw $password -hostkey $HostKey (Join-Path $Workspace "docker-compose.yml") "${Server}:/tmp/shamrai-docker-compose.yml"
-  $remote = @"
+  foreach ($service in $services) {
+    $archive = Join-Path $deployDir "shamrai-$service-fast.tar.gz"
+    if (Test-Path $archive) {
+      Remove-Item -LiteralPath $archive -Force
+    }
+
+    Invoke-Step "Pack $service" {
+      Push-Location $Workspace
+      try {
+        if ($service -eq "backend") {
+          Invoke-NativeChecked "tar" `
+            "--exclude=./backend/.venv" `
+            "--exclude=*/__pycache__" `
+            "--exclude=*.pyc" `
+            "--exclude=*.pem" `
+            "--exclude=./backend/.env" `
+            "--exclude=./backend/.env.local" `
+            "--exclude=./backend/.env.*" `
+            "--exclude=./backend/static/coupons" `
+            "--exclude=./backend/static/coupons/*" `
+            "-czf" $archive "backend"
+        } else {
+          Invoke-NativeChecked "tar" `
+            "--exclude=./frontend/node_modules" `
+            "--exclude=./frontend/dist" `
+            "--exclude=./frontend/.vite" `
+            "--exclude=./frontend/.env" `
+            "--exclude=./frontend/.env.local" `
+            "--exclude=./frontend/.env.*" `
+            "-czf" $archive "frontend"
+        }
+      } finally {
+        Pop-Location
+      }
+    }
+
+    Invoke-Step "Upload $service archive" {
+      Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $archive "${Server}:/tmp/shamrai-$service-fast.tar.gz"
+    }
+
+    Invoke-Step "Stage and swap $service on server" {
+      $remote = @"
+set -e
+cd '$RemotePath'
+backup_root='$RemotePath/.deploy-backups/fast-$deployId'
+stage_root='$RemotePath/.deploy-stage/fast-$deployId'
+mkdir -p "`$backup_root" "`$stage_root"
+rm -rf "`$stage_root/$service"
+tar -xzf /tmp/shamrai-$service-fast.tar.gz -C "`$stage_root"
+test -d "`$stage_root/$service"
+if [ -d '$RemotePath/$service' ]; then
+  rm -rf "`$backup_root/$service"
+  cp -a '$RemotePath/$service' "`$backup_root/$service"
+fi
+"@
+      if ($service -eq "backend") {
+        $remote += @"
+
+if [ -f '$RemotePath/backend/.env' ]; then
+  cp '$RemotePath/backend/.env' "`$stage_root/backend/.env"
+fi
+rm -rf '$RemotePath/backend'
+mv "`$stage_root/backend" '$RemotePath/backend'
+rm -f '$RemotePath/backend/.env.local'
+"@
+      } else {
+        $remote += @"
+
+rm -rf '$RemotePath/frontend'
+mv "`$stage_root/frontend" '$RemotePath/frontend'
+rm -f '$RemotePath/frontend/.env' '$RemotePath/frontend/.env.local'
+"@
+      }
+      Invoke-RemoteSh -Script $remote
+      $rollbackArmed = $true
+    }
+  }
+
+  Invoke-Step "Upload compose file" {
+    Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey (Join-Path $Workspace "docker-compose.yml") "${Server}:/tmp/shamrai-docker-compose.yml"
+    $remote = @"
 set -e
 install -m 0644 /tmp/shamrai-docker-compose.yml '$RemotePath/docker-compose.yml'
 "@
-  Invoke-RemoteSh -Script $remote
-}
+    Invoke-RemoteSh -Script $remote
+  }
 
-Invoke-Step "Patch server runtime config" {
-  $remote = @"
+  Invoke-Step "Patch server runtime config" {
+    $remote = @"
 set -e
 cd '$RemotePath'
 python3 - .env backend/.env <<'PY'
@@ -273,7 +428,7 @@ def patch_env(path, values):
     p.write_text("\n".join(out).rstrip() + "\n")
 
 patch_env(Path(sys.argv[1]), {
-    "APP_ENV": "local",
+    "APP_ENV": "production",
     "DEBUG_MODE": "false",
     "ALLOW_DEBUG_AUTH_BYPASS": "false",
     "FRONTEND_PORT": "8082",
@@ -298,22 +453,23 @@ patch_env(Path(sys.argv[2]), {
 })
 PY
 "@
-  Invoke-RemoteSh -Script $remote
-}
+    Invoke-RemoteSh -Script $remote
+  }
 
-Invoke-Step "Docker compose rebuild: $($services -join ', ')" {
-  $serviceArgs = $services -join " "
-  $remote = @"
+  Invoke-Step "Docker compose rebuild: $($services -join ', ')" {
+    $serviceArgs = $services -join " "
+    $remote = @"
 set -e
 cd '$RemotePath'
+docker compose -p '$ComposeProject' config -q
 docker compose -p '$ComposeProject' up -d --build $serviceArgs
 "@
-  Invoke-RemoteSh -Script $remote
-}
+    Invoke-RemoteSh -Script $remote
+  }
 
-if ($Target -eq "backend" -or $Target -eq "all") {
-  Invoke-Step "Reset Telegram delivery state" {
-    $remote = @"
+  if ($Target -eq "backend" -or $Target -eq "all") {
+    Invoke-Step "Reset Telegram delivery state" {
+      $remote = @"
 set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' exec -T backend python - <<'PY'
@@ -363,20 +519,71 @@ for attempt in range(1, 4):
 print("telegram_webhook_reset_ok")
 PY
 "@
-    Invoke-RemoteSh -Script $remote
+      Invoke-RemoteSh -Script $remote
+    }
   }
-}
 
-Invoke-Step "Health verification" {
-  $remote = @"
+  Invoke-Step "Health verification" {
+    $expectedVkCode = ConvertTo-ShellSingleQuoted $ExpectedVkCallbackConfirmationCode
+    if ($VkGroupId -notmatch "^\d+$") {
+      throw "VK group id must be numeric for deploy verification."
+    }
+    $vkCallbackPayload = ConvertTo-ShellSingleQuoted ('{"type":"confirmation","group_id":' + $VkGroupId + '}')
+    $remote = @"
 set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' ps
 curl -fsS http://127.0.0.1:8082/api/health
 curl -fsS http://127.0.0.1:8082/api/health/telegram
+curl -fsS http://127.0.0.1:8082/api/health/vk
+curl -fsS http://127.0.0.1:8082/api/health/vk/deep
+expected_vk_callback_confirmation=$expectedVkCode
+vk_callback_payload=$vkCallbackPayload
+runtime_vk_callback_confirmation="`$(python3 - <<'PY'
+from pathlib import Path
+value = ""
+path = Path("backend/.env")
+if path.exists():
+    for line in path.read_text().splitlines():
+        if line.startswith("VK_CALLBACK_CONFIRMATION_CODE="):
+            value = line.split("=", 1)[1].strip()
+print(value)
+PY
+)"
+if [ -z "`$runtime_vk_callback_confirmation" ]; then
+  echo 'VK callback confirmation code is missing in backend runtime env.' >&2
+  exit 30
+fi
+actual_runtime_vk_callback_confirmation="`$(curl -fsS -X POST -H 'Content-Type: application/json' --data "`$vk_callback_payload" https://shamra1.pro/api/vk/callback)"
+if [ "`$actual_runtime_vk_callback_confirmation" != "`$runtime_vk_callback_confirmation" ]; then
+  echo 'VK callback runtime confirmation mismatch.' >&2
+  exit 30
+fi
+echo 'vk_callback_runtime_confirmation_ok'
+if [ -n "`$expected_vk_callback_confirmation" ]; then
+  actual_vk_callback_confirmation="`$actual_runtime_vk_callback_confirmation"
+  if [ "`$actual_vk_callback_confirmation" != "`$expected_vk_callback_confirmation" ]; then
+    echo 'VK callback confirmation mismatch.' >&2
+    exit 31
+  fi
+  echo 'vk_callback_dashboard_confirmation_ok'
+else
+  echo 'WARNING: VK dashboard confirmation was not verified because expected code was not provided.' >&2
+fi
 curl -fsS -I http://127.0.0.1:8082/ | head -n 8
 "@
-  Invoke-RemoteSh -Script $remote
+    Invoke-RemoteSh -Script $remote
+  }
+} catch {
+  if ($rollbackArmed) {
+    Write-Warning "Fast redeploy failed after server files changed; attempting rollback from deploy snapshot $deployId."
+    try {
+      Invoke-FastRollback -RollbackServices $services
+    } catch {
+      Write-Warning "Fast redeploy rollback also failed. Manual server inspection is required."
+    }
+  }
+  throw
 }
 
 Write-Host ""

@@ -15,8 +15,9 @@ from src.models.models import Subscription
 from src.core.config import settings
 from src.core.roles import is_staff_role
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
-from src.api.payments import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, go
+from src.services.delivery_outbox import delivery_outbox_daemon
+from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.services.vk_delivery import log_vk_runtime_config, probe_vk_api, vk_delivery_configured, vk_group_id
 
 
@@ -30,6 +31,7 @@ async def run_dev_schema_migrations(conn):
     if dialect == "postgresql":
         statements = [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS alert_min_coef DOUBLE PRECISION NOT NULL DEFAULT 1.0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS odds_drop_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id BIGINT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_night_mode BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS night_mode_start VARCHAR(5) NOT NULL DEFAULT '23:00'",
@@ -114,6 +116,40 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_id ON personal_signals (user_id)",
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_type ON personal_signals (type)",
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_created ON personal_signals (user_id, created_at)",
+            """
+            CREATE TABLE IF NOT EXISTS delivery_outbox (
+                id UUID PRIMARY KEY,
+                channel VARCHAR NOT NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                user_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                personal_signal_id INTEGER REFERENCES personal_signals(id) ON DELETE SET NULL,
+                forecast_request_id UUID REFERENCES forecast_requests(id) ON DELETE SET NULL,
+                payload JSON NOT NULL DEFAULT '{}',
+                dedupe_key VARCHAR,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                locked_at TIMESTAMP WITH TIME ZONE,
+                sent_at TIMESTAMP WITH TIME ZONE,
+                last_error TEXT,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_outbox_dedupe_key ON delivery_outbox (dedupe_key)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel ON delivery_outbox (channel)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status ON delivery_outbox (status)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_user_id ON delivery_outbox (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_personal_signal_id ON delivery_outbox (personal_signal_id)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_forecast_request_id ON delivery_outbox (forecast_request_id)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status_next_attempt ON delivery_outbox (status, next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)",
+            "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)",
+            "CREATE INDEX IF NOT EXISTS ix_bets_author_status_resolved ON bets (author_id, status, resolved_at)",
+            "CREATE INDEX IF NOT EXISTS ix_user_bets_user_taken ON user_bets (user_id, taken_at)",
+            "CREATE INDEX IF NOT EXISTS ix_user_bets_bet_user ON user_bets (bet_id, user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_forecast_requests_bet_status ON forecast_requests (bet_id, status)",
         ]
         for statement in statements:
             await conn.execute(text(statement))
@@ -128,6 +164,7 @@ async def run_dev_schema_migrations(conn):
         sqlite_columns = {
             "users": [
                 ("alert_min_coef", "REAL NOT NULL DEFAULT 1.0"),
+                ("odds_drop_notifications_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
                 ("referred_by_user_id", "BIGINT"),
                 ("is_night_mode", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("night_mode_start", "VARCHAR(5) NOT NULL DEFAULT '23:00'"),
@@ -263,6 +300,74 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_created ON personal_signals (user_id, created_at)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS delivery_outbox (
+                id CHAR(32) NOT NULL,
+                channel VARCHAR NOT NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                user_id BIGINT,
+                personal_signal_id INTEGER,
+                forecast_request_id CHAR(32),
+                payload JSON NOT NULL DEFAULT '{}',
+                dedupe_key VARCHAR,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                next_attempt_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                locked_at DATETIME,
+                sent_at DATETIME,
+                last_error TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE SET NULL,
+                FOREIGN KEY (personal_signal_id) REFERENCES personal_signals(id) ON DELETE SET NULL,
+                FOREIGN KEY (forecast_request_id) REFERENCES forecast_requests(id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_outbox_dedupe_key ON delivery_outbox (dedupe_key)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel ON delivery_outbox (channel)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status ON delivery_outbox (status)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_user_id ON delivery_outbox (user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_personal_signal_id ON delivery_outbox (personal_signal_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_forecast_request_id ON delivery_outbox (forecast_request_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status_next_attempt ON delivery_outbox (status, next_attempt_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_bets_author_status_resolved ON bets (author_id, status, resolved_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_user_bets_user_taken ON user_bets (user_id, taken_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_user_bets_bet_user ON user_bets (bet_id, user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_forecast_requests_bet_status ON forecast_requests (bet_id, status)"
         )
 
 async def check_abandoned_invoices(db):
@@ -720,17 +825,19 @@ async def lifespan(app: FastAPI):
 
     daemon_task = None
     vip_daemon_task = None
+    delivery_outbox_task = None
     webhook_monitor_task = None
     if settings.ENABLE_BACKGROUND_TASKS:
         daemon_task = asyncio.create_task(abandoned_cart_recovery_daemon())
         vip_daemon_task = asyncio.create_task(vip_chat_expirations_daemon())
+        delivery_outbox_task = asyncio.create_task(delivery_outbox_daemon())
         if settings.DEBUG_MODE:
             webhook_monitor_task = asyncio.create_task(tunnel_webhook_monitor_daemon())
     
     yield
     
     # Cancel tasks on shutdown
-    for task in (daemon_task, vip_daemon_task, webhook_monitor_task, polling_task, telegram_startup_task):
+    for task in (daemon_task, vip_daemon_task, delivery_outbox_task, webhook_monitor_task, polling_task, telegram_startup_task):
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -778,6 +885,33 @@ app.include_router(go.router, prefix="/api")
 async def health_check():
     """Simple container sanity health-check."""
     return {"status": "ok", "message": "Betting TMA service active"}
+
+
+@app.get("/api/health/payments")
+async def payments_health_check():
+    """Safe payment diagnostics without exposing provider credentials."""
+    yookassa_return_url = settings.YOOKASSA_RETURN_URL.strip() or settings.FRONTEND_BASE_URL.strip()
+    return {
+        "ok": bool(
+            settings.has_real_telegram_token
+            or settings.has_yookassa_credentials
+            or settings.DEBUG_MODE
+        ),
+        "app_env": settings.APP_ENV,
+        "debug_checkout_enabled": settings.DEBUG_MODE,
+        "telegram_stars": {
+            "configured": settings.has_real_telegram_token,
+            "mode": "live" if settings.has_real_telegram_token else "not_configured",
+        },
+        "yookassa": {
+            "configured": settings.has_yookassa_credentials,
+            "return_url_configured": bool(yookassa_return_url),
+        },
+        "production_requirements_met": (
+            not settings.is_production
+            or (settings.has_real_telegram_token and settings.has_yookassa_credentials)
+        ),
+    }
 
 
 @app.get("/api/health/telegram")
@@ -834,17 +968,43 @@ async def telegram_health_check():
 
 @app.get("/api/health/vk")
 async def vk_health_check():
-    """Safe VK diagnostics without exposing tokens or callback secrets."""
+    """Fast VK configuration diagnostics without exposing tokens or callback secrets."""
     group_id = vk_group_id()
     token_configured = bool(settings.VK_GROUP_ACCESS_TOKEN.strip())
+    confirmation_configured = bool(settings.VK_CALLBACK_CONFIRMATION_CODE.strip())
     configured = vk_delivery_configured()
-    api_probe_ok = await asyncio.to_thread(probe_vk_api) if configured else False
 
     return {
+        "ok": configured,
         "configured": configured,
         "group_id_set": bool(group_id),
         "token_configured": token_configured,
         "callback_secret_configured": bool(settings.VK_CALLBACK_SECRET.strip()),
-        "confirmation_code_configured": bool(settings.VK_CALLBACK_CONFIRMATION_CODE.strip()),
+        "confirmation_code_configured": confirmation_configured,
+        "callback_endpoint_configured": True,
+        "confirmation_self_check": "configured" if confirmation_configured else "missing",
+    }
+
+
+@app.get("/api/health/vk/deep")
+async def vk_deep_health_check():
+    """Safe live VK API diagnostics without exposing tokens or callback secrets."""
+    group_id = vk_group_id()
+    token_configured = bool(settings.VK_GROUP_ACCESS_TOKEN.strip())
+    confirmation_configured = bool(settings.VK_CALLBACK_CONFIRMATION_CODE.strip())
+    configured = vk_delivery_configured()
+    started_at = time.perf_counter()
+    api_probe_ok = await asyncio.to_thread(probe_vk_api) if configured else False
+
+    return {
+        "ok": bool(configured and api_probe_ok),
+        "configured": configured,
+        "group_id_set": bool(group_id),
+        "token_configured": token_configured,
+        "callback_secret_configured": bool(settings.VK_CALLBACK_SECRET.strip()),
+        "confirmation_code_configured": confirmation_configured,
+        "callback_endpoint_configured": True,
+        "confirmation_self_check": "configured" if confirmation_configured else "missing",
         "api_probe_ok": api_probe_ok,
+        "duration_ms": round((time.perf_counter() - started_at) * 1000),
     }

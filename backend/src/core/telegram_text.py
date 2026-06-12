@@ -6,7 +6,24 @@ from typing import Optional
 from src.core.config import settings
 
 SHAMRAI_CONTACT_USERNAME = "@Shamrai_Osnova"
+SHAMRAI_CONTACT_URL = "https://t.me/+OUTzNRDdl9gzNTQy"
 BOOKMAKER_FALLBACK_EMOJI = "🏦"
+BOOKMAKER_FALLBACK_EMOJIS = {
+    "fonbet": "💵",
+    "betboom": "💥",
+    "winline": "🟠",
+    "pari": "🔷",
+    "ligastavok": "🏆",
+    "marathon": "🏁",
+    "betcity": "🏙️",
+    "bettery": "⚡",
+    "melbet": "🟡",
+    "leon": "⭐",
+    "olimpbet": "🏛️",
+    "olimp": "🏛️",
+    "zenit": "🔵",
+    "other": BOOKMAKER_FALLBACK_EMOJI,
+}
 BOOKMAKER_EMOJI_KEY_ALIASES = {
     "fonbet": ("fonbet", "фонбет", "фонбет (fonbet)"),
     "betboom": ("betboom", "бетбум", "бетбум (betboom)"),
@@ -94,10 +111,19 @@ def _bookmaker_emoji_keys(code: Optional[str], name: Optional[str] = None) -> li
 
 def bookmaker_custom_emoji(code: Optional[str], name: Optional[str] = None) -> str:
     emoji_map = _parse_custom_emoji_map(settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS)
+    fallback = bookmaker_fallback_emoji(code, name)
     for key in _bookmaker_emoji_keys(code, name):
-        emoji = custom_emoji(emoji_map.get(key), BOOKMAKER_FALLBACK_EMOJI)
+        emoji = custom_emoji(emoji_map.get(key), fallback)
         if emoji:
             return emoji
+    return fallback
+
+
+def bookmaker_fallback_emoji(code: Optional[str], name: Optional[str] = None) -> str:
+    for key in _bookmaker_emoji_keys(code, name):
+        fallback = BOOKMAKER_FALLBACK_EMOJIS.get(key)
+        if fallback:
+            return fallback
     return BOOKMAKER_FALLBACK_EMOJI
 
 
@@ -111,7 +137,11 @@ def write_emoji() -> str:
 
 
 def contact_footer() -> str:
-    return f"Если есть вопросы {write_emoji()} пишите\n{SHAMRAI_CONTACT_USERNAME}"
+    contact_link = (
+        f'<a href="{html.escape(SHAMRAI_CONTACT_URL, quote=True)}">'
+        f"{html.escape(SHAMRAI_CONTACT_USERNAME)}</a>"
+    )
+    return f"Если есть вопросы {write_emoji()} пишите\n{contact_link}"
 
 
 def append_contact_footer(message: str) -> str:

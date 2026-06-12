@@ -10,7 +10,13 @@ from src.api import go
 from src.api import payments
 from src.core import telegram_text
 from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
+from src.models.models import DeliveryOutbox
 from src.services import forecast_delivery as delivery
+from src.services.delivery_outbox import (
+    CHANNEL_FORECAST_AUTO_DELIVERY,
+    CHANNEL_FORECAST_FULL_DELIVERY,
+    CHANNEL_TELEGRAM_MESSAGE,
+)
 
 
 class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
@@ -104,7 +110,7 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>Fonbet</b>", message)
         self.assertNotIn(expected_url, message)
         self.assertIn("Нажмите кнопку ниже, чтобы открыть матч", message)
-        self.assertIn("🏦", message)
+        self.assertIn("💵", message)
         self.assertNotIn("<a href", message)
         self.assertEqual(
             reply_markup,
@@ -152,7 +158,8 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "sendMessage")
         self.assertNotIn(expected_url, payload["text"])
         self.assertIn("Нажмите кнопку ниже, чтобы открыть матч", payload["text"])
-        self.assertNotIn("<a href", payload["text"])
+        self.assertNotIn(f'<a href="{expected_url}"', payload["text"])
+        self.assertIn('href="https://t.me/+OUTzNRDdl9gzNTQy"', payload["text"])
         self.assertEqual(payload["reply_markup"]["inline_keyboard"][0][0]["url"], expected_button_url)
 
     def test_single_unknown_bookmaker_link_is_not_labeled_as_selected_bookmaker(self):
@@ -214,9 +221,19 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         message = delivery._bookmaker_links_message(bet)
         reply_markup = delivery._bookmaker_link_reply_markup(bet)
 
-        self.assertIn("🏦 <b>Fonbet</b>", message)
+        self.assertIn("💵 <b>Fonbet</b>", message)
         self.assertNotIn(expected_url, message)
         self.assertEqual(reply_markup["inline_keyboard"][0][0]["url"], expected_button_url)
+
+    def test_teaser_contact_footer_links_to_shamrai_telegram(self):
+        forecast_request = SimpleNamespace(user_id=123456789, bet=self._bet())
+
+        message = delivery.build_teaser_message(forecast_request, None)
+        vk_text = delivery.html_to_vk_text(message)
+
+        self.assertIn('href="https://t.me/+OUTzNRDdl9gzNTQy"', message)
+        self.assertIn(">@Shamrai_Osnova</a>", message)
+        self.assertIn("[https://t.me/+OUTzNRDdl9gzNTQy|@Shamrai_Osnova]", vk_text)
 
     def test_custom_bookmaker_emoji_can_be_found_by_display_name_alias(self):
         original_value = delivery.settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS
@@ -456,6 +473,9 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
     def _user(self, *, telegram_id=123456789, vk_user_id=None, vk_messages_allowed=False):
         return SimpleNamespace(
             telegram_id=telegram_id,
+            username="client",
+            first_name="Client",
+            last_name=None,
             is_web_only=telegram_id < 0,
             vk_user_id=vk_user_id,
             vk_messages_allowed=vk_messages_allowed,
@@ -508,6 +528,59 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         finally:
             delivery.refresh_vk_delivery_status = original_refresh
 
+    async def test_sales_manager_notification_is_enqueued(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_sales_manager = delivery.settings.SALES_MANAGER_TELEGRAM_ID
+        db = FakeDb()
+        try:
+            delivery.settings.SALES_MANAGER_TELEGRAM_ID = 987654321
+            forecast_request = self._forecast_request(self._user())
+            result = await delivery.enqueue_sales_manager_notification(db, forecast_request)
+        finally:
+            delivery.settings.SALES_MANAGER_TELEGRAM_ID = previous_sales_manager
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(db.added), 1)
+        outbox_item = db.added[0]
+        self.assertIsInstance(outbox_item, DeliveryOutbox)
+        self.assertEqual(outbox_item.channel, CHANNEL_TELEGRAM_MESSAGE)
+        self.assertEqual(outbox_item.forecast_request_id, forecast_request.id)
+        self.assertIn(str(forecast_request.id), outbox_item.dedupe_key)
+        self.assertEqual(outbox_item.payload["method"], "sendMessage")
+        self.assertEqual(outbox_item.payload["payload"]["chat_id"], 987654321)
+
+    async def test_forecast_auto_delivery_is_enqueued(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        db = FakeDb()
+        forecast_request = self._forecast_request(self._user())
+
+        result = await delivery.enqueue_forecast_auto_delivery(
+            db,
+            forecast_request,
+            delivery_method="vk_bot",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(db.added), 1)
+        outbox_item = db.added[0]
+        self.assertIsInstance(outbox_item, DeliveryOutbox)
+        self.assertEqual(outbox_item.channel, CHANNEL_FORECAST_AUTO_DELIVERY)
+        self.assertEqual(outbox_item.forecast_request_id, forecast_request.id)
+        self.assertEqual(outbox_item.payload["request_id"], str(forecast_request.id))
+        self.assertEqual(outbox_item.payload["delivery_method"], "vk_bot")
+
     def test_status_for_vk_delivery_methods_is_sent(self):
         self.assertEqual(delivery._status_for_delivery_method("bot"), delivery.FORECAST_STATUS_SENT)
         self.assertEqual(delivery._status_for_delivery_method("vk"), delivery.FORECAST_STATUS_SENT)
@@ -541,14 +614,18 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Football", teaser_data["message_text"])
         self.assertEqual(teaser_data["actions"], ["take", "decline"])
 
-    async def test_vk_bot_delivery_records_access_once_after_sending_both_channels(self):
+    async def test_vk_bot_delivery_records_access_once_and_queues_full_delivery(self):
         user = self._user(vk_user_id="456", vk_messages_allowed=True)
         forecast_request = self._forecast_request(user)
         record_calls = []
-        send_calls = []
-        web_signal_calls = []
 
         class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
             async def execute(self, _query):
                 return SimpleNamespace(rowcount=1)
 
@@ -567,78 +644,53 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
                 no_balance_warning=False,
             )
 
-        async def fake_deliver_full_forecast_to_web_chat(_db, request):
-            web_signal_calls.append(request.id)
-
-        original_vk = delivery.send_full_forecast_to_vk_client
-        original_telegram = delivery.send_full_forecast_to_client
         original_record = delivery.record_user_bet_access
-        original_web_signal = delivery.deliver_full_forecast_to_web_chat
+        db = FakeDb()
         try:
-            delivery.send_full_forecast_to_vk_client = lambda _request: send_calls.append("vk") or {"ok": True}
-            delivery.send_full_forecast_to_client = lambda _request: send_calls.append("bot") or {"ok": True}
             delivery.record_user_bet_access = fake_record_user_bet_access
-            delivery.deliver_full_forecast_to_web_chat = fake_deliver_full_forecast_to_web_chat
 
             await delivery.deliver_forecast_request(
-                FakeDb(),
+                db,
                 forecast_request=forecast_request,
                 handled_by=111,
                 delivery_method="vk_bot",
                 send_to_client=True,
+                commit=True,
             )
         finally:
-            delivery.send_full_forecast_to_vk_client = original_vk
-            delivery.send_full_forecast_to_client = original_telegram
             delivery.record_user_bet_access = original_record
-            delivery.deliver_full_forecast_to_web_chat = original_web_signal
 
-        self.assertEqual(send_calls, ["vk", "bot"])
-        self.assertEqual(web_signal_calls, [forecast_request.id])
         self.assertEqual(len(record_calls), 1)
+        self.assertEqual(len(db.added), 1)
+        outbox_item = db.added[0]
+        self.assertIsInstance(outbox_item, DeliveryOutbox)
+        self.assertEqual(outbox_item.channel, CHANNEL_FORECAST_FULL_DELIVERY)
+        self.assertEqual(outbox_item.forecast_request_id, forecast_request.id)
+        self.assertEqual(outbox_item.payload["request_id"], str(forecast_request.id))
+        self.assertEqual(outbox_item.payload["delivery_method"], "vk_bot")
         self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_SENT)
         self.assertEqual(forecast_request.delivery_method, "vk_bot")
 
-    async def test_vk_permission_error_marks_messages_denied(self):
+    async def test_vk_permission_error_is_reported_by_full_delivery_sender(self):
         user = self._user(telegram_id=-456, vk_user_id="456", vk_messages_allowed=True)
         forecast_request = self._forecast_request(user)
 
-        class FakeDb:
-            async def execute(self, _query):
-                return SimpleNamespace(rowcount=1)
-
-            async def commit(self):
-                return None
-
-            async def rollback(self):
-                return None
-
-        async def fake_refresh(_db, _user, refresh_group=False):
-            return {"changed": False}
-
         original_vk = delivery.send_full_forecast_to_vk_client
-        original_refresh = delivery.refresh_vk_delivery_status
         try:
             delivery.send_full_forecast_to_vk_client = lambda _request: {
                 "ok": False,
                 "error": {"error_code": 901, "error_msg": "Can't send messages for users without permission"},
             }
-            delivery.refresh_vk_delivery_status = fake_refresh
 
-            with self.assertRaises(HTTPException) as exc:
-                await delivery.deliver_forecast_request(
-                    FakeDb(),
-                    forecast_request=forecast_request,
-                    handled_by=111,
-                    delivery_method="vk",
-                    send_to_client=True,
-                )
+            result = await delivery.send_full_forecast_to_external_channels(
+                forecast_request,
+                delivery_method="vk",
+            )
         finally:
             delivery.send_full_forecast_to_vk_client = original_vk
-            delivery.refresh_vk_delivery_status = original_refresh
 
-        self.assertEqual(exc.exception.status_code, 502)
-        self.assertFalse(user.vk_messages_allowed)
+        self.assertFalse(result["ok"])
+        self.assertTrue(delivery.is_vk_message_permission_error(result["result"]))
 
 
 if __name__ == "__main__":

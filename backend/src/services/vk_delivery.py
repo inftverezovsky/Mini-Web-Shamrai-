@@ -14,6 +14,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from src.core.config import settings
+from src.core.telegram_text import SHAMRAI_CONTACT_URL, SHAMRAI_CONTACT_USERNAME
 
 logger = logging.getLogger("uvicorn")
 
@@ -23,6 +24,11 @@ VK_RANDOM_ID_MAX = 2_147_483_647
 STATIC_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static")
 )
+
+
+def _vk_urlopen(request: urllib.request.Request, *, timeout: float):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(request, timeout=timeout)
 
 
 def vk_group_id() -> Optional[int]:
@@ -133,9 +139,9 @@ async def refresh_vk_delivery_status(
     changed = False
 
     remote_allowed = await asyncio.to_thread(check_vk_messages_allowed, vk_user_id)
-    if remote_allowed is not None and remote_allowed != messages_allowed:
-        setattr(user, "vk_messages_allowed", bool(remote_allowed))
-        messages_allowed = bool(remote_allowed)
+    if remote_allowed is True and not messages_allowed:
+        setattr(user, "vk_messages_allowed", True)
+        messages_allowed = True
         changed = True
 
     remote_group_member = None
@@ -170,9 +176,17 @@ async def mark_vk_messages_denied(db: Any, user: Any, *, commit: bool = False) -
 
 def html_to_vk_text(value: str) -> str:
     text = str(value or "")
+
+    def replace_anchor(match: re.Match) -> str:
+        href = html.unescape(match.group(1)).strip()
+        label = html.unescape(re.sub(r"<[^>]+>", "", match.group(2))).strip()
+        if href == SHAMRAI_CONTACT_URL and label == SHAMRAI_CONTACT_USERNAME:
+            return f"[{href}|{label}]"
+        return f"{label}: {href}"
+
     text = re.sub(
         r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
-        lambda match: f"{match.group(2)}: {match.group(1)}",
+        replace_anchor,
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -205,7 +219,7 @@ def _vk_api_request(method: str, params: dict[str, Any], *, timeout: float = 8.0
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _vk_urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
             logger.info("VK Response: %s", result)
     except urllib.error.HTTPError as error:
@@ -258,7 +272,7 @@ def _multipart_request(url: str, field_name: str, file_path: str, *, timeout: fl
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _vk_urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -352,7 +366,11 @@ def probe_vk_api() -> bool:
     group_id = vk_group_id()
     if not group_id or not settings.VK_GROUP_ACCESS_TOKEN.strip():
         return False
-    result = _vk_api_request("groups.getById", {"group_id": group_id}, timeout=5.0)
+    result = _vk_api_request(
+        "groups.isMember",
+        {"group_id": group_id, "user_id": 1},
+        timeout=5.0,
+    )
     if result.get("ok"):
         return True
     fallback = _vk_api_request("groups.getById", {"group_ids": str(group_id)}, timeout=5.0)
@@ -376,11 +394,11 @@ def build_vk_forecast_keyboard(request_id: UUID) -> dict:
         "buttons": [
             [
                 {
-                    "action": {"type": "callback", "label": "Взять", "payload": payload("take")},
+                    "action": {"type": "text", "label": "Взять", "payload": payload("take")},
                     "color": "positive",
                 },
                 {
-                    "action": {"type": "callback", "label": "Не взять", "payload": payload("decline")},
+                    "action": {"type": "text", "label": "Не взять", "payload": payload("decline")},
                     "color": "negative",
                 },
             ]
