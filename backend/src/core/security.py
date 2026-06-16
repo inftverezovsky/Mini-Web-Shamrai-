@@ -10,7 +10,7 @@ from src.core.config import settings
 
 # JWT configuration settings
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 30
+ACCESS_TOKEN_EXPIRE_DAYS = 1
 TELEGRAM_LOGIN_WIDGET_SIGNED_FIELDS = {
     "id",
     "first_name",

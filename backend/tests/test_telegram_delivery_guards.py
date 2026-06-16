@@ -1,7 +1,8 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src import main
+from src.api import telegram_webhook
 
 
 class TelegramDeliveryGuardTests(unittest.TestCase):
@@ -62,6 +63,113 @@ class TelegramDeliveryGuardTests(unittest.TestCase):
         self.assertEqual(payload["ip_address"], "82.147.67.245")
         self.assertEqual(payload["secret_token"], "secret")
         self.assertIn("callback_query", payload["allowed_updates"])
+
+
+class TelegramForecastCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sales_send_callback_is_scheduled_in_background(self):
+        created_tasks = []
+
+        def fake_run_background(coro):
+            created_tasks.append(coro)
+
+        with (
+            patch.object(telegram_webhook, "_run_background", side_effect=fake_run_background) as run_background,
+            patch.object(
+                telegram_webhook,
+                "_process_sales_send_callback",
+                new=Mock(return_value=object()),
+            ) as process_sales_send,
+        ):
+            response = await telegram_webhook._handle_forecast_callback(
+                {
+                    "id": "callback-1",
+                    "from": {"id": 111},
+                    "message": {"chat": {"id": 111}},
+                    "data": "forecast:sales_send:00000000-0000-0000-0000-000000000001",
+                },
+                object(),
+            )
+
+        self.assertEqual(response["method"], "answerCallbackQuery")
+        self.assertEqual(response["callback_query_id"], "callback-1")
+        self.assertIn("отправляем", response["text"])
+        process_sales_send.assert_called_once()
+        run_background.assert_called_once()
+        self.assertEqual(len(created_tasks), 1)
+
+
+class VkHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vk_health_is_fast_config_only(self):
+        with (
+            patch.object(main, "vk_group_id", return_value=239419819),
+            patch.object(main, "vk_delivery_configured", return_value=True),
+            patch.object(main, "probe_vk_api") as probe_vk_api,
+            patch.object(main.settings, "VK_GROUP_ACCESS_TOKEN", "token"),
+            patch.object(main.settings, "VK_CALLBACK_SECRET", "secret"),
+            patch.object(main.settings, "VK_CALLBACK_CONFIRMATION_CODE", "confirmation"),
+        ):
+            response = await main.vk_health_check()
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["configured"])
+        probe_vk_api.assert_not_called()
+
+    async def test_vk_deep_health_runs_live_probe(self):
+        with (
+            patch.object(main, "vk_group_id", return_value=239419819),
+            patch.object(main, "vk_delivery_configured", return_value=True),
+            patch.object(main, "probe_vk_api", return_value=True) as probe_vk_api,
+            patch.object(main.settings, "VK_GROUP_ACCESS_TOKEN", "token"),
+            patch.object(main.settings, "VK_CALLBACK_SECRET", "secret"),
+            patch.object(main.settings, "VK_CALLBACK_CONFIRMATION_CODE", "confirmation"),
+        ):
+            response = await main.vk_deep_health_check()
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["api_probe_ok"])
+        self.assertIn("duration_ms", response)
+        probe_vk_api.assert_called_once()
+
+
+class PaymentsHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_payment_health_reports_configuration_without_secrets(self):
+        with (
+            patch.object(main.settings, "APP_ENV", "production"),
+            patch.object(main.settings, "DEBUG_MODE", False),
+            patch.object(main.settings, "TELEGRAM_BOT_TOKEN", "123456:realistic"),
+            patch.object(main.settings, "YOOKASSA_SHOP_ID", "shop-id"),
+            patch.object(main.settings, "YOOKASSA_SECRET_KEY", "super-secret"),
+            patch.object(main.settings, "YOOKASSA_RETURN_URL", "https://shamra1.pro/app"),
+        ):
+            response = await main.payments_health_check()
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["telegram_stars"]["configured"])
+        self.assertTrue(response["yookassa"]["configured"])
+        self.assertTrue(response["yookassa"]["return_url_configured"])
+        self.assertTrue(response["production_requirements_met"])
+        self.assertNotIn("super-secret", str(response))
+        self.assertNotIn("shop-id", str(response))
+
+
+class RuntimeSecurityTests(unittest.TestCase):
+    def test_production_vk_callback_secret_is_required_when_vk_group_is_enabled(self):
+        with (
+            patch.object(main.settings, "APP_ENV", "production"),
+            patch.object(main.settings, "DEBUG_MODE", False),
+            patch.object(main.settings, "TELEGRAM_BOT_TOKEN", "123456:realistic"),
+            patch.object(main.settings, "OWNER_TELEGRAM_ID", 1),
+            patch.object(main.settings, "JWT_SECRET_KEY", "x" * 32),
+            patch.object(main.settings, "TELEGRAM_WEBHOOK_SECRET_TOKEN", "telegram-secret"),
+            patch.object(main.settings, "YOOKASSA_SHOP_ID", "shop-id"),
+            patch.object(main.settings, "YOOKASSA_SECRET_KEY", "yookassa-secret"),
+            patch.object(main.settings, "YOOKASSA_RETURN_URL", "https://shamra1.pro/app"),
+            patch.object(main.settings, "VK_GROUP_ID", "239419819"),
+            patch.object(main.settings, "VK_CALLBACK_CONFIRMATION_CODE", "confirmation-code"),
+            patch.object(main.settings, "VK_CALLBACK_SECRET", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "VK_CALLBACK_SECRET"):
+                main.settings.validate_runtime_security()
 
 
 if __name__ == "__main__":

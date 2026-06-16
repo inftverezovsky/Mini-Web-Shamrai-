@@ -1,6 +1,19 @@
 const CACHE_NAME = 'shamrai-pwa-v5';
 const APP_SHELL_URLS = ['/', '/app', '/manifest.json'];
 
+function safeNotificationPath(rawUrl) {
+  try {
+    const parsedUrl = new URL(rawUrl || '/app?open=web-bot-chat', self.location.origin);
+    if (parsedUrl.origin !== self.location.origin) return '/app?open=web-bot-chat';
+    if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/app' || parsedUrl.pathname.startsWith('/app/')) {
+      return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+    }
+  } catch {
+    return '/app?open=web-bot-chat';
+  }
+  return '/app?open=web-bot-chat';
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL_URLS)).catch(() => undefined)
@@ -26,6 +39,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
+        if (!response.ok || response.type !== 'basic') return response;
         const responseClone = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone)).catch(() => undefined);
         return response;
@@ -54,7 +68,7 @@ self.addEventListener('push', (event) => {
 
   const notificationData = {
     ...(payload.data || {}),
-    url: payload.url || payload.data?.url || '/app?open=web-bot-chat',
+    url: safeNotificationPath(payload.url || payload.data?.url),
   };
 
   event.waitUntil(
@@ -81,7 +95,7 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  const targetUrl = new URL(event.notification.data?.url || '/app?open=web-bot-chat', self.location.origin);
+  const targetUrl = new URL(safeNotificationPath(event.notification.data?.url), self.location.origin);
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {

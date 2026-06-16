@@ -14,11 +14,19 @@ from src.models.database import Base, engine, AsyncSessionLocal
 from src.models.models import Subscription
 from src.core.config import settings
 from src.core.roles import is_staff_role
+from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, go
 from src.services.delivery_outbox import delivery_outbox_daemon
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
-from src.services.vk_delivery import log_vk_runtime_config, probe_vk_api, vk_delivery_configured, vk_group_id
+from src.services.vk_delivery import (
+    get_vk_unread_conversations,
+    log_vk_runtime_config,
+    mark_vk_conversation_read,
+    probe_vk_api,
+    vk_delivery_configured,
+    vk_group_id,
+)
 
 
 async def run_dev_schema_migrations(conn):
@@ -144,6 +152,19 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_forecast_request_id ON delivery_outbox (forecast_request_id)",
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status_next_attempt ON delivery_outbox (status, next_attempt_at)",
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)",
+            """
+            CREATE TABLE IF NOT EXISTS message_templates (
+                key VARCHAR PRIMARY KEY,
+                title VARCHAR NOT NULL,
+                description TEXT,
+                body TEXT NOT NULL,
+                variables JSON NOT NULL DEFAULT '[]'::json,
+                updated_by BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_message_templates_updated_by ON message_templates (updated_by)",
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_author_status_resolved ON bets (author_id, status, resolved_at)",
@@ -350,6 +371,25 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS message_templates (
+                key VARCHAR NOT NULL,
+                title VARCHAR NOT NULL,
+                description TEXT,
+                body TEXT NOT NULL,
+                variables JSON NOT NULL DEFAULT '[]',
+                updated_by BIGINT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (key),
+                FOREIGN KEY (updated_by) REFERENCES users(telegram_id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_message_templates_updated_by ON message_templates (updated_by)"
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)"
@@ -671,6 +711,83 @@ async def telegram_polling_daemon():
             await asyncio.sleep(3)
 
 
+def _vk_event_object_from_conversation_item(item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    message = dict(item.get("last_message") or {})
+    if not message:
+        return None
+    if str(message.get("out") or "").strip() in {"1", "true", "True"}:
+        return None
+
+    conversation = item.get("conversation") or {}
+    peer = conversation.get("peer") or {}
+    peer_id = message.get("peer_id") or peer.get("id")
+    from_id = message.get("from_id")
+    if not peer_id or not from_id:
+        return None
+    try:
+        if int(from_id) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    message["peer_id"] = peer_id
+    return {
+        "message": message,
+        "user_id": from_id,
+        "peer_id": peer_id,
+    }
+
+
+async def vk_dialog_polling_daemon():
+    """
+    Fallback for VK communities where Callback API message_new events are not delivered.
+    It reads unread dialogs with the group token and runs the same handler as callbacks.
+    """
+    print("[Daemon] VK dialog polling daemon initialized.")
+
+    while True:
+        interval = max(1.0, float(settings.VK_DIALOG_POLLING_INTERVAL_SECONDS or 4.0))
+        if not settings.VK_DIALOG_POLLING_ENABLED:
+            await asyncio.sleep(interval)
+            continue
+        if not vk_delivery_configured():
+            await asyncio.sleep(interval)
+            continue
+
+        try:
+            result = await asyncio.to_thread(
+                get_vk_unread_conversations,
+                settings.VK_DIALOG_POLLING_BATCH_SIZE,
+            )
+            if not result.get("ok"):
+                print(f"[Daemon] VK dialog polling failed: {result.get('description', 'unknown error')}")
+                await asyncio.sleep(interval)
+                continue
+
+            response = result.get("response") or {}
+            items = response.get("items") or []
+            for item in items:
+                event_object = _vk_event_object_from_conversation_item(item)
+                if not event_object:
+                    continue
+                await vk_callback.handle_vk_message_new_event(event_object, source="polling")
+                mark_result = await asyncio.to_thread(
+                    mark_vk_conversation_read,
+                    event_object.get("peer_id"),
+                )
+                if not mark_result.get("ok"):
+                    print(
+                        "[Daemon] VK dialog markAsRead failed: "
+                        f"{mark_result.get('description', 'unknown error')}"
+                    )
+        except Exception as exc:
+            print(f"[Daemon] VK dialog polling tick failed: {exc}")
+
+        await asyncio.sleep(interval)
+
+
 def _telegram_api_host_entries() -> list[str]:
     entries: list[str] = []
     hosts_paths = ["/etc/hosts", r"C:\Windows\System32\drivers\etc\hosts"]
@@ -827,6 +944,10 @@ async def lifespan(app: FastAPI):
     vip_daemon_task = None
     delivery_outbox_task = None
     webhook_monitor_task = None
+    vk_dialog_polling_task = None
+    if settings.VK_DIALOG_POLLING_ENABLED:
+        vk_dialog_polling_task = asyncio.create_task(vk_dialog_polling_daemon())
+
     if settings.ENABLE_BACKGROUND_TASKS:
         daemon_task = asyncio.create_task(abandoned_cart_recovery_daemon())
         vip_daemon_task = asyncio.create_task(vip_chat_expirations_daemon())
@@ -837,7 +958,15 @@ async def lifespan(app: FastAPI):
     yield
     
     # Cancel tasks on shutdown
-    for task in (daemon_task, vip_daemon_task, delivery_outbox_task, webhook_monitor_task, polling_task, telegram_startup_task):
+    for task in (
+        daemon_task,
+        vip_daemon_task,
+        delivery_outbox_task,
+        webhook_monitor_task,
+        vk_dialog_polling_task,
+        polling_task,
+        telegram_startup_task,
+    ):
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -858,6 +987,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityRateLimitMiddleware, limiter=security_rate_limiter)
 
 # Mount static files directory for serving uploaded coupon images
 import os
@@ -891,10 +1021,12 @@ async def health_check():
 async def payments_health_check():
     """Safe payment diagnostics without exposing provider credentials."""
     yookassa_return_url = settings.YOOKASSA_RETURN_URL.strip() or settings.FRONTEND_BASE_URL.strip()
+    tegro_return_url = settings.TEGRO_RETURN_URL.strip() or settings.FRONTEND_BASE_URL.strip()
     return {
         "ok": bool(
             settings.has_real_telegram_token
             or settings.has_yookassa_credentials
+            or settings.has_tegro_credentials
             or settings.DEBUG_MODE
         ),
         "app_env": settings.APP_ENV,
@@ -907,9 +1039,14 @@ async def payments_health_check():
             "configured": settings.has_yookassa_credentials,
             "return_url_configured": bool(yookassa_return_url),
         },
+        "tegro": {
+            "configured": settings.has_tegro_credentials,
+            "api_configured": settings.has_tegro_api_credentials,
+            "return_url_configured": bool(tegro_return_url),
+        },
         "production_requirements_met": (
             not settings.is_production
-            or (settings.has_real_telegram_token and settings.has_yookassa_credentials)
+            or (settings.has_real_telegram_token and settings.has_ruble_payment_provider)
         ),
     }
 
@@ -982,6 +1119,8 @@ async def vk_health_check():
         "callback_secret_configured": bool(settings.VK_CALLBACK_SECRET.strip()),
         "confirmation_code_configured": confirmation_configured,
         "callback_endpoint_configured": True,
+        "dialog_polling_enabled": settings.VK_DIALOG_POLLING_ENABLED,
+        "dialog_polling_interval_seconds": settings.VK_DIALOG_POLLING_INTERVAL_SECONDS,
         "confirmation_self_check": "configured" if confirmation_configured else "missing",
     }
 
@@ -1004,6 +1143,8 @@ async def vk_deep_health_check():
         "callback_secret_configured": bool(settings.VK_CALLBACK_SECRET.strip()),
         "confirmation_code_configured": confirmation_configured,
         "callback_endpoint_configured": True,
+        "dialog_polling_enabled": settings.VK_DIALOG_POLLING_ENABLED,
+        "dialog_polling_interval_seconds": settings.VK_DIALOG_POLLING_INTERVAL_SECONDS,
         "confirmation_self_check": "configured" if confirmation_configured else "missing",
         "api_probe_ok": api_probe_ok,
         "duration_ms": round((time.perf_counter() - started_at) * 1000),

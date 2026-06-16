@@ -1,5 +1,6 @@
 import * as VKID from '@vkid/sdk';
 import type { AuthResponse } from '@vkid/sdk';
+import { DEBUG_AUTH_ENABLED } from '../config/api';
 import { apiFetch } from './api';
 
 export interface VkLinkResponse {
@@ -85,7 +86,7 @@ function formatVkSdkError(error: unknown) {
 export function getVkIdConfig() {
   const appId = import.meta.env.VITE_VK_ID_APP_ID;
   const redirectUri = import.meta.env.VITE_VK_ID_REDIRECT_URI || window.location.origin;
-  const debugEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const debugEnabled = DEBUG_AUTH_ENABLED;
   const configured = Boolean(appId && Number.isFinite(Number(appId)) && redirectUri);
   const redirectOrigin = configured ? new URL(redirectUri, window.location.origin).origin : '';
   const currentOrigin = window.location.origin;

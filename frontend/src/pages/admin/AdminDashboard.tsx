@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { Settings } from 'lucide-react';
-import AdminBets from './AdminBets';
-import AdminBroadcast from './AdminBroadcast';
-import AdminResults from './AdminResults';
+import React, { Suspense, lazy, useState } from 'react';
+import { Loader2, Settings } from 'lucide-react';
+
+const AdminBets = lazy(() => import('./AdminBets'));
+const AdminBroadcast = lazy(() => import('./AdminBroadcast'));
+const AdminResults = lazy(() => import('./AdminResults'));
 
 type AdminTabId = 'bets' | 'results' | 'broadcast';
 
@@ -14,6 +15,12 @@ export default function AdminDashboard() {
     { id: 'results', label: 'Результаты' },
     { id: 'broadcast', label: 'Рассылки' },
   ];
+
+  const renderActiveTab = () => {
+    if (activeTab === 'bets') return <AdminBets />;
+    if (activeTab === 'results') return <AdminResults />;
+    return <AdminBroadcast />;
+  };
 
   return (
     <div className="space-y-6 animate-slide-up pb-10">
@@ -48,9 +55,15 @@ export default function AdminDashboard() {
 
       {/* 3. Sub-Tab Component Switcher */}
       <div>
-        {activeTab === 'bets' && <AdminBets />}
-        {activeTab === 'results' && <AdminResults />}
-        {activeTab === 'broadcast' && <AdminBroadcast />}
+        <Suspense
+          fallback={
+            <div className="flex min-h-[240px] items-center justify-center">
+              <Loader2 className="h-6 w-6 animate-spin text-indigo-300" />
+            </div>
+          }
+        >
+          {renderActiveTab()}
+        </Suspense>
       </div>
 
     </div>

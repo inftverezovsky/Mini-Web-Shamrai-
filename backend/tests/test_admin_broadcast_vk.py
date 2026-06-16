@@ -12,7 +12,7 @@ class AdminBroadcastVkTests(unittest.IsolatedAsyncioTestCase):
             vk_user_id="456",
             vk_messages_allowed=False,
         )
-        db = SimpleNamespace(commit=AsyncMock())
+        db = SimpleNamespace(commit=AsyncMock(), flush=AsyncMock())
 
         async def fake_refresh(_db, refreshed_user, refresh_group=False):
             refreshed_user.vk_messages_allowed = True
@@ -26,7 +26,8 @@ class AdminBroadcastVkTests(unittest.IsolatedAsyncioTestCase):
             admin_broadcast.refresh_vk_delivery_status = original_refresh
 
         self.assertEqual(audience, [user])
-        db.commit.assert_awaited_once()
+        db.flush.assert_awaited_once()
+        db.commit.assert_not_awaited()
 
 
 if __name__ == "__main__":

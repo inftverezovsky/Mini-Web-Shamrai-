@@ -1,10 +1,10 @@
 # Shamrai Mini App
 
-Telegram Mini App для спортивной аналитики: премиум-лента прогнозов, пакеты матчей, Telegram Stars, YooKassa, CRM/админ cockpit и маркетинговые виджеты.
+Telegram Mini App для спортивной аналитики: премиум-лента прогнозов, пакеты матчей, Telegram Stars, YooKassa/Tegro, CRM/админ cockpit и маркетинговые виджеты.
 
 ## Структура
 
-- `backend/` - FastAPI, SQLAlchemy, Alembic, Telegram/YooKassa webhooks.
+- `backend/` - FastAPI, SQLAlchemy, Alembic, Telegram/YooKassa/Tegro webhooks.
 - `frontend/` - React + Vite, Telegram WebApp UI, nginx production build.
 - `docker-compose.yml` - production-ready VPS контур: Postgres, backend, frontend/nginx.
 
@@ -60,10 +60,14 @@ API_BASE_URL=https://your-domain.example
 YOOKASSA_SHOP_ID=123456
 YOOKASSA_SECRET_KEY=live-secret
 YOOKASSA_RETURN_URL=https://your-domain.example
+TEGRO_SHOP_ID=shop-id
+TEGRO_API_KEY=api-key
+TEGRO_SECRET_KEY=secret-key
+TEGRO_RETURN_URL=https://your-domain.example/app
 TELEGRAM_VIP_CHAT_ID=-100...
 ```
 
-`APP_ENV=production` включает runtime-проверки: без реального Telegram bot token, webhook secret, owner id, сильного JWT secret и YooKassa credentials backend не стартует.
+`APP_ENV=production` включает runtime-проверки: без реального Telegram bot token, webhook secret, owner id, сильного JWT secret и хотя бы одного рублевого провайдера оплаты (YooKassa или Tegro) backend не стартует.
 
 ## Миграции И Seed
 
@@ -145,6 +149,14 @@ event: payment.succeeded
 
 Webhook YooKassa повторно запрашивает платеж у YooKassa API и сверяет `status`, `amount`, `currency` и `metadata.attempt_id`. Повторные webhook-и не начисляют доступ повторно.
 
+Tegro webhook в кабинете Tegro.Money:
+
+```text
+https://your-domain.example/api/payments/tegro/webhook
+```
+
+Webhook Tegro проверяет MD5-подпись уведомления, сверяет `order_id` с внутренним `PaymentAttempt.id`, сумму и валюту. Повторные webhook-и не начисляют доступ повторно.
+
 ## Проверки
 
 Frontend:
@@ -176,5 +188,5 @@ curl http://localhost:8082/api/health
 
 - `/subscriptions/buy`, debug auth, mock purchases and demo seeds are development-only.
 - Public production endpoints do not auto-create demo stats/quiz/swipe/PvP/marathon/crowd data.
-- Telegram Stars and YooKassa create pending payment attempts; access is activated only by verified webhook processing.
+- Telegram Stars, YooKassa and Tegro create pending payment attempts; access is activated only by verified webhook processing.
 - Active UI uses `Tariffs` for billing and `AdminDashboard` for the admin cockpit.

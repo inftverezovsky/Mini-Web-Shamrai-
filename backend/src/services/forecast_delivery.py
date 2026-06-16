@@ -14,16 +14,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from src.api.payments import call_telegram_api, call_telegram_api_multipart
 from src.api.go import bookmaker_match_url_for_bet
 from src.core.bookmaker_links import normalize_match_url as normalize_bookmaker_match_url
 from src.core.config import settings
+from src.core.message_templates import (
+    TEMPLATE_PAID_SET_TEASER,
+    TEMPLATE_FORECAST_FULL,
+    TEMPLATE_FORECAST_TEASER,
+    default_message_template_body,
+    load_message_template_body,
+    render_message_template_body,
+)
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
 from src.models.database import AsyncSessionLocal
 from src.models.models import Bet, ForecastRequest, User
+from src.services.delivery_outbox import (
+    CHANNEL_FORECAST_AUTO_DELIVERY,
+    CHANNEL_FORECAST_FULL_DELIVERY,
+    CHANNEL_TELEGRAM_MESSAGE,
+    enqueue_delivery,
+)
 from src.services.match_access import UserBetAccessResult, record_user_bet_access
 from src.services.signals import deliver_personal_signal
+from src.services.telegram_bot import call_telegram_api, call_telegram_api_multipart
 from src.services.vk_delivery import (
     html_to_vk_text,
     is_vk_message_permission_error,
@@ -47,6 +61,9 @@ FORECAST_STATUS_REMOVED = "removed"
 
 DELIVERED_STATUSES = {FORECAST_STATUS_SENT, FORECAST_STATUS_MANUAL_SENT}
 PLACEHOLDER_EVENT_NAME = "Закрытый прогноз"
+PAID_SET_PLACEHOLDER_EVENT_NAME = "Платный набор"
+DELIVERY_MODE_SALES_PRIVATE = "sales_private"
+DELIVERY_MODE_PAID_SET = "paid_set"
 FULL_FORECAST_LINKS_REQUIRED_MESSAGE = "Добавьте хотя бы одну ссылку по БК"
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_TEXT_LIMIT = 4096
@@ -86,6 +103,16 @@ def _coefficient_text(bet: Bet) -> str:
         return str(bet.coefficient)
 
 
+def _format_rub_price(value: Optional[object]) -> str:
+    try:
+        amount = int(value or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    if amount <= 0:
+        return "уточним лично"
+    return f"{amount:,}".replace(",", " ") + " ₽"
+
+
 def _bookmakers_for_bet(bet: Bet) -> list:
     bookmakers = list(bet.bookmakers or [])
     if not bookmakers and bet.bookmaker:
@@ -96,6 +123,21 @@ def _bookmakers_for_bet(bet: Bet) -> list:
 def bookmaker_names_for_bet(bet: Bet) -> str:
     bookmakers = _bookmakers_for_bet(bet)
     return ", ".join(bookmaker.name for bookmaker in bookmakers) or "не указана"
+
+
+def _paid_set_bookmaker_line(bet: Bet) -> str:
+    bookmakers = _bookmakers_for_bet(bet)
+    if not bookmakers:
+        return "<b>не указана</b>"
+    return " | ".join(f"<b>{_html(bookmaker.name.upper())}</b>" for bookmaker in bookmakers)
+
+
+def bet_is_paid_set(bet: Optional[Bet]) -> bool:
+    return str(getattr(bet, "delivery_mode", "") or "") == DELIVERY_MODE_PAID_SET
+
+
+def request_is_paid_set(forecast_request: ForecastRequest) -> bool:
+    return bet_is_paid_set(forecast_request.bet)
 
 
 def _bookmaker_label(bookmaker) -> str:
@@ -499,19 +541,59 @@ async def load_forecast_request(db: AsyncSession, request_id: UUID) -> ForecastR
     return forecast_request
 
 
-def build_teaser_message(forecast_request: ForecastRequest, teaser_text: Optional[str]) -> str:
+def build_teaser_message(
+    forecast_request: ForecastRequest,
+    teaser_text: Optional[str],
+    *,
+    template_body: Optional[str] = None,
+) -> str:
     bet = forecast_request.bet
     teaser = (teaser_text or "").strip() or "Есть закрытый прогноз под вашу БК. Нажмите, если хотите взять матч."
-    lines = [
-        "<b>Закрытый анонс прогноза</b>",
-        f"БК: {_bookmaker_labels_for_bet(bet)}",
-        f"Коэффициент: <b>{_html(_coefficient_text(bet))}</b>",
-        _html(teaser),
-    ]
-    return append_contact_footer(_join_forecast_lines(lines))
+    return render_message_template_body(
+        template_body or default_message_template_body(TEMPLATE_FORECAST_TEASER),
+        {
+            "bookmaker_labels": _bookmaker_labels_for_bet(bet),
+            "coefficient": _coefficient_text(bet),
+            "teaser_text": teaser,
+            "contact_footer": append_contact_footer("").strip(),
+        },
+        safe_keys={"bookmaker_labels", "contact_footer"},
+    )
 
 
-def build_forecast_teaser_payload(forecast_request: ForecastRequest, teaser_text: Optional[str]) -> dict:
+def build_paid_set_teaser_message(
+    forecast_request: ForecastRequest,
+    teaser_text: Optional[str],
+    *,
+    title: Optional[str] = None,
+    price_rub: Optional[int] = None,
+    template_body: Optional[str] = None,
+) -> str:
+    bet = forecast_request.bet
+    clean_title = (title or bet.event_name or PAID_SET_PLACEHOLDER_EVENT_NAME).strip() or PAID_SET_PLACEHOLDER_EVENT_NAME
+    teaser = (teaser_text or bet.description or "").strip() or "Реальный КФ не выше 1.9!"
+    price_text = _format_rub_price(price_rub if price_rub is not None else bet.price_stars)
+    return render_message_template_body(
+        template_body or default_message_template_body(TEMPLATE_PAID_SET_TEASER),
+        {
+            "title": clean_title,
+            "coefficient": _coefficient_text(bet),
+            "bookmaker_line": _paid_set_bookmaker_line(bet),
+            "body": teaser,
+            "price_text": price_text,
+            "contact_footer": append_contact_footer("").strip(),
+        },
+        safe_keys={"bookmaker_line", "contact_footer"},
+    )
+
+
+def build_forecast_teaser_payload(
+    forecast_request: ForecastRequest,
+    teaser_text: Optional[str],
+    *,
+    template_body: Optional[str] = None,
+    message_text: Optional[str] = None,
+) -> dict:
     reply_markup = {
         "inline_keyboard": [
             [
@@ -528,7 +610,7 @@ def build_forecast_teaser_payload(forecast_request: ForecastRequest, teaser_text
     }
     return {
         "chat_id": forecast_request.user_id,
-        "text": build_teaser_message(forecast_request, teaser_text),
+        "text": message_text or build_teaser_message(forecast_request, teaser_text, template_body=template_body),
         "parse_mode": "HTML",
         "reply_markup": reply_markup,
     }
@@ -545,32 +627,38 @@ def _build_full_forecast_message(
     *,
     include_bookmaker: bool = True,
     include_bookmaker_links: bool = False,
+    template_body: Optional[str] = None,
 ) -> str:
     bet = forecast_request.bet
-    lines = [
-        f"Матч: <b>{_html(bet.event_name)}</b>",
-        f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>",
-        f"Коэффициент: <b>{_html(_coefficient_text(bet))}</b>",
-    ]
-    if include_bookmaker:
-        lines.append(f"БК: {_bookmaker_labels_for_bet(bet)}")
-    if bet.description:
-        lines.append(_html(bet.description))
-    if include_bookmaker_links:
-        lines.extend(_bookmaker_link_lines(bet))
+    return render_message_template_body(
+        template_body or default_message_template_body(TEMPLATE_FORECAST_FULL),
+        {
+            "event_name": bet.event_name,
+            "outcome": bet.outcome or "уточняется",
+            "coefficient": _coefficient_text(bet),
+            "bookmaker_line": f"БК: {_bookmaker_labels_for_bet(bet)}" if include_bookmaker else "",
+            "description": bet.description or "",
+            "bookmaker_links_block": _join_forecast_lines(_bookmaker_link_lines(bet)) if include_bookmaker_links else "",
+            "contact_footer": append_contact_footer("").strip(),
+        },
+        safe_keys={"bookmaker_line", "bookmaker_links_block", "contact_footer"},
+    )
 
-    return append_contact_footer(_join_forecast_lines(lines))
 
-
-def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
+def send_full_forecast_to_client(
+    forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
+) -> dict:
     if not is_personal_telegram_user_id(forecast_request.user_id):
         return {"ok": False, "description": "Client does not have a personal Telegram chat"}
 
     bet = forecast_request.bet
-    base_full_message = _build_full_forecast_message(forecast_request)
+    base_full_message = _build_full_forecast_message(forecast_request, template_body=template_body)
     full_message_with_links = _build_full_forecast_message(
         forecast_request,
         include_bookmaker_links=True,
+        template_body=template_body,
     )
     links_inline = bool(_bookmaker_link_targets(bet)) and _fits_photo_caption(full_message_with_links)
     reply_markup = _bookmaker_link_reply_markup(bet)
@@ -674,12 +762,16 @@ def send_full_forecast_to_client(forecast_request: ForecastRequest) -> dict:
     return text_result
 
 
-def send_full_forecast_to_vk_client(forecast_request: ForecastRequest) -> dict:
+def send_full_forecast_to_vk_client(
+    forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
+) -> dict:
     if not user_can_receive_vk_messages(forecast_request.user):
         return {"ok": False, "description": "Client has not allowed VK messages"}
 
     bet = forecast_request.bet
-    full_message = html_to_vk_text(_build_full_forecast_message(forecast_request))
+    full_message = html_to_vk_text(_build_full_forecast_message(forecast_request, template_body=template_body))
     links_message = _bookmaker_links_plain_text(bet) or ""
     coupon_file_path = vk_local_static_asset_path(bet.coupon_image_url)
     coupon_url = None if coupon_file_path else _public_asset_url(bet.coupon_image_url)
@@ -697,19 +789,32 @@ def send_full_forecast_to_vk_client(forecast_request: ForecastRequest) -> dict:
     )
 
 
-def build_web_full_forecast_text(forecast_request: ForecastRequest) -> str:
-    return html_to_vk_text(_build_full_forecast_message(forecast_request, include_bookmaker=False))
+def build_web_full_forecast_text(
+    forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
+) -> str:
+    return html_to_vk_text(_build_full_forecast_message(
+        forecast_request,
+        include_bookmaker=False,
+        template_body=template_body,
+    ))
 
 
 def build_web_forecast_signal_data(
     forecast_request: ForecastRequest,
     *,
     status_value: Optional[str] = None,
+    template_body: Optional[str] = None,
 ) -> dict[str, object]:
     bet = forecast_request.bet
     return {
-        "message_html": _build_full_forecast_message(forecast_request, include_bookmaker=False),
-        "message_text": build_web_full_forecast_text(forecast_request),
+        "message_html": _build_full_forecast_message(
+            forecast_request,
+            include_bookmaker=False,
+            template_body=template_body,
+        ),
+        "message_text": build_web_full_forecast_text(forecast_request, template_body=template_body),
         "coupon_image_url": bet.coupon_image_url,
         "bookmakers": _bookmaker_web_items(bet),
         "event_name": bet.event_name,
@@ -726,11 +831,14 @@ def build_web_forecast_signal_data(
 def build_web_teaser_signal_data(
     forecast_request: ForecastRequest,
     teaser_text: Optional[str],
+    *,
+    template_body: Optional[str] = None,
 ) -> dict[str, object]:
     bet = forecast_request.bet
+    message_html = build_teaser_message(forecast_request, teaser_text, template_body=template_body)
     return {
-        "message_html": build_teaser_message(forecast_request, teaser_text),
-        "message_text": html_to_vk_text(build_teaser_message(forecast_request, teaser_text)),
+        "message_html": message_html,
+        "message_text": html_to_vk_text(message_html),
         "coupon_image_url": bet.coupon_image_url,
         "bookmakers": _bookmaker_web_items(bet),
         "event_name": bet.event_name,
@@ -743,19 +851,92 @@ def build_web_teaser_signal_data(
     }
 
 
+def build_web_paid_set_signal_data(
+    forecast_request: ForecastRequest,
+    teaser_text: Optional[str],
+    *,
+    title: Optional[str] = None,
+    price_rub: Optional[int] = None,
+    template_body: Optional[str] = None,
+) -> dict[str, object]:
+    bet = forecast_request.bet
+    message_html = build_paid_set_teaser_message(
+        forecast_request,
+        teaser_text,
+        title=title,
+        price_rub=price_rub,
+        template_body=template_body,
+    )
+    return {
+        "message_html": message_html,
+        "message_text": html_to_vk_text(message_html),
+        "coupon_image_url": bet.coupon_image_url,
+        "bookmakers": _bookmaker_web_items(bet),
+        "event_name": bet.event_name,
+        "coefficient": _coefficient_text(bet),
+        "sport_type": bet.sport_type,
+        "forecast_request_id": str(forecast_request.id),
+        "forecast_status": forecast_request.status,
+        "bet_id": str(getattr(forecast_request, "bet_id", None) or getattr(bet, "id", "")),
+        "request_kind": "paid_set",
+        "price_text": _format_rub_price(price_rub if price_rub is not None else bet.price_stars),
+        "actions": ["take", "decline"],
+    }
+
+
 async def deliver_full_forecast_to_web_chat(
     db: AsyncSession,
     forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
 ) -> None:
     await deliver_personal_signal(
         db,
         user=forecast_request.user,
-        text=build_web_full_forecast_text(forecast_request),
+        text=build_web_full_forecast_text(forecast_request, template_body=template_body),
         signal_type="forecast_full",
-        data=build_web_forecast_signal_data(forecast_request),
+        data=build_web_forecast_signal_data(forecast_request, template_body=template_body),
         send_telegram=False,
         send_web_push=True,
     )
+
+
+async def send_full_forecast_to_external_channels(
+    forecast_request: ForecastRequest,
+    *,
+    delivery_method: str,
+    db: Optional[AsyncSession] = None,
+) -> dict:
+    template_body = (
+        await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
+        if db is not None
+        else default_message_template_body(TEMPLATE_FORECAST_FULL)
+    )
+    if delivery_method == "vk":
+        result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request, template_body=template_body)
+        return {"ok": bool(result.get("ok")), "channel": "vk", "result": result}
+
+    if delivery_method == "vk_bot":
+        vk_result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request, template_body=template_body)
+        if not vk_result.get("ok"):
+            return {"ok": False, "channel": "vk", "result": vk_result}
+        telegram_result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request, template_body=template_body)
+        if not telegram_result.get("ok"):
+            logger.warning(
+                "[ForecastDelivery] Telegram duplicate failed for request %s after VK success: %s",
+                forecast_request.id,
+                telegram_result.get("description", "unknown error"),
+            )
+        return {"ok": True, "channel": "vk_bot", "result": vk_result, "telegram_result": telegram_result}
+
+    if delivery_method == "bot":
+        result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request, template_body=template_body)
+        return {"ok": bool(result.get("ok")), "channel": "telegram", "result": result}
+
+    if delivery_method == "web":
+        return {"ok": True, "channel": "web", "result": {"ok": True}}
+
+    return {"ok": False, "channel": delivery_method, "result": {"description": "Unknown delivery method"}}
 
 
 def client_delivery_method(user: User) -> str:
@@ -827,41 +1008,55 @@ def _full_forecast_ready_error(forecast_request: ForecastRequest) -> Optional[st
     return None
 
 
-def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
+def build_sales_manager_notification_delivery(forecast_request: ForecastRequest) -> Optional[dict[str, object]]:
     sales_manager_id = settings.sales_manager_telegram_id
     if not sales_manager_id:
-        return {"ok": False, "description": "SALES_MANAGER_TELEGRAM_ID or OWNER_TELEGRAM_ID is not configured"}
+        return None
 
     user = forecast_request.user
     bet = forecast_request.bet
+    is_paid_set = request_is_paid_set(forecast_request)
     balance = user_match_balance(user)
     no_balance_warning = balance <= 0 and not bool(user.guarantee_active)
     warning = ""
-    if no_balance_warning:
+    if no_balance_warning and not is_paid_set:
         warning = "\n\n⚠️ У клиента 0 матчей. Отправка разрешена, баланс уйдет в минус."
 
-    message = (
-        "<b>Клиент хочет взять закрытый прогноз</b>\n\n"
-        f"Клиент: <b>{_html(_client_display(user))}</b>\n"
-        f"Telegram ID: <code>{user.telegram_id}</code>\n"
-        f"Баланс матчей: <b>{balance}</b>\n\n"
-        f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
-        f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
-        f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>"
-        f"{warning}"
-    )
+    if is_paid_set:
+        message = (
+            "<b>Клиент хочет взять платный набор</b>\n\n"
+            f"Клиент: <b>{_html(_client_display(user))}</b>\n"
+            f"Telegram ID: <code>{user.telegram_id}</code>\n\n"
+            f"Набор: <b>{_html(bet.event_name or PAID_SET_PLACEHOLDER_EVENT_NAME)}</b>\n"
+            f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
+            f"Стоимость: <b>{_html(_format_rub_price(bet.price_stars))}</b>\n"
+            f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
+            f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>\n\n"
+            "Свяжитесь с клиентом лично и обсудите покупку."
+        )
+    else:
+        message = (
+            "<b>Клиент хочет взять закрытый прогноз</b>\n\n"
+            f"Клиент: <b>{_html(_client_display(user))}</b>\n"
+            f"Telegram ID: <code>{user.telegram_id}</code>\n"
+            f"Баланс матчей: <b>{balance}</b>\n\n"
+            f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
+            f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
+            f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>"
+            f"{warning}"
+        )
 
     reply_markup = {
         "inline_keyboard": [
-            [
+            *([] if is_paid_set else [[
                 {
                     "text": "Отправить прогноз",
                     "callback_data": f"forecast:sales_send:{forecast_request.id}",
                 }
-            ],
+            ]]),
             [
                 {
-                    "text": "Клиент взял вручную",
+                    "text": "Продажа в диалоге" if is_paid_set else "Клиент взял вручную",
                     "callback_data": f"forecast:sales_manual:{forecast_request.id}",
                 },
                 {
@@ -871,21 +1066,137 @@ def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
             ],
         ]
     }
-    return call_telegram_api("sendMessage", {
-        "chat_id": sales_manager_id,
-        "text": message,
-        "parse_mode": "HTML",
-        "reply_markup": reply_markup,
-    })
+    return {
+        "method": "sendMessage",
+        "payload": {
+            "chat_id": sales_manager_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup,
+        },
+    }
+
+
+def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
+    delivery = build_sales_manager_notification_delivery(forecast_request)
+    if not delivery:
+        return {"ok": False, "description": "SALES_MANAGER_TELEGRAM_ID or OWNER_TELEGRAM_ID is not configured"}
+    return call_telegram_api(str(delivery["method"]), delivery["payload"])
+
+
+async def enqueue_sales_manager_notification(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> dict:
+    delivery = build_sales_manager_notification_delivery(forecast_request)
+    if not delivery:
+        return {"ok": False, "description": "SALES_MANAGER_TELEGRAM_ID or OWNER_TELEGRAM_ID is not configured"}
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=forecast_request.user_id,
+        forecast_request_id=forecast_request.id,
+        dedupe_key=f"forecast_request:{forecast_request.id}:sales_manager:interested",
+        payload=delivery,
+    )
+    return {"ok": True, "queued": True}
+
+
+async def enqueue_forecast_auto_delivery(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+    *,
+    delivery_method: str = "auto",
+) -> dict:
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_FORECAST_AUTO_DELIVERY,
+        user_id=forecast_request.user_id,
+        forecast_request_id=forecast_request.id,
+        dedupe_key=f"forecast_request:{forecast_request.id}:auto_delivery",
+        payload={
+            "request_id": str(forecast_request.id),
+            "delivery_method": delivery_method,
+        },
+    )
+    return {"ok": True, "queued": True}
+
+
+async def enqueue_forecast_full_delivery(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+    *,
+    delivery_method: str,
+) -> dict:
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_FORECAST_FULL_DELIVERY,
+        user_id=forecast_request.user_id,
+        forecast_request_id=forecast_request.id,
+        dedupe_key=f"forecast_request:{forecast_request.id}:full_delivery:{delivery_method}",
+        payload={
+            "request_id": str(forecast_request.id),
+            "delivery_method": delivery_method,
+        },
+    )
+    return {"ok": True, "queued": True}
+
+
+async def dispatch_forecast_full_delivery_from_outbox(
+    request_id: UUID,
+    *,
+    delivery_method: str = "auto",
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        forecast_request = await load_forecast_request(db, request_id)
+        if forecast_request.status not in DELIVERED_STATUSES:
+            return {
+                "ok": True,
+                "skipped": True,
+                "description": f"Forecast request is {forecast_request.status}, not delivered",
+            }
+        resolved_delivery_method = (
+            forecast_request.delivery_method
+            or (
+                await refreshed_client_delivery_method(db, forecast_request.user)
+                if delivery_method == "auto"
+                else delivery_method
+            )
+        )
+        if resolved_delivery_method == "manual":
+            return {"ok": True, "skipped": True, "description": "Manual delivery has no client channel"}
+
+        send_report = await send_full_forecast_to_external_channels(
+            forecast_request,
+            delivery_method=resolved_delivery_method,
+            db=db,
+        )
+        if not send_report.get("ok"):
+            send_result = send_report.get("result") if isinstance(send_report.get("result"), dict) else {}
+            if resolved_delivery_method in {"vk", "vk_bot"} and is_vk_message_permission_error(send_result):
+                await mark_vk_messages_denied(db, forecast_request.user)
+                await db.commit()
+            description = send_result.get("description") if isinstance(send_result, dict) else None
+            return {
+                "ok": False,
+                "description": description or f"{resolved_delivery_method} did not deliver the forecast",
+            }
+
+        template_body = await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
+        await deliver_full_forecast_to_web_chat(db, forecast_request, template_body=template_body)
+        await db.commit()
+        return {"ok": True, "delivery_method": resolved_delivery_method}
 
 
 async def notify_sales_manager_for_request(request_id: UUID) -> dict:
     async with AsyncSessionLocal() as db:
         forecast_request = await load_forecast_request(db, request_id)
-        notify_result = await asyncio.to_thread(notify_sales_manager, forecast_request)
+        notify_result = await enqueue_sales_manager_notification(db, forecast_request)
+        await db.commit()
         if not notify_result.get("ok"):
             logger.warning(
-                "[ForecastDelivery] Sales manager notification failed for %s: %s",
+                "[ForecastDelivery] Sales manager notification was not queued for %s: %s",
                 request_id,
                 notify_result.get("description", "unknown error"),
             )
@@ -895,6 +1206,7 @@ async def notify_sales_manager_for_request(request_id: UUID) -> dict:
 def forecast_request_should_auto_deliver(forecast_request: ForecastRequest) -> bool:
     return bool(
         getattr(forecast_request.bet, "status", None) != "deleted"
+        and not request_is_paid_set(forecast_request)
         and getattr(forecast_request.bet, "auto_send_on_interest", False)
         and _full_forecast_ready_error(forecast_request) is None
     )
@@ -921,6 +1233,7 @@ async def auto_deliver_forecast_request_for_request(
                 handled_by=None,
                 delivery_method=resolved_delivery_method,
                 send_to_client=True,
+                commit=True,
             )
             return {"ok": True, "already_recorded": access_result.already_recorded}
         except HTTPException as exc:
@@ -1012,6 +1325,11 @@ async def set_forecast_request_interested(
             else auto_delivery_method
         )
         if not auto_delivery_now:
+            await enqueue_forecast_auto_delivery(
+                db,
+                forecast_request,
+                delivery_method=resolved_auto_delivery_method,
+            )
             return forecast_request, "Принято. Готовим прогноз.", False
         try:
             forecast_request, access_result = await deliver_forecast_request(
@@ -1020,6 +1338,7 @@ async def set_forecast_request_interested(
                 handled_by=None,
                 delivery_method=resolved_auto_delivery_method,
                 send_to_client=True,
+                commit=True,
             )
             if access_result.already_recorded:
                 return forecast_request, "Прогноз уже был отправлен.", False
@@ -1043,11 +1362,11 @@ async def set_forecast_request_interested(
             )
 
     if notify_sales_manager_now:
-        notify_result = await asyncio.to_thread(notify_sales_manager, forecast_request)
+        notify_result = await enqueue_sales_manager_notification(db, forecast_request)
         if not notify_result.get("ok"):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Продажник не уведомлен: {notify_result.get('description', 'unknown error')}",
+                detail=f"Продажник не поставлен в очередь уведомлений: {notify_result.get('description', 'unknown error')}",
             )
         return forecast_request, "Заявка отправлена продажнику.", False
     return forecast_request, "Заявка отправлена продажнику.", True
@@ -1083,6 +1402,8 @@ async def set_forecast_request_declined(
 
     forecast_request.status = FORECAST_STATUS_DECLINED
     forecast_request.responded_at = forecast_request.responded_at or _now()
+    if request_is_paid_set(forecast_request):
+        return forecast_request, "Ок, набор не берем."
     return forecast_request, "Ок, не берем."
 
 
@@ -1093,7 +1414,9 @@ async def deliver_forecast_request(
     handled_by: Optional[int],
     delivery_method: str,
     send_to_client: bool,
+    commit: bool,
 ) -> tuple[ForecastRequest, UserBetAccessResult]:
+    """Deliver a private forecast and own the transaction boundary when commit=True."""
     if delivery_method == "auto":
         delivery_method = await refreshed_client_delivery_method(db, forecast_request.user)
 
@@ -1121,6 +1444,61 @@ async def deliver_forecast_request(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Прогноз остановлен администратором",
+        )
+
+    if request_is_paid_set(forecast_request):
+        if send_to_client:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Набор продается вручную, отправка прогноза недоступна",
+            )
+        if delivery_method not in {"manual", "web", "bot", "vk", "vk_bot"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Неизвестный способ обработки заявки",
+            )
+        lock_result = await db.execute(
+            update(ForecastRequest)
+            .where(
+                ForecastRequest.id == forecast_request.id,
+                ForecastRequest.status == FORECAST_STATUS_INTERESTED,
+            )
+            .values(
+                status=FORECAST_STATUS_PROCESSING,
+                handled_by=handled_by,
+            )
+        )
+        if lock_result.rowcount != 1:
+            if commit:
+                await db.rollback()
+            latest_request = await load_forecast_request(db, forecast_request.id)
+            if latest_request.status in DELIVERED_STATUSES:
+                return latest_request, _already_taken_access_result(latest_request)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Заявка уже обрабатывается или изменила статус",
+            )
+
+        balance_before = user_match_balance(forecast_request.user)
+        forecast_request.status = FORECAST_STATUS_MANUAL_SENT
+        forecast_request.delivery_method = "manual"
+        forecast_request.handled_by = handled_by
+        forecast_request.delivered_at = forecast_request.delivered_at or _now()
+        forecast_request.balance_before = balance_before
+        forecast_request.balance_after = balance_before
+        forecast_request.no_balance_warning = False
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return forecast_request, UserBetAccessResult(
+            status="manual_sale",
+            already_recorded=False,
+            access_type="manual_paid_set",
+            match_charged=False,
+            balance_before=balance_before,
+            balance_after=balance_before,
+            no_balance_warning=False,
         )
 
     if send_to_client:
@@ -1156,7 +1534,8 @@ async def deliver_forecast_request(
         )
     )
     if lock_result.rowcount != 1:
-        await db.rollback()
+        if commit:
+            await db.rollback()
         latest_request = await load_forecast_request(db, forecast_request.id)
         if latest_request.status in DELIVERED_STATUSES:
             return latest_request, _already_taken_access_result(latest_request)
@@ -1167,46 +1546,8 @@ async def deliver_forecast_request(
 
     forecast_request.status = FORECAST_STATUS_PROCESSING
     forecast_request.handled_by = handled_by
-    await db.commit()
 
     try:
-        if send_to_client:
-            if delivery_method == "vk":
-                send_result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request)
-                delivery_label = "VK"
-            elif delivery_method == "vk_bot":
-                send_result = await asyncio.to_thread(send_full_forecast_to_vk_client, forecast_request)
-                delivery_label = "VK"
-                if send_result.get("ok"):
-                    telegram_result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request)
-                    if not telegram_result.get("ok"):
-                        logger.warning(
-                            "[ForecastDelivery] Telegram duplicate failed for request %s after VK success: %s",
-                            forecast_request.id,
-                            telegram_result.get("description", "unknown error"),
-                        )
-            elif delivery_method == "bot":
-                send_result = await asyncio.to_thread(send_full_forecast_to_client, forecast_request)
-                delivery_label = "Telegram"
-            else:
-                send_result = {"ok": True}
-                delivery_label = "Web"
-            if not send_result.get("ok"):
-                if delivery_method in {"vk", "vk_bot"} and is_vk_message_permission_error(send_result):
-                    await mark_vk_messages_denied(db, forecast_request.user)
-                    await db.commit()
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=(
-                            "VK не разрешает отправлять этому клиенту личные сообщения. "
-                            "Попросите клиента открыть диалог VK и нажать проверку доступа."
-                        ),
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"{delivery_label} не доставил прогноз клиенту: {send_result.get('description', 'unknown error')}",
-                )
-
         access_result = await record_user_bet_access(
             db,
             user=forecast_request.user,
@@ -1223,14 +1564,19 @@ async def deliver_forecast_request(
         forecast_request.balance_after = access_result.balance_after
         forecast_request.no_balance_warning = access_result.no_balance_warning
         if send_to_client:
-            await deliver_full_forecast_to_web_chat(db, forecast_request)
-        await db.commit()
+            await enqueue_forecast_full_delivery(
+                db,
+                forecast_request,
+                delivery_method=delivery_method,
+            )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return forecast_request, access_result
     except Exception:
-        await db.rollback()
-        forecast_request.status = FORECAST_STATUS_INTERESTED
-        forecast_request.handled_by = None
-        await db.commit()
+        if commit:
+            await db.rollback()
         raise
 
 
@@ -1273,12 +1619,18 @@ async def handle_sales_callback(
 
     forecast_request = await load_forecast_request(db, request_id)
     if action == "sales_send":
+        if request_is_paid_set(forecast_request):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Набор продается вручную, отправка прогноза недоступна",
+            )
         forecast_request, access_result = await deliver_forecast_request(
             db,
             forecast_request=forecast_request,
             handled_by=actor_user_id,
             delivery_method=await refreshed_client_delivery_method(db, forecast_request.user),
             send_to_client=True,
+            commit=True,
         )
         if access_result.already_recorded:
             return forecast_request, "Прогноз уже был отправлен."
@@ -1291,9 +1643,12 @@ async def handle_sales_callback(
             handled_by=actor_user_id,
             delivery_method="manual",
             send_to_client=False,
+            commit=True,
         )
         if access_result.already_recorded:
             return forecast_request, "Ручная отправка уже была отмечена."
+        if request_is_paid_set(forecast_request):
+            return forecast_request, "Продажа набора отмечена вручную."
         return forecast_request, "Клиент отмечен как взявший прогноз."
 
     if action == "sales_cancel":

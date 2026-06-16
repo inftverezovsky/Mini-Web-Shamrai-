@@ -11,10 +11,11 @@ import NotificationCenter from './components/NotificationCenter';
 import PwaPushGate from './components/PwaPushGate';
 import VkConsentWizard from './components/VkConsentWizard';
 import WelcomeSplash from './components/WelcomeSplash';
-import WebBotChat from './components/WebBotChat';
 import WebSignalListener from './components/WebSignalListener';
+import AppErrorBoundary from './components/AppErrorBoundary';
 
 import { isStaffRole, roleLabel } from './utils/roles';
+import { buildTabPath, trackEvent, trackPageView } from './utils/analytics';
 import { isTelegramMiniApp } from './utils/telegramSdk';
 import { registerPwaServiceWorker } from './utils/webPush';
 
@@ -25,15 +26,45 @@ import {
   Loader2,
 } from 'lucide-react';
 
-const BetFeed = lazy(() => import('./pages/user/BetFeed'));
-const GlobalStats = lazy(() => import('./pages/user/GlobalStats'));
-const MyBets = lazy(() => import('./pages/user/MyBets'));
-const Profile = lazy(() => import('./pages/user/Profile'));
-const Tariffs = lazy(() => import('./pages/user/Tariffs'));
-const Onboarding = lazy(() => import('./pages/user/Onboarding'));
-const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
-const AdminCRM = lazy(() => import('./pages/admin/AdminCRM'));
-const AdminStats = lazy(() => import('./pages/admin/AdminStats'));
+const loadBetFeed = () => import('./pages/user/BetFeed');
+const loadGlobalStats = () => import('./pages/user/GlobalStats');
+const loadMyBets = () => import('./pages/user/MyBets');
+const loadProfile = () => import('./pages/user/Profile');
+const loadTariffs = () => import('./pages/user/Tariffs');
+const loadOnboarding = () => import('./pages/user/Onboarding');
+const loadWebBotChat = () => import('./components/WebBotChat');
+const loadAdminDashboard = () => import('./pages/admin/AdminDashboard');
+const loadAdminCRM = () => import('./pages/admin/AdminCRM');
+const loadAdminSettings = () => import('./pages/admin/AdminSettings');
+const loadAdminStats = () => import('./pages/admin/AdminStats');
+const loadAdminBets = () => import('./pages/admin/AdminBets');
+const loadAdminBroadcast = () => import('./pages/admin/AdminBroadcast');
+const loadAdminResults = () => import('./pages/admin/AdminResults');
+
+const BetFeed = lazy(loadBetFeed);
+const GlobalStats = lazy(loadGlobalStats);
+const MyBets = lazy(loadMyBets);
+const Profile = lazy(loadProfile);
+const Tariffs = lazy(loadTariffs);
+const Onboarding = lazy(loadOnboarding);
+const WebBotChat = lazy(loadWebBotChat);
+const AdminDashboard = lazy(loadAdminDashboard);
+const AdminCRM = lazy(loadAdminCRM);
+const AdminSettings = lazy(loadAdminSettings);
+const AdminStats = lazy(loadAdminStats);
+
+function runWhenIdle(callback: () => void) {
+  const requestIdleCallback = (window as any).requestIdleCallback as
+    | ((cb: () => void, options?: { timeout?: number }) => number)
+    | undefined;
+  const cancelIdleCallback = (window as any).cancelIdleCallback as ((handle: number) => void) | undefined;
+  if (typeof requestIdleCallback === 'function') {
+    const handle = requestIdleCallback(callback, { timeout: 1400 });
+    return () => cancelIdleCallback?.(handle);
+  }
+  const handle = window.setTimeout(callback, 120);
+  return () => window.clearTimeout(handle);
+}
 
 function PageLoader() {
   return (
@@ -80,8 +111,99 @@ export default function App() {
 
   const handleIntroComplete = () => {
     setSplashLeaving(true);
-    window.setTimeout(() => setIntroComplete(true), 760);
+    window.setTimeout(() => setIntroComplete(true), 180);
   };
+
+  useEffect(() => {
+    if (!introComplete || !userProfile) return;
+
+    const userIsStaff = isStaffRole(userProfile.role);
+    const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp();
+    const shouldPreloadWebChat = !runsInTelegramMiniApp && !userIsStaff && userProfile.is_onboarded !== false;
+    const loaders = userIsStaff
+      ? [
+          loadAdminDashboard,
+          loadAdminBets,
+          loadAdminResults,
+          loadAdminBroadcast,
+          loadAdminStats,
+          loadAdminCRM,
+          loadAdminSettings,
+          loadProfile,
+        ]
+      : [
+          loadBetFeed,
+          loadGlobalStats,
+          loadMyBets,
+          loadTariffs,
+          loadProfile,
+          ...(shouldPreloadWebChat ? [loadWebBotChat] : []),
+          ...(userProfile.is_onboarded === false ? [loadOnboarding] : []),
+        ];
+
+    const queuedTimers: number[] = [];
+    const cancelIdle = runWhenIdle(() => {
+      loaders.forEach((loader, index) => {
+        const timer = window.setTimeout(() => {
+          void loader().catch(() => undefined);
+        }, index * 70);
+        queuedTimers.push(timer);
+      });
+    });
+
+    return () => {
+      cancelIdle();
+      queuedTimers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [introComplete, isTelegram, userProfile]);
+
+  const forceOnboarding = import.meta.env.DEV && new URLSearchParams(window.location.search).has('force_onboarding');
+  const isAdmin = userProfile ? isStaffRole(userProfile.role) : false;
+  const showAdminInterface = isAdmin && !adminPreviewMode;
+  const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp();
+  const needsOnboarding = Boolean(
+    userProfile
+    && (forceOnboarding || userProfile.is_onboarded === false)
+    && !isStaffRole(userProfile.role),
+  );
+  const showWebChatTab = Boolean(userProfile) && !runsInTelegramMiniApp && !showAdminInterface && !needsOnboarding;
+
+  useEffect(() => {
+    if (!introComplete || !userProfile) return;
+
+    if (needsOnboarding) {
+      trackPageView('/app/user/onboarding', {
+        role: 'user',
+        tab: 'onboarding',
+        layout: isCompact ? 'compact' : 'full',
+        onboarded: false,
+      });
+      return;
+    }
+
+    const role = showAdminInterface ? 'admin' : 'user';
+    const tab = showAdminInterface
+      ? activeAdminTab
+      : activeUserTab === 'chat' && !showWebChatTab
+        ? 'feed'
+        : activeUserTab;
+
+    trackPageView(buildTabPath(role, tab), {
+      role,
+      tab,
+      layout: isCompact ? 'compact' : 'full',
+      onboarded: userProfile.is_onboarded !== false,
+    });
+  }, [
+    activeAdminTab,
+    activeUserTab,
+    introComplete,
+    isCompact,
+    needsOnboarding,
+    showAdminInterface,
+    showWebChatTab,
+    userProfile,
+  ]);
 
   if (!introComplete) {
     return (
@@ -121,10 +243,11 @@ export default function App() {
     );
   }
 
-  const isAdmin = isStaffRole(userProfile.role);
-  const showAdminInterface = isAdmin && !adminPreviewMode;
-
   const handleTabChange = (tab: UserTabId | AdminShellTabId) => {
+    const role = showAdminInterface ? 'admin' : 'user';
+    const from = showAdminInterface ? activeAdminTab : activeUserTab;
+    trackEvent('Tab Switch', { role, from, to: tab });
+
     if (showAdminInterface) {
       setActiveAdminTab(tab as AdminShellTabId);
     } else {
@@ -132,19 +255,23 @@ export default function App() {
     }
   };
 
-  const forceOnboarding = import.meta.env.DEV && new URLSearchParams(window.location.search).has('force_onboarding');
-  const needsOnboarding = (forceOnboarding || userProfile.is_onboarded === false) && !isStaffRole(userProfile.role);
+  const handleToggleAdminPreviewMode = () => {
+    const nextMode = !adminPreviewMode;
+    trackEvent('Admin Preview Toggle', {
+      mode: nextMode ? 'client_preview' : 'admin',
+    });
+    setAdminPreviewMode(nextMode);
+  };
+
   const isWebOnlyClient = userProfile.telegram_id < 0;
   const displayName = [userProfile.first_name, userProfile.last_name].filter(Boolean).join(' ').trim()
     || (userProfile.username ? `@${userProfile.username}` : isWebOnlyClient ? 'Web/VK клиент' : `ID ${userProfile.telegram_id}`);
   const roleText = isWebOnlyClient ? 'Web/VK клиент' : roleLabel(userProfile.role);
-  const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp();
-  const showWebChatTab = !runsInTelegramMiniApp && !showAdminInterface && !needsOnboarding;
 
   const adminPreviewControl = isAdmin ? (
     <button
       type="button"
-      onClick={() => setAdminPreviewMode(!adminPreviewMode)}
+      onClick={handleToggleAdminPreviewMode}
       className="flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.045] px-3 py-3 text-xs font-black text-white transition-all hover:bg-white/[0.07] active:scale-[0.98]"
     >
       <Eye className="h-4 w-4 text-indigo-300" />
@@ -154,33 +281,38 @@ export default function App() {
 
   const renderCurrentPage = () => {
     const safeUserTab = activeUserTab === 'chat' && !showWebChatTab ? 'feed' : activeUserTab;
+    const pageResetKey = showAdminInterface ? `admin:${activeAdminTab}` : `user:${safeUserTab}`;
 
     return (
-      <Suspense fallback={<PageLoader />}>
-        {showAdminInterface ? (
-          activeAdminTab === 'manage_bets' ? (
-            <AdminDashboard />
-          ) : activeAdminTab === 'stats' ? (
-            <AdminStats />
-          ) : activeAdminTab === 'clients' ? (
-            <AdminCRM />
+      <AppErrorBoundary resetKey={pageResetKey}>
+        <Suspense fallback={<PageLoader />}>
+          {showAdminInterface ? (
+            activeAdminTab === 'manage_bets' ? (
+              <AdminDashboard />
+            ) : activeAdminTab === 'stats' ? (
+              <AdminStats />
+            ) : activeAdminTab === 'clients' ? (
+              <AdminCRM />
+            ) : activeAdminTab === 'settings' ? (
+              <AdminSettings />
+            ) : (
+              <Profile />
+            )
+          ) : safeUserTab === 'feed' ? (
+            <BetFeed onNavigateToBilling={() => setActiveUserTab('billing')} />
+          ) : safeUserTab === 'chat' ? (
+            <WebBotChat />
+          ) : safeUserTab === 'stats' ? (
+            <GlobalStats />
+          ) : safeUserTab === 'my_bets' ? (
+            <MyBets />
+          ) : safeUserTab === 'billing' ? (
+            <Tariffs onSubscriptionActivated={fetchUserProfile} />
           ) : (
             <Profile />
-          )
-        ) : safeUserTab === 'feed' ? (
-          <BetFeed onNavigateToBilling={() => setActiveUserTab('billing')} />
-        ) : safeUserTab === 'chat' ? (
-          <WebBotChat />
-        ) : safeUserTab === 'stats' ? (
-          <GlobalStats />
-        ) : safeUserTab === 'my_bets' ? (
-          <MyBets />
-        ) : safeUserTab === 'billing' ? (
-          <Tariffs onSubscriptionActivated={fetchUserProfile} />
-        ) : (
-          <Profile />
-        )}
-      </Suspense>
+          )}
+        </Suspense>
+      </AppErrorBoundary>
     );
   };
 
@@ -188,13 +320,19 @@ export default function App() {
     <div
       className={`app-shell min-h-screen bg-[#070B19] relative overflow-x-hidden selection:bg-emerald-500/30 ${
         isCompact
-          ? 'mx-auto flex max-w-md flex-col justify-between px-4 pb-24 pt-4'
+          ? 'mobile-app-shell mx-auto flex max-w-md flex-col justify-between px-4 pt-4'
           : 'w-full px-5 py-6 xl:px-8'
       }`}
     >
-      <NotificationCenter />
-      <WebSignalListener enabled={showWebChatTab} />
-      <VkConsentWizard />
+      <AppErrorBoundary
+        resetKey={`global:${userProfile.telegram_id}:${showWebChatTab}`}
+        title="Фоновый виджет временно недоступен"
+        description="Основные разделы продолжают работать, можно спокойно пользоваться приложением дальше."
+      >
+        <NotificationCenter />
+        <WebSignalListener enabled={showWebChatTab} />
+        <VkConsentWizard />
+      </AppErrorBoundary>
       <div className="ambient-field" aria-hidden="true">
         <div className="ambient-field__grid" />
         <div className="ambient-field__rings" />
@@ -207,9 +345,15 @@ export default function App() {
               isCompact ? 'w-full' : 'mx-auto min-h-[calc(100vh-3rem)] w-full max-w-3xl'
             }`}
           >
-            <Suspense fallback={<PageLoader />}>
-              <Onboarding onCompleted={fetchUserProfile} />
-            </Suspense>
+            <AppErrorBoundary
+              resetKey="onboarding"
+              title="Анкета временно недоступна"
+              description="Остальная часть приложения продолжит работать, а анкету можно попробовать открыть повторно."
+            >
+              <Suspense fallback={<PageLoader />}>
+                <Onboarding onCompleted={fetchUserProfile} />
+              </Suspense>
+            </AppErrorBoundary>
           </div>
         ) : isCompact ? (
           <>
@@ -221,7 +365,7 @@ export default function App() {
                     Вы вошли как <strong className="ml-1 text-rose-400">{roleLabel(userProfile.role)}</strong>
                   </span>
                   <button
-                    onClick={() => setAdminPreviewMode(!adminPreviewMode)}
+                    onClick={handleToggleAdminPreviewMode}
                     className="flex items-center space-x-1 rounded-xl border border-white/10 bg-white/10 px-2.5 py-1 text-[10px] text-white transition-all hover:bg-white/15 active:scale-95"
                   >
                     <Eye className="h-3.5 w-3.5 text-indigo-400" />

@@ -1,68 +1,72 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import case, extract, func
 from sqlalchemy.future import select
-from typing import List, Dict, Any
 from decimal import Decimal
 from datetime import datetime
-from collections import defaultdict
 
-from src.models.database import get_db
+from src.models.database import get_read_db
 from src.models.models import Bet
 
 router = APIRouter(prefix="/stats", tags=["Stats"])
 
 @router.get("/global")
-async def get_global_stats(db: AsyncSession = Depends(get_db)):
+async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
     """
     GET /api/stats/global
     Public endpoint. Calculates global winrate, ROI, and profit trends.
     """
-    # Fetch resolved bets (win, loss, refund) sorted chronologically
-    query = select(Bet).filter(Bet.status.in_(["win", "loss", "refund"])).order_by(Bet.resolved_at.asc(), Bet.created_at.asc())
-    result = await db.execute(query)
-    bets = result.scalars().all()
-        
-    total = len(bets)
-    won = 0
-    lost = 0
-    refunded = 0
-    profit = Decimal("0.00")
-    
-    # Calculate monthly performance
-    monthly_profits = defaultdict(Decimal)
-    
-    for bet in bets:
-        bet_profit = Decimal("0.00")
-        if bet.status == "win":
-            won += 1
-            bet_profit = bet.coefficient - Decimal("1.00")
-        elif bet.status == "loss":
-            lost += 1
-            bet_profit = Decimal("-1.00")
-        elif bet.status == "refund":
-            refunded += 1
-            
-        profit += bet_profit
-        
-        # Use resolved_at or created_at for date reference
-        date_ref = bet.resolved_at or bet.created_at
-        if date_ref:
-            month_str = date_ref.strftime("%Y-%m")
-            monthly_profits[month_str] += bet_profit
+    resolved_statuses = ["win", "loss", "refund"]
+    profit_expr = case(
+        (Bet.status == "win", Bet.coefficient - Decimal("1.00")),
+        (Bet.status == "loss", Decimal("-1.00")),
+        else_=Decimal("0.00"),
+    )
+    won_expr = case((Bet.status == "win", 1), else_=0)
+    lost_expr = case((Bet.status == "loss", 1), else_=0)
+    refund_expr = case((Bet.status == "refund", 1), else_=0)
 
+    summary_result = await db.execute(
+        select(
+            func.count(Bet.id),
+            func.coalesce(func.sum(won_expr), 0),
+            func.coalesce(func.sum(lost_expr), 0),
+            func.coalesce(func.sum(refund_expr), 0),
+            func.coalesce(func.sum(profit_expr), Decimal("0.00")),
+        )
+        .filter(Bet.status.in_(resolved_statuses))
+    )
+    total, won, lost, refunded, profit = summary_result.one()
+    total = int(total or 0)
+    won = int(won or 0)
+    lost = int(lost or 0)
+    refunded = int(refunded or 0)
+    profit = Decimal(str(profit or "0.00"))
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
     roi = (float(profit) / total * 100) if total > 0 else 0.0
 
-    # Build chronological cumulative profit points
-    sorted_months = sorted(monthly_profits.keys())
+    date_ref = func.coalesce(Bet.resolved_at, Bet.created_at)
+    year_part = extract("year", date_ref)
+    month_part = extract("month", date_ref)
+    monthly_result = await db.execute(
+        select(
+            year_part.label("year"),
+            month_part.label("month"),
+            func.coalesce(func.sum(profit_expr), Decimal("0.00")).label("profit"),
+        )
+        .filter(Bet.status.in_(resolved_statuses), date_ref.isnot(None))
+        .group_by(year_part, month_part)
+        .order_by(year_part.asc(), month_part.asc())
+    )
     chart_points = []
     cumulative_profit = Decimal("0.00")
-    
-    for m in sorted_months:
-        cumulative_profit += monthly_profits[m]
+
+    for year, month, month_profit in monthly_result.all():
+        cumulative_profit += Decimal(str(month_profit or "0.00"))
+        month_key = f"{int(year):04d}-{int(month):02d}"
         chart_points.append({
-            "month": m,
+            "month": month_key,
             "profit": round(float(cumulative_profit), 2)
         })
 

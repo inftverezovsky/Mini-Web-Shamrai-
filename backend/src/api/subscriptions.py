@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from src.models.database import get_db
+from src.models.database import get_db, get_read_db
 from src.models.models import User, SubscriptionPlan, Subscription, ABTestConfig, AdminAuditLog
 from src.schemas.schemas import (
     SubscriptionPlanResponse,
@@ -16,11 +16,11 @@ from src.schemas.schemas import (
     SubscriptionCreate,
     SubscriptionManualAssign
 )
-from src.api.deps import get_current_user, get_current_privileged_admin, get_optional_user
+from src.api.deps import get_current_user, get_current_privileged_admin, get_optional_user_read
 from src.core.roles import is_admin_role, is_staff_role
 from src.core.config import settings
 from src.services.match_access import activate_match_package
-from src.api.payments import call_telegram_api_async
+from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
 
@@ -29,8 +29,8 @@ router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
 @router.get("/plans", response_model=List[SubscriptionPlanResponse])
 async def list_plans(
     include_inactive: bool = False,
-    db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_user)
+    db: AsyncSession = Depends(get_read_db),
+    current_user: Optional[User] = Depends(get_optional_user_read)
 ):
     """Retrieve available subscription plans and apply A/B pricing."""
     all_result = await db.execute(select(SubscriptionPlan))

@@ -1,14 +1,20 @@
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from uuid import UUID
 
 from src.api.deps import get_current_user
+from src.api.payments import (
+    PAYMENT_PURCHASE_CROWD_BET,
+    _create_payment_attempt,
+    create_telegram_stars_invoice_link,
+)
 from src.core.config import settings
 from src.models.database import get_db
-from src.models.models import Bet, CrowdBet, CrowdBetParticipant, User, user_bets
-from src.schemas.schemas import CrowdBetFundRequest, CrowdBetResponse
+from src.models.models import Bet, CrowdBet, User
+from src.schemas.schemas import CrowdBetFundRequest, CrowdBetFundResponse, CrowdBetResponse
+from src.services.crowd_bets import user_is_crowd_participant
 
 router = APIRouter(prefix="/crowd-bets", tags=["Crowd Bets"])
 
@@ -72,48 +78,6 @@ async def get_active_or_debug_seed_crowd_bet(db: AsyncSession) -> CrowdBet | Non
     return crowd_bet
 
 
-async def user_is_participant(db: AsyncSession, crowd_bet_id: int, user_id: int) -> bool:
-    result = await db.execute(
-        select(CrowdBetParticipant.id).filter(
-            and_(
-                CrowdBetParticipant.crowd_bet_id == crowd_bet_id,
-                CrowdBetParticipant.user_id == user_id,
-            )
-        )
-    )
-    return result.first() is not None
-
-
-async def unlock_for_participants(db: AsyncSession, crowd_bet: CrowdBet) -> int:
-    participants_result = await db.execute(
-        select(CrowdBetParticipant.user_id).filter(CrowdBetParticipant.crowd_bet_id == crowd_bet.id)
-    )
-    participant_ids = [row[0] for row in participants_result.all()]
-
-    unlocked_count = 0
-    for user_id in participant_ids:
-        existing_result = await db.execute(
-            select(user_bets).filter(
-                and_(user_bets.c.user_id == user_id, user_bets.c.bet_id == crowd_bet.bet_id)
-            )
-        )
-        if existing_result.first():
-            continue
-
-        await db.execute(
-            user_bets.insert().values(
-                user_id=user_id,
-                bet_id=crowd_bet.bet_id,
-                taken_at=func.now(),
-                access_type="crowd_pool",
-                match_charged=False,
-            )
-        )
-        unlocked_count += 1
-
-    return unlocked_count
-
-
 @router.get("/active", response_model=CrowdBetResponse)
 async def get_active_crowd_bet(
     current_user: User = Depends(get_current_user),
@@ -122,12 +86,12 @@ async def get_active_crowd_bet(
     crowd_bet = await get_active_or_debug_seed_crowd_bet(db)
     if not crowd_bet:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Нет активной складчины")
-    is_participant = await user_is_participant(db, crowd_bet.id, current_user.telegram_id)
+    is_participant = await user_is_crowd_participant(db, crowd_bet.id, current_user.telegram_id)
     await db.commit()
     return crowd_bet_response(crowd_bet, current_user.telegram_id, is_participant)
 
 
-@router.post("/{crowd_bet_id}/fund", response_model=CrowdBetResponse)
+@router.post("/{crowd_bet_id}/fund", response_model=CrowdBetFundResponse)
 async def fund_crowd_bet(
     crowd_bet_id: int,
     payload: CrowdBetFundRequest,
@@ -136,7 +100,8 @@ async def fund_crowd_bet(
 ):
     """
     POST /api/crowd-bets/{id}/fund
-    Adds XTR to a pooled VIP forecast. When target is reached, unlocks the bet for all participants.
+    Creates a Telegram Stars invoice for a pooled VIP forecast.
+    The contribution is applied only after a verified successful_payment webhook.
     """
     if payload.amount_xtr <= 0:
         raise HTTPException(
@@ -150,34 +115,41 @@ async def fund_crowd_bet(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Складчина не найдена")
 
     if crowd_bet.status == "opened":
-        is_participant = await user_is_participant(db, crowd_bet.id, current_user.telegram_id)
-        return crowd_bet_response(crowd_bet, current_user.telegram_id, is_participant)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Складчина уже открыта")
 
-    participant_result = await db.execute(
-        select(CrowdBetParticipant).filter(
-            and_(
-                CrowdBetParticipant.crowd_bet_id == crowd_bet.id,
-                CrowdBetParticipant.user_id == current_user.telegram_id,
-            )
+    remaining = max(0, int(crowd_bet.target_amount or 0) - int(crowd_bet.current_amount or 0))
+    amount_xtr = min(int(payload.amount_xtr), remaining) if remaining else int(payload.amount_xtr)
+    if amount_xtr <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сумма пополнения должна быть больше 0 XTR",
         )
+
+    attempt = await _create_payment_attempt(
+        db,
+        user=current_user,
+        provider="telegram_stars",
+        amount=Decimal(amount_xtr),
+        currency="XTR",
+        bet_id=crowd_bet.bet_id,
+        metadata={
+            "purchase_type": PAYMENT_PURCHASE_CROWD_BET,
+            "crowd_bet_id": crowd_bet.id,
+            "amount_xtr": amount_xtr,
+        },
     )
-    participant = participant_result.scalars().first()
-    if participant:
-        participant.contributed_amount += payload.amount_xtr
-    else:
-        participant = CrowdBetParticipant(
-            crowd_bet_id=crowd_bet.id,
-            user_id=current_user.telegram_id,
-            contributed_amount=payload.amount_xtr,
-        )
-        db.add(participant)
-
-    crowd_bet.current_amount += payload.amount_xtr
-    if crowd_bet.current_amount >= crowd_bet.target_amount:
-        crowd_bet.current_amount = crowd_bet.target_amount
-        crowd_bet.status = "opened"
-        await db.flush()
-        await unlock_for_participants(db, crowd_bet)
 
     await db.commit()
-    return crowd_bet_response(crowd_bet, current_user.telegram_id, True)
+    invoice_url = await create_telegram_stars_invoice_link(
+        attempt=attempt,
+        title="Складчина Shamrai",
+        description=f"Вклад в VIP-прогноз: {amount_xtr} XTR.",
+        label="Вклад в складчину",
+    )
+    is_participant = await user_is_crowd_participant(db, crowd_bet.id, current_user.telegram_id)
+    return CrowdBetFundResponse(
+        crowd_bet=crowd_bet_response(crowd_bet, current_user.telegram_id, is_participant),
+        attempt_id=attempt.id,
+        invoice_url=invoice_url,
+        amount_xtr=amount_xtr,
+    )

@@ -8,19 +8,20 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.database import AsyncSessionLocal
+from src.core.background_tasks import create_logged_task
 from src.core.config import settings
+from src.core.message_templates import TEMPLATE_TELEGRAM_WELCOME, render_message_template
 from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_text import contact_footer, write_emoji
-from src.api.payments import call_telegram_api, process_telegram_payment_update
+from src.api.payments import process_telegram_payment_update
 from src.services.forecast_delivery import (
-    auto_deliver_forecast_request_for_request,
-    forecast_request_should_auto_deliver,
     handle_sales_callback,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
     set_forecast_request_interested,
 )
 from src.services.telegram_auth import confirm_telegram_bot_auth_session, parse_telegram_auth_start_param
+from src.services.telegram_bot import call_telegram_api
 import logging
 
 router = APIRouter(prefix="/telegram", tags=["Telegram Webhook"])
@@ -115,6 +116,25 @@ def _build_start_response(message: dict, request_base_url: Optional[str] = None)
             ]
         },
     }
+
+
+async def _build_start_response_from_template(
+    db: AsyncSession,
+    message: dict,
+    request_base_url: Optional[str] = None,
+) -> dict:
+    response = _build_start_response(message, request_base_url=request_base_url)
+    user = message.get("from") or {}
+    response["text"] = await render_message_template(
+        db,
+        TEMPLATE_TELEGRAM_WELCOME,
+        {
+            "first_name": user.get("first_name") or "друг",
+            "contact_footer": contact_footer(),
+        },
+        safe_keys={"contact_footer"},
+    )
+    return response
 
 
 def _build_auth_response(message: dict, confirmed: bool, request_base_url: Optional[str] = None) -> dict:
@@ -243,15 +263,7 @@ def _answer_callback_query(callback_query_id: Optional[str], text: str, show_ale
 
 
 def _run_background(coro) -> None:
-    task = asyncio.create_task(coro)
-
-    def _log_failure(done_task: asyncio.Task) -> None:
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.exception("[Webhook] Background task failed: %s", exc)
-
-    task.add_done_callback(_log_failure)
+    create_logged_task(coro, logger=logger, failure_message="[Webhook] Background task failed")
 
 
 def _clear_forecast_client_message(callback_query: dict) -> None:
@@ -289,6 +301,46 @@ def _clear_forecast_client_message(callback_query: dict) -> None:
         )
 
 
+async def _process_sales_send_callback(
+    callback_query: dict,
+    *,
+    request_id: UUID,
+    actor_user_id: int,
+) -> None:
+    chat = (callback_query.get("message") or {}).get("chat") or {}
+    target_chat_id = chat.get("id") or actor_user_id
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                _, message = await handle_sales_callback(
+                    db,
+                    request_id=request_id,
+                    actor_user_id=actor_user_id,
+                    action="sales_send",
+                )
+                await db.commit()
+            except HTTPException as exc:
+                await db.rollback()
+                message = str(exc.detail)
+            except Exception:
+                await db.rollback()
+                raise
+    except HTTPException as exc:
+        message = str(exc.detail)
+    except Exception as exc:
+        logger.exception("[Webhook] Sales send callback failed: %s", exc)
+        message = "Не удалось отправить прогноз клиенту"
+
+    await asyncio.to_thread(
+        call_telegram_api,
+        "sendMessage",
+        {
+            "chat_id": target_chat_id,
+            "text": message,
+        },
+    )
+
+
 async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> dict:
     callback_id = callback_query.get("id")
     data = callback_query.get("data") or ""
@@ -305,11 +357,20 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
 
     action = parts[1]
     should_notify_sales = False
-    should_auto_deliver = False
     try:
         request_id = UUID(parts[2])
     except ValueError:
         return _answer_callback_query(callback_id, "Некорректная заявка", True)
+
+    if action == "sales_send":
+        _run_background(
+            _process_sales_send_callback(
+                callback_query,
+                request_id=request_id,
+                actor_user_id=int(actor_user_id),
+            )
+        )
+        return _answer_callback_query(callback_id, "Принято, отправляем прогноз.")
 
     try:
         if action == "take":
@@ -320,14 +381,13 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
                 notify_sales_manager_now=False,
                 auto_delivery_now=False,
             )
-            should_auto_deliver = forecast_request_should_auto_deliver(forecast_request)
         elif action == "decline":
             _, message = await set_forecast_request_declined(
                 db,
                 request_id=request_id,
                 actor_user_id=int(actor_user_id),
             )
-        elif action in {"sales_send", "sales_manual", "sales_cancel"}:
+        elif action in {"sales_manual", "sales_cancel"}:
             _, message = await handle_sales_callback(
                 db,
                 request_id=request_id,
@@ -340,13 +400,6 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
         await db.commit()
         if action in {"take", "decline"}:
             _run_background(asyncio.to_thread(_clear_forecast_client_message, callback_query))
-        if should_auto_deliver:
-            _run_background(
-                auto_deliver_forecast_request_for_request(
-                    forecast_request.id,
-                    delivery_method="auto",
-                )
-            )
         if should_notify_sales:
             _run_background(notify_sales_manager_for_request(forecast_request.id))
         callback_message = "Принято" if action in {"take", "decline"} else message
@@ -453,7 +506,8 @@ async def _handle_telegram_update_inner(update: dict, request_base_url: Optional
                 },
             )
             return _build_auth_response(message, confirmed, request_base_url=request_base_url)
-        return _build_start_response(message, request_base_url=request_base_url)
+        async with AsyncSessionLocal() as db:
+            return await _build_start_response_from_template(db, message, request_base_url=request_base_url)
 
     emoji_ids_response = _build_emoji_ids_response(message, user.get("id"))
     if emoji_ids_response:
@@ -462,4 +516,5 @@ async def _handle_telegram_update_inner(update: dict, request_base_url: Optional
             **emoji_ids_response,
         }
 
-    return _build_start_response(message, request_base_url=request_base_url)
+    async with AsyncSessionLocal() as db:
+        return await _build_start_response_from_template(db, message, request_base_url=request_base_url)

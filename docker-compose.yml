@@ -28,6 +28,7 @@ services:
       APP_ENV: ${APP_ENV:-production}
       DEBUG_MODE: ${DEBUG_MODE:-false}
       ALLOW_DEBUG_AUTH_BYPASS: ${ALLOW_DEBUG_AUTH_BYPASS:-false}
+      SECURITY_RATE_LIMIT_MODE: ${SECURITY_RATE_LIMIT_MODE:-enforce}
       DATABASE_URL: postgresql://${POSTGRES_USER:-shamrai}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-shamrai}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-Shamra1_bot}
       WEB_PUSH_VAPID_PUBLIC_KEY: ${WEB_PUSH_VAPID_PUBLIC_KEY:-}
@@ -35,6 +36,13 @@ services:
       WEB_PUSH_VAPID_SUBJECT: ${WEB_PUSH_VAPID_SUBJECT:-mailto:support@shamra1.pro}
     volumes:
       - backend_static:/app/static
+    read_only: true
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,17 +74,29 @@ services:
         VITE_VK_GROUP_ID: ${VITE_VK_GROUP_ID:-}
         VITE_TELEGRAM_BOT_USERNAME: ${VITE_TELEGRAM_BOT_USERNAME:-Shamra1_bot}
         VITE_WEB_PUSH_VAPID_PUBLIC_KEY: ${VITE_WEB_PUSH_VAPID_PUBLIC_KEY:-}
+        VITE_PLAUSIBLE_DOMAIN: ${VITE_PLAUSIBLE_DOMAIN:-}
+        VITE_PLAUSIBLE_ENDPOINT: ${VITE_PLAUSIBLE_ENDPOINT:-}
+        VITE_PLAUSIBLE_CAPTURE_LOCALHOST: ${VITE_PLAUSIBLE_CAPTURE_LOCALHOST:-false}
     container_name: shamrai-frontend
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-8082}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-8082}:8080"
     volumes:
       - backend_static:/usr/share/nginx/html/static:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+      - /tmp:uid=101,gid=101,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -9,11 +9,19 @@ from fastapi import WebSocket
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.payments import call_telegram_api
+from src.core.background_tasks import create_logged_task
 from src.core.config import settings
+from src.core.message_templates import (
+    TEMPLATE_LIVE_SIGNAL,
+    default_message_template_body,
+    load_message_template_body,
+    render_message_template_body,
+)
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.models.database import AsyncSessionLocal
 from src.models.models import PersonalSignal, User
+from src.services.delivery_outbox import enqueue_signal_external_delivery_batch
+from src.services.telegram_bot import call_telegram_api
 
 try:
     from pywebpush import WebPushException, webpush
@@ -29,15 +37,7 @@ WEB_PUSH_INVALID_STATUS_CODES = {404, 410}
 
 
 def _run_background_delivery(coro) -> None:
-    task = asyncio.create_task(coro)
-
-    def _log_failure(done_task: asyncio.Task) -> None:
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.exception("[Signals] Background delivery failed: %s", exc)
-
-    task.add_done_callback(_log_failure)
+    create_logged_task(coro, logger=logger, failure_message="[Signals] Background delivery failed")
 
 
 class SignalStreamHub:
@@ -114,15 +114,16 @@ def build_live_signal_text(
     event_name: str,
     coefficient: Decimal,
     brain_score: Optional[int],
+    template_body: Optional[str] = None,
 ) -> str:
-    brain_line = f"\n🧠 Brain Score: {brain_score}/10" if brain_score is not None else ""
-    return (
-        "⚡⚡⚡ SHAMRAI LIVE SIGNAL ALARM ⚡⚡⚡\n\n"
-        "Новый срочный Live-прогноз от Shamrai:\n"
-        f"🏆 {event_name}\n"
-        f"📈 Коэффициент: {float(coefficient):.2f}"
-        f"{brain_line}\n\n"
-        "Быстрее заходите в приложение Shamrai Analytics Hub!"
+    brain_score_line = f"🧠 Brain Score: {brain_score}/10" if brain_score is not None else ""
+    return render_message_template_body(
+        template_body or default_message_template_body(TEMPLATE_LIVE_SIGNAL),
+        {
+            "event_name": event_name,
+            "coefficient": f"{float(coefficient):.2f}",
+            "brain_score_line": brain_score_line,
+        },
     )
 
 
@@ -165,6 +166,8 @@ def _notification_title(signal_payload: dict[str, Any]) -> str:
     explicit_title = str(signal_data.get("push_title") or signal_data.get("title") or "").strip()
     if explicit_title:
         return explicit_title
+    if signal_data.get("request_kind") == "paid_set":
+        return "Платный набор Shamrai"
     if signal_type == "forecast_teaser":
         return "Закрытый прогноз Shamrai"
     if signal_type == "forecast_full":
@@ -385,8 +388,9 @@ async def deliver_personal_signal(
 
     payload = signal_to_payload(signal)
     await signal_stream_hub.send_to_user(user.telegram_id, payload)
-    _run_background_delivery(
-        dispatch_signal_external_delivery_batch([
+    await enqueue_signal_external_delivery_batch(
+        db,
+        [
             {
                 "user_id": user.telegram_id,
                 "text": text,
@@ -395,7 +399,7 @@ async def deliver_personal_signal(
                 "send_telegram": send_telegram,
                 "send_web_push": send_web_push,
             }
-        ])
+        ],
     )
     return signal
 
@@ -482,7 +486,7 @@ async def broadcast_personal_signals(
             "web_push_missing_permission": web_push_missing_permission,
             "web_push_errors": list(dict.fromkeys(web_push_errors))[:5],
         }
-    _run_background_delivery(dispatch_signal_external_delivery_batch(external_deliveries))
+    await enqueue_signal_external_delivery_batch(db, external_deliveries)
     return len(signals)
 
 
@@ -494,10 +498,12 @@ async def broadcast_live_signal(
     coefficient: Decimal,
     brain_score: Optional[int],
 ) -> int:
+    template_body = await load_message_template_body(db, TEMPLATE_LIVE_SIGNAL)
     text = build_live_signal_text(
         event_name=event_name,
         coefficient=coefficient,
         brain_score=brain_score,
+        template_body=template_body,
     )
     user_list = list(users)
     signals = [
@@ -526,5 +532,5 @@ async def broadcast_live_signal(
             "send_web_push": True,
         })
     await dispatch_websocket_delivery_batch(websocket_deliveries)
-    _run_background_delivery(dispatch_signal_external_delivery_batch(external_deliveries))
+    await enqueue_signal_external_delivery_batch(db, external_deliveries)
     return len(signals)

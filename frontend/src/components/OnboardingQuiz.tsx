@@ -27,6 +27,7 @@ import { BookmakerResponse } from '../schemas/schemas';
 import EmojiTextField from './EmojiTextField';
 import { BookmakerLogoFrame } from './LogoFrame';
 import { useAuth } from '../context/AuthContext';
+import { trackEvent } from '../utils/analytics';
 
 type ExperienceLevel = 'novice' | 'amateur' | 'pro';
 type BankrollSize = 'micro' | 'mid' | 'high';
@@ -358,6 +359,14 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       setErrorMessage(null);
       setDirection(1);
       setStepIndex(4);
+      trackEvent('Onboarding Submitted', {
+        experience_level: answers.experience_level,
+        bankroll_size: answers.bankroll_size,
+        risk_tolerance: answers.risk_tolerance,
+        bookmakers_count: answers.bookmaker_codes.length,
+        vk_linked: Boolean(nextVkUserId),
+        currency,
+      });
 
       const [response] = await Promise.all([
         apiFetch<OnboardingResponse>(userId ? `/users/${userId}/onboard` : '/users/me/onboard', {
@@ -379,10 +388,24 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
 
       setRecommendation(response.recommendation);
       setCurrency(response.recommendation.currency || currency);
+      trackEvent('Onboarding Result Shown', {
+        experience_level: answers.experience_level,
+        bankroll_size: answers.bankroll_size,
+        risk_tolerance: answers.risk_tolerance,
+        vk_linked: Boolean(nextVkUserId),
+        currency: response.recommendation.currency || currency,
+      });
       revealResults();
     } catch (error: any) {
       setStepIndex(3);
       setErrorMessage(error?.message || 'Не удалось завершить калибровку Shamrai');
+      trackEvent('Onboarding Submit Failed', {
+        experience_level: answers.experience_level,
+        bankroll_size: answers.bankroll_size,
+        risk_tolerance: answers.risk_tolerance,
+        bookmakers_count: answers.bookmaker_codes.length,
+        vk_linked: Boolean(nextVkUserId),
+      });
     } finally {
       setSubmitting(false);
     }
@@ -392,16 +415,19 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       if (!vkReady) {
         setVkLinkStatus('error');
         setVkLinkError('VK ID не настроен. Обратитесь к администратору Shamrai.');
+        trackEvent('Onboarding VK Link Failed', { reason: 'not_configured' });
         return;
       }
 
     try {
       setVkLinkStatus('loading');
       setVkLinkError(null);
+      trackEvent('Onboarding VK Link Started');
       const linkedProfile = await linkVkProfile();
       setAnswers((current) => ({ ...current, vk_user_id: linkedProfile.vk_user_id }));
       setVkDisplayName(linkedProfile.vk_display_name || `VK ID ${linkedProfile.vk_user_id}`);
       setVkLinkStatus('linked');
+      trackEvent('Onboarding VK Link Success');
       window.setTimeout(() => {
         setDirection(1);
         setStepIndex(1);
@@ -410,10 +436,12 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       if (isVkRedirectStartedError(error)) return;
       setVkLinkStatus('error');
       setVkLinkError(error?.message || 'Не удалось привязать VK. Попробуйте еще раз.');
+      trackEvent('Onboarding VK Link Failed', { reason: 'request_error' });
     }
   };
 
   const handleSkipVk = () => {
+    trackEvent('Onboarding VK Skipped');
     setVkLinkError(null);
     setVkLinkStatus('idle');
     setDirection(1);
@@ -425,9 +453,11 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       setSkipping(true);
       setErrorMessage(null);
       await apiFetch('/users/me/onboard/skip', { method: 'POST' });
+      trackEvent('Onboarding Skipped');
       await onCompleted();
     } catch (error: any) {
       setErrorMessage(error?.message || 'Не удалось пропустить опрос');
+      trackEvent('Onboarding Skip Failed');
     } finally {
       setSkipping(false);
     }
@@ -447,6 +477,13 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       try {
         setFinishing(true);
         await onCompleted();
+        trackEvent('Onboarding Completed', {
+          experience_level: answers.experience_level,
+          bankroll_size: answers.bankroll_size,
+          risk_tolerance: answers.risk_tolerance,
+          vk_linked: Boolean(answers.vk_user_id),
+          currency,
+        });
       } finally {
         setFinishing(false);
       }

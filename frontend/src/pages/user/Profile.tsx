@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { BookmakerResponse } from '../../schemas/schemas';
+import { API_BASE_URL } from '../../config/api';
+import { getStoredAuthToken } from '../../utils/authStorage';
+import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
 import { getVkIdConfig, isVkRedirectStartedError, linkVkProfile } from '../../utils/vkId';
 import {
   detectVkMiniAppRuntime,
@@ -44,6 +47,7 @@ import { notifyInfo } from '../../utils/notify';
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
   alert_min_coef: number;
+  odds_drop_notifications_enabled: boolean;
   is_night_mode: boolean;
   night_mode_start: string;
   night_mode_end: string;
@@ -171,6 +175,7 @@ export default function Profile() {
   /* ── Preferences (Block 2) ── */
   const [prefs, setPrefs] = useState<Preferences>({
     alert_min_coef: 1.5,
+    odds_drop_notifications_enabled: true,
     is_night_mode: false,
     night_mode_start: DEFAULT_NIGHT_MODE_START,
     night_mode_end: DEFAULT_NIGHT_MODE_END,
@@ -228,6 +233,12 @@ export default function Profile() {
   const vkDeliveryReady = Boolean(userProfile?.vk_user_id && vkMessagesAllowed);
   const vkMissingPermissionsCount = vkDeliveryReady ? 0 : 1;
   const telegramLinked = Boolean(userProfile && !userProfile.is_web_only && userProfile.telegram_id > 0);
+  const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
+    queryKey: ['profile-dashboard', userProfile?.telegram_id],
+    queryFn: () => apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard'),
+    enabled: Boolean(userProfile && !isAdminProfile),
+    staleTime: 60_000,
+  });
 
   /* ────────────────── Data loaders ────────────────── */
   useEffect(() => {
@@ -241,86 +252,55 @@ export default function Profile() {
   }, []);
 
   useEffect(() => {
-    async function loadBookmakers() {
-      try {
-        setLoadingBks(true);
-        const allBks = await apiFetch('/bookmakers');
-        setBookmakers(allBks);
-        const [myBkIds, freshProfile] = await Promise.all([
-          apiFetch('/users/me/bookmakers'),
-          apiFetch('/users/me'),
-        ]);
-        setSelectedBkIds(myBkIds);
-        setOtherBookmakerName(freshProfile.other_bookmaker_name ?? '');
-        setUser(freshProfile);
-      } catch (err) {
-        console.error('Error loading bookmaker options:', err);
-      } finally {
-        setLoadingBks(false);
-      }
-    }
-
-    async function loadSubscription() {
-      try {
-        setLoadingSub(true);
-        await apiFetch('/subscriptions/my-status');
-      } catch (err) {
-        console.error('Error loading subscription:', err);
-      } finally {
-        setLoadingSub(false);
-      }
-    }
-
-    async function loadPreferences() {
-      try {
-        setLoadingPrefs(true);
-        const data = await apiFetch('/users/me/preferences');
-        setPrefs({
-          alert_min_coef: clampAlertMinCoef(data.alert_min_coef ?? 1.5),
-          is_night_mode: data.is_night_mode ?? false,
-          night_mode_start: data.night_mode_start ?? DEFAULT_NIGHT_MODE_START,
-          night_mode_end: data.night_mode_end ?? DEFAULT_NIGHT_MODE_END,
-          stats_display_mode: data.stats_display_mode ?? 'percent',
-        });
-      } catch (err) {
-        console.error('Error loading preferences:', err);
-      } finally {
-        setLoadingPrefs(false);
-      }
-    }
-
-    async function loadReferral() {
-      try {
-        setLoadingRef(true);
-        const data = await apiFetch('/users/me/referral');
-        setReferral(data);
-      } catch (err) {
-        console.error('Error loading referral:', err);
-      } finally {
-        setLoadingRef(false);
-      }
-    }
-
-    async function loadPayments() {
-      try {
-        setLoadingPay(true);
-        const data = await apiFetch('/users/me/payments');
-        setPayments(Array.isArray(data) ? data : data.transactions ?? []);
-      } catch (err) {
-        console.error('Error loading payments:', err);
-      } finally {
-        setLoadingPay(false);
-      }
-    }
-
     if (isAdminProfile) return;
+    if (profileDashboardQuery.isLoading) {
+      setLoadingBks(true);
+      setLoadingSub(true);
+      setLoadingPrefs(true);
+      setLoadingRef(true);
+      setLoadingPay(true);
+      return;
+    }
+    if (profileDashboardQuery.isError) {
+      console.error('Error loading profile dashboard:', profileDashboardQuery.error);
+      setLoadingBks(false);
+      setLoadingSub(false);
+      setLoadingPrefs(false);
+      setLoadingRef(false);
+      setLoadingPay(false);
+      return;
+    }
 
-    loadBookmakers();
-    loadSubscription();
-    loadPreferences();
-    loadReferral();
-    loadPayments();
-  }, [isAdminProfile, setUser]);
+    const dashboard = profileDashboardQuery.data;
+    if (!dashboard) return;
+    setBookmakers(dashboard.bookmakers);
+    setSelectedBkIds(dashboard.selected_bookmaker_ids);
+    setOtherBookmakerName(dashboard.user.other_bookmaker_name ?? '');
+    setUser(dashboard.user);
+    setPrefs({
+      alert_min_coef: clampAlertMinCoef(dashboard.preferences.alert_min_coef ?? 1.5),
+      odds_drop_notifications_enabled: dashboard.preferences.odds_drop_notifications_enabled ?? true,
+      is_night_mode: dashboard.preferences.is_night_mode ?? false,
+      night_mode_start: dashboard.preferences.night_mode_start ?? DEFAULT_NIGHT_MODE_START,
+      night_mode_end: dashboard.preferences.night_mode_end ?? DEFAULT_NIGHT_MODE_END,
+      stats_display_mode: dashboard.preferences.stats_display_mode ?? 'percent',
+    });
+    setReferral(dashboard.referral);
+    setPayments(dashboard.payments.transactions ?? []);
+    setVkDeliveryStatus(dashboard.vk_delivery_status);
+    setLoadingBks(false);
+    setLoadingSub(false);
+    setLoadingPrefs(false);
+    setLoadingRef(false);
+    setLoadingPay(false);
+  }, [
+    isAdminProfile,
+    profileDashboardQuery.data,
+    profileDashboardQuery.error,
+    profileDashboardQuery.isError,
+    profileDashboardQuery.isLoading,
+    setUser,
+  ]);
 
   const loadVkDeliveryStatus = useCallback(async () => {
     if (!userProfile?.vk_user_id) {
@@ -346,12 +326,12 @@ export default function Profile() {
   }, [setUser, userProfile?.vk_user_id]);
 
   useEffect(() => {
-    if (isAdminProfile) return;
+    if (isAdminProfile || !openSettingsSections.vk) return;
     loadVkDeliveryStatus();
-  }, [isAdminProfile, loadVkDeliveryStatus]);
+  }, [isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk]);
 
   useEffect(() => {
-    if (isAdminProfile || !userProfile?.vk_user_id || vkMessagesAllowed) return;
+    if (isAdminProfile || !openSettingsSections.vk || !userProfile?.vk_user_id || vkMessagesAllowed) return;
 
     const checkOnReturn = () => {
       if (document.visibilityState !== 'visible') return;
@@ -366,7 +346,7 @@ export default function Profile() {
       window.removeEventListener('focus', checkOnReturn);
       document.removeEventListener('visibilitychange', checkOnReturn);
     };
-  }, [isAdminProfile, loadVkDeliveryStatus, userProfile?.vk_user_id, vkMessagesAllowed]);
+  }, [isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk, userProfile?.vk_user_id, vkMessagesAllowed]);
 
   /* ────────────────── Handlers ────────────────── */
   const handleDownloadShamraiReport = () => {
@@ -376,10 +356,10 @@ export default function Profile() {
   const handleDownloadPersonalReport = async () => {
     try {
       setDownloadingPersonalReport(true);
-      const token = localStorage.getItem('bet_tma_jwt_token');
-      const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
-      const response = await fetch(`${API_URL}/api/users/me/report`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const token = getStoredAuthToken();
+      const response = await fetch(`${API_BASE_URL}/api/users/me/report`, {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!response.ok) throw new Error('Не удалось сгенерировать PDF');
 
@@ -1194,6 +1174,45 @@ export default function Profile() {
                 <span>{ALERT_MIN_COEF_MIN.toFixed(2)}</span>
                 <span>{ALERT_MIN_COEF_MAX.toFixed(2)}</span>
               </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3.5">
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-300 min-w-0">
+                <Bell className="w-3.5 h-3.5 shrink-0" style={{ color: ACCENT_PINK }} />
+                <span className="min-w-0">
+                  <span className="block text-white">Падение кэфа</span>
+                  <span className="block text-[10px] text-slate-500 leading-snug">
+                    Уведомлять при поле «Упал до»
+                  </span>
+                </span>
+              </label>
+              <button
+                type="button"
+                aria-pressed={prefs.odds_drop_notifications_enabled}
+                onClick={() =>
+                  setPrefs((p) => ({
+                    ...p,
+                    odds_drop_notifications_enabled: !p.odds_drop_notifications_enabled,
+                  }))
+                }
+                className={`relative h-5 w-10 rounded-full transition-all shrink-0 ${
+                  prefs.odds_drop_notifications_enabled ? '' : 'bg-slate-700'
+                }`}
+                style={
+                  prefs.odds_drop_notifications_enabled
+                    ? {
+                        background: `linear-gradient(135deg, ${ACCENT_PINK}, ${ACCENT_BLUE})`,
+                        boxShadow: NEON_GLOW_BLUE,
+                      }
+                    : {}
+                }
+              >
+                <span
+                  className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    prefs.odds_drop_notifications_enabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
             </div>
 
             {/* Ночной режим */}

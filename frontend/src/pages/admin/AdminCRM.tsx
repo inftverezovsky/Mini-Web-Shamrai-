@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { BookmakerResponse } from '../../schemas/schemas';
+import { BookmakerResponse, PaginatedResponse } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
@@ -95,6 +96,17 @@ function pluralRu(value: number, one: string, few: string, many: string) {
   return many;
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedValue(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debouncedValue;
+}
+
 function getMatchStreak(results: ClientRecentMatchResult[]) {
   const currentStatus = results[0]?.status;
   if (!currentStatus) return null;
@@ -118,13 +130,11 @@ function getMatchStreak(results: ClientRecentMatchResult[]) {
 
 export default function AdminCRM() {
   const { user: currentAdmin } = useAuth();
-  const [users, setUsers] = useState<CRMUser[]>([]);
-  const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
-  const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [groupFilter, setGroupFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('all');
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 250);
 
   const [selectedUser, setSelectedUser] = useState<CRMUser | null>(null);
   const [editStatsMode, setEditStatsMode] = useState<StatsDisplayMode>('percent');
@@ -136,25 +146,48 @@ export default function AdminCRM() {
   const [saving, setSaving] = useState(false);
   const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
 
-  const loadCRM = async () => {
-    try {
-      setLoading(true);
-      const [usersList, bkList] = await Promise.all([
-        apiFetch<CRMUser[]>('/admin/users'),
-        apiFetch<BookmakerResponse[]>('/bookmakers'),
-      ]);
-      setUsers(usersList.filter(user => user.role === 'user'));
-      setBookmakers(bkList);
-    } catch (err: any) {
-      notifyError(err.message || 'Ошибка загрузки клиентов');
-    } finally {
-      setLoading(false);
-    }
+  const bookmakersQuery = useQuery<BookmakerResponse[]>({
+    queryKey: ['bookmakers'],
+    queryFn: ({ signal }) => apiFetch<BookmakerResponse[]>('/bookmakers', { signal }),
+    staleTime: 5 * 60_000,
+  });
+
+  const usersQuery = useInfiniteQuery<PaginatedResponse<CRMUser>, Error>({
+    queryKey: ['admin-users-page', debouncedSearchTerm, activityFilter, groupFilter, tagFilter],
+    initialPageParam: null as string | null,
+    enabled: Boolean(currentAdmin),
+    queryFn: ({ pageParam, signal }) => {
+      const params = new URLSearchParams({ limit: '50' });
+      if (pageParam) params.set('cursor', String(pageParam));
+      if (debouncedSearchTerm.trim()) params.set('q', debouncedSearchTerm.trim());
+      if (activityFilter !== 'all') params.set('activity', activityFilter);
+      if (groupFilter !== 'all') params.set('group', groupFilter);
+      if (tagFilter !== 'all') params.set('tag', tagFilter);
+      return apiFetch<PaginatedResponse<CRMUser>>(`/admin/users-page?${params.toString()}`, { signal });
+    },
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
+    staleTime: 20_000,
+  });
+
+  const users = useMemo(() => {
+    const byId = new Map<number, CRMUser>();
+    usersQuery.data?.pages.forEach((page) => {
+      page.items.forEach((user) => {
+        if (user.role === 'user') byId.set(user.telegram_id, user);
+      });
+    });
+    return Array.from(byId.values());
+  }, [usersQuery.data]);
+  const bookmakers = useMemo(() => bookmakersQuery.data ?? [], [bookmakersQuery.data]);
+  const loading = usersQuery.isLoading || bookmakersQuery.isLoading;
+  const paginationMeta = {
+    filteredTotal: usersQuery.data?.pages[0]?.filtered_total ?? users.length,
+    hasMore: Boolean(usersQuery.hasNextPage),
   };
 
-  useEffect(() => {
-    loadCRM();
-  }, []);
+  const loadCRM = useCallback(async () => {
+    await Promise.all([usersQuery.refetch(), bookmakersQuery.refetch()]);
+  }, [bookmakersQuery, usersQuery]);
 
   const groups = useMemo(() => (
     Array.from(new Set(users.map(user => user.client_group?.trim()).filter(Boolean) as string[])).sort()
@@ -353,7 +386,6 @@ export default function AdminCRM() {
         method: 'DELETE',
       });
       notifySuccess('Клиент удален из базы');
-      setUsers(prev => prev.filter(user => user.telegram_id !== deletedUserId));
       setSelectedUser(null);
       await loadCRM();
     } catch (err: any) {
@@ -367,6 +399,23 @@ export default function AdminCRM() {
     return (
       <div className="flex justify-center py-8">
         <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
+      </div>
+    );
+  }
+
+  if (usersQuery.isError || bookmakersQuery.isError) {
+    const message = usersQuery.error?.message || (bookmakersQuery.error as Error | null)?.message || 'Ошибка загрузки клиентов';
+    return (
+      <div className="space-y-3 rounded-2xl border border-rose-500/25 bg-rose-500/10 p-4 text-center text-xs text-rose-100">
+        <AlertTriangle className="mx-auto h-6 w-6 text-rose-300" />
+        <p className="font-bold">{message}</p>
+        <button
+          type="button"
+          onClick={() => void loadCRM()}
+          className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-3 py-2 font-black uppercase tracking-wider text-rose-50"
+        >
+          Повторить
+        </button>
       </div>
     );
   }
@@ -391,9 +440,14 @@ export default function AdminCRM() {
           </p>
         </div>
         <div className="bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-xs px-3 py-1 rounded-full font-black">
-          {filteredUsers.length}/{users.length}
+          {filteredUsers.length}/{paginationMeta.filteredTotal || users.length}
         </div>
       </div>
+      {paginationMeta.hasMore && (
+        <div className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-cyan-100">
+          Показаны первые {users.length} клиентов. Уточните поиск или фильтр, чтобы сузить список.
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-2">
         <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
@@ -578,6 +632,18 @@ export default function AdminCRM() {
           })
         )}
       </div>
+
+      {usersQuery.hasNextPage && (
+        <button
+          type="button"
+          onClick={() => void usersQuery.fetchNextPage()}
+          disabled={usersQuery.isFetchingNextPage}
+          className="mx-auto flex min-h-[42px] items-center justify-center gap-2 rounded-2xl border border-cyan-300/25 bg-cyan-300/10 px-4 text-xs font-black text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
+        >
+          {usersQuery.isFetchingNextPage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
+          <span>{usersQuery.isFetchingNextPage ? 'Загружаем...' : 'Загрузить еще клиентов'}</span>
+        </button>
+      )}
 
       {selectedUser && (
         <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">

@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    host: true,  // Listen on all network interfaces inside the Docker container
+    host: process.env.VITE_DEV_HOST || '127.0.0.1',
   }
 })

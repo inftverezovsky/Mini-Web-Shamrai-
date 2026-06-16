@@ -4,6 +4,7 @@
 
 @layer base {
   :root {
+    --shamrai-ui-scale: 0.5;
     --brand-cyan: #00d2ff;
     --brand-pink: #ff007f;
     --brand-violet: #7c3aed;
@@ -21,6 +22,13 @@
   }
 }
 
+#root {
+  width: calc(100% / var(--shamrai-ui-scale));
+  min-height: calc(100dvh / var(--shamrai-ui-scale));
+  transform: scale(var(--shamrai-ui-scale));
+  transform-origin: top left;
+}
+
 .app-shell::before {
   content: "";
   position: fixed;
@@ -33,6 +41,14 @@
     linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
   background-size: 34px 34px;
   mask-image: linear-gradient(to bottom, black, transparent 78%);
+}
+
+.mobile-app-shell {
+  --bottom-nav-height: 4.75rem;
+  --bottom-nav-gap: 1rem;
+  --bottom-nav-clearance: calc(var(--bottom-nav-height) + var(--bottom-nav-gap) + 2rem);
+  padding-bottom: calc(var(--bottom-nav-clearance) + env(safe-area-inset-bottom, 0px));
+  min-height: 100dvh;
 }
 
 .ambient-field {
@@ -1058,6 +1074,7 @@
 
 .bottom-nav-aurora {
   position: fixed;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   background:
     linear-gradient(135deg, rgba(15, 23, 42, 0.42), rgba(2, 6, 23, 0.28)),
     radial-gradient(circle at 28% 18%, rgba(0, 210, 255, 0.1), transparent 38%),

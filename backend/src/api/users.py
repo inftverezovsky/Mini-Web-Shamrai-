@@ -1,19 +1,31 @@
-import asyncio
+import csv
+import io
 from html import escape
+from io import BytesIO, StringIO
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 
-from src.models.database import get_db
+from src.models.database import get_db, get_read_db
 from src.models.models import User, Bookmaker, Subscription, Bet, user_bets
-from src.schemas.schemas import UserResponse, BookmakerResponse, UserUpdateBookmakers, AdminUpdateUserPreferences, UserUpdateBankroll, BetResponse, OnboardRequest, OnboardResponse
-from src.api.deps import get_current_user, get_current_admin
+from src.schemas.schemas import (
+    BetResponse,
+    BookmakerResponse,
+    OnboardRequest,
+    OnboardResponse,
+    SubscriptionResponse,
+    UserResponse,
+    UserUpdateBankroll,
+    UserUpdateBookmakers,
+)
+from src.api.deps import get_current_user, get_current_user_read, get_current_admin
 from src.core.bookmakers import ensure_standard_bookmakers
 from src.core.config import settings
 from src.core.quiet_hours import (
@@ -23,12 +35,21 @@ from src.core.quiet_hours import (
     quiet_time_or_default,
 )
 from src.core.roles import is_staff_role
-from src.api.payments import call_telegram_api
+from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.referrals import get_referral_stats
 from src.services.vk_delivery import (
     refresh_vk_delivery_status,
     vk_delivery_configured,
     vk_group_id,
+)
+from src.services.statistics import (
+    build_performance_payload,
+    filter_items_by_period,
+    is_paid_client_access,
+    normalize_period,
+    period_start,
+    stat_item_from_bet,
+    summarize_items,
 )
 
 router = APIRouter(tags=["Users"])
@@ -133,6 +154,94 @@ async def load_user_or_404(db: AsyncSession, telegram_id: int) -> User:
             detail="User not found"
         )
     return user
+
+
+def build_preferences_payload(user: User) -> dict[str, Any]:
+    return {
+        "alert_min_coef": min(
+            ALERT_MIN_COEF_MAX,
+            max(ALERT_MIN_COEF_MIN, user.alert_min_coef or ALERT_MIN_COEF_MIN),
+        ),
+        "odds_drop_notifications_enabled": user.odds_drop_notifications_enabled,
+        "is_night_mode": user.is_night_mode,
+        "night_mode_start": quiet_time_or_default(
+            getattr(user, "night_mode_start", None),
+            DEFAULT_NIGHT_MODE_START,
+        ),
+        "night_mode_end": quiet_time_or_default(
+            getattr(user, "night_mode_end", None),
+            DEFAULT_NIGHT_MODE_END,
+        ),
+        "preferred_sports": user.preferred_sports or ALL_SPORT_LABELS,
+        "stats_display_mode": user.stats_display_mode,
+    }
+
+
+async def build_payment_history_payload(db: AsyncSession, user_id: int) -> dict[str, Any]:
+    query = (
+        select(Subscription)
+        .filter(Subscription.user_id == user_id)
+        .options(selectinload(Subscription.plan))
+        .order_by(Subscription.created_at.desc())
+    )
+    result = await db.execute(query)
+    subs = result.scalars().all()
+
+    transactions = []
+    for sub in subs:
+        amount_stars = sub.plan.price_stars if sub.plan else None
+        transactions.append({
+            "id": str(sub.id),
+            "plan_name": sub.plan.name if sub.plan else "Неизвестный тариф",
+            "amount": amount_stars if amount_stars is not None else "—",
+            "amount_currency": f"{sub.plan.price} {sub.plan.currency}" if sub.plan else "—",
+            "amount_stars": amount_stars,
+            "payment_provider": sub.payment_provider or "—",
+            "status": sub.status,
+            "created_at": sub.created_at.isoformat() if sub.created_at else None,
+            "start_date": sub.start_date.isoformat() if sub.start_date else None,
+            "end_date": sub.end_date.isoformat() if sub.end_date else None,
+        })
+
+    return {"transactions": transactions, "total": len(transactions)}
+
+
+async def build_subscription_status_payload(db: AsyncSession, user_id: int) -> Optional[dict[str, Any]]:
+    result = await db.execute(
+        select(Subscription)
+        .filter(Subscription.user_id == user_id)
+        .options(selectinload(Subscription.plan))
+        .order_by(Subscription.created_at.desc())
+    )
+    subscription = result.scalars().first()
+    if not subscription:
+        return None
+    return SubscriptionResponse.model_validate(subscription).model_dump(mode="json")
+
+
+async def build_referral_payload(db: AsyncSession, user: User) -> dict[str, Any]:
+    stats = await get_referral_stats(db, user.telegram_id)
+    return {
+        "referral_code": f"SHAMRAI_{user.telegram_id}",
+        "referral_link": f"https://t.me/Shamra1_bot?start=ref_{user.telegram_id}",
+        "invited_count": stats["invited_count"],
+        "purchased_invited_count": stats["purchased_invited_count"],
+        "discount_step_percent": stats["discount_step_percent"],
+        "referral_discount_percent": stats["referral_discount_percent"],
+        "earned_bonus_days": 0,
+        "pending_rewards": 0,
+    }
+
+
+def build_stored_vk_delivery_payload(user: User) -> dict[str, Any]:
+    return {
+        "vk_user_id": user.vk_user_id,
+        "group_id": vk_group_id(),
+        "configured": vk_delivery_configured(),
+        "group_member": bool(user.vk_group_member),
+        "messages_allowed": bool(user.vk_messages_allowed),
+        "notifications_allowed": bool(user.vk_notifications_allowed),
+    }
 
 
 def validate_onboarding_payload(data: OnboardRequest) -> None:
@@ -317,7 +426,8 @@ def _format_onboarding_report(
     return "\n".join(lines)
 
 
-async def send_onboarding_report(
+async def enqueue_onboarding_report(
+    db: AsyncSession,
     user: User,
     data: OnboardRequest,
     selected_bookmakers: List[Bookmaker],
@@ -328,18 +438,20 @@ async def send_onboarding_report(
         return
 
     message = _format_onboarding_report(user, data, selected_bookmakers, recommendation)
-    result = await asyncio.to_thread(
-        call_telegram_api,
-        "sendMessage",
-        {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=user.telegram_id,
+        payload={
+            "method": "sendMessage",
+            "payload": {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
         },
     )
-    if not result.get("ok"):
-        print(f"Onboarding report delivery failed: {result.get('description', 'unknown error')}")
 
 
 async def save_onboarding_profile(
@@ -397,9 +509,9 @@ async def save_onboarding_profile(
     user.is_onboarded = True
 
     telegram_id = user.telegram_id
-    await db.commit()
+    await db.flush()
     hydrated_user = await load_user_or_404(db, telegram_id)
-    await send_onboarding_report(hydrated_user, data, selected_bookmakers, recommendation)
+    await enqueue_onboarding_report(db, hydrated_user, data, selected_bookmakers, recommendation)
 
     return OnboardResponse(
         status="success",
@@ -412,19 +524,44 @@ async def save_onboarding_profile(
 # --- BOOKMAKERS LIST ENDPOINT ---
 
 @router.get("/bookmakers", response_model=List[BookmakerResponse])
-async def list_bookmakers(db: AsyncSession = Depends(get_db)):
+async def list_bookmakers(db: AsyncSession = Depends(get_read_db)):
     """GET /api/bookmakers/ — Returns a list of all active platforms in the system."""
     return await ensure_standard_bookmakers(db)
 
 @router.get("/users/me", response_model=UserResponse)
-async def get_my_profile(current_user: User = Depends(get_current_user)):
+async def get_my_profile(current_user: User = Depends(get_current_user_read)):
     """GET /api/users/me — Returns the current user profile including badges and bookmakers."""
     return current_user
+
+
+@router.get("/users/me/profile-dashboard")
+async def get_my_profile_dashboard(
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregated profile payload for fast profile screen boot."""
+    user = await load_user_or_404(db, current_user.telegram_id)
+    if user.vk_user_id:
+        await refresh_vk_delivery_status(db, user, commit=True)
+    bookmakers = await ensure_standard_bookmakers(db)
+    return {
+        "user": UserResponse.model_validate(user).model_dump(mode="json"),
+        "bookmakers": [
+            BookmakerResponse.model_validate(bookmaker).model_dump(mode="json")
+            for bookmaker in bookmakers
+        ],
+        "selected_bookmaker_ids": [bookmaker.id for bookmaker in user.bookmakers],
+        "preferences": build_preferences_payload(user),
+        "subscription": await build_subscription_status_payload(db, user.telegram_id),
+        "payments": await build_payment_history_payload(db, user.telegram_id),
+        "referral": await build_referral_payload(db, user),
+        "vk_delivery_status": build_stored_vk_delivery_payload(user),
+    }
 
 # --- SUBSCRIBER BOOKMAKERS READ/WRITE ---
 
 @router.get("/users/me/bookmakers", response_model=List[int])
-async def get_my_bookmakers(current_user: User = Depends(get_current_user)):
+async def get_my_bookmakers(current_user: User = Depends(get_current_user_read)):
     """GET /api/users/me/bookmakers — Returns IDs of bookmakers chosen by user."""
     return [bk.id for bk in current_user.bookmakers]
 
@@ -532,8 +669,8 @@ async def update_my_bankroll(
 
 @router.get("/users/me/bets", response_model=List[BetResponse])
 async def get_my_taken_bets(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """GET /api/users/me/bets — Returns a list of all bets currently tracked by the user."""
     query = (
@@ -547,13 +684,172 @@ async def get_my_taken_bets(
     return result.scalars().all()
 
 
-from fastapi.responses import StreamingResponse
-import io
+@router.get("/users/me/bets/timeline")
+async def get_my_taken_bets_timeline(
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Resolved paid client bets grouped by settlement month/day with 1-unit ROI stats."""
+    normalized_period = normalize_period(period)
+    query = (
+        select(Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        .join(user_bets, user_bets.c.bet_id == Bet.id)
+        .filter(
+            user_bets.c.user_id == current_user.telegram_id,
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    start = period_start(normalized_period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    rows = (await db.execute(query)).all()
+    paid_items = []
+    excluded_items = []
+    for bet, access_type, match_charged, taken_at in rows:
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+        )
+        if not item:
+            continue
+        if is_paid_client_access(access_type, match_charged):
+            paid_items.append(item)
+        else:
+            excluded_items.append(item)
+
+    payload = build_performance_payload(paid_items, include_bets=True, period=normalized_period)
+    filtered_excluded_items = filter_items_by_period(excluded_items, normalized_period)
+    payload["excluded_summary"] = summarize_items(filtered_excluded_items)
+    payload["excluded_bets"] = filtered_excluded_items
+    return payload
+
+def _user_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for item in items:
+        rows.append({
+            "resolved_at": item.get("resolved_at") or "",
+            "event_name": item.get("event_name") or "",
+            "status": item.get("status") or "",
+            "coefficient": item.get("coefficient") or 0,
+            "profit_units": item.get("profit_units") or 0,
+            "roi_percent": round(float(item.get("profit_units") or 0) * 100, 2),
+            "source": item.get("source_type") or "",
+            "sport": item.get("sport_type") or "",
+            "bookmakers": ", ".join(item.get("bookmaker_names") or []),
+            "outcome": item.get("outcome") or "",
+        })
+    return rows
+
+
+def _user_csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingResponse:
+    fieldnames = [
+        "resolved_at",
+        "event_name",
+        "status",
+        "coefficient",
+        "profit_units",
+        "roi_percent",
+        "source",
+        "sport",
+        "bookmakers",
+        "outcome",
+    ]
+    buffer = StringIO()
+    buffer.write("\ufeff")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _user_xlsx_response(rows: list[dict[str, Any]], filename: str) -> StreamingResponse:
+    from openpyxl import Workbook
+
+    headers = [
+        ("resolved_at", "Дата расчета"),
+        ("event_name", "Матч"),
+        ("status", "Результат"),
+        ("coefficient", "КФ"),
+        ("profit_units", "Profit, u"),
+        ("roi_percent", "ROI ставки, %"),
+        ("source", "Источник"),
+        ("sport", "Спорт"),
+        ("bookmakers", "БК"),
+        ("outcome", "Исход"),
+    ]
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "My Bets"
+    worksheet.append([label for _key, label in headers])
+    for row in rows:
+        worksheet.append([row.get(key, "") for key, _label in headers])
+    for column in worksheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column)
+        worksheet.column_dimensions[column[0].column_letter].width = min(max(max_length + 2, 10), 48)
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/users/me/bets/timeline/export")
+async def export_my_taken_bets_timeline(
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    normalized_period = normalize_period(period)
+    query = (
+        select(Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        .join(user_bets, user_bets.c.bet_id == Bet.id)
+        .filter(
+            user_bets.c.user_id == current_user.telegram_id,
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    start = period_start(normalized_period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    rows = (await db.execute(query)).all()
+    paid_items = []
+    for bet, access_type, match_charged, taken_at in rows:
+        if not is_paid_client_access(access_type, match_charged):
+            continue
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+        )
+        if item:
+            paid_items.append(item)
+    export_rows = _user_export_rows(filter_items_by_period(paid_items, normalized_period))
+    filename = f"shamrai_my_bets_{normalized_period}.{format}"
+    return _user_xlsx_response(export_rows, filename) if format == "xlsx" else _user_csv_response(export_rows, filename)
 
 @router.get("/users/me/report")
 async def generate_user_pdf_report(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/users/me/report
@@ -738,6 +1034,7 @@ async def generate_user_pdf_report(
 
 class UserPreferencesUpdate(BaseModel):
     alert_min_coef: Optional[float] = None
+    odds_drop_notifications_enabled: Optional[bool] = None
     is_night_mode: Optional[bool] = None
     night_mode_start: Optional[str] = None
     night_mode_end: Optional[str] = None
@@ -752,25 +1049,9 @@ class VkDeliveryStatusUpdate(BaseModel):
 
 
 @router.get("/users/me/preferences")
-async def get_my_preferences(current_user: User = Depends(get_current_user)):
+async def get_my_preferences(current_user: User = Depends(get_current_user_read)):
     """GET /api/users/me/preferences — Returns current notification and display preferences."""
-    return {
-        "alert_min_coef": min(
-            ALERT_MIN_COEF_MAX,
-            max(ALERT_MIN_COEF_MIN, current_user.alert_min_coef or ALERT_MIN_COEF_MIN),
-        ),
-        "is_night_mode": current_user.is_night_mode,
-        "night_mode_start": quiet_time_or_default(
-            getattr(current_user, "night_mode_start", None),
-            DEFAULT_NIGHT_MODE_START,
-        ),
-        "night_mode_end": quiet_time_or_default(
-            getattr(current_user, "night_mode_end", None),
-            DEFAULT_NIGHT_MODE_END,
-        ),
-        "preferred_sports": current_user.preferred_sports or ALL_SPORT_LABELS,
-        "stats_display_mode": current_user.stats_display_mode
-    }
+    return build_preferences_payload(current_user)
 
 
 @router.put("/users/me/preferences")
@@ -787,6 +1068,9 @@ async def update_my_preferences(
                 detail="Минимальный коэффициент должен быть от 1.0 до 1.6"
             )
         current_user.alert_min_coef = data.alert_min_coef
+
+    if data.odds_drop_notifications_enabled is not None:
+        current_user.odds_drop_notifications_enabled = data.odds_drop_notifications_enabled
 
     if data.is_night_mode is not None:
         current_user.is_night_mode = data.is_night_mode
@@ -836,6 +1120,7 @@ async def update_my_preferences(
         "status": "success",
         "preferences": {
             "alert_min_coef": current_user.alert_min_coef,
+            "odds_drop_notifications_enabled": current_user.odds_drop_notifications_enabled,
             "is_night_mode": current_user.is_night_mode,
             "night_mode_start": quiet_time_or_default(
                 getattr(current_user, "night_mode_start", None),
@@ -876,19 +1161,15 @@ async def update_my_vk_delivery_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Stores VK permission grants and refreshes message permission from VK when possible."""
+    """Stores VK notification intent and refreshes verified permissions from VK."""
     if not current_user.vk_user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="VK ID is not linked to this profile",
         )
 
-    if data.messages_allowed is not None:
-        messages_allowed = bool(data.messages_allowed)
-        current_user.vk_messages_allowed = messages_allowed
-
-    if data.group_member is not None:
-        current_user.vk_group_member = bool(data.group_member)
+    if data.messages_allowed is False:
+        current_user.vk_messages_allowed = False
 
     if data.notifications_allowed is not None:
         current_user.vk_notifications_allowed = bool(data.notifications_allowed)
@@ -912,56 +1193,19 @@ async def update_my_vk_delivery_status(
 
 @router.get("/users/me/payments")
 async def get_my_payment_history(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """GET /api/users/me/payments — Returns all subscription payment transactions for the user."""
-    from src.models.models import SubscriptionPlan
-    
-    query = (
-        select(Subscription)
-        .filter(Subscription.user_id == current_user.telegram_id)
-        .options(selectinload(Subscription.plan))
-        .order_by(Subscription.created_at.desc())
-    )
-    result = await db.execute(query)
-    subs = result.scalars().all()
-
-    transactions = []
-    for sub in subs:
-        amount_stars = sub.plan.price_stars if sub.plan else None
-        transactions.append({
-            "id": str(sub.id),
-            "plan_name": sub.plan.name if sub.plan else "Неизвестный тариф",
-            "amount": amount_stars if amount_stars is not None else "—",
-            "amount_currency": f"{sub.plan.price} {sub.plan.currency}" if sub.plan else "—",
-            "amount_stars": amount_stars,
-            "payment_provider": sub.payment_provider or "—",
-            "status": sub.status,
-            "created_at": sub.created_at.isoformat() if sub.created_at else None,
-            "start_date": sub.start_date.isoformat() if sub.start_date else None,
-            "end_date": sub.end_date.isoformat() if sub.end_date else None
-        })
-
-    return {"transactions": transactions, "total": len(transactions)}
+    return await build_payment_history_payload(db, current_user.telegram_id)
 
 
 # --- SUBSCRIBER REFERRAL STATS (stub) ---
 
 @router.get("/users/me/referral")
 async def get_my_referral_stats(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db),
 ):
     """GET /api/users/me/referral — Returns referral stats and subscription discount."""
-    stats = await get_referral_stats(db, current_user.telegram_id)
-    return {
-        "referral_code": f"SHAMRAI_{current_user.telegram_id}",
-        "referral_link": f"https://t.me/Shamra1_bot?start=ref_{current_user.telegram_id}",
-        "invited_count": stats["invited_count"],
-        "purchased_invited_count": stats["purchased_invited_count"],
-        "discount_step_percent": stats["discount_step_percent"],
-        "referral_discount_percent": stats["referral_discount_percent"],
-        "earned_bonus_days": 0,
-        "pending_rewards": 0,
-    }
+    return await build_referral_payload(db, current_user)

@@ -10,6 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@plausible-analytics/tracker": "^0.4.5",
+    "@tanstack/react-query": "^5.101.0",
+    "@tanstack/react-virtual": "^3.14.2",
     "@vkid/sdk": "^2.6.5",
     "@vkontakte/vk-bridge": "^3.0.2",
     "framer-motion": "^12.40.0",

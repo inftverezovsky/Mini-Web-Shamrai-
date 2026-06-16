@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -50,6 +50,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
                         code_verifier="verifier",
                         state="state",
                     ),
+                    response=Response(),
                     db=db,
                 )
 

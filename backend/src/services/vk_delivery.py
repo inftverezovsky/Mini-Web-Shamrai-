@@ -139,9 +139,9 @@ async def refresh_vk_delivery_status(
     changed = False
 
     remote_allowed = await asyncio.to_thread(check_vk_messages_allowed, vk_user_id)
-    if remote_allowed is True and not messages_allowed:
-        setattr(user, "vk_messages_allowed", True)
-        messages_allowed = True
+    if remote_allowed is not None and remote_allowed != messages_allowed:
+        setattr(user, "vk_messages_allowed", bool(remote_allowed))
+        messages_allowed = bool(remote_allowed)
         changed = True
 
     remote_group_member = None
@@ -198,7 +198,13 @@ def html_to_vk_text(value: str) -> str:
     return text.strip()
 
 
-def _vk_api_request(method: str, params: dict[str, Any], *, timeout: float = 8.0) -> dict:
+def _vk_api_request(
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float = 8.0,
+    log_response: bool = True,
+) -> dict:
     if not vk_delivery_configured():
         return {"ok": False, "description": "VK group token is not configured"}
 
@@ -221,11 +227,27 @@ def _vk_api_request(method: str, params: dict[str, Any], *, timeout: float = 8.0
     try:
         with _vk_urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
-            logger.info("VK Response: %s", result)
+            if log_response:
+                logger.info("VK Response: %s", result)
+            else:
+                logger.info(
+                    "VK Response: method=%s ok=%s has_error=%s",
+                    method,
+                    not bool(result.get("error")),
+                    bool(result.get("error")),
+                )
     except urllib.error.HTTPError as error:
         try:
             result = json.loads(error.read().decode("utf-8"))
-            logger.info("VK Response: %s", result)
+            if log_response:
+                logger.info("VK Response: %s", result)
+            else:
+                logger.info(
+                    "VK Response: method=%s ok=%s has_error=%s",
+                    method,
+                    not bool(result.get("error")),
+                    bool(result.get("error")),
+                )
         except Exception:
             logger.warning("[VKDelivery] VK HTTP %s for %s: %s", error.code, method, error.reason)
             return {"ok": False, "description": f"VK HTTP {error.code}: {error.reason}"}
@@ -245,6 +267,38 @@ def _vk_api_request(method: str, params: dict[str, Any], *, timeout: float = 8.0
         )
         return {"ok": False, "description": description, "error": error_info}
     return {"ok": True, "response": result.get("response")}
+
+
+def get_vk_unread_conversations(count: Optional[int] = None) -> dict:
+    try:
+        clean_count = int(count or settings.VK_DIALOG_POLLING_BATCH_SIZE or 20)
+    except (TypeError, ValueError):
+        clean_count = 20
+    clean_count = max(1, min(clean_count, 200))
+    return _vk_api_request(
+        "messages.getConversations",
+        {
+            "count": clean_count,
+            "filter": "unread",
+        },
+        timeout=8.0,
+        log_response=False,
+    )
+
+
+def mark_vk_conversation_read(peer_id: Any) -> dict:
+    try:
+        clean_peer_id = int(str(peer_id or "").strip())
+    except (TypeError, ValueError):
+        return {"ok": False, "description": "VK peer_id is invalid"}
+    if clean_peer_id <= 0:
+        return {"ok": False, "description": "VK peer_id is invalid"}
+    return _vk_api_request(
+        "messages.markAsRead",
+        {"peer_id": clean_peer_id},
+        timeout=8.0,
+        log_response=False,
+    )
 
 
 def _multipart_request(url: str, field_name: str, file_path: str, *, timeout: float = 20.0) -> dict:
@@ -513,9 +567,11 @@ __all__ = [
     "build_vk_forecast_keyboard",
     "check_vk_group_member",
     "check_vk_messages_allowed",
+    "get_vk_unread_conversations",
     "html_to_vk_text",
     "is_vk_message_permission_error",
     "local_static_asset_path",
+    "mark_vk_conversation_read",
     "mark_vk_messages_denied",
     "probe_vk_api",
     "refresh_vk_delivery_status",

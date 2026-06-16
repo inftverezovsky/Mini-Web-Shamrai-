@@ -12,6 +12,7 @@ ADMIN_ROLES = ("admin", "owner")
 
 RESET_TABLES = [
     "admin_audit_logs",
+    "delivery_outbox",
     "daily_reward_claims",
     "user_badges",
     "user_notes",
@@ -56,6 +57,7 @@ ADMIN_RESET_COLUMNS = {
     "tg_chat_joined": "false",
     "has_used_shield": "false",
     "alert_min_coef": "1.0",
+    "odds_drop_notifications_enabled": "true",
     "is_night_mode": "false",
     "night_mode_start": "'23:00'",
     "night_mode_end": "'08:00'",

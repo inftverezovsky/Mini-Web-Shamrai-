@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getVkIdConfig } from '../utils/vkId';
+import { trackEvent, trackPageView } from '../utils/analytics';
 
 export default function BrowserAuthScreen() {
   const { error, loading, loginWithVk, loginWithTelegramBot } = useAuth();
@@ -15,12 +16,21 @@ export default function BrowserAuthScreen() {
   const showVkLogin = vkConfig.ready && vkConfig.originCompatible;
   const secureAppUrl = vkConfig.canonicalAppUrl || 'https://shamra1.pro/app/';
 
+  React.useEffect(() => {
+    trackPageView('/auth', {
+      vk_ready: showVkLogin,
+      telegram_ready: Boolean(botUsername),
+    });
+  }, [botUsername, showVkLogin]);
+
   const handleVkLogin = async () => {
     if (!vkConfig.ready) return;
     try {
       setVkBusy(true);
+      trackEvent('Auth Started', { provider: 'vk' });
       await loginWithVk();
     } catch {
+      trackEvent('Auth Failed', { provider: 'vk' });
       // AuthContext exposes the message in-place; keep the screen available.
     } finally {
       setVkBusy(false);
@@ -31,9 +41,11 @@ export default function BrowserAuthScreen() {
     try {
       setTelegramBusy(true);
       setTelegramError(null);
+      trackEvent('Auth Started', { provider: 'telegram' });
       await loginWithTelegramBot();
     } catch (err: any) {
       setTelegramError(err?.message || 'Не удалось войти через Telegram');
+      trackEvent('Auth Failed', { provider: 'telegram' });
     } finally {
       setTelegramBusy(false);
     }

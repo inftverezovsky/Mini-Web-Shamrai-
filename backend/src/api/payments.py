@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
+import hmac
 import json
-import logging
-import mimetypes
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +16,6 @@ from pydantic import BaseModel
 from typing import Optional, Any
 from decimal import Decimal
 import base64
-import secrets
 
 from uuid import UUID
 from src.models.database import get_db
@@ -26,9 +26,14 @@ from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.api.deps import get_current_user
 from src.services.referrals import get_referral_discount_percent
 from src.services.match_access import activate_match_package
+from src.services.crowd_bets import apply_verified_crowd_contribution
+from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
+from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
-logger = logging.getLogger("uvicorn")
+
+PAYMENT_PURCHASE_CROWD_BET = "crowd_bet"
+PAYMENT_PURCHASE_BET_HINT = "bet_hint"
 
 class InvoiceRequest(BaseModel):
     plan_id: Optional[int] = None
@@ -45,179 +50,19 @@ class DebugYooKassaCompleteRequest(YooKassaPaymentRequest):
     attempt_id: Optional[UUID] = None
 
 
-def call_telegram_api(
-    method: str,
-    payload: dict,
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
-) -> dict:
-    """Helper to perform synchronous POST calls to the Telegram Bot API."""
-    if not settings.has_real_telegram_token:
-        return {"ok": False, "description": "Telegram bot token is not configured"}
-
-    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/{method}"
-    headers = {"Content-Type": "application/json"}
-    req_body = json.dumps(payload).encode("utf-8")
-    opener = urllib.request.build_opener()
-    if settings.HTTPS_PROXY.strip():
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({
-                "http": settings.HTTPS_PROXY.strip(),
-                "https": settings.HTTPS_PROXY.strip(),
-            })
-        )
-    
-    retry_count = settings.TELEGRAM_API_RETRIES if retries is None else retries
-    attempts = max(1, int(retry_count or 0) + 1)
-    request_timeout = timeout or settings.TELEGRAM_API_TIMEOUT_SECONDS
-    last_description = "unknown error"
-
-    for attempt in range(1, attempts + 1):
-        try:
-            req = urllib.request.Request(url, data=req_body, headers=headers, method="POST")
-            with opener.open(req, timeout=request_timeout) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                return res_data
-        except urllib.error.HTTPError as e:
-            try:
-                error_payload = json.loads(e.read().decode("utf-8"))
-                description = error_payload.get("description") or f"HTTP {e.code}"
-            except Exception:
-                description = f"HTTP {e.code}: {e.reason}"
-            print(f"Telegram Bot API call failed: {method}: {description}")
-            return {"ok": False, "description": description}
-        except Exception as e:
-            last_description = str(e)
-            if attempt < attempts:
-                print(f"Telegram Bot API call retrying: {method}: attempt {attempt}/{attempts}: {e}")
-                time.sleep(min(0.8 * attempt, 2.0))
-                continue
-            print(f"Telegram Bot API call failed: {method}: {e}")
-            return {"ok": False, "description": last_description}
-
-    return {"ok": False, "description": last_description}
+class TegroPaymentRequest(BaseModel):
+    plan_id: int
+    promo_code: Optional[str] = None
 
 
-async def call_telegram_api_async(
-    method: str,
-    payload: dict,
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
-) -> dict:
-    return await asyncio.to_thread(call_telegram_api, method, payload, timeout, retries)
+class DebugTegroCompleteRequest(TegroPaymentRequest):
+    attempt_id: Optional[UUID] = None
 
 
-def run_telegram_api_background(
-    method: str,
-    payload: dict,
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
-) -> None:
-    task = asyncio.create_task(call_telegram_api_async(method, payload, timeout, retries))
-
-    def _log_failure(done_task: asyncio.Task) -> None:
-        try:
-            result = done_task.result()
-            if not result.get("ok"):
-                logger.info(
-                    "[Telegram] Background %s failed: %s",
-                    method,
-                    result.get("description", "unknown error"),
-                )
-        except Exception as exc:
-            logger.exception("[Telegram] Background %s crashed: %s", method, exc)
-
-    task.add_done_callback(_log_failure)
-
-
-def _telegram_multipart_field_value(value: Any) -> str:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def call_telegram_api_multipart(
-    method: str,
-    payload: dict,
-    files: dict[str, tuple[str, bytes, str]],
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
-) -> dict:
-    """Helper to perform synchronous multipart/form-data calls to the Telegram Bot API."""
-    if not settings.has_real_telegram_token:
-        return {"ok": False, "description": "Telegram bot token is not configured"}
-
-    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/{method}"
-    boundary = f"----shamrai-telegram-{secrets.token_hex(16)}"
-    body_parts: list[bytes] = []
-
-    for key, value in payload.items():
-        if value is None:
-            continue
-        body_parts.extend([
-            f"--{boundary}\r\n".encode("utf-8"),
-            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
-            _telegram_multipart_field_value(value).encode("utf-8"),
-            b"\r\n",
-        ])
-
-    for field_name, (filename, contents, content_type) in files.items():
-        clean_filename = filename or field_name
-        guessed_type = content_type or mimetypes.guess_type(clean_filename)[0] or "application/octet-stream"
-        body_parts.extend([
-            f"--{boundary}\r\n".encode("utf-8"),
-            (
-                f'Content-Disposition: form-data; name="{field_name}"; '
-                f'filename="{clean_filename}"\r\n'
-            ).encode("utf-8"),
-            f"Content-Type: {guessed_type}\r\n\r\n".encode("utf-8"),
-            contents,
-            b"\r\n",
-        ])
-
-    body_parts.append(f"--{boundary}--\r\n".encode("utf-8"))
-    req_body = b"".join(body_parts)
-    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
-
-    opener = urllib.request.build_opener()
-    if settings.HTTPS_PROXY.strip():
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({
-                "http": settings.HTTPS_PROXY.strip(),
-                "https": settings.HTTPS_PROXY.strip(),
-            })
-        )
-
-    retry_count = settings.TELEGRAM_API_RETRIES if retries is None else retries
-    attempts = max(1, int(retry_count or 0) + 1)
-    request_timeout = timeout or settings.TELEGRAM_API_TIMEOUT_SECONDS
-    last_description = "unknown error"
-
-    for attempt in range(1, attempts + 1):
-        try:
-            req = urllib.request.Request(url, data=req_body, headers=headers, method="POST")
-            with opener.open(req, timeout=request_timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            try:
-                error_payload = json.loads(e.read().decode("utf-8"))
-                description = error_payload.get("description") or f"HTTP {e.code}"
-            except Exception:
-                description = f"HTTP {e.code}: {e.reason}"
-            print(f"Telegram Bot API multipart call failed: {method}: {description}")
-            return {"ok": False, "description": description}
-        except Exception as e:
-            last_description = str(e)
-            if attempt < attempts:
-                print(f"Telegram Bot API multipart call retrying: {method}: attempt {attempt}/{attempts}: {e}")
-                time.sleep(min(0.8 * attempt, 2.0))
-                continue
-            print(f"Telegram Bot API multipart call failed: {method}: {e}")
-            return {"ok": False, "description": last_description}
-
-    return {"ok": False, "description": last_description}
+class TegroWebhookSignatureError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(f"tegro_webhook_{code}")
+        self.code = code
 
 
 def _telegram_text(value: str, max_length: int) -> str:
@@ -265,7 +110,7 @@ def _request_yookassa_payment(payment_id: str) -> dict:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with _open_payment_provider_request(req, timeout=15) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise HTTPException(
@@ -277,6 +122,144 @@ def _request_yookassa_payment(payment_id: str) -> dict:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"YooKassa payment verification failed: {e}",
         )
+
+
+def _open_payment_provider_request(req: urllib.request.Request, timeout: float = 15):
+    # Telegram may need a global HTTPS proxy on this VDS, but payment providers should go direct.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(req, timeout=timeout)
+
+
+def _tegro_api_url(path: str) -> str:
+    base = (settings.TEGRO_API_BASE_URL or "https://tegro.money/api").strip().rstrip("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    return f"{base}{clean_path}"
+
+
+def _tegro_sign_json_body(json_body: str, api_key: str) -> str:
+    return hmac.new(api_key.encode("utf-8"), json_body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _tegro_payment_form_signature(fields: dict[str, str], secret_key: str) -> str:
+    query = _tegro_signature_query(fields)
+    return hashlib.md5((query + secret_key).encode("utf-8")).hexdigest().lower()
+
+
+def _create_tegro_payment_url(payload: dict[str, Any]) -> str:
+    fields: dict[str, str] = {
+        "shop_id": str(payload["shop_id"]),
+        "amount": str(payload["amount"]),
+        "order_id": str(payload["order_id"]),
+        "lang": str(payload.get("lang") or "ru"),
+        "currency": str(payload.get("currency") or "RUB"),
+    }
+    receipt = payload.get("receipt") or {}
+    items = receipt.get("items") if isinstance(receipt, dict) else None
+    if isinstance(items, list):
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            prefix = f"receipt[items][{index}]"
+            fields[f"{prefix}[name]"] = str(item.get("name") or "")
+            fields[f"{prefix}[count]"] = str(item.get("count") or 1)
+            fields[f"{prefix}[price]"] = str(item.get("price") or fields["amount"])
+
+    fields["sign"] = _tegro_payment_form_signature(fields, settings.TEGRO_SECRET_KEY)
+    return "https://tegro.money/pay/?" + urllib.parse.urlencode(
+        [(key, fields[key]) for key in fields],
+        doseq=False,
+        quote_via=urllib.parse.quote_plus,
+    )
+
+
+def _create_tegro_order(payload: dict[str, Any]) -> dict[str, Any]:
+    if not settings.has_tegro_api_credentials:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Tegro checkout is not configured",
+        )
+
+    json_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    sign = _tegro_sign_json_body(json_body, settings.TEGRO_API_KEY)
+    req = urllib.request.Request(
+        _tegro_api_url("/createOrder/"),
+        data=json_body.encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {sign}",
+        },
+        method="POST",
+    )
+
+    try:
+        with _open_payment_provider_request(req, timeout=15) as response:
+            envelope = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        response_body = e.read().decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Tegro checkout error: HTTP {e.code}: {response_body[:200]}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Tegro checkout error: {e}")
+
+    if envelope.get("type") != "success" or not isinstance(envelope.get("data"), dict):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Tegro checkout error: {envelope.get('desc') or 'unexpected response'}",
+        )
+    data = envelope["data"]
+    if not data.get("url"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Tegro did not return payment URL")
+    return data
+
+
+def _tegro_signature_query(fields: dict[str, str]) -> str:
+    return urllib.parse.urlencode(
+        [(key, fields[key]) for key in sorted(fields)],
+        doseq=False,
+        quote_via=urllib.parse.quote_plus,
+    )
+
+
+def _verify_tegro_notification(raw_fields: dict[str, Any]) -> dict[str, Any]:
+    provided_sign = str(raw_fields.get("sign") or "").strip().lower()
+    if not provided_sign:
+        raise TegroWebhookSignatureError("missing_sign")
+
+    fields_for_sign: dict[str, str] = {}
+    for key, value in raw_fields.items():
+        if key == "sign" or value is None:
+            continue
+        fields_for_sign[str(key)] = str(value)
+
+    query = _tegro_signature_query(fields_for_sign)
+    expected = hashlib.md5((query + settings.TEGRO_SECRET_KEY).encode("utf-8")).hexdigest().lower()
+    if not hmac.compare_digest(expected, provided_sign):
+        raise TegroWebhookSignatureError("bad_signature")
+
+    order_id = str(raw_fields.get("order_id") or "").strip()
+    amount_str = str(raw_fields.get("amount") or "").strip()
+    if not order_id or not amount_str:
+        raise TegroWebhookSignatureError("missing_required_fields")
+
+    try:
+        amount = Decimal(amount_str)
+    except Exception:
+        raise TegroWebhookSignatureError("bad_amount")
+    if amount <= 0:
+        raise TegroWebhookSignatureError("bad_amount")
+
+    return {
+        "shop_id": str(raw_fields.get("shop_id") or ""),
+        "amount": amount.quantize(Decimal("0.01")),
+        "order_id": order_id,
+        "payment_system": str(raw_fields.get("payment_system") or ""),
+        "currency": str(raw_fields.get("currency") or "RUB"),
+        "payment_id": str(raw_fields.get("payment_id") or "") or None,
+        "is_test": str(raw_fields.get("test") or "").lower() in {"1", "true"},
+        "raw": raw_fields,
+    }
 
 
 def _decimal_eq(left: Decimal, right: Decimal) -> bool:
@@ -355,6 +338,43 @@ async def _create_payment_attempt(
     return attempt
 
 
+async def create_telegram_stars_invoice_link(
+    *,
+    attempt: PaymentAttempt,
+    title: str,
+    description: str,
+    label: str,
+) -> str:
+    if settings.DEBUG_MODE:
+        return f"https://t.me/invoice/mock_stars_attempt_{attempt.id}"
+
+    if not settings.has_real_telegram_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram Stars billing is not configured",
+        )
+
+    tg_payload = {
+        "title": _telegram_text(title, 32),
+        "description": _telegram_text(description, 255),
+        "payload": _telegram_invoice_payload(attempt),
+        "provider_token": "",
+        "currency": "XTR",
+        "prices": [{
+            "label": _telegram_text(label, 32),
+            "amount": int(Decimal(attempt.amount)),
+        }],
+    }
+
+    res = await call_telegram_api_async("createInvoiceLink", tg_payload)
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Telegram billing interface error: {res.get('description', 'Unknown error')}",
+        )
+    return res["result"]
+
+
 async def _unlock_single_bet(
     db: AsyncSession,
     *,
@@ -402,6 +422,7 @@ async def _process_payment_attempt(
             selectinload(PaymentAttempt.plan),
             selectinload(PaymentAttempt.bet),
         )
+        .with_for_update()
     )
     attempt = attempt_res.scalars().first()
     if not attempt:
@@ -435,10 +456,24 @@ async def _process_payment_attempt(
         "user_id": user.telegram_id,
     }
 
+    plan: Optional[SubscriptionPlan] = None
+    bet: Optional[Bet] = None
     if attempt.plan_id:
         plan = attempt.plan
         if not plan:
             return {"status": "plan_missing", "attempt_id": str(attempt.id)}
+    elif attempt.bet_id:
+        bet = attempt.bet
+        if not bet:
+            return {"status": "bet_missing", "attempt_id": str(attempt.id)}
+    else:
+        return {"status": "attempt_has_no_item", "attempt_id": str(attempt.id)}
+
+    attempt.status = "processing"
+    attempt.provider_payment_id = provider_payment_id
+    await db.flush()
+
+    if plan:
         subscription = await activate_match_package(
             db,
             user=user,
@@ -451,22 +486,34 @@ async def _process_payment_attempt(
             "subscription_id": str(subscription.id),
             "matches_added": plan.match_count,
         })
-    elif attempt.bet_id:
-        bet = attempt.bet
-        if not bet:
-            return {"status": "bet_missing", "attempt_id": str(attempt.id)}
-        unlocked = await _unlock_single_bet(
-            db,
-            user=user,
-            bet=bet,
-            access_type=f"{provider}_single_bet",
-        )
-        result.update({"bet_id": str(bet.id), "already_unlocked": not unlocked})
-    else:
-        return {"status": "attempt_has_no_item", "attempt_id": str(attempt.id)}
+    elif bet:
+        metadata = attempt.metadata_json or {}
+        purchase_type = str(metadata.get("purchase_type") or "single_bet")
+        if purchase_type == PAYMENT_PURCHASE_CROWD_BET:
+            crowd_bet_id = int(metadata.get("crowd_bet_id") or 0)
+            crowd_result = await apply_verified_crowd_contribution(
+                db,
+                user=user,
+                crowd_bet_id=crowd_bet_id,
+                amount_xtr=amount,
+            )
+            result.update(crowd_result)
+        elif purchase_type == PAYMENT_PURCHASE_BET_HINT:
+            result.update({
+                "bet_id": str(bet.id),
+                "purchase_type": PAYMENT_PURCHASE_BET_HINT,
+                "hint_ready": True,
+            })
+        else:
+            unlocked = await _unlock_single_bet(
+                db,
+                user=user,
+                bet=bet,
+                access_type=f"{provider}_single_bet",
+            )
+            result.update({"bet_id": str(bet.id), "already_unlocked": not unlocked})
 
     attempt.status = "succeeded"
-    attempt.provider_payment_id = provider_payment_id
     attempt.processed_at = datetime.now(timezone.utc)
     if raw_payload is not None:
         attempt.metadata_json = {
@@ -475,6 +522,40 @@ async def _process_payment_attempt(
         }
     await db.flush()
     return result
+
+
+def _payment_confirmation_text(result: dict[str, Any]) -> str:
+    if result.get("matches_added") is not None:
+        return f"✅ Абонемент успешно оформлен: +{result['matches_added']} матчей!"
+    if result.get("purchase_type") == PAYMENT_PURCHASE_BET_HINT:
+        return "✅ Подсказка оплачена. Вернитесь в приложение, чтобы открыть аналитику."
+    if result.get("crowd_bet_id"):
+        return "✅ Вклад в складчину засчитан."
+    if result.get("bet_id"):
+        return "✅ Прогноз успешно разблокирован!"
+    return "✅ Платеж успешно обработан!"
+
+
+async def _enqueue_payment_confirmation(db: AsyncSession, result: dict[str, Any]) -> None:
+    if result.get("status") != "success":
+        return
+    user_id = result.get("user_id")
+    attempt_id = result.get("attempt_id")
+    if not attempt_id or not is_personal_telegram_user_id(user_id):
+        return
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=int(user_id),
+        dedupe_key=f"payment_attempt:{attempt_id}:telegram_confirmation",
+        payload={
+            "method": "sendMessage",
+            "payload": {
+                "chat_id": int(user_id),
+                "text": _payment_confirmation_text(result),
+            },
+        },
+    )
 
 # --- GENERATE TELEGRAM STARS INVOICE LINK ---
 
@@ -530,46 +611,21 @@ async def create_stars_invoice(
             promo_code=promo_code,
             metadata={"discount_percent": discount_percent},
         )
-        title = "Прогноз Shamrai"
-        description = _telegram_text(
-            f"Разблокировка прогноза. Событие: {bet.event_name}. Коэффициент: {float(bet.coefficient):.2f}.",
-            255,
-        )
-        prices = [{
-            "label": "Прогноз Shamrai" + (" со скидкой" if discount_percent > 0 else ""),
-            "amount": int(price_amount),
-        }]
+    await db.commit()
 
-        tg_payload = {
-            "title": title,
-            "description": description,
-            "payload": _telegram_invoice_payload(attempt),
-            "provider_token": "",
-            "currency": "XTR",
-            "prices": prices
-        }
+    invoice_url = await create_telegram_stars_invoice_link(
+        attempt=attempt,
+        title="Прогноз Shamrai",
+        description=f"Разблокировка прогноза. Событие: {bet.event_name}. Коэффициент: {float(bet.coefficient):.2f}.",
+        label="Прогноз Shamrai" + (" со скидкой" if discount_percent > 0 else ""),
+    )
 
-    if settings.DEBUG_MODE:
-        return {
-            "invoice_url": f"https://t.me/invoice/mock_stars_attempt_{attempt.id}",
-            "attempt_id": str(attempt.id),
-            "discount_percent": discount_percent,
-            "mock": True,
-        }
-    if not settings.has_real_telegram_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Telegram Stars billing is not configured",
-        )
-
-    res = await call_telegram_api_async("createInvoiceLink", tg_payload)
-    if not res.get("ok"):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Telegram billing interface error: {res.get('description', 'Unknown error')}"
-        )
-
-    return {"invoice_url": res["result"], "attempt_id": str(attempt.id), "discount_percent": discount_percent}
+    return {
+        "invoice_url": invoice_url,
+        "attempt_id": str(attempt.id),
+        "discount_percent": discount_percent,
+        **({"mock": True} if settings.DEBUG_MODE else {}),
+    }
 
 
 @router.post("/yookassa/create")
@@ -617,6 +673,8 @@ async def create_yookassa_payment(
         },
     )
 
+    await db.commit()
+
     if settings.DEBUG_MODE:
         mock_payment_id = f"mock_yookassa_{plan.id}_{current_user.telegram_id}_{int(datetime.now(timezone.utc).timestamp())}"
         return {
@@ -652,7 +710,7 @@ async def create_yookassa_payment(
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Basic " + base64.b64encode(auth_raw).decode("ascii"),
-        "Idempotence-Key": secrets.token_hex(16),
+        "Idempotence-Key": str(attempt.id),
     }
     req = urllib.request.Request(
         "https://api.yookassa.ru/v3/payments",
@@ -661,19 +719,116 @@ async def create_yookassa_payment(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with _open_payment_provider_request(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ЮKassa checkout error: {e}")
 
     attempt.provider_payment_id = data.get("id")
-    await db.flush()
+    await db.commit()
 
     return {
         "payment_id": data.get("id"),
         "attempt_id": str(attempt.id),
         "confirmation_url": data.get("confirmation", {}).get("confirmation_url"),
         "status": data.get("status"),
+    }
+
+
+@router.post("/tegro/create")
+async def create_tegro_payment(
+    payment_data: TegroPaymentRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    plan_res = await db.execute(
+        select(SubscriptionPlan).filter(
+            SubscriptionPlan.id == payment_data.plan_id,
+            SubscriptionPlan.is_active == True,
+        )
+    )
+    plan = plan_res.scalars().first()
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тариф не найден")
+
+    promo_code, discount_percent = await _validate_promo(
+        db,
+        promo_code=payment_data.promo_code,
+        user=current_user,
+    )
+
+    referral_discount_percent = 0
+    if discount_percent == 0:
+        referral_discount_percent = await get_referral_discount_percent(db, current_user.telegram_id)
+        discount_percent = referral_discount_percent
+
+    amount = Decimal(plan.price)
+    if discount_percent > 0:
+        amount = _apply_percent_discount(amount, discount_percent, minimum=Decimal("1.00"))
+    amount = amount.quantize(Decimal("0.01"))
+    currency = plan.currency or "RUB"
+    if currency != "RUB":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tegro поддерживает только рублевые пакеты")
+
+    attempt = await _create_payment_attempt(
+        db,
+        user=current_user,
+        provider="tegro_debug" if settings.DEBUG_MODE else "tegro",
+        amount=amount,
+        currency=currency,
+        plan_id=plan.id,
+        promo_code=promo_code,
+        metadata={
+            "discount_percent": discount_percent,
+            "referral_discount_percent": referral_discount_percent if not promo_code else 0,
+        },
+    )
+    await db.commit()
+
+    if settings.DEBUG_MODE:
+        mock_payment_id = f"mock_tegro_{plan.id}_{current_user.telegram_id}_{int(datetime.now(timezone.utc).timestamp())}"
+        return {
+            "payment_id": mock_payment_id,
+            "attempt_id": str(attempt.id),
+            "confirmation_url": f"{settings.FRONTEND_BASE_URL}?mock_tegro_payment={mock_payment_id}&plan_id={plan.id}&attempt_id={attempt.id}",
+            "mock": True,
+        }
+
+    if not settings.has_tegro_credentials:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Tegro checkout is not configured",
+        )
+
+    payload = {
+        "shop_id": settings.TEGRO_SHOP_ID,
+        "nonce": int(time.time() * 1000),
+        "currency": currency,
+        "amount": f"{amount:.2f}",
+        "order_id": str(attempt.id),
+        "lang": "ru",
+        **({"fields": {"phone": current_user.phone}} if current_user.phone else {}),
+        "receipt": {
+            "items": [{
+                "name": _telegram_text(f"{plan.name}: {plan.match_count} матчей", 128),
+                "count": 1,
+                "price": f"{amount:.2f}",
+            }],
+        },
+    }
+    confirmation_url = _create_tegro_payment_url(payload)
+
+    attempt.metadata_json = {
+        **(attempt.metadata_json or {}),
+        "tegro_payment_url_created": True,
+    }
+    await db.commit()
+
+    return {
+        "payment_id": str(attempt.id),
+        "attempt_id": str(attempt.id),
+        "confirmation_url": confirmation_url,
+        "status": "pending",
     }
 
 
@@ -721,6 +876,50 @@ async def complete_debug_yookassa_payment(
     return result
 
 
+@router.post("/tegro/debug-complete")
+async def complete_debug_tegro_payment(
+    payment_data: DebugTegroCompleteRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not settings.DEBUG_MODE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug checkout is disabled")
+
+    if payment_data.attempt_id:
+        attempt_res = await db.execute(select(PaymentAttempt).filter(PaymentAttempt.id == payment_data.attempt_id))
+        attempt = attempt_res.scalars().first()
+        if not attempt or attempt.user_id != current_user.telegram_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug payment attempt not found")
+    else:
+        plan_res = await db.execute(select(SubscriptionPlan).filter(SubscriptionPlan.id == payment_data.plan_id))
+        plan = plan_res.scalars().first()
+        if not plan:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тариф не найден")
+        attempt = await _create_payment_attempt(
+            db,
+            user=current_user,
+            provider="tegro_debug",
+            amount=Decimal(plan.price),
+            currency=plan.currency or "RUB",
+            plan_id=plan.id,
+            promo_code=payment_data.promo_code.strip().upper() if payment_data.promo_code else None,
+            metadata={"debug_direct_complete": True},
+        )
+
+    payment_id = f"debug_tegro_{attempt.id}"
+    result = await _process_payment_attempt(
+        db,
+        attempt_id=attempt.id,
+        provider="tegro_debug",
+        provider_payment_id=payment_id,
+        amount=Decimal(attempt.amount),
+        currency=attempt.currency,
+        raw_payload={"debug": True},
+    )
+    await db.commit()
+    return result
+
+
 @router.post("/yookassa/webhook")
 async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     update = await request.json()
@@ -732,7 +931,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
     if not payment_id:
         return {"status": "ignored_no_payment_id"}
 
-    verified_payment = _request_yookassa_payment(payment_id)
+    verified_payment = await asyncio.to_thread(_request_yookassa_payment, payment_id)
     if verified_payment.get("id") != payment_id or verified_payment.get("status") != "succeeded":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -756,6 +955,49 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         currency=currency,
         raw_payload=verified_payment,
     )
+    await db.commit()
+    return result
+
+
+@router.post("/tegro/webhook")
+async def tegro_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    if not settings.has_tegro_credentials:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Tegro webhook is not configured")
+
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type == "application/json":
+        raw_fields = await request.json()
+    else:
+        form = await request.form()
+        raw_fields = {key: value for key, value in form.items()}
+
+    try:
+        notification = _verify_tegro_notification(dict(raw_fields))
+    except TegroWebhookSignatureError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.code)
+
+    if notification["is_test"]:
+        return {"status": "test_ignored"}
+
+    if settings.TEGRO_SHOP_ID.strip() and notification["shop_id"] and notification["shop_id"] != settings.TEGRO_SHOP_ID:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tegro shop id mismatch")
+
+    try:
+        attempt_id = UUID(notification["order_id"])
+    except Exception:
+        return {"status": "ignored_invalid_order_id"}
+
+    provider_payment_id = f"tegro_order_{notification['order_id']}"
+    result = await _process_payment_attempt(
+        db,
+        attempt_id=attempt_id,
+        provider="tegro",
+        provider_payment_id=provider_payment_id,
+        amount=notification["amount"],
+        currency=notification["currency"],
+        raw_payload=notification["raw"],
+    )
+    await _enqueue_payment_confirmation(db, result)
     await db.commit()
     return result
 
@@ -910,18 +1152,8 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
             currency=currency,
             raw_payload=payment,
         )
+        await _enqueue_payment_confirmation(db, result)
         await db.commit()
-
-        if result.get("status") == "success":
-            user_id = result.get("user_id")
-            if result.get("matches_added") is not None:
-                confirm_text = f"✅ Абонемент успешно оформлен: +{result['matches_added']} матчей!"
-            elif result.get("bet_id"):
-                confirm_text = "✅ Прогноз успешно разблокирован!"
-            else:
-                confirm_text = "✅ Платеж успешно обработан!"
-            if is_personal_telegram_user_id(user_id):
-                run_telegram_api_background("sendMessage", {"chat_id": user_id, "text": confirm_text})
 
         return result
 

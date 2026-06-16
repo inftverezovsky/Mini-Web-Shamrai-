@@ -66,6 +66,7 @@ class UserResponse(UserBase):
     tg_chat_joined: bool = False
     has_used_shield: bool = False
     alert_min_coef: float = 1.0
+    odds_drop_notifications_enabled: bool = True
     is_night_mode: bool = False
     night_mode_start: str = "23:00"
     night_mode_end: str = "08:00"
@@ -256,6 +257,7 @@ class BetOddsDropNotifyResponse(BaseModel):
     bet: BetResponse
     total: int
     sent: int
+    queued: int = 0
     failed: int
     errors: List[str] = Field(default_factory=list)
 
@@ -307,6 +309,14 @@ class BetHintResponse(BaseModel):
     reveal_level: str = "analysis_only"
 
 
+class BetHintInvoiceResponse(BaseModel):
+    bet_id: UUID
+    attempt_id: UUID
+    invoice_url: str
+    price_xtr: int
+    status: str = "invoice_created"
+
+
 class CrowdBetFundRequest(BaseModel):
     amount_xtr: int
 
@@ -322,6 +332,14 @@ class CrowdBetResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CrowdBetFundResponse(BaseModel):
+    crowd_bet: CrowdBetResponse
+    attempt_id: UUID
+    invoice_url: str
+    amount_xtr: int
+    status: str = "invoice_created"
 
 
 class SwipeCandidateResponse(BaseModel):
@@ -535,9 +553,33 @@ class AdminAuditLogResponse(BaseModel):
     created_at: datetime
 
 
+class MessageTemplateVariableResponse(BaseModel):
+    key: str
+    label: str
+    example: str = ""
+
+
+class MessageTemplateResponse(BaseModel):
+    key: str
+    title: str
+    description: str
+    body: str
+    default_body: str
+    variables: List[MessageTemplateVariableResponse] = Field(default_factory=list)
+    is_custom: bool = False
+    updated_by: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class MessageTemplateUpdate(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+
+
 # --- USER PREFERENCES SCHEMAS ---
 class UserPreferencesUpdate(BaseModel):
     alert_min_coef: Optional[float] = Field(default=None, ge=1.0, le=1.6)
+    odds_drop_notifications_enabled: Optional[bool] = None
     is_night_mode: Optional[bool] = None
     night_mode_start: Optional[str] = None
     night_mode_end: Optional[str] = None
@@ -547,6 +589,7 @@ class UserPreferencesUpdate(BaseModel):
 
 class UserPreferencesResponse(BaseModel):
     alert_min_coef: float
+    odds_drop_notifications_enabled: bool
     is_night_mode: bool
     night_mode_start: str
     night_mode_end: str

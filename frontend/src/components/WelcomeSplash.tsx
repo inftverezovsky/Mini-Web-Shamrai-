@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
+import { getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
 
 interface WelcomeSplashProps {
   appReady?: boolean;
@@ -17,6 +18,7 @@ export default function WelcomeSplash({
   const [mediaReady, setMediaReady] = useState(false);
   const [logoPlayed, setLogoPlayed] = useState(false);
   const [minimumWatchDone, setMinimumWatchDone] = useState(false);
+  const [playLogoVideo, setPlayLogoVideo] = useState(false);
   const [watchProgress, setWatchProgress] = useState(0);
 
   const markReadyWhenBuffered = useCallback(() => {
@@ -29,20 +31,43 @@ export default function WelcomeSplash({
   }, []);
 
   useEffect(() => {
-    markReadyWhenBuffered();
-  }, [markReadyWhenBuffered]);
+    const connection = (navigator as any).connection as
+      | { saveData?: boolean; effectiveType?: string }
+      | undefined;
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const slowConnection = ['slow-2g', '2g'].includes(connection?.effectiveType || '');
+    const shouldPlayVideo =
+      (Boolean(getTelegramWebApp()) || hasTelegramLaunchParams()) &&
+      !prefersReducedMotion &&
+      !connection?.saveData &&
+      !slowConnection;
+
+    if (shouldPlayVideo) {
+      setPlayLogoVideo(true);
+      return;
+    }
+
+    setMediaReady(true);
+    setLogoPlayed(true);
+    setWatchProgress(1);
+  }, []);
 
   useEffect(() => {
-    const minimumTimer = setTimeout(() => setMinimumWatchDone(true), 900);
+    if (!playLogoVideo) return;
+    markReadyWhenBuffered();
+  }, [markReadyWhenBuffered, playLogoVideo]);
+
+  useEffect(() => {
+    const minimumTimer = setTimeout(() => setMinimumWatchDone(true), 180);
     const logoTimer = setTimeout(() => {
       setLogoPlayed(true);
       setWatchProgress(1);
-    }, 1800);
+    }, 420);
     const rescueTimer = setTimeout(() => {
       setMediaReady(true);
       setLogoPlayed(true);
       setWatchProgress(1);
-    }, 3200);
+    }, 900);
 
     return () => {
       clearTimeout(minimumTimer);
@@ -61,7 +86,7 @@ export default function WelcomeSplash({
       if (!active || completedRef.current) return;
       completedRef.current = true;
       onIntroComplete?.();
-    }, 420);
+    }, 80);
 
     return () => {
       active = false;
@@ -110,28 +135,38 @@ export default function WelcomeSplash({
       <div className="welcome-splash__content">
         <div className="welcome-splash__logo-shell" aria-hidden="true" />
         <div className="welcome-splash__logo shimmer-border">
-          <video
-            ref={videoRef}
-            className="welcome-splash__video"
-            src="/brand-logo.mp4"
-            poster="/brand-logo-poster.jpg"
-            autoPlay
-            muted
-            playsInline
-            preload="metadata"
-            onLoadedMetadata={markReadyWhenBuffered}
-            onLoadedData={markReadyWhenBuffered}
-            onProgress={markReadyWhenBuffered}
-            onCanPlay={markReadyWhenBuffered}
-            onCanPlayThrough={markReadyWhenBuffered}
-            onTimeUpdate={handleTimeUpdate}
-            onEnded={() => {
-              setMediaReady(true);
-              setLogoPlayed(true);
-              setWatchProgress(1);
-            }}
-            onError={handleVideoError}
-          />
+          {playLogoVideo ? (
+            <video
+              ref={videoRef}
+              className="welcome-splash__video"
+              src="/brand-logo.mp4"
+              poster="/brand-logo-poster.jpg"
+              autoPlay
+              muted
+              playsInline
+              preload="metadata"
+              onLoadedMetadata={markReadyWhenBuffered}
+              onLoadedData={markReadyWhenBuffered}
+              onProgress={markReadyWhenBuffered}
+              onCanPlay={markReadyWhenBuffered}
+              onCanPlayThrough={markReadyWhenBuffered}
+              onTimeUpdate={handleTimeUpdate}
+              onEnded={() => {
+                setMediaReady(true);
+                setLogoPlayed(true);
+                setWatchProgress(1);
+              }}
+              onError={handleVideoError}
+            />
+          ) : (
+            <img
+              className="welcome-splash__video"
+              src="/brand-logo-poster.jpg"
+              alt=""
+              loading="eager"
+              decoding="async"
+            />
+          )}
         </div>
 
         <div className="welcome-splash__caption">

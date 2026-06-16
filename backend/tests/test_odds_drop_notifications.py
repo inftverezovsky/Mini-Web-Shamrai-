@@ -1,7 +1,6 @@
 import unittest
 import uuid
 from decimal import Decimal
-from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -10,8 +9,9 @@ from sqlalchemy.future import select
 
 from src.api import bets
 from src.models.database import Base
-from src.models.models import Bet, Bookmaker, User, user_bets
+from src.models.models import Bet, Bookmaker, DeliveryOutbox, User, user_bets
 from src.schemas.schemas import BetOddsDropUpdate, BetUpdate
+from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE
 
 
 class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
@@ -125,7 +125,7 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-    async def test_notify_odds_drop_sends_only_to_users_with_access(self):
+    async def test_notify_odds_drop_queues_only_users_with_access(self):
         async with self.Session() as session:
             admin = self._user(900, role="admin")
             taker = self._user(101)
@@ -136,30 +136,104 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             await self._add_access(session, user=taker, bet=bet)
             await session.commit()
 
-            sent_payloads = []
+            response = await bets.notify_bet_odds_drop(
+                bet.id,
+                BetOddsDropUpdate(odds_dropped_to=Decimal("1.50")),
+                admin=admin,
+                db=session,
+            )
 
-            def fake_call(method, payload, *args, **kwargs):
-                sent_payloads.append((method, payload))
-                return {"ok": True}
+            self.assertEqual(response.total, 1)
+            self.assertEqual(response.sent, 0)
+            self.assertEqual(response.queued, 1)
+            self.assertEqual(response.failed, 0)
+            outbox_items = (await session.execute(select(DeliveryOutbox))).scalars().all()
+            self.assertEqual(len(outbox_items), 1)
+            self.assertEqual(outbox_items[0].channel, CHANNEL_TELEGRAM_MESSAGE)
+            self.assertEqual(outbox_items[0].payload["method"], "sendMessage")
+            self.assertEqual(outbox_items[0].payload["payload"]["chat_id"], taker.telegram_id)
+            self.assertIn("1.50", outbox_items[0].payload["payload"]["text"])
 
-            with patch("src.api.bets.call_telegram_api", fake_call):
-                response = await bets.notify_bet_odds_drop(
+            refreshed = (await session.execute(select(Bet).filter(Bet.id == bet.id))).scalars().first()
+            self.assertEqual(refreshed.odds_dropped_to, Decimal("1.50"))
+            self.assertIsNotNone(refreshed.odds_drop_notified_at)
+
+    async def test_notify_odds_drop_queues_vk_for_vk_only_recipient(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            vk_taker = self._user(-101)
+            vk_taker.vk_user_id = "123456"
+            vk_taker.vk_messages_allowed = True
+            bet = self._bet()
+            session.add_all([admin, vk_taker, bet])
+            await session.flush()
+            await self._add_access(session, user=vk_taker, bet=bet)
+            await session.commit()
+
+            response = await bets.notify_bet_odds_drop(
+                bet.id,
+                BetOddsDropUpdate(odds_dropped_to=Decimal("1.50")),
+                admin=admin,
+                db=session,
+            )
+
+            self.assertEqual(response.queued, 1)
+            self.assertEqual(response.failed, 0)
+            outbox_item = (await session.execute(select(DeliveryOutbox))).scalars().one()
+            self.assertEqual(outbox_item.channel, CHANNEL_VK_MESSAGE)
+            self.assertEqual(outbox_item.user_id, vk_taker.telegram_id)
+            self.assertIn("1.50", outbox_item.payload["message"])
+
+    async def test_notify_odds_drop_skips_users_who_disabled_odds_drop_alerts(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            enabled_taker = self._user(101)
+            disabled_taker = self._user(102)
+            disabled_taker.odds_drop_notifications_enabled = False
+            bet = self._bet()
+            session.add_all([admin, enabled_taker, disabled_taker, bet])
+            await session.flush()
+            await self._add_access(session, user=enabled_taker, bet=bet)
+            await self._add_access(session, user=disabled_taker, bet=bet)
+            await session.commit()
+
+            response = await bets.notify_bet_odds_drop(
+                bet.id,
+                BetOddsDropUpdate(odds_dropped_to=Decimal("1.50")),
+                admin=admin,
+                db=session,
+            )
+
+            self.assertEqual(response.total, 1)
+            self.assertEqual(response.sent, 0)
+            self.assertEqual(response.queued, 1)
+            self.assertEqual(response.failed, 0)
+            outbox_items = (await session.execute(select(DeliveryOutbox))).scalars().all()
+            self.assertEqual([item.user_id for item in outbox_items], [enabled_taker.telegram_id])
+
+    async def test_notify_odds_drop_requires_enabled_recipients(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            disabled_taker = self._user(101)
+            disabled_taker.odds_drop_notifications_enabled = False
+            bet = self._bet()
+            session.add_all([admin, disabled_taker, bet])
+            await session.flush()
+            await self._add_access(session, user=disabled_taker, bet=bet)
+            await session.commit()
+
+            with self.assertRaises(HTTPException) as exc:
+                await bets.notify_bet_odds_drop(
                     bet.id,
                     BetOddsDropUpdate(odds_dropped_to=Decimal("1.50")),
                     admin=admin,
                     db=session,
                 )
 
-            self.assertEqual(response.total, 1)
-            self.assertEqual(response.sent, 1)
-            self.assertEqual(response.failed, 0)
-            self.assertEqual(sent_payloads[0][0], "sendMessage")
-            self.assertEqual(sent_payloads[0][1]["chat_id"], taker.telegram_id)
-            self.assertIn("1.50", sent_payloads[0][1]["text"])
-
-            refreshed = (await session.execute(select(Bet).filter(Bet.id == bet.id))).scalars().first()
-            self.assertEqual(refreshed.odds_dropped_to, Decimal("1.50"))
-            self.assertIsNotNone(refreshed.odds_drop_notified_at)
+            self.assertEqual(exc.exception.status_code, 400)
+            self.assertIn("разрешены уведомления", str(exc.exception.detail))
+            outbox_count = (await session.execute(select(func.count(DeliveryOutbox.id)))).scalar_one()
+            self.assertEqual(outbox_count, 0)
 
     async def test_notify_odds_drop_requires_recipient_access(self):
         async with self.Session() as session:

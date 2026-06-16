@@ -1,15 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import base64
+import csv
+import json
+from io import BytesIO, StringIO
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy import delete, func, update
+from sqlalchemy import String, case, cast, delete, func, or_, update
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from src.models.database import get_db
+from src.models.database import get_db, get_read_db
 from src.models.models import (
     AdminAuditLog,
     Bet,
@@ -36,14 +42,65 @@ from src.schemas.schemas import (
     AdminUpdateUserPreferences,
     AdminUserListResponse,
     BetResponse,
+    MessageTemplateResponse,
+    MessageTemplateUpdate,
     UserResponse,
 )
-from src.api.deps import get_current_admin, get_current_privileged_admin
+from src.api.deps import get_current_admin, get_current_admin_read, get_current_privileged_admin
 from src.core.roles import ADMIN_ROLES, ROLE_LABELS, STAFF_ROLES, VALID_ROLES, is_admin_role, is_owner_role, normalize_role
+from src.core.message_templates import (
+    list_message_templates,
+    reset_message_template,
+    upsert_message_template,
+)
+from src.core.security_limits import get_security_rate_limit_metrics
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
+from src.services.delivery_outbox import get_delivery_outbox_metrics
 from src.services.match_access import log_match_balance_event, revoke_user_bet_access
+from src.services.statistics import (
+    build_performance_payload,
+    client_situation,
+    filter_items_by_period,
+    is_paid_client_access,
+    last_result_codes,
+    normalize_period,
+    period_start,
+    stat_item_from_bet,
+    summarize_items,
+)
+from src.services.google_drive_export import get_drive_export_job, start_drive_export_job
+from src.services.stats_export import (
+    build_stats_export_workbook,
+    load_author_export_items,
+    load_clients_export_items,
+    load_shamrai_export_items,
+    stats_export_period_label,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
+
+
+def _encode_admin_user_cursor(user: User) -> str:
+    payload = {
+        "created_at": user.created_at.isoformat() if user.created_at else "",
+        "telegram_id": user.telegram_id,
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_admin_user_cursor(cursor: Optional[str]) -> tuple[datetime, int] | None:
+    if not cursor:
+        return None
+    try:
+        padded = cursor + ("=" * ((4 - len(cursor) % 4) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        return datetime.fromisoformat(str(payload["created_at"])), int(payload["telegram_id"])
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректный cursor клиентов",
+        )
 
 class PromoCreate(BaseModel):
     code: str
@@ -56,6 +113,12 @@ class MarathonCreateOrUpdate(BaseModel):
     current_step: Optional[int] = None
     total_steps: Optional[int] = None
     is_active: Optional[bool] = None
+
+
+class AdminStatsDriveExportRequest(BaseModel):
+    scope: str = "all"
+    period: str = "all"
+    formats: List[str] = Field(default_factory=lambda: ["xlsx", "google_sheet"])
 
 
 async def load_user_response(db: AsyncSession, telegram_id: int) -> User:
@@ -182,16 +245,24 @@ async def ensure_role_change_allowed(
             )
 
 
+def ensure_privileged_admin(actor: User) -> None:
+    if not is_admin_role(actor.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Admin permissions required",
+        )
+
+
 # --- ADMIN STATISTICS / STATS ---
 
 @router.get("/dashboard/stats")
 async def get_admin_dashboard_stats(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/dashboard/stats
-    Returns aggregate stats metrics: revenue, users with paid balance, ROI, Winrate, and Total Users.
+    Returns aggregate stats metrics: users with paid balance, ROI, Winrate, and Total Users.
     """
     # 1. Total users
     res_users = await db.execute(select(func.count(User.telegram_id)))
@@ -206,81 +277,50 @@ async def get_admin_dashboard_stats(
     )
     active_subscribers = res_active.scalar() or 0
 
-    # 3. Total revenue from actually processed payment attempts.
-    res_revenue = await db.execute(
-        select(func.coalesce(func.sum(PaymentAttempt.amount), 0))
-        .filter(PaymentAttempt.status == "succeeded")
+    # 3. Bet performance calculations for the channel and the current author.
+    profit_expr = case(
+        (Bet.status == "win", Bet.coefficient - Decimal("1.00")),
+        (Bet.status == "loss", Decimal("-1.00")),
+        else_=Decimal("0.00"),
     )
-    total_revenue = int(res_revenue.scalar() or 0)
+    won_expr = case((Bet.status == "win", 1), else_=0)
+    lost_expr = case((Bet.status == "loss", 1), else_=0)
+    settled_expr = case((Bet.status.in_(["win", "loss", "refund"]), 1), else_=0)
 
-    # 4. Bet performance calculations for the channel and the current author.
-    res_bets = await db.execute(select(Bet))
-    all_bets = res_bets.scalars().all()
-
-    def summarize_bets(source_bets: List[Bet]) -> Dict[str, float]:
-        total_bets = len(source_bets)
-        settled_bets = [bet for bet in source_bets if bet.status in ("win", "loss", "refund")]
-        won = 0
-        lost = 0
-        profit = Decimal("0.00")
-        coefficient_sum = Decimal("0.00")
-
-        for bet in source_bets:
-            coefficient_sum += bet.coefficient
-
-        for bet in settled_bets:
-            if bet.status == "win":
-                won += 1
-                profit += bet.coefficient - Decimal("1.00")
-            elif bet.status == "loss":
-                lost += 1
-                profit += Decimal("-1.00")
-
+    async def summarize_bets(author_id: Optional[int] = None) -> Dict[str, float]:
+        filters = []
+        if author_id is not None:
+            filters.append(Bet.author_id == author_id)
+        result = await db.execute(
+            select(
+                func.count(Bet.id),
+                func.coalesce(func.sum(won_expr), 0),
+                func.coalesce(func.sum(lost_expr), 0),
+                func.coalesce(func.sum(settled_expr), 0),
+                func.coalesce(func.sum(profit_expr), Decimal("0.00")),
+                func.coalesce(func.avg(Bet.coefficient), Decimal("0.00")),
+            )
+            .filter(*filters)
+        )
+        total_bets, won, lost, settled_total, profit, average_coefficient = result.one()
+        total_bets = int(total_bets or 0)
+        won = int(won or 0)
+        lost = int(lost or 0)
+        settled_total = int(settled_total or 0)
+        profit = Decimal(str(profit or "0.00"))
         resolved = won + lost
-        winrate = (won / resolved * 100) if resolved > 0 else 0.0
-        roi = (float(profit) / len(settled_bets) * 100) if settled_bets else 0.0
-        average_coefficient = float(coefficient_sum / Decimal(total_bets)) if total_bets > 0 else 0.0
 
         return {
             "total_bets": total_bets,
-            "winrate": round(winrate, 2),
-            "roi": round(roi, 2),
-            "average_coefficient": round(average_coefficient, 2),
+            "winrate": round((won / resolved * 100) if resolved else 0.0, 2),
+            "roi": round((float(profit) / settled_total * 100) if settled_total else 0.0, 2),
+            "average_coefficient": round(float(average_coefficient or 0), 2),
         }
 
-    channel_performance = summarize_bets(all_bets)
-    author_performance = summarize_bets([bet for bet in all_bets if bet.author_id == admin.telegram_id])
+    channel_performance = await summarize_bets()
+    author_performance = await summarize_bets(admin.telegram_id)
 
-    # 5. Gather monthly revenue points for the chart
-    from collections import defaultdict
-    res_payments = await db.execute(
-        select(PaymentAttempt.processed_at, PaymentAttempt.created_at, PaymentAttempt.amount)
-        .filter(PaymentAttempt.status == "succeeded")
-    )
-    payments_data = res_payments.all()
-    
-    monthly_revenue = defaultdict(int)
-    for processed_at, created_at, amount in payments_data:
-        date_ref = processed_at or created_at
-        if date_ref:
-            m_str = date_ref.strftime("%Y-%m")
-            monthly_revenue[m_str] += int(amount or 0)
-            
-    sorted_rev_months = sorted(monthly_revenue.keys())
-    revenue_points = []
-    cumulative_revenue = 0
-    for m in sorted_rev_months:
-        cumulative_revenue += monthly_revenue[m]
-        revenue_points.append({
-            "month": m,
-            "revenue": cumulative_revenue
-        })
-        
-    if not revenue_points:
-        current_month = datetime.now().strftime("%Y-%m")
-        revenue_points.append({"month": current_month, "revenue": 0})
-
-    # 6. A/B testing split conversion metrics
+    # 4. A/B testing split conversion metrics
     res_a_total = await db.execute(select(func.count(User.telegram_id)).filter(User.ab_group == 'A'))
     total_a = res_a_total.scalar() or 0
     
@@ -308,24 +348,7 @@ async def get_admin_dashboard_stats(
     conv_a = (active_a / total_a * 100) if total_a > 0 else 0.0
     conv_b = (active_b / total_b * 100) if total_b > 0 else 0.0
     
-    # Revenue A
-    res_a_rev = await db.execute(
-        select(func.coalesce(func.sum(PaymentAttempt.amount), 0))
-        .join(User, PaymentAttempt.user_id == User.telegram_id)
-        .filter(PaymentAttempt.status == "succeeded", User.ab_group == 'A')
-    )
-    rev_a = int(res_a_rev.scalar() or 0)
-    
-    # Revenue B
-    res_b_rev = await db.execute(
-        select(func.coalesce(func.sum(PaymentAttempt.amount), 0))
-        .join(User, PaymentAttempt.user_id == User.telegram_id)
-        .filter(PaymentAttempt.status == "succeeded", User.ab_group == 'B')
-    )
-    rev_b = int(res_b_rev.scalar() or 0)
-
     return {
-        "total_revenue": total_revenue,
         "active_subscribers": active_subscribers,
         "channel_roi": channel_performance["roi"],
         "winrate": channel_performance["winrate"],
@@ -336,7 +359,6 @@ async def get_admin_dashboard_stats(
         "author_average_coefficient": author_performance["average_coefficient"],
         "author_channel_roi": author_performance["roi"],
         "total_users": total_users,
-        "revenue_points": revenue_points,
         "ab_test_metrics": {
             "group_a_users": total_a,
             "group_b_users": total_b,
@@ -344,17 +366,510 @@ async def get_admin_dashboard_stats(
             "group_b_active_subs": active_b,
             "group_a_conversion": round(conv_a, 2),
             "group_b_conversion": round(conv_b, 2),
-            "group_a_revenue": rev_a,
-            "group_b_revenue": rev_b
         }
     }
+
+
+@router.get("/delivery-outbox/metrics")
+async def admin_delivery_outbox_metrics(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Lightweight queue metrics for background delivery health checks."""
+    return await get_delivery_outbox_metrics(db)
+
+
+@router.get("/security/rate-limit/metrics")
+async def admin_security_rate_limit_metrics(
+    admin: User = Depends(get_current_admin_read),
+) -> dict[str, Any]:
+    """In-memory security limiter counters for the current backend process."""
+    return get_security_rate_limit_metrics()
+
+
+@router.get("/message-templates", response_model=List[MessageTemplateResponse])
+async def admin_list_message_templates(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    """Admin editor source for client-facing Telegram, VK, and web-chat texts."""
+    return await list_message_templates(db)
+
+
+@router.put("/message-templates/{template_key}", response_model=MessageTemplateResponse)
+async def admin_update_message_template(
+    template_key: str,
+    payload: MessageTemplateUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save an edited message template."""
+    response = await upsert_message_template(
+        db,
+        template_key=template_key,
+        body=payload.body,
+        actor_id=admin.telegram_id,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="message_template_updated",
+        details={"template_key": template_key},
+    )
+    return response
+
+
+@router.post("/message-templates/{template_key}/reset", response_model=MessageTemplateResponse)
+async def admin_reset_message_template(
+    template_key: str,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset a template body back to the built-in default."""
+    response = await reset_message_template(
+        db,
+        template_key=template_key,
+        actor_id=admin.telegram_id,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="message_template_reset",
+        details={"template_key": template_key},
+    )
+    return response
+
+
+def _admin_user_display(user: User) -> str:
+    parts = [part for part in [user.first_name, user.last_name] if part]
+    if parts:
+        return " ".join(parts)
+    if user.username:
+        return f"@{user.username}"
+    return str(user.telegram_id)
+
+
+@router.get("/stats/author-timeline")
+async def get_admin_author_timeline_stats(
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Resolved author bets grouped by result date. Refunds and pending bets are excluded."""
+    query = (
+        select(Bet)
+        .filter(
+            Bet.author_id == admin.telegram_id,
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    start = period_start(period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    result = await db.execute(query)
+    items = [
+        item
+        for bet in result.scalars().all()
+        if (item := stat_item_from_bet(bet)) is not None
+    ]
+    payload = build_performance_payload(items, include_bets=True, period=period)
+    payload["author"] = {
+        "telegram_id": admin.telegram_id,
+        "name": _admin_user_display(admin),
+        "username": admin.username,
+    }
+    return payload
+
+
+async def _load_client_stat_rows(
+    db: AsyncSession,
+    *,
+    user_id: Optional[int] = None,
+    period: str = "all",
+) -> list[tuple[User, Bet, str, bool, datetime]]:
+    query = (
+        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        .join(user_bets, user_bets.c.user_id == User.telegram_id)
+        .join(Bet, Bet.id == user_bets.c.bet_id)
+        .filter(
+            User.role.notin_(list(STAFF_ROLES)),
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    if user_id is not None:
+        query = query.filter(User.telegram_id == user_id)
+    start = period_start(period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    return (await db.execute(query)).all()
+
+
+async def _client_counts(db: AsyncSession) -> dict[str, int]:
+    total_res = await db.execute(
+        select(func.count(User.telegram_id)).filter(User.role.notin_(list(STAFF_ROLES)))
+    )
+    active_res = await db.execute(
+        select(func.count(User.telegram_id)).filter(
+            User.role.notin_(list(STAFF_ROLES)),
+            (User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True),
+        )
+    )
+    return {
+        "clients_count": int(total_res.scalar() or 0),
+        "active_clients_count": int(active_res.scalar() or 0),
+    }
+
+
+@router.get("/stats/clients")
+async def get_admin_client_stats(
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Per-client paid settled performance summary for the admin stats workspace."""
+    normalized_period = normalize_period(period)
+    rows = await _load_client_stat_rows(db, period=normalized_period)
+    grouped: dict[int, dict[str, Any]] = {}
+    for user, bet, access_type, match_charged, taken_at in rows:
+        if not is_paid_client_access(access_type, match_charged):
+            continue
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+        )
+        if not item:
+            continue
+        if not filter_items_by_period([item], normalized_period):
+            continue
+        if user.telegram_id not in grouped:
+            grouped[user.telegram_id] = {
+                "user": {
+                    "telegram_id": user.telegram_id,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "photo_url": user.photo_url,
+                    "name": _admin_user_display(user),
+                    "matches_remaining": int(user.purchased_bets_balance or user.matches_remaining or 0),
+                    "guarantee_active": bool(user.guarantee_active),
+                    "client_group": user.client_group,
+                    "client_tag": user.client_tag,
+                },
+                "items": [],
+            }
+        grouped[user.telegram_id]["items"].append(item)
+
+    clients = []
+    all_items = []
+    for group in grouped.values():
+        items = group["items"]
+        all_items.extend(items)
+        summary = summarize_items(items)
+        clients.append({
+            **group["user"],
+            "summary": summary,
+            "source_split": build_performance_payload(items, include_bets=False, period=normalized_period)["source_split"],
+            "recent_results": last_result_codes(items),
+            "situation": client_situation(summary),
+        })
+
+    clients.sort(key=lambda client: (
+        client["situation"]["tone"] != "danger",
+        -float(client["summary"]["profit_units"]),
+        -int(client["summary"]["bets"]),
+    ))
+    counts = await _client_counts(db)
+    return {
+        "period": normalized_period,
+        "period_label": build_performance_payload([], include_bets=False, period=normalized_period)["period_label"],
+        **counts,
+        "active_clients_with_stats_count": len(clients),
+        "summary": summarize_items(all_items),
+        "clients": clients,
+    }
+
+
+@router.get("/stats/clients/{user_id}")
+async def get_admin_client_timeline_stats(
+    user_id: int,
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Detailed timeline for a single client's paid settled bets."""
+    normalized_period = normalize_period(period)
+    rows = await _load_client_stat_rows(db, user_id=user_id, period=normalized_period)
+    if not rows:
+        target_res = await db.execute(select(User).filter(User.telegram_id == user_id))
+        target = target_res.scalars().first()
+        if not target:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Клиент не найден")
+    else:
+        target = rows[0][0]
+
+    paid_items = []
+    excluded_items = []
+    for _user, bet, access_type, match_charged, taken_at in rows:
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+        )
+        if not item:
+            continue
+        if is_paid_client_access(access_type, match_charged):
+            paid_items.append(item)
+        else:
+            excluded_items.append(item)
+
+    payload = build_performance_payload(paid_items, include_bets=True, period=normalized_period)
+    payload["user"] = {
+        "telegram_id": target.telegram_id,
+        "username": target.username,
+        "first_name": target.first_name,
+        "last_name": target.last_name,
+        "photo_url": target.photo_url,
+        "name": _admin_user_display(target),
+        "matches_remaining": int(target.purchased_bets_balance or target.matches_remaining or 0),
+        "guarantee_active": bool(target.guarantee_active),
+        "client_group": target.client_group,
+        "client_tag": target.client_tag,
+    }
+    payload["situation"] = client_situation(payload["summary"])
+    filtered_paid_items = filter_items_by_period(paid_items, normalized_period)
+    payload["recent_results"] = last_result_codes(filtered_paid_items)
+    filtered_excluded_items = filter_items_by_period(excluded_items, normalized_period)
+    payload["excluded_summary"] = summarize_items(filtered_excluded_items)
+    payload["excluded_bets"] = filtered_excluded_items
+    return payload
+
+
+def _export_rows_from_items(items: list[dict[str, Any]], *, scope: str, client_name: Optional[str] = None) -> list[dict[str, Any]]:
+    rows = []
+    for item in items:
+        rows.append({
+            "scope": scope,
+            "client": client_name or "",
+            "resolved_at": item.get("resolved_at") or "",
+            "event_name": item.get("event_name") or "",
+            "status": item.get("status") or "",
+            "coefficient": item.get("coefficient") or 0,
+            "profit_units": item.get("profit_units") or 0,
+            "roi_percent": round(float(item.get("profit_units") or 0) * 100, 2),
+            "source": item.get("source_type") or "",
+            "sport": item.get("sport_type") or "",
+            "bookmakers": ", ".join(item.get("bookmaker_names") or []),
+            "outcome": item.get("outcome") or "",
+        })
+    return rows
+
+
+def _csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingResponse:
+    fieldnames = [
+        "scope",
+        "client",
+        "resolved_at",
+        "event_name",
+        "status",
+        "coefficient",
+        "profit_units",
+        "roi_percent",
+        "source",
+        "sport",
+        "bookmakers",
+        "outcome",
+    ]
+    buffer = StringIO()
+    buffer.write("\ufeff")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _xlsx_bytes_response(content: bytes, filename: str) -> StreamingResponse:
+    buffer = BytesIO(content)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def _author_export_items(db: AsyncSession, admin: User, period: str, source: str) -> list[dict[str, Any]]:
+    query = (
+        select(Bet)
+        .filter(
+            Bet.author_id == admin.telegram_id,
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    start = period_start(period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    result = await db.execute(query)
+    items = [
+        item
+        for bet in result.scalars().all()
+        if (item := stat_item_from_bet(bet)) is not None
+    ]
+    items = filter_items_by_period(items, period)
+    if source in {"feed", "private"}:
+        items = [item for item in items if item.get("source_type") == source]
+    return items
+
+
+async def _clients_export_items(db: AsyncSession, period: str) -> list[dict[str, Any]]:
+    rows = await _load_client_stat_rows(db, period=period)
+    items = []
+    for user, bet, access_type, match_charged, taken_at in rows:
+        if not is_paid_client_access(access_type, match_charged):
+            continue
+        item = stat_item_from_bet(bet, access_type=access_type, match_charged=match_charged, taken_at=taken_at)
+        if item:
+            item["client_name"] = _admin_user_display(user)
+            items.append(item)
+    return filter_items_by_period(items, period)
+
+
+async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str, Any]]:
+    query = (
+        select(Bet)
+        .filter(
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(Bet.resolved_at.desc())
+    )
+    start = period_start(period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+    result = await db.execute(query)
+    return [
+        item
+        for bet in result.scalars().all()
+        if (item := stat_item_from_bet(bet)) is not None
+    ]
+
+
+@router.get("/stats/export")
+async def export_admin_stats(
+    scope: str = Query("author", pattern="^(author|clients|shamrai)$"),
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    source: str = Query("all", pattern="^(all|feed|private)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> Response:
+    normalized_period = normalize_period(period)
+    if format == "xlsx":
+        period_label = stats_export_period_label(normalized_period)
+        if scope == "shamrai":
+            export_items = await load_shamrai_export_items(db, normalized_period)
+            content = build_stats_export_workbook(
+                export_items,
+                title="СТАТИСТИКА SHAMRAI",
+                period_label=period_label,
+                include_client=False,
+            )
+        elif scope == "clients":
+            export_items = await load_clients_export_items(db, normalized_period)
+            content = build_stats_export_workbook(
+                export_items,
+                title="СТАТИСТИКА КЛИЕНТОВ SHAMRAI",
+                period_label=period_label,
+                include_client=True,
+            )
+        else:
+            export_items = await load_author_export_items(
+                db,
+                author_id=admin.telegram_id,
+                period=normalized_period,
+                source=source,
+            )
+            source_label = {
+                "feed": "ЛЕНТА",
+                "private": "ЗАКРЫТАЯ ВЫДАЧА",
+                "all": "ВСЕ ПРОГНОЗЫ",
+            }.get(source, "ВСЕ ПРОГНОЗЫ")
+            content = build_stats_export_workbook(
+                export_items,
+                title=f"СТАТИСТИКА АВТОРА: {source_label}",
+                period_label=period_label,
+                include_client=False,
+            )
+        filename = f"shamrai_stats_{scope}_{normalized_period}.xlsx"
+        return _xlsx_bytes_response(content, filename)
+
+    if scope == "clients":
+        items = await _clients_export_items(db, normalized_period)
+        rows = _export_rows_from_items(items, scope="clients")
+        for row, item in zip(rows, items):
+            row["client"] = item.get("client_name", "")
+    elif scope == "shamrai":
+        items = await _shamrai_export_items(db, normalized_period)
+        rows = _export_rows_from_items(items, scope="shamrai")
+    else:
+        items = await _author_export_items(db, admin, normalized_period, source)
+        rows = _export_rows_from_items(items, scope=f"author:{source}")
+
+    filename = f"shamrai_stats_{scope}_{normalized_period}.{format}"
+    return _csv_response(rows, filename)
+
+
+@router.post("/stats/drive-export")
+async def create_admin_stats_drive_export(
+    payload: AdminStatsDriveExportRequest,
+    admin: User = Depends(get_current_admin),
+) -> dict[str, Any]:
+    scope = str(payload.scope or "all").strip().lower()
+    if scope not in {"shamrai", "clients", "all"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="scope должен быть shamrai, clients или all")
+
+    period = normalize_period(payload.period)
+    formats = [str(item).strip().lower() for item in (payload.formats or [])]
+    if not formats:
+        formats = ["xlsx", "google_sheet"]
+    invalid_formats = [item for item in formats if item not in {"xlsx", "google_sheet"}]
+    if invalid_formats:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="formats может содержать только xlsx и google_sheet")
+
+    return start_drive_export_job(scope=scope, period=period, formats=list(dict.fromkeys(formats)))
+
+
+@router.get("/stats/drive-export/{job_id}")
+async def get_admin_stats_drive_export(
+    job_id: str,
+    admin: User = Depends(get_current_admin_read),
+) -> dict[str, Any]:
+    job = get_drive_export_job(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Задача выгрузки не найдена")
+    return job
 
 # --- PENDING FORECASTS FOR RESOLVING ---
 
 @router.get("/bets/pending", response_model=List[BetResponse])
 async def get_pending_bets(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/bets/pending
@@ -373,7 +888,7 @@ async def get_pending_bets(
 @router.delete("/bets/{bet_id}")
 async def delete_bet_from_admin(
     bet_id: UUID,
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -460,7 +975,7 @@ async def delete_bet_from_admin(
 @router.post("/promo")
 async def create_promo(
     data: PromoCreate,
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -497,8 +1012,8 @@ async def create_promo(
 
 @router.get("/promo/list")
 async def list_promos(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/promo/list
@@ -510,7 +1025,7 @@ async def list_promos(
 @router.post("/promo/{code_id}/deactivate")
 async def deactivate_promo(
     code_id: int,
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -600,8 +1115,8 @@ async def create_or_update_marathon(
 
 @router.get("/users", response_model=List[AdminUserListResponse])
 async def admin_list_users(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/users
@@ -645,10 +1160,108 @@ async def admin_list_users(
     ]
 
 
+@router.get("/users-page")
+async def admin_list_users_page(
+    limit: int = Query(50, ge=1, le=100),
+    cursor: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    activity: str = Query("all", pattern="^(all|active|empty|guarantee)$"),
+    group: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    """Cursor-paginated CRM directory for responsive admin UI."""
+    cursor_value = _decode_admin_user_cursor(cursor)
+    filters = [User.role == "user"]
+    clean_q = (q or "").strip()
+    if clean_q:
+        like_q = f"%{clean_q.lower()}%"
+        filters.append(or_(
+            func.lower(func.coalesce(User.username, "")).like(like_q),
+            func.lower(func.coalesce(User.first_name, "")).like(like_q),
+            func.lower(func.coalesce(User.last_name, "")).like(like_q),
+            func.lower(func.coalesce(User.client_group, "")).like(like_q),
+            func.lower(func.coalesce(User.client_tag, "")).like(like_q),
+            func.lower(func.coalesce(User.other_bookmaker_name, "")).like(like_q),
+            cast(User.telegram_id, String).like(f"%{clean_q}%"),
+        ))
+    if activity == "active":
+        filters.append((User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True))
+    elif activity == "empty":
+        filters.append(User.guarantee_active == False)
+        filters.append(User.purchased_bets_balance <= 0)
+        filters.append(User.matches_remaining <= 0)
+    elif activity == "guarantee":
+        filters.append(User.guarantee_active == True)
+    if group and group != "all":
+        filters.append(User.client_group == group)
+    if tag and tag != "all":
+        filters.append(User.client_tag == tag)
+    count_filters = list(filters)
+    if cursor_value:
+        cursor_created_at, cursor_telegram_id = cursor_value
+        filters.append(or_(
+            User.created_at < cursor_created_at,
+            (User.created_at == cursor_created_at) & (User.telegram_id < cursor_telegram_id),
+        ))
+
+    total_result = await db.execute(select(func.count(User.telegram_id)).filter(*filters[:1]))
+    total_users = int(total_result.scalar() or 0)
+    filtered_total_result = await db.execute(select(func.count(User.telegram_id)).filter(*count_filters))
+    filtered_total = int(filtered_total_result.scalar() or 0)
+
+    result = await db.execute(
+        select(User)
+        .filter(*filters)
+        .options(selectinload(User.bookmakers), selectinload(User.badges))
+        .order_by(User.created_at.desc(), User.telegram_id.desc())
+        .limit(limit + 1)
+    )
+    fetched_users = result.scalars().all()
+    page_users = fetched_users[:limit]
+    has_more = len(fetched_users) > limit
+    user_ids = [user.telegram_id for user in page_users]
+    recent_results_by_user: Dict[int, List[Dict[str, Any]]] = {user_id: [] for user_id in user_ids}
+
+    if user_ids:
+        recent_result = await db.execute(
+            select(
+                user_bets.c.user_id,
+                user_bets.c.bet_id,
+                user_bets.c.taken_at,
+                Bet.status,
+            )
+            .join(Bet, Bet.id == user_bets.c.bet_id)
+            .filter(user_bets.c.user_id.in_(user_ids), Bet.status.in_(["win", "loss"]))
+            .order_by(user_bets.c.taken_at.desc())
+        )
+
+        for user_id, bet_id, taken_at, bet_status in recent_result.all():
+            user_results = recent_results_by_user.setdefault(user_id, [])
+            if len(user_results) < 10:
+                user_results.append({
+                    "bet_id": bet_id,
+                    "status": bet_status,
+                    "taken_at": taken_at,
+                })
+
+    return {
+        "items": [
+            build_admin_user_response(user, recent_results_by_user.get(user.telegram_id, []))
+            for user in page_users
+        ],
+        "next_cursor": _encode_admin_user_cursor(page_users[-1]) if has_more and page_users else None,
+        "has_more": has_more,
+        "total": total_users,
+        "filtered_total": filtered_total,
+    }
+
+
 @router.get("/admins", response_model=List[AdminUserListResponse])
 async def admin_list_admins(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/admins
@@ -667,8 +1280,8 @@ async def admin_list_admins(
 @router.get("/audit-log", response_model=List[AdminAuditLogResponse])
 async def admin_audit_log(
     limit: int = Query(50, ge=1, le=200),
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """
     GET /api/admin/audit-log
@@ -719,6 +1332,15 @@ async def admin_update_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Пользователь не найден"
         )
+
+    sensitive_fields_requested = (
+        data.role is not None
+        or (data.matches_delta is not None and data.matches_delta != 0)
+        or bool(data.close_guarantee)
+        or data.subscription_end_date is not None
+    )
+    if sensitive_fields_requested:
+        ensure_privileged_admin(admin)
 
     audit_changes: Dict[str, Any] = {}
 
@@ -1028,7 +1650,7 @@ from src.schemas.schemas import ABTestConfigCreate, ABTestConfigResponse
 
 @router.post("/chats/generate-link")
 async def admin_chats_generate_link(
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -1038,7 +1660,7 @@ async def admin_chats_generate_link(
     from src.core.config import settings
     chat_id = settings.TELEGRAM_VIP_CHAT_ID
     
-    from src.api.payments import call_telegram_api_async
+    from src.services.telegram_bot import call_telegram_api_async
     payload = {
         "chat_id": chat_id,
         "member_limit": 1
@@ -1060,8 +1682,8 @@ async def admin_chats_generate_link(
 
 @router.get("/abtest", response_model=List[ABTestConfigResponse])
 async def list_ab_configs(
-    admin: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db)
 ):
     """GET /api/admin/abtest — Retrieves all defined A/B split configs."""
     res = await db.execute(select(ABTestConfig))
@@ -1071,7 +1693,7 @@ async def list_ab_configs(
 @router.post("/abtest", response_model=ABTestConfigResponse)
 async def create_or_update_ab_config(
     data: ABTestConfigCreate,
-    admin: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """

@@ -8,7 +8,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from src.api import signals as signals_api
-from src.models.models import User
+from src.models.models import DeliveryOutbox, PersonalSignal, User
+from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_WEB_PUSH_SIGNAL
 from src.services import signals
 
 
@@ -19,6 +20,9 @@ class FakeDb:
 
     def add(self, value):
         self.added.append(value)
+
+    def add_all(self, values):
+        self.added.extend(values)
 
     async def flush(self):
         for item in self.added:
@@ -39,14 +43,7 @@ class SignalDeliveryTests(unittest.TestCase):
         async def fake_send_to_user(user_id, payload):
             events.append(("websocket", user_id, payload["text"]))
 
-        def fake_run_background(coro):
-            events.append(("background",))
-            coro.close()
-
-        with (
-            patch.object(signals.signal_stream_hub, "send_to_user", fake_send_to_user),
-            patch.object(signals, "_run_background_delivery", fake_run_background),
-        ):
+        with patch.object(signals.signal_stream_hub, "send_to_user", fake_send_to_user):
             signal = asyncio.run(
                 signals.deliver_personal_signal(
                     db,
@@ -57,7 +54,10 @@ class SignalDeliveryTests(unittest.TestCase):
 
         self.assertEqual(signal.id, 42)
         self.assertEqual(events[0], ("websocket", 12345, "fast signal"))
-        self.assertEqual(events[1], ("background",))
+        outbox_items = [item for item in db.added if isinstance(item, DeliveryOutbox)]
+        self.assertEqual([item.channel for item in outbox_items], [CHANNEL_TELEGRAM_MESSAGE, CHANNEL_WEB_PUSH_SIGNAL])
+        self.assertEqual(outbox_items[0].payload["payload"]["text"], "fast signal")
+        self.assertEqual(outbox_items[1].payload["signal_payload"]["text"], "fast signal")
 
     def test_broadcast_personal_signals_fans_out_to_web_clients(self):
         events = []
@@ -70,14 +70,7 @@ class SignalDeliveryTests(unittest.TestCase):
         async def fake_send_to_user(user_id, payload):
             events.append(("websocket", user_id, payload["id"], payload["type"], payload["text"]))
 
-        def fake_run_background(coro):
-            events.append(("background",))
-            coro.close()
-
-        with (
-            patch.object(signals.signal_stream_hub, "send_to_user", fake_send_to_user),
-            patch.object(signals, "_run_background_delivery", fake_run_background),
-        ):
+        with patch.object(signals.signal_stream_hub, "send_to_user", fake_send_to_user):
             sent = asyncio.run(
                 signals.broadcast_personal_signals(
                     db,
@@ -89,10 +82,13 @@ class SignalDeliveryTests(unittest.TestCase):
             )
 
         self.assertEqual(sent, 2)
-        self.assertEqual([item.user_id for item in db.added], [111, 222])
+        signal_rows = [item for item in db.added if isinstance(item, PersonalSignal)]
+        outbox_items = [item for item in db.added if isinstance(item, DeliveryOutbox)]
+        self.assertEqual([item.user_id for item in signal_rows], [111, 222])
+        self.assertEqual([item.user_id for item in outbox_items], [111, 222])
+        self.assertEqual([item.channel for item in outbox_items], [CHANNEL_WEB_PUSH_SIGNAL, CHANNEL_WEB_PUSH_SIGNAL])
         self.assertEqual(events[0], ("websocket", 111, 42, "forecast_teaser", "Закрытый анонс прогноза"))
         self.assertEqual(events[1], ("websocket", 222, 43, "forecast_teaser", "Закрытый анонс прогноза"))
-        self.assertEqual(events[2], ("background",))
 
     def test_web_push_payload_uses_root_static_image_url_and_signal_metadata(self):
         signal_payload = {

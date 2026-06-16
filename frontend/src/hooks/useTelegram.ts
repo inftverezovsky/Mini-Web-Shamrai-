@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ensureTelegramSdk, getTelegramWebApp, TELEGRAM_SDK_READY_EVENT } from '../utils/telegramSdk';
+import { DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
+import {
+  ensureTelegramSdk,
+  getTelegramWebApp,
+  hasTelegramLaunchParams,
+  TELEGRAM_SDK_READY_EVENT,
+} from '../utils/telegramSdk';
 
 declare global {
   interface Window {
@@ -33,12 +39,11 @@ export function useTelegram() {
   const [isReady, setIsReady] = useState(false);
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [initData, setInitData] = useState<string>('');
-  const debugAuthEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
-  const debugRoleStorageKey = 'bet_tma_debug_role';
+  const debugAuthEnabled = DEBUG_AUTH_ENABLED;
   
   // Local storage mock configuration to persist role state across page refreshes in browser
   const [mockRole, setMockRole] = useState<'user' | 'admin'>(
-    (localStorage.getItem(debugRoleStorageKey) as 'user' | 'admin') || 'user'
+    (localStorage.getItem(DEBUG_ROLE_STORAGE_KEY) as 'user' | 'admin') || 'user'
   );
 
   const tg = getTelegramWebApp<TelegramWebApp>();
@@ -76,7 +81,12 @@ export function useTelegram() {
     };
 
     window.addEventListener(TELEGRAM_SDK_READY_EVENT, syncTelegramState);
-    void ensureTelegramSdk().then(syncTelegramState);
+
+    if (getTelegramWebApp() || hasTelegramLaunchParams()) {
+      void ensureTelegramSdk(1200).then(syncTelegramState);
+    } else {
+      syncTelegramState();
+    }
 
     return () => {
       cancelled = true;
@@ -88,7 +98,7 @@ export function useTelegram() {
     if (!debugAuthEnabled) return;
     const nextRole = mockRole === 'user' ? 'admin' : 'user';
     setMockRole(nextRole);
-    localStorage.setItem(debugRoleStorageKey, nextRole);
+    localStorage.setItem(DEBUG_ROLE_STORAGE_KEY, nextRole);
     window.location.reload(); // Force reload to refresh router auth logic
   };
 

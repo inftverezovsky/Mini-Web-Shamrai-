@@ -45,7 +45,7 @@ async def ensure_standard_bookmakers(db: AsyncSession) -> list[Bookmaker]:
             changed = True
 
     if changed:
-        await db.commit()
+        await db.flush()
 
     result = await db.execute(select(Bookmaker).filter(Bookmaker.is_active == True))
     bookmakers = result.scalars().all()

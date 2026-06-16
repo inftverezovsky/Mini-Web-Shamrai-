@@ -1,3 +1,6 @@
+import secrets
+import time
+from threading import RLock
 from typing import Any, Optional
 from uuid import UUID
 
@@ -9,11 +12,11 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user
 from src.core.config import settings
-from src.core.security import verify_access_token
 from src.models.database import AsyncSessionLocal, get_db
 from src.models.models import Bet, ForecastRequest, PersonalSignal, User
 from src.services.forecast_delivery import (
     build_web_forecast_signal_data,
+    build_web_paid_set_signal_data,
     build_web_teaser_signal_data,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
@@ -58,6 +61,16 @@ class WebPushSubscriptionResponse(BaseModel):
 class WebPushPublicKeyResponse(BaseModel):
     public_key: str = ""
     configured: bool = False
+
+
+class SignalStreamTicketResponse(BaseModel):
+    ticket: str
+    expires_in: int
+
+
+SIGNAL_STREAM_TICKET_TTL_SECONDS = 30
+_signal_stream_tickets: dict[str, tuple[int, float]] = {}
+_signal_stream_ticket_lock = RLock()
 
 
 def _serialize_signal(signal: PersonalSignal) -> PersonalSignalResponse:
@@ -119,7 +132,11 @@ def _enrich_forecast_signal_data(
             status_value=forecast_request.status,
         )
     elif signal.type == "forecast_teaser":
-        fresh_data = build_web_teaser_signal_data(forecast_request, None)
+        fresh_data = (
+            build_web_paid_set_signal_data(forecast_request, None)
+            if signal_data.get("request_kind") == "paid_set"
+            else build_web_teaser_signal_data(forecast_request, None)
+        )
         fresh_data["forecast_status"] = forecast_request.status
     else:
         return signal_data
@@ -146,18 +163,33 @@ def _serialize_signal_with_forecast_data(
     return PersonalSignalResponse(**payload)
 
 
-async def _load_user_from_ws_token(db: AsyncSession, token: str) -> Optional[User]:
-    payload = verify_access_token(token)
-    if not payload or "sub" not in payload:
-        return None
+def _issue_signal_stream_ticket(user_id: int) -> str:
+    ticket = secrets.token_urlsafe(32)
+    expires_at = time.monotonic() + SIGNAL_STREAM_TICKET_TTL_SECONDS
+    with _signal_stream_ticket_lock:
+        now = time.monotonic()
+        expired = [
+            existing_ticket
+            for existing_ticket, (_, ticket_expires_at) in _signal_stream_tickets.items()
+            if ticket_expires_at <= now
+        ]
+        for existing_ticket in expired:
+            _signal_stream_tickets.pop(existing_ticket, None)
+        _signal_stream_tickets[ticket] = (user_id, expires_at)
+    return ticket
 
-    try:
-        user_id = int(payload["sub"])
-    except (TypeError, ValueError):
-        return None
 
-    result = await db.execute(select(User).filter(User.telegram_id == user_id))
-    return result.scalars().first()
+def _consume_signal_stream_ticket(ticket: str) -> Optional[int]:
+    if not ticket:
+        return None
+    with _signal_stream_ticket_lock:
+        item = _signal_stream_tickets.pop(ticket, None)
+    if not item:
+        return None
+    user_id, expires_at = item
+    if expires_at <= time.monotonic():
+        return None
+    return user_id
 
 
 @router.get("/web-push/public-key", response_model=WebPushPublicKeyResponse)
@@ -185,6 +217,16 @@ async def delete_web_push_subscription(
     current_user.web_push_subscription = None
     await db.flush()
     return WebPushSubscriptionResponse(status="deleted", configured=web_push_configured())
+
+
+@router.post("/stream-ticket", response_model=SignalStreamTicketResponse)
+async def create_signal_stream_ticket(
+    current_user: User = Depends(get_current_user),
+):
+    return SignalStreamTicketResponse(
+        ticket=_issue_signal_stream_ticket(current_user.telegram_id),
+        expires_in=SIGNAL_STREAM_TICKET_TTL_SECONDS,
+    )
 
 
 @router.get("/history", response_model=list[PersonalSignalResponse])
@@ -223,7 +265,7 @@ async def answer_forecast_request_from_web_chat(
             actor_user_id=current_user.telegram_id,
             notify_sales_manager_now=False,
             auto_delivery_method="auto",
-            auto_delivery_now=True,
+            auto_delivery_now=False,
         )
         await db.commit()
         if should_notify_sales:
@@ -256,14 +298,16 @@ async def answer_forecast_request_from_web_chat(
 @router.websocket("/stream")
 async def stream_personal_signals(
     websocket: WebSocket,
-    token: str = Query(""),
+    ticket: str = Query(""),
 ):
-    if not token:
+    user_id = _consume_signal_stream_ticket(ticket)
+    if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     async with AsyncSessionLocal() as db:
-        user = await _load_user_from_ws_token(db, token)
+        result = await db.execute(select(User).filter(User.telegram_id == user_id))
+        user = result.scalars().first()
 
     if not user:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)

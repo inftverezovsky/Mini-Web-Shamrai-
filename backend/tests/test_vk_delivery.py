@@ -73,6 +73,37 @@ class VkDeliveryTests(unittest.TestCase):
         randint_mock.assert_not_called()
         self.assertEqual(request_mock.call_args.args[1]["random_id"], 777)
 
+    def test_get_vk_unread_conversations_uses_unread_filter(self):
+        with patch.object(vk_delivery, "_vk_api_request", return_value={"ok": True, "response": {"items": []}}) as request_mock:
+            result = vk_delivery.get_vk_unread_conversations(250)
+
+        self.assertTrue(result["ok"])
+        request_mock.assert_called_once_with(
+            "messages.getConversations",
+            {"count": 200, "filter": "unread"},
+            timeout=8.0,
+            log_response=False,
+        )
+
+    def test_mark_vk_conversation_read_requires_positive_peer_id(self):
+        with patch.object(vk_delivery, "_vk_api_request") as request_mock:
+            result = vk_delivery.mark_vk_conversation_read("-1")
+
+        self.assertFalse(result["ok"])
+        request_mock.assert_not_called()
+
+    def test_mark_vk_conversation_read_calls_vk_api(self):
+        with patch.object(vk_delivery, "_vk_api_request", return_value={"ok": True, "response": 1}) as request_mock:
+            result = vk_delivery.mark_vk_conversation_read("123")
+
+        self.assertTrue(result["ok"])
+        request_mock.assert_called_once_with(
+            "messages.markAsRead",
+            {"peer_id": 123},
+            timeout=8.0,
+            log_response=False,
+        )
+
     def test_send_vk_message_retries_without_keyboard_when_bot_feature_disabled(self):
         keyboard = {"inline": True, "buttons": []}
         vk_error = {
@@ -186,7 +217,7 @@ class VkDeliveryRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["changed"])
         db.commit.assert_awaited_once()
 
-    async def test_refresh_vk_delivery_status_does_not_downgrade_local_message_grant(self):
+    async def test_refresh_vk_delivery_status_downgrades_remote_denial(self):
         user = SimpleNamespace(vk_user_id="123", vk_messages_allowed=True, vk_group_member=False)
         db = SimpleNamespace(commit=AsyncMock())
 
@@ -196,10 +227,10 @@ class VkDeliveryRefreshTests(unittest.IsolatedAsyncioTestCase):
         ):
             payload = await vk_delivery.refresh_vk_delivery_status(db, user, commit=True)
 
-        self.assertTrue(user.vk_messages_allowed)
-        self.assertTrue(payload["messages_allowed"])
-        self.assertFalse(payload["changed"])
-        db.commit.assert_not_awaited()
+        self.assertFalse(user.vk_messages_allowed)
+        self.assertFalse(payload["messages_allowed"])
+        self.assertTrue(payload["changed"])
+        db.commit.assert_awaited_once()
 
 
 if __name__ == "__main__":

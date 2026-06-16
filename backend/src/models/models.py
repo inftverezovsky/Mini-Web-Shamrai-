@@ -37,7 +37,9 @@ user_bets = Table(
     Column("bet_id", Uuid(as_uuid=True), ForeignKey("bets.id", ondelete="CASCADE"), primary_key=True),
     Column("taken_at", DateTime(timezone=True), server_default=func.now()),
     Column("access_type", String, default="paid_match", nullable=False),
-    Column("match_charged", Boolean, default=True, nullable=False)
+    Column("match_charged", Boolean, default=True, nullable=False),
+    Index("ix_user_bets_user_taken", "user_id", "taken_at"),
+    Index("ix_user_bets_bet_user", "bet_id", "user_id"),
 )
 
 # Association Table for Bet <-> Bookmaker (one forecast can target several bookmakers)
@@ -84,6 +86,7 @@ class User(Base):
     tg_chat_joined = Column(Boolean, default=False, nullable=False)
     has_used_shield = Column(Boolean, default=False, nullable=False)
     alert_min_coef = Column(Float, default=1.0, nullable=False)
+    odds_drop_notifications_enabled = Column(Boolean, default=True, nullable=False)
     is_night_mode = Column(Boolean, default=False, nullable=False)
     night_mode_start = Column(String(5), default="23:00", nullable=False)
     night_mode_end = Column(String(5), default="08:00", nullable=False)
@@ -210,6 +213,36 @@ class PersonalSignal(Base):
     user = relationship("User", back_populates="personal_signals")
 
 
+class DeliveryOutbox(Base):
+    __tablename__ = "delivery_outbox"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_delivery_outbox_dedupe_key"),
+        Index("ix_delivery_outbox_status_next_attempt", "status", "next_attempt_at"),
+        Index("ix_delivery_outbox_channel_status", "channel", "status"),
+    )
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel = Column(String, nullable=False, index=True)
+    status = Column(String, default="pending", nullable=False, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
+    personal_signal_id = Column(Integer, ForeignKey("personal_signals.id", ondelete="SET NULL"), nullable=True, index=True)
+    forecast_request_id = Column(Uuid(as_uuid=True), ForeignKey("forecast_requests.id", ondelete="SET NULL"), nullable=True, index=True)
+    payload = Column(JSON, default=dict, nullable=False)
+    dedupe_key = Column(String, nullable=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    max_attempts = Column(Integer, default=5, nullable=False)
+    next_attempt_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+    user = relationship("User")
+    personal_signal = relationship("PersonalSignal")
+    forecast_request = relationship("ForecastRequest")
+
+
 class AdminAuditLog(Base):
     __tablename__ = "admin_audit_logs"
 
@@ -223,8 +256,28 @@ class AdminAuditLog(Base):
     actor = relationship("User", foreign_keys=[actor_id])
     target_user = relationship("User", foreign_keys=[target_user_id])
 
+
+class MessageTemplate(Base):
+    __tablename__ = "message_templates"
+
+    key = Column(String, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    body = Column(Text, nullable=False)
+    variables = Column(JSON, default=list, nullable=False)
+    updated_by = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+    editor = relationship("User", foreign_keys=[updated_by])
+
 class Bet(Base):
     __tablename__ = "bets"
+    __table_args__ = (
+        Index("ix_bets_status_delivery_created", "status", "delivery_mode", "created_at"),
+        Index("ix_bets_status_resolved", "status", "resolved_at"),
+        Index("ix_bets_author_status_resolved", "author_id", "status", "resolved_at"),
+    )
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_name = Column(String, nullable=False)
@@ -268,6 +321,7 @@ class ForecastRequest(Base):
     __table_args__ = (
         UniqueConstraint("bet_id", "user_id", name="uq_forecast_requests_bet_user"),
         Index("ix_forecast_requests_status_created", "status", "created_at"),
+        Index("ix_forecast_requests_bet_status", "bet_id", "status"),
     )
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)

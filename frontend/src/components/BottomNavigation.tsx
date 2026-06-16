@@ -3,6 +3,7 @@ import {
   MessageCircle,
   Newspaper,
   Settings2,
+  SlidersHorizontal,
   TrendingUp,
   Trophy,
   User as UserIcon,
@@ -11,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export type UserTabId = 'feed' | 'chat' | 'stats' | 'my_bets' | 'profile' | 'billing';
-export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'profile';
+export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'settings' | 'profile';
 type BottomTabId = UserTabId | AdminShellTabId;
 
 interface BottomNavigationProps {
@@ -39,6 +40,7 @@ export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'manage_bets', label: 'Панель', Icon: Settings2 },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp },
   { id: 'clients', label: 'Клиенты', Icon: Users },
+  { id: 'settings', label: 'Настройки', Icon: SlidersHorizontal },
   { id: 'profile', label: 'Профиль', Icon: UserIcon },
 ];
 

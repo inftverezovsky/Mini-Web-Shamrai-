@@ -1,0 +1,105 @@
+import unittest
+from datetime import datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+from uuid import uuid4
+
+from src.services.statistics import (
+    build_performance_payload,
+    filter_items_by_period,
+    is_paid_client_access,
+    normalize_period,
+    period_start,
+    stat_item_from_bet,
+    summarize_items,
+)
+
+
+def _bet(*, status, coefficient="2.00", created_at=None, resolved_at=None, delivery_mode="feed"):
+    bookmaker = SimpleNamespace(id=1, name="Fonbet", code="fonbet")
+    return SimpleNamespace(
+        id=uuid4(),
+        event_name="Team A - Team B",
+        status=status,
+        coefficient=Decimal(coefficient),
+        created_at=created_at or datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+        resolved_at=resolved_at,
+        delivery_mode=delivery_mode,
+        sport_type="Футбол",
+        outcome="П1",
+        bookmakers=[bookmaker],
+        bookmaker=bookmaker,
+    )
+
+
+class StatisticsServiceTests(unittest.TestCase):
+    def test_refunds_and_pending_do_not_create_stat_items(self):
+        resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)
+
+        self.assertIsNone(stat_item_from_bet(_bet(status="refund", resolved_at=resolved_at)))
+        self.assertIsNone(stat_item_from_bet(_bet(status="pending", resolved_at=None)))
+        self.assertIsNotNone(stat_item_from_bet(_bet(status="win", resolved_at=resolved_at)))
+
+    def test_summary_uses_unit_stake_roi_for_win_loss_only(self):
+        resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)
+        items = [
+            stat_item_from_bet(_bet(status="win", coefficient="2.50", resolved_at=resolved_at)),
+            stat_item_from_bet(_bet(status="loss", coefficient="1.80", resolved_at=resolved_at)),
+            stat_item_from_bet(_bet(status="refund", coefficient="2.00", resolved_at=resolved_at)),
+        ]
+        summary = summarize_items([item for item in items if item])
+
+        self.assertEqual(summary["bets"], 2)
+        self.assertEqual(summary["wins"], 1)
+        self.assertEqual(summary["losses"], 1)
+        self.assertEqual(summary["profit_units"], 0.5)
+        self.assertEqual(summary["roi"], 25.0)
+        self.assertEqual(summary["winrate"], 50.0)
+
+    def test_paid_client_access_detection(self):
+        self.assertTrue(is_paid_client_access("paid_match", True))
+        self.assertTrue(is_paid_client_access("telegram_stars_single_bet", False))
+        self.assertTrue(is_paid_client_access("debug_single_bet", False))
+        self.assertTrue(is_paid_client_access("unknown", True))
+        self.assertFalse(is_paid_client_access("free_bet", False))
+        self.assertFalse(is_paid_client_access("guarantee_replacement", False))
+        self.assertFalse(is_paid_client_access("admin", True))
+
+    def test_timeline_groups_by_resolved_at_in_moscow_timezone(self):
+        item = stat_item_from_bet(_bet(
+            status="win",
+            coefficient="1.90",
+            created_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+            resolved_at=datetime(2026, 6, 9, 22, 30, tzinfo=timezone.utc),
+        ))
+        payload = build_performance_payload([item])
+
+        self.assertEqual(payload["timeline"][0]["key"], "2026-06")
+        self.assertEqual(payload["timeline"][0]["days"][0]["key"], "2026-06-10")
+        self.assertEqual(payload["timeline"][0]["days"][0]["bets"][0]["profit_units"], 0.9)
+
+    def test_period_start_uses_moscow_calendar_boundaries(self):
+        now = datetime(2026, 6, 10, 9, tzinfo=timezone.utc)
+
+        self.assertEqual(period_start("week", now=now).isoformat(), "2026-06-08T00:00:00+03:00")
+        self.assertEqual(period_start("month", now=now).isoformat(), "2026-06-01T00:00:00+03:00")
+        self.assertEqual(period_start("quarter", now=now).isoformat(), "2026-04-01T00:00:00+03:00")
+        self.assertIsNone(period_start("all", now=now))
+        self.assertEqual(normalize_period("bad-value"), "all")
+
+    def test_filter_items_by_period_uses_resolved_at(self):
+        now = datetime(2026, 6, 10, 12, tzinfo=timezone.utc)
+        items = [
+            {"resolved_at": "2026-06-10T14:00:00+03:00", "status": "win"},
+            {"resolved_at": "2026-06-02T14:00:00+03:00", "status": "loss"},
+            {"resolved_at": "2026-03-20T14:00:00+03:00", "status": "win"},
+        ]
+
+        self.assertEqual(len(filter_items_by_period(items, "week", now=now)), 1)
+        self.assertEqual(len(filter_items_by_period(items, "month", now=now)), 2)
+        self.assertEqual(len(filter_items_by_period(items, "quarter", now=now)), 2)
+        self.assertEqual(len(filter_items_by_period(items, "all", now=now)), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

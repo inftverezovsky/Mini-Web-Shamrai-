@@ -1,320 +1,349 @@
-import React, { useState, useEffect } from 'react';
-import { apiFetch } from '../../utils/api';
-import { BetResponse, UserStats } from '../../schemas/schemas';
-import { Trophy, Calendar, Loader2, TrendingUp, AlertCircle, BookOpen } from 'lucide-react';
-import EmojiTextField from '../../components/EmojiTextField';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  AlertCircle,
+  BarChart3,
+  CalendarDays,
+  ChevronDown,
+  ChevronRight,
+  CircleDollarSign,
+  Download,
+  FileSpreadsheet,
+  Loader2,
+  Target,
+  TrendingDown,
+  TrendingUp,
+  Trophy,
+} from 'lucide-react';
+
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
+import { EMPTY_SUMMARY, MiniSummary, PeriodSelector, StatTile, pct, signed, summaryTone } from '../../features/performance/performanceUi';
+import { PerformanceBetItem, PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
+import { apiFetch, downloadApiFile } from '../../utils/api';
+
+type ExpandedMap = Record<string, boolean>;
+
+function resultLabel(status: PerformanceBetItem['status']) {
+  return status === 'win' ? 'Выигрыш' : 'Проигрыш';
+}
+
+function resultClass(status: PerformanceBetItem['status']) {
+  return status === 'win'
+    ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100'
+    : 'border-rose-300/25 bg-rose-400/10 text-rose-100';
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return '—';
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function SummaryStrip({ summary }: { summary: PerformanceSummary }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <StatTile label="Ставок" value={summary.bets} hint={`${summary.wins}W / ${summary.losses}L`} />
+      <StatTile label="Прибыль" value={`${signed(summary.profit_units)}u`} tone={summaryTone(summary)} />
+      <StatTile label="ROI" value={pct(summary.roi)} tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-rose-300'} />
+      <StatTile label="Winrate" value={pct(summary.winrate)} tone="text-cyan-200" />
+    </div>
+  );
+}
+
+function BetRow({ bet }: { bet: PerformanceBetItem }) {
+  const profitTone = bet.profit_units >= 0 ? 'text-emerald-300' : 'text-rose-300';
+  return (
+    <div className="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h4 className="break-words text-sm font-black leading-snug text-white">{bet.event_name}</h4>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {bet.bookmakers.map((bookmaker) => (
+              <span
+                key={bookmaker.id}
+                className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/70 py-0.5 pl-1 pr-2 text-[9px] font-bold text-slate-200"
+              >
+                <BookmakerLogoFrame bookmaker={bookmaker as any} size="badge" className="rounded-full" />
+                {bookmaker.name}
+              </span>
+            ))}
+            {bet.sport_type && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/70 py-0.5 pl-1 pr-2 text-[9px] font-bold text-slate-200">
+                <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full" />
+                {bet.sport_type}
+              </span>
+            )}
+            <span className={`rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-[0.1em] ${resultClass(bet.status)}`}>
+              {resultLabel(bet.status)}
+            </span>
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className={`text-base font-black ${profitTone}`}>{signed(bet.profit_units)}u</div>
+          <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-500">КФ {bet.coefficient.toFixed(2)}</div>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-bold text-slate-500">
+        <span>Расчет: {formatDateTime(bet.resolved_at)}</span>
+        {bet.outcome && <span className="text-slate-400">Исход: {bet.outcome}</span>}
+        <span>{bet.source_type === 'private' ? 'Закрытая выдача' : 'Лента'}</span>
+      </div>
+    </div>
+  );
+}
 
 export default function MyBets() {
-  const [bets, setBets] = useState<BetResponse[]>([]);
-  const [stats, setStats] = useState<UserStats | null>(null);
-  
+  const [data, setData] = useState<PerformanceTimelineResponse | null>(null);
+  const [period, setPeriod] = useState<PeriodFilter>('all');
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expandedMonths, setExpandedMonths] = useState<ExpandedMap>({});
+  const [expandedDays, setExpandedDays] = useState<ExpandedMap>({});
 
-  // Capper Diary Notes State
-  const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
-  const [noteTexts, setNoteTexts] = useState<Record<string, string>>({});
-  const [noteEmotions, setNoteEmotions] = useState<Record<string, number>>({});
-  const [loadingNotes, setLoadingNotes] = useState<Record<string, boolean>>({});
-  const [savingNotes, setSavingNotes] = useState<Record<string, boolean>>({});
-
-  const toggleNoteDiary = async (betId: string) => {
-    const isExpanded = !!expandedNotes[betId];
-    setExpandedNotes(prev => ({ ...prev, [betId]: !isExpanded }));
-
-    // Fetch note if opening and not loaded yet
-    if (!isExpanded && noteTexts[betId] === undefined) {
-      try {
-        setLoadingNotes(prev => ({ ...prev, [betId]: true }));
-        const note = await apiFetch(`/bets/${betId}/notes`);
-        if (note) {
-          setNoteTexts(prev => ({ ...prev, [betId]: note.text }));
-          setNoteEmotions(prev => ({ ...prev, [betId]: note.emotion_score }));
-        } else {
-          setNoteTexts(prev => ({ ...prev, [betId]: '' }));
-          setNoteEmotions(prev => ({ ...prev, [betId]: 5 }));
-        }
-      } catch (err) {
-        console.error('Failed to load diary note:', err);
-      } finally {
-        setLoadingNotes(prev => ({ ...prev, [betId]: false }));
-      }
-    }
-  };
-
-  const handleSaveNote = async (betId: string) => {
-    try {
-      setSavingNotes(prev => ({ ...prev, [betId]: true }));
-      const payload = {
-        text: noteTexts[betId] || '',
-        emotion_score: noteEmotions[betId] || 5
-      };
-      await apiFetch(`/bets/${betId}/notes`, {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
-      alert('Заметка сохранена!');
-    } catch (err: any) {
-      alert(err.message || 'Ошибка сохранения');
-    } finally {
-      setSavingNotes(prev => ({ ...prev, [betId]: false }));
-    }
-  };
-
-  const loadMyBets = async () => {
+  const loadMyBets = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      
-      // GET /api/users/me/bets
-      const data = await apiFetch('/users/me/bets');
-      setBets(data);
-
-      // GET /api/bets/stats for user indicators
-      const statsData = await apiFetch('/bets/stats');
-      setStats(statsData);
+      const timeline = await apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`);
+      setData(timeline);
+      setExpandedMonths({
+        [timeline.default_expanded_month_key]: true,
+      });
+      setExpandedDays({
+        [timeline.default_expanded_day_key]: true,
+      });
     } catch (err: any) {
-      console.error(err);
       setError(err.message || 'Ошибка загрузки ставок');
     } finally {
       setLoading(false);
     }
-  };
+  }, [period]);
 
   useEffect(() => {
-    loadMyBets();
-  }, []);
+    void loadMyBets();
+  }, [loadMyBets]);
 
-  const formatDate = (dateStr: string) => {
-    const d = new Date(dateStr);
-    return d.toLocaleString('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+  const summary = data?.summary ?? EMPTY_SUMMARY;
+  const bestBookmaker = useMemo(() => {
+    return data?.bookmaker_breakdown
+      ?.filter((item) => item.summary.bets > 0)
+      .sort((a, b) => b.summary.roi - a.summary.roi)[0];
+  }, [data]);
+
+  const exportMyBets = async (format: 'csv' | 'xlsx') => {
+    try {
+      setExporting(format);
+      setError(null);
+      const params = new URLSearchParams({ period, format });
+      await downloadApiFile(`/users/me/bets/timeline/export?${params.toString()}`, `shamrai_my_bets_${period}.${format}`);
+    } catch (err: any) {
+      setError(err.message || 'Не удалось скачать экспорт');
+    } finally {
+      setExporting(null);
+    }
   };
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[40vh] space-y-3">
-        <Loader2 className="w-7 h-7 text-emerald-500 animate-spin" />
-        <span className="text-slate-400 text-xs">Загрузка ваших ставок...</span>
+      <div className="flex min-h-[40vh] flex-col items-center justify-center space-y-3">
+        <Loader2 className="h-7 w-7 animate-spin text-emerald-500" />
+        <span className="text-xs text-slate-400">Собираем вашу статистику...</span>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="text-center p-6 text-rose-400 text-xs flex flex-col items-center space-y-2">
-        <AlertCircle className="w-8 h-8" />
+      <div className="flex flex-col items-center space-y-2 p-6 text-center text-xs text-rose-400">
+        <AlertCircle className="h-8 w-8" />
         <span>Ошибка: {error}</span>
-        <button onClick={loadMyBets} className="underline text-indigo-400">Повторить</button>
+        <button type="button" onClick={loadMyBets} className="text-indigo-300 underline">Повторить</button>
       </div>
     );
   }
 
-  const totalBetsTaken = stats?.total_bets_taken ?? bets.length;
-  const winrateNum = stats?.winrate ?? 0;
-  const averageCoefficient = stats?.average_coefficient ?? (
-    bets.length > 0
-      ? bets.reduce((sum, bet) => sum + Number(bet.coefficient || 0), 0) / bets.length
-      : 0
-  );
-
   return (
-    <div className="space-y-6 animate-slide-up pb-10">
-      
-      {/* Header section with User stats */}
-      <div className="bg-white/[0.04] border border-white/10 backdrop-blur-md p-4 rounded-2xl space-y-3">
-        <div className="flex items-center space-x-1.5 text-slate-400 text-[10px] font-extrabold uppercase tracking-wider">
-          <TrendingUp className="w-4 h-4 text-emerald-400" />
-          <span>Моя эффективность</span>
+    <div className="space-y-5 pb-10">
+      <section className="rounded-3xl border border-white/10 bg-white/[0.045] p-4 shadow-glass backdrop-blur-xl">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200">
+              <CircleDollarSign className="h-4 w-4" />
+              Моя эффективность
+            </div>
+            <h2 className="mt-1 text-xl font-black text-white">Купленные прогнозы</h2>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-[380px]">
+            <PeriodSelector value={period} onChange={setPeriod} />
+            <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+              <div className={`rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-right ${summaryTone(summary)}`}>
+                <div className="text-lg font-black">{signed(summary.profit_units)}u</div>
+                <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-500">{data?.period_label || 'profit'}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void exportMyBets('csv')}
+                disabled={exporting !== null}
+                title="Скачать CSV"
+                className="inline-flex min-h-[48px] min-w-[54px] items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-slate-200 transition-all hover:bg-white/[0.09] disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void exportMyBets('xlsx')}
+                disabled={exporting !== null}
+                title="Скачать XLSX"
+                className="inline-flex min-h-[48px] min-w-[54px] items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-100 transition-all hover:bg-emerald-300/15 disabled:opacity-50"
+              >
+                <FileSpreadsheet className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 text-center text-xs">
-          <div className="bg-black/20 min-h-[70px] px-2 py-3 rounded-xl border border-white/5 flex flex-col justify-center">
-            <span className="text-[9px] text-slate-500 font-semibold uppercase leading-tight">Ставок</span>
-            <span className="text-base font-black mt-1 text-white">
-              {totalBetsTaken}
-            </span>
+        <div className="mt-4">
+          <SummaryStrip summary={summary} />
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <StatTile label="Средний КФ" value={summary.average_coefficient.toFixed(2)} tone="text-indigo-200" />
+          <StatTile
+            label="Текущая серия"
+            value={summary.current_streak ? `${summary.current_streak} ${summary.current_streak_type === 'win' ? 'W' : 'L'}` : '—'}
+            tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
+          />
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div className="rounded-2xl border border-white/10 bg-slate-950/30 p-3">
+            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
+              <TrendingUp className="h-3.5 w-3.5 text-emerald-300" />
+              Лента
+            </div>
+            <MiniSummary summary={data?.source_split.feed ?? EMPTY_SUMMARY} />
           </div>
-          <div className="bg-black/20 min-h-[70px] px-2 py-3 rounded-xl border border-white/5 flex flex-col justify-center">
-            <span className="text-[9px] text-slate-500 font-semibold uppercase leading-tight">Побед</span>
-            <span className="text-base font-black text-emerald-400 mt-1">
-              {winrateNum.toFixed(winrateNum % 1 === 0 ? 0 : 1)}%
-            </span>
-          </div>
-          <div className="bg-black/20 min-h-[70px] px-2 py-3 rounded-xl border border-white/5 flex flex-col justify-center">
-            <span className="text-[9px] text-slate-500 font-semibold uppercase leading-tight">Средний КФ</span>
-            <span className="text-base font-black text-indigo-400 mt-1">
-              {averageCoefficient.toFixed(2)}
-            </span>
+          <div className="rounded-2xl border border-white/10 bg-slate-950/30 p-3">
+            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
+              <Target className="h-3.5 w-3.5 text-cyan-300" />
+              Закрытые
+            </div>
+            <MiniSummary summary={data?.source_split.private ?? EMPTY_SUMMARY} />
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Bets list catalog */}
-      <div className="space-y-4">
-        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Моя история ставок</h3>
-        
-        {bets.length === 0 ? (
-          <div className="glass-panel p-8 text-center rounded-2xl border border-white/5">
-            <Trophy className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-            <p className="text-slate-400 text-xs font-semibold">История пуста</p>
-            <p className="text-slate-500 text-[10px] mt-1">Добавьте прогнозы в отслеживание из Ленты.</p>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">
+            <CalendarDays className="h-4 w-4 text-cyan-300" />
+            История по расчету
+          </h3>
+          {bestBookmaker && (
+            <span className="text-[10px] font-bold text-slate-500">Лучший БК: {bestBookmaker.label}</span>
+          )}
+        </div>
+
+        {!data?.timeline.length ? (
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-8 text-center">
+            <Trophy className="mx-auto h-10 w-10 text-slate-600" />
+            <p className="mt-2 text-xs font-semibold text-slate-400">Пока нет купленных рассчитанных ставок</p>
           </div>
         ) : (
-          bets.map(bet => {
-            const isPending = bet.status === 'pending';
-            const betBookmakers = bet.bookmakers?.length
-              ? bet.bookmakers
-              : bet.bookmaker
-                ? [bet.bookmaker]
-                : [];
-            
+          data.timeline.map((month) => {
+            const monthOpen = expandedMonths[month.key] ?? false;
             return (
-              <div 
-                key={bet.id}
-                className="p-5 rounded-2xl border border-white/10 backdrop-blur-md bg-white/[0.04] space-y-3 relative overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:-translate-y-0.5 motion-card shimmer-border"
-              >
-                
-                {/* Date & Badge Tag */}
-                <div className="flex justify-between items-center text-[10px] text-slate-400">
-                  <span className="flex items-center">
-                    <Calendar className="w-3 h-3 mr-1 text-slate-500" />
-                    {formatDate(bet.created_at)}
-                  </span>
-                  
-                  <div className="flex items-center space-x-1.5">
-                    {bet.sport_type && (
-                      <span className="bg-slate-900/60 border border-white/10 pl-1 pr-2.5 py-0.5 rounded-full font-bold text-[8.5px] uppercase tracking-wider flex items-center gap-1.5 text-slate-200 hover:border-pink-500/30 transition-all duration-300 shadow-sm">
-                        <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full overflow-hidden" />
-                        {bet.sport_type}
-                      </span>
-                    )}
-                    {/* Settle Badge indicator */}
-                    {bet.status === 'pending' && (
-                      <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2.5 py-0.5 rounded-full font-bold">Ожидает</span>
-                    )}
-                    {bet.status === 'win' && (
-                      <span className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 px-2.5 py-0.5 rounded-full font-bold shadow-neon-green">Выигрыш 🏆</span>
-                    )}
-                    {bet.status === 'loss' && (
-                      <span className="bg-rose-500/15 text-rose-400 border border-rose-500/25 px-2.5 py-0.5 rounded-full font-bold shadow-neon-red">Проигрыш</span>
-                    )}
-                    {bet.status === 'refund' && (
-                      <span className="bg-slate-800 border border-slate-750 text-slate-400 px-2.5 py-0.5 rounded-full font-bold">Возврат</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Content Header */}
-                <div>
-                  <h4 className="text-sm font-extrabold text-white leading-snug">{bet.event_name}</h4>
-                  {betBookmakers.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2 mt-2">
-                      {betBookmakers.map((bookmaker) => (
-                        <span
-                          key={bookmaker.id}
-                          className="bg-slate-900/60 border border-white/10 pl-1 pr-2.5 py-0.5 rounded-full text-[9px] font-bold text-slate-200 inline-flex items-center gap-1.5 hover:border-cyan-500/30 transition-all duration-300 shadow-sm"
-                        >
-                          <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="rounded-full overflow-hidden" />
-                          {bookmaker.name}
-                        </span>
-                      ))}
+              <div key={month.key} className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.04]">
+                <button
+                  type="button"
+                  onClick={() => setExpandedMonths((current) => ({ ...current, [month.key]: !monthOpen }))}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    {monthOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
+                    <div>
+                      <div className="text-sm font-black text-white">{month.label}</div>
+                      <MiniSummary summary={month.summary} />
                     </div>
-                  )}
-                </div>
-
-                {/* Odds */}
-                <div className="flex justify-between items-center bg-black/25 p-3 rounded-xl border border-white/5 text-xs">
-                  <div>
-                    <span className="text-[9px] uppercase font-bold text-slate-500 block">Коэффициент</span>
-                    <span className="text-base font-black text-emerald-400">{parseFloat(bet.coefficient as any).toFixed(2)}</span>
                   </div>
-                </div>
+                  <div className={`shrink-0 text-right text-sm font-black ${summaryTone(month.summary)}`}>
+                    {signed(month.summary.profit_units)}u
+                  </div>
+                </button>
 
-                {/* Notes Diary section (only for resolved bets) */}
-                {!isPending && (
-                  <div className="pt-2.5 border-t border-white/5 space-y-2.5">
-                    <button
-                      onClick={() => toggleNoteDiary(bet.id)}
-                      className="text-[10px] text-slate-400 font-extrabold uppercase hover:text-white transition-all flex items-center space-x-1"
-                    >
-                      <BookOpen className="w-3.5 h-3.5 mr-1 text-indigo-400" />
-                      <span>{expandedNotes[bet.id] ? 'Скрыть дневник' : '📝 Дневник каппера'}</span>
-                    </button>
-
-                    {expandedNotes[bet.id] && (
-                      <div className="space-y-3 pt-1 border-t border-white/[0.02] animate-slide-down">
-                        {loadingNotes[bet.id] ? (
-                          <div className="flex justify-center py-2">
-                            <Loader2 className="w-4 h-4 text-indigo-500 animate-spin" />
-                          </div>
-                        ) : (
-                          <>
-                            <div>
-                              <span className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Ваше настроение:</span>
-                              <div className="flex space-x-2 text-lg">
-                                {['😡', '😟', '😐', '🙂', '😎'].map((emoji, scoreIdx) => {
-                                  const score = scoreIdx + 1;
-                                  const isSelected = (noteEmotions[bet.id] || 5) === score;
-                                  return (
-                                    <button
-                                      key={score}
-                                      type="button"
-                                      onClick={() => setNoteEmotions(prev => ({ ...prev, [bet.id]: score }))}
-                                      className={`transition-all duration-200 p-1 rounded-lg ${
-                                        isSelected 
-                                          ? 'bg-indigo-500/20 border border-indigo-500 scale-125' 
-                                          : 'opacity-40 hover:opacity-85'
-                                      }`}
-                                    >
-                                      {emoji}
-                                    </button>
-                                  );
-                                })}
+                {monthOpen && (
+                  <div className="space-y-2 border-t border-white/10 p-3">
+                    {month.days.map((day) => {
+                      const dayOpen = expandedDays[day.key] ?? false;
+                      return (
+                        <div key={day.key} className="rounded-2xl border border-white/10 bg-black/15">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedDays((current) => ({ ...current, [day.key]: !dayOpen }))}
+                            className="flex w-full items-center justify-between gap-2 px-3 py-3 text-left"
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              {dayOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
+                              <div>
+                                <div className="text-xs font-black text-white">{day.label}</div>
+                                <MiniSummary summary={day.summary} />
                               </div>
                             </div>
+                            {day.summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 shrink-0 text-emerald-300" /> : <TrendingDown className="h-4 w-4 shrink-0 text-rose-300" />}
+                          </button>
 
-                            <div>
-                              <span className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Заметки по матчу:</span>
-                              <EmojiTextField
-                                multiline
-                                value={noteTexts[bet.id] || ''}
-                                onValueChange={(value) => setNoteTexts(prev => ({ ...prev, [bet.id]: value }))}
-                                placeholder="Опишите свои мысли, ход игры, ошибки или выводы..."
-                                rows={3}
-                                className="w-full bg-slate-950/60 border border-slate-800/60 rounded-xl py-2 px-3 text-xs text-white placeholder-slate-650 focus:outline-none focus:border-indigo-500/50 transition-all leading-normal"
-                              />
+                          {dayOpen && (
+                            <div className="space-y-2 border-t border-white/10 p-2">
+                              {day.bets.map((bet) => <BetRow key={bet.id} bet={bet} />)}
                             </div>
-
-                            <button
-                              onClick={() => handleSaveNote(bet.id)}
-                              disabled={savingNotes[bet.id]}
-                              className="w-full bg-indigo-500 hover:bg-indigo-600 active:scale-[0.98] disabled:opacity-50 text-white font-extrabold py-2 rounded-xl text-[10px] uppercase tracking-wider flex items-center justify-center transition-all shadow-glass"
-                            >
-                              {savingNotes[bet.id] ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                'Сохранить в дневник'
-                              )}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-
               </div>
             );
           })
         )}
-      </div>
+      </section>
 
+      {Boolean(data?.sport_breakdown.length || data?.bookmaker_breakdown.length) && (
+        <section className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+            <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-slate-400">
+              <BarChart3 className="h-4 w-4 text-cyan-300" />
+              По спорту
+            </h3>
+            <div className="mt-3 space-y-2">
+              {data?.sport_breakdown.slice(0, 5).map((item) => (
+                <div key={item.key} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-950/30 px-3 py-2">
+                  <span className="text-xs font-bold text-white">{item.label}</span>
+                  <span className={`text-xs font-black ${summaryTone(item.summary)}`}>{signed(item.summary.profit_units)}u · ROI {pct(item.summary.roi)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
+            <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-slate-400">
+              <BarChart3 className="h-4 w-4 text-emerald-300" />
+              По БК
+            </h3>
+            <div className="mt-3 space-y-2">
+              {data?.bookmaker_breakdown.slice(0, 5).map((item) => (
+                <div key={item.key} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-950/30 px-3 py-2">
+                  <span className="text-xs font-bold text-white">{item.label}</span>
+                  <span className={`text-xs font-black ${summaryTone(item.summary)}`}>{signed(item.summary.profit_units)}u · ROI {pct(item.summary.roi)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

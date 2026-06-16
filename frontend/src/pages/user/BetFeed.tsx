@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { BetResponse } from '../../schemas/schemas';
+import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
+import { BetResponse, PaginatedResponse } from '../../schemas/schemas';
 import { useAuth } from '../../context/AuthContext';
 import { useLayoutMode } from '../../context/LayoutModeContext';
 import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, ExternalLink, Star, Image as ImageIcon } from 'lucide-react';
@@ -14,13 +16,12 @@ import { hasActivePromo, promoFlags } from '../../config/promoFlags';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import { isStaffRole } from '../../utils/roles';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
+import { trackEvent } from '../../utils/analytics';
 
 function resolveAssetUrl(path: string | null) {
   if (!path) return null;
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
-  return `${API_URL}${path}`;
+  return `${API_BASE_URL}${path}`;
 }
 
 function getBookmakerLinkUrl(bet: BetResponse, bookmakerId: number) {
@@ -28,28 +29,37 @@ function getBookmakerLinkUrl(bet: BetResponse, bookmakerId: number) {
   return link?.url?.trim() || null;
 }
 
-// Custom ticking countdown timer for Live forecasts
-function LiveTimer({ endsAt }: { endsAt: string }) {
-  const calculateTimeLeft = useCallback(() => {
-    const difference = +new Date(endsAt) - +new Date();
-    if (difference <= 0) return '00:00';
-    
-    const minutes = Math.floor((difference / 1000 / 60) % 60);
-    const seconds = Math.floor((difference / 1000) % 60);
-    
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-  }, [endsAt]);
-  
-  const [timeLeft, setTimeLeft] = useState(calculateTimeLeft());
-  
+function useVisibleNowTick(intervalMs = 1000) {
+  const [now, setNow] = useState(() => Date.now());
+
   useEffect(() => {
     const timer = setInterval(() => {
-      setTimeLeft(calculateTimeLeft());
-    }, 1000);
-    
-    return () => clearInterval(timer);
-  }, [calculateTimeLeft]);
-  
+      if (document.visibilityState === 'visible') {
+        setNow(Date.now());
+      }
+    }, intervalMs);
+    const syncOnVisible = () => {
+      if (document.visibilityState === 'visible') setNow(Date.now());
+    };
+    document.addEventListener('visibilitychange', syncOnVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', syncOnVisible);
+    };
+  }, [intervalMs]);
+
+  return now;
+}
+
+// Shared ticking countdown timer for Live forecasts.
+function LiveTimer({ endsAt, now }: { endsAt: string; now: number }) {
+  const difference = +new Date(endsAt) - now;
+  const minutes = Math.max(0, Math.floor((difference / 1000 / 60) % 60));
+  const seconds = Math.max(0, Math.floor((difference / 1000) % 60));
+  const timeLeft = difference <= 0
+    ? '00:00'
+    : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
   return (
     <span className="shimmer-border bg-rose-500/10 border border-rose-500/25 px-2.5 py-0.5 rounded-full font-black text-rose-400 shadow-neon-rose animate-pulse text-[8.5px] uppercase tracking-wider flex items-center space-x-1 shrink-0 select-none relative">
       <Flame className="w-3 h-3 fill-rose-500 text-rose-500 animate-bounce" />
@@ -66,40 +76,53 @@ interface BetFeedProps {
 export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   const { user: userProfile } = useAuth();
   const { isCompact } = useLayoutMode();
-  const debugCheckoutEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
   
-  const [bets, setBets] = useState<BetResponse[]>([]);
   const [takenBetIds, setTakenBetIds] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const nowTick = useVisibleNowTick();
 
-  const loadFeed = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const feedData = await apiFetch('/bets/feed');
+  const feedQuery = useInfiniteQuery<PaginatedResponse<BetResponse>, Error>({
+    queryKey: ['bets-feed-page'],
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ limit: '20' });
+      if (pageParam) params.set('cursor', String(pageParam));
+      return apiFetch<PaginatedResponse<BetResponse>>(`/bets/feed-page?${params.toString()}`);
+    },
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
+    staleTime: 20_000,
+  });
 
-      setBets(feedData);
-      const backendTakenIds = feedData.filter((bet: BetResponse) => bet.is_taken).map((bet: BetResponse) => bet.id);
-      setTakenBetIds(backendTakenIds);
-      localStorage.setItem('bet_tma_taken_ids', JSON.stringify(backendTakenIds));
-    } catch (err: any) {
-      console.error('Failed to load feed:', err);
-      setError(err.message || 'Ошибка загрузки ленты прогнозов');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const bets = useMemo(
+    () => feedQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [feedQuery.data],
+  );
+
+  const loadFeed = useCallback(async () => {
+    await feedQuery.refetch();
+  }, [feedQuery]);
 
   useEffect(() => {
-    loadFeed();
-  }, []);
+    const backendTakenIds = bets.filter((bet) => bet.is_taken).map((bet) => bet.id);
+    setTakenBetIds(backendTakenIds);
+    localStorage.setItem('bet_tma_taken_ids', JSON.stringify(backendTakenIds));
+  }, [bets]);
+
+  const loading = feedQuery.isLoading;
+  const error = feedQuery.error?.message || null;
 
   const handleTakeBet = async (betId: string) => {
+    const bet = bets.find((item) => item.id === betId);
+
     try {
       setActionLoadingId(betId);
+      trackEvent('Bet Take Started', {
+        category: bet?.category,
+        sport: bet?.sport_type,
+        unlocked: bet?.is_unlocked,
+      });
+
       // POST /api/bets/{bet_id}/take
       await apiFetch(`/bets/${betId}/take`, { method: 'POST' });
       
@@ -107,17 +130,34 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
       setTakenBetIds(nextTaken);
       localStorage.setItem('bet_tma_taken_ids', JSON.stringify(nextTaken));
       notifySuccess('Прогноз добавлен в “Мои ставки”.');
+      trackEvent('Bet Take Success', {
+        category: bet?.category,
+        sport: bet?.sport_type,
+        unlocked: bet?.is_unlocked,
+      });
       await loadFeed();
     } catch (err: any) {
       notifyError(err.message || 'Не удалось принять ставку');
+      trackEvent('Bet Take Failed', {
+        category: bet?.category,
+        sport: bet?.sport_type,
+        unlocked: bet?.is_unlocked,
+      });
     } finally {
       setActionLoadingId(null);
     }
   };
 
   const handleBuyBet = async (betId: string) => {
+    const bet = bets.find((item) => item.id === betId);
+
     try {
       setActionLoadingId(betId);
+      trackEvent('Stars Checkout Started', {
+        category: bet?.category,
+        sport: bet?.sport_type,
+        price_stars: bet?.price_stars ?? 50,
+      });
       
       // POST /api/payments/invoice
       const invoiceData = await apiFetch('/payments/invoice', {
@@ -131,11 +171,26 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
       const tg = window.Telegram?.WebApp;
 
       if (tg && typeof tg.openInvoice === 'function') {
+        trackEvent('Stars Checkout Opened', {
+          category: bet?.category,
+          sport: bet?.sport_type,
+          price_stars: bet?.price_stars ?? 50,
+        });
         tg.openInvoice(invoiceUrl, async (status: string) => {
           if (status === 'paid') {
             notifyPending('Оплата прошла в Telegram. Ждем webhook и обновляем ленту.');
+            trackEvent('Stars Checkout Paid', {
+              category: bet?.category,
+              sport: bet?.sport_type,
+              price_stars: bet?.price_stars ?? 50,
+            });
             await loadFeed();
           } else {
+            trackEvent('Stars Checkout Closed', {
+              status,
+              category: bet?.category,
+              sport: bet?.sport_type,
+            });
             if (import.meta.env.DEV) {
               console.warn('Payment sheet closed or failed. Status:', status);
             }
@@ -149,13 +204,32 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
         await apiFetch(`/payments/debug/complete-bet/${betId}`, { method: 'POST' });
         notifySuccess('Debug-покупка проведена, прогноз открыт.');
+        trackEvent('Stars Checkout Paid', {
+          provider: 'debug',
+          category: bet?.category,
+          sport: bet?.sport_type,
+          price_stars: bet?.price_stars ?? 50,
+        });
         await loadFeed();
       }
     } catch (err: any) {
       notifyError(err.message || 'Ошибка обработки транзакции');
+      trackEvent('Stars Checkout Failed', {
+        category: bet?.category,
+        sport: bet?.sport_type,
+        price_stars: bet?.price_stars ?? 50,
+      });
     } finally {
       setActionLoadingId(null);
     }
+  };
+
+  const handleNavigateToBilling = () => {
+    trackEvent('Billing CTA Clicked', {
+      location: 'feed_access_banner',
+      active_access: active,
+    });
+    onNavigateToBilling?.();
   };
 
   const formatDate = (dateStr: string) => {
@@ -225,7 +299,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
           </div>
           {onNavigateToBilling && (
             <button 
-              onClick={onNavigateToBilling}
+              onClick={handleNavigateToBilling}
               className="bg-indigo-500 text-white font-extrabold px-3 py-1.5 rounded-lg text-[10px] active:scale-95 transition-all shadow-glass"
             >
               Купить матчи
@@ -278,7 +352,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                     </span>
                   )}
                   {isLive && bet.live_ends_at ? (
-                    <LiveTimer endsAt={bet.live_ends_at} />
+                    <LiveTimer endsAt={bet.live_ends_at} now={nowTick} />
                   ) : (
                     <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
                       Ожидает
@@ -327,6 +401,11 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                           href={bookmakerUrl}
                           target="_blank"
                           rel="noreferrer"
+                          onClick={() => trackEvent('Bookmaker Link Clicked', {
+                            bookmaker: bookmaker.code || bookmaker.name,
+                            sport: bet.sport_type,
+                            category: bet.category,
+                          })}
                           className="min-w-0 bg-slate-900/60 border border-cyan-400/20 pl-1 pr-2.5 py-1 rounded-full text-[9px] font-bold text-slate-100 inline-flex items-center gap-1.5 hover:border-cyan-400/50 hover:bg-cyan-400/10 active:scale-[0.98] transition-all duration-300 shadow-sm"
                         >
                           {bookmakerContent}
@@ -372,6 +451,10 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                       href={bet.match_link}
                       target="_blank"
                       rel="noreferrer"
+                      onClick={() => trackEvent('Match Link Clicked', {
+                        sport: bet.sport_type,
+                        category: bet.category,
+                      })}
                       className="bg-cyan-500/10 border border-cyan-500/20 text-cyan-200 text-[10px] font-extrabold py-2.5 px-3 rounded-xl flex items-center justify-center space-x-1.5 active:scale-[0.98] transition-all"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
@@ -433,6 +516,23 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
           );
         })}
         </div>
+      )}
+
+      {feedQuery.hasNextPage && (
+        <button
+          type="button"
+          onClick={() => {
+            trackEvent('Feed Load More Clicked', {
+              loaded_count: bets.length,
+            });
+            void feedQuery.fetchNextPage();
+          }}
+          disabled={feedQuery.isFetchingNextPage}
+          className="mx-auto flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-cyan-300/25 bg-cyan-300/10 px-4 text-xs font-black text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
+        >
+          {feedQuery.isFetchingNextPage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          <span>{feedQuery.isFetchingNextPage ? 'Загружаем...' : 'Показать еще'}</span>
+        </button>
       )}
     </div>
   );

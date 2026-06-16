@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import logging
 from typing import Any, Optional
@@ -61,16 +62,11 @@ def _verify_callback_group(raw_group_id: Any) -> None:
 def _verify_callback_secret(payload: dict) -> None:
     expected_secret = settings.VK_CALLBACK_SECRET.strip()
     if not expected_secret:
-        if settings.is_production:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="VK callback secret is not configured",
-            )
-        logger.warning(
-            "[VKCallback] VK_CALLBACK_SECRET is not configured; accepting callbacks by group_id only."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VK callback secret is not configured",
         )
-        return
-    if payload.get("secret") != expected_secret:
+    if not hmac.compare_digest(str(payload.get("secret") or ""), expected_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="VK callback secret mismatch",
@@ -408,6 +404,27 @@ async def _process_plain_text_status_message(event_object: dict) -> None:
         _send_forecast_button_message(event_object, VK_PROFILE_NOT_LINKED_MESSAGE)
 
 
+async def handle_vk_message_new_event(event_object: dict, *, source: str = "callback") -> None:
+    message = event_object.get("message") or {}
+    button_payload = _vk_event_button_payload(event_object)
+    logger.info(
+        "[VKCallback] message_new source=%s user_id=%s peer_id=%s text=%s forecast_action=%s request_id=%s",
+        source,
+        message.get("from_id") or event_object.get("user_id"),
+        message.get("peer_id") or event_object.get("peer_id"),
+        str(message.get("text") or "")[:500],
+        button_payload.get("action") if button_payload.get("type") == "forecast_request" else None,
+        button_payload.get("request_id") if button_payload.get("type") == "forecast_request" else None,
+    )
+    _run_background(_refresh_message_permission_from_message_new(event_object))
+    if button_payload.get("type") == "forecast_request":
+        _run_background(_process_forecast_button_event(event_object))
+    elif _forecast_action_from_message_text(event_object):
+        _run_background(_process_plain_text_forecast_message(event_object))
+    elif _should_reply_to_plain_text_message(event_object):
+        _run_background(_process_plain_text_status_message(event_object))
+
+
 @router.post("/callback")
 async def vk_callback(request: Request):
     try:
@@ -440,23 +457,7 @@ async def vk_callback(request: Request):
 
     if event_type == "message_new":
         event_object = payload.get("object") or {}
-        message = event_object.get("message") or {}
-        button_payload = _vk_event_button_payload(event_object)
-        logger.info(
-            "[VKCallback] message_new user_id=%s peer_id=%s text=%s forecast_action=%s request_id=%s",
-            message.get("from_id") or event_object.get("user_id"),
-            message.get("peer_id") or event_object.get("peer_id"),
-            str(message.get("text") or "")[:500],
-            button_payload.get("action") if button_payload.get("type") == "forecast_request" else None,
-            button_payload.get("request_id") if button_payload.get("type") == "forecast_request" else None,
-        )
-        _run_background(_refresh_message_permission_from_message_new(event_object))
-        if button_payload.get("type") == "forecast_request":
-            _run_background(_process_forecast_button_event(event_object))
-        elif _forecast_action_from_message_text(event_object):
-            _run_background(_process_plain_text_forecast_message(event_object))
-        elif _should_reply_to_plain_text_message(event_object):
-            _run_background(_process_plain_text_status_message(event_object))
+        await handle_vk_message_new_event(event_object, source="callback")
         return PlainTextResponse("ok")
 
     if event_type != "message_event":

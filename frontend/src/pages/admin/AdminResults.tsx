@@ -28,6 +28,7 @@ interface OddsDropNotifyResponse {
   bet: BetResponse;
   total: number;
   sent: number;
+  queued?: number;
   failed: number;
   errors: string[];
 }
@@ -382,7 +383,14 @@ export default function AdminResults() {
         body: JSON.stringify({ odds_dropped_to: normalizedValue }),
       });
       updateBetFromResponse(result.bet);
-      if (result.failed > 0) {
+      const queued = result.queued ?? 0;
+      if (queued > 0) {
+        notifySuccess(
+          result.failed > 0
+            ? `Поставлено в очередь: ${queued} из ${result.total}. Ошибок: ${result.failed}`
+            : `Уведомления поставлены в очередь: ${queued}`,
+        );
+      } else if (result.failed > 0) {
         notifySuccess(`Отправлено ${result.sent} из ${result.total}. Ошибок: ${result.failed}`);
       } else {
         notifySuccess(`Сообщение отправлено клиентам: ${result.sent}`);

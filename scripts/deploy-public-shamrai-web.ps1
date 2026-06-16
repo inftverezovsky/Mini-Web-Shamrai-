@@ -255,6 +255,9 @@ if (-not $SkipLocalChecks) {
       VITE_VK_ID_REDIRECT_URI = $env:VITE_VK_ID_REDIRECT_URI
       VITE_VK_GROUP_ID = $env:VITE_VK_GROUP_ID
       VITE_TELEGRAM_BOT_USERNAME = $env:VITE_TELEGRAM_BOT_USERNAME
+      VITE_PLAUSIBLE_DOMAIN = $env:VITE_PLAUSIBLE_DOMAIN
+      VITE_PLAUSIBLE_ENDPOINT = $env:VITE_PLAUSIBLE_ENDPOINT
+      VITE_PLAUSIBLE_CAPTURE_LOCALHOST = $env:VITE_PLAUSIBLE_CAPTURE_LOCALHOST
     }
     try {
       $env:VITE_API_URL = ""
@@ -263,6 +266,9 @@ if (-not $SkipLocalChecks) {
       $env:VITE_VK_ID_REDIRECT_URI = "https://shamra1.pro"
       $env:VITE_VK_GROUP_ID = $VkGroupId
       $env:VITE_TELEGRAM_BOT_USERNAME = "Shamra1_bot"
+      if ($null -eq $env:VITE_PLAUSIBLE_DOMAIN) { $env:VITE_PLAUSIBLE_DOMAIN = "shamra1.pro" }
+      if ($null -eq $env:VITE_PLAUSIBLE_ENDPOINT) { $env:VITE_PLAUSIBLE_ENDPOINT = "" }
+      if ($null -eq $env:VITE_PLAUSIBLE_CAPTURE_LOCALHOST) { $env:VITE_PLAUSIBLE_CAPTURE_LOCALHOST = "false" }
       Invoke-NativeChecked "npm" "run" "build"
     } finally {
       foreach ($key in $previousEnv.Keys) {
@@ -293,7 +299,6 @@ Invoke-Step "Create deployment archives" {
       "--exclude=./.deploy" `
       "--exclude=./.env" `
       "--exclude=./.env.local" `
-      "--exclude=./.env.*" `
       "--exclude=./.playwright-cli" `
       "--exclude=./deploy.tar.gz" `
       "--exclude=./remote.py" `
@@ -310,7 +315,6 @@ Invoke-Step "Create deployment archives" {
       "--exclude=*.pem" `
       "--exclude=./backend/.env" `
       "--exclude=./backend/.env.local" `
-      "--exclude=./backend/.env.*" `
       "--exclude=./backend/static/coupons" `
       "--exclude=./backend/static/coupons/*" `
       "-czf" $repoArchive "."
@@ -336,17 +340,29 @@ deploy_id="`$(date +%Y%m%d%H%M%S)"
 stage_path="$RemotePath.stage.`$deploy_id"
 backup_path="$RemotePath.rollback.`$deploy_id"
 failed_path="$RemotePath.failed.`$deploy_id"
-tmp_root_env="/tmp/shamrai-root.env.keep.`$deploy_id"
-tmp_backend_env="/tmp/shamrai-backend.env.keep.`$deploy_id"
 backup_marker="/tmp/shamrai-public-code-backup.path"
+db_backup_dir="$RemotePath.db-backups"
+db_backup_path="`$db_backup_dir/shamrai-db.`$deploy_id.dump"
 rm -rf "`$stage_path"
-rm -f "`$tmp_root_env" "`$tmp_backend_env" "`$backup_marker"
-[ -f "$RemotePath/.env" ] && cp "$RemotePath/.env" "`$tmp_root_env" || true
-[ -f "$RemotePath/backend/.env" ] && cp "$RemotePath/backend/.env" "`$tmp_backend_env" || true
+rm -f "`$backup_marker"
 mkdir -p "`$stage_path"
 tar -xzf /tmp/shamrai-public-repo.tar.gz -C "`$stage_path"
-[ -f "`$tmp_root_env" ] && cp "`$tmp_root_env" "`$stage_path/.env" || cp "`$stage_path/.env.example" "`$stage_path/.env"
-[ -f "`$tmp_backend_env" ] && cp "`$tmp_backend_env" "`$stage_path/backend/.env" || cp "`$stage_path/backend/.env.example" "`$stage_path/backend/.env"
+if [ -f "$RemotePath/.env" ]; then
+  install -m 0600 "$RemotePath/.env" "`$stage_path/.env"
+elif [ -f "`$stage_path/.env.example" ]; then
+  install -m 0600 "`$stage_path/.env.example" "`$stage_path/.env"
+else
+  echo "Missing root runtime env and .env.example fallback." >&2
+  exit 20
+fi
+if [ -f "$RemotePath/backend/.env" ]; then
+  install -m 0600 "$RemotePath/backend/.env" "`$stage_path/backend/.env"
+elif [ -f "`$stage_path/backend/.env.example" ]; then
+  install -m 0600 "`$stage_path/backend/.env.example" "`$stage_path/backend/.env"
+else
+  echo "Missing backend runtime env and backend/.env.example fallback." >&2
+  exit 21
+fi
 python3 - "`$stage_path/.env" "`$stage_path/backend/.env" <<'PY'
 from pathlib import Path
 import sys
@@ -382,13 +398,19 @@ patch_env(root_env, {
     "VITE_VK_ID_REDIRECT_URI": "https://shamra1.pro",
     "VITE_VK_GROUP_ID": "$VkGroupId",
     "VITE_TELEGRAM_BOT_USERNAME": "Shamra1_bot",
+    "VITE_PLAUSIBLE_DOMAIN": "shamra1.pro",
+    "VITE_PLAUSIBLE_ENDPOINT": "",
+    "VITE_PLAUSIBLE_CAPTURE_LOCALHOST": "false",
 })
 patch_env(backend_env, {
     "DEBUG_MODE": "false",
     "ALLOW_DEBUG_AUTH_BYPASS": "false",
     "TELEGRAM_USE_POLLING": "true",
     "TELEGRAM_START_RESPONSE_TIMEOUT_SECONDS": "4.0",
-    "TELEGRAM_WEBHOOK_IP_ADDRESS": "82.147.67.245",
+    "TELEGRAM_WEBHOOK_IP_ADDRESS": "",
+    "VK_DIALOG_POLLING_ENABLED": "true",
+    "VK_DIALOG_POLLING_INTERVAL_SECONDS": "1.0",
+    "VK_DIALOG_POLLING_BATCH_SIZE": "20",
     "CORS_ALLOWED_ORIGINS": "https://shamra1.pro,https://www.shamra1.pro",
     "API_BASE_URL": "https://shamra1.pro",
     "FRONTEND_BASE_URL": "https://shamra1.pro/app",
@@ -404,6 +426,9 @@ docker compose -p "$ComposeProject" config -q
 rollback_code() {
   status="`$?"
   echo "Preview deploy failed; rolling back code snapshot." >&2
+  if [ -s "`$db_backup_path" ]; then
+    echo "Database backup is available at `$db_backup_path" >&2
+  fi
   if [ -d "$RemotePath" ]; then
     rm -rf "`$failed_path"
     mv "$RemotePath" "`$failed_path" || true
@@ -416,6 +441,21 @@ rollback_code() {
   exit "`$status"
 }
 
+mkdir -p "`$db_backup_dir"
+chmod 0700 "`$db_backup_dir"
+if [ -d "$RemotePath" ] && [ -f "$RemotePath/docker-compose.yml" ]; then
+  (
+    cd "$RemotePath"
+    if docker compose -p "$ComposeProject" ps -q postgres >/dev/null 2>&1; then
+      docker compose -p "$ComposeProject" exec -T postgres sh -c 'pg_dump -U "`$POSTGRES_USER" -d "`$POSTGRES_DB" -Fc' > "`$db_backup_path"
+      chmod 0600 "`$db_backup_path"
+    fi
+  ) || {
+    echo "Database backup failed; aborting deploy before migrations." >&2
+    exit 22
+  }
+fi
+
 if [ -d "$RemotePath" ]; then
   mv "$RemotePath" "`$backup_path"
   printf '%s\n' "`$backup_path" > "`$backup_marker"
@@ -423,8 +463,22 @@ fi
 mv "`$stage_path" "$RemotePath"
 trap rollback_code ERR
 cd "$RemotePath"
-docker compose -p "$ComposeProject" up -d --build
-curl -fsS http://127.0.0.1:8082/api/health
+docker compose -p "$ComposeProject" up -d postgres
+docker compose -p "$ComposeProject" build backend frontend
+backend_static_volume="${ComposeProject}_backend_static"
+docker volume inspect "`$backend_static_volume" >/dev/null 2>&1 || docker volume create "`$backend_static_volume" >/dev/null
+docker run --rm -v "`$backend_static_volume:/target" alpine:3.20 sh -c 'mkdir -p /target/coupons && chown -R 10001:10001 /target'
+docker compose -p "$ComposeProject" run --rm backend alembic upgrade head
+docker compose -p "$ComposeProject" up -d
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if curl -fsS http://127.0.0.1:8082/api/health; then
+    break
+  fi
+  if [ "`$attempt" = "15" ]; then
+    exit 1
+  fi
+  sleep 1
+done
 trap - ERR
 "@
   Set-Utf8NoBomLfContent -Path $remoteDeployScript -Content $remoteDeployContent
@@ -460,7 +514,7 @@ restore_public() {
   fi
   rm -f /etc/nginx/sites-enabled/shamrai.conf
   if [ -f "`$nginx_backup/enabled-manifest" ]; then
-    while IFS="$(printf '\t')" read -r kind name target; do
+    while IFS="`$(printf '\t')" read -r kind name target; do
       [ -n "`$name" ] || continue
       rm -f "/etc/nginx/sites-enabled/`$name"
       if [ "`$kind" = "symlink" ]; then
@@ -549,7 +603,7 @@ if [ -f "`$nginx_backup_marker" ]; then
   fi
   rm -f /etc/nginx/sites-enabled/shamrai.conf
   if [ -f "`$nginx_backup/enabled-manifest" ]; then
-    while IFS="$(printf '\t')" read -r kind name target; do
+    while IFS="`$(printf '\t')" read -r kind name target; do
       [ -n "`$name" ] || continue
       rm -f "/etc/nginx/sites-enabled/`$name"
       if [ "`$kind" = "symlink" ]; then
@@ -645,7 +699,10 @@ curl -I -fsS http://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/app/ | head -n 8
 "@
-    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remote
+    $normalizedRemote = ((($remote -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
+    $encodedRemote = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedRemote))
+    $remoteCommand = "printf '%s' '$encodedRemote' | base64 -d | bash"
+    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
   }
 } catch {
   Write-Warning "Deploy verification failed; attempting remote rollback."

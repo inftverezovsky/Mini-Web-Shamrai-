@@ -438,13 +438,19 @@ patch_env(Path(sys.argv[1]), {
     "VITE_VK_ID_REDIRECT_URI": "https://shamra1.pro",
     "VITE_VK_GROUP_ID": "239419819",
     "VITE_TELEGRAM_BOT_USERNAME": "Shamra1_bot",
+    "VITE_PLAUSIBLE_DOMAIN": "shamra1.pro",
+    "VITE_PLAUSIBLE_ENDPOINT": "",
+    "VITE_PLAUSIBLE_CAPTURE_LOCALHOST": "false",
 })
 patch_env(Path(sys.argv[2]), {
     "DEBUG_MODE": "false",
     "ALLOW_DEBUG_AUTH_BYPASS": "false",
     "TELEGRAM_USE_POLLING": "true",
     "TELEGRAM_START_RESPONSE_TIMEOUT_SECONDS": "4.0",
-    "TELEGRAM_WEBHOOK_IP_ADDRESS": "82.147.67.245",
+    "TELEGRAM_WEBHOOK_IP_ADDRESS": "",
+    "VK_DIALOG_POLLING_ENABLED": "true",
+    "VK_DIALOG_POLLING_INTERVAL_SECONDS": "1.0",
+    "VK_DIALOG_POLLING_BATCH_SIZE": "20",
     "API_BASE_URL": "https://shamra1.pro",
     "FRONTEND_BASE_URL": "https://shamra1.pro/app",
     "CORS_ALLOWED_ORIGINS": "https://shamra1.pro,https://www.shamra1.pro",
@@ -476,8 +482,8 @@ docker compose -p '$ComposeProject' exec -T backend python - <<'PY'
 import re
 import time
 
-from src.api.payments import call_telegram_api
 from src.core.config import settings
+from src.services.telegram_bot import call_telegram_api
 
 if not settings.has_real_telegram_token:
     raise SystemExit("Telegram bot token is not configured")
@@ -513,7 +519,8 @@ for attempt in range(1, 4):
     description = result.get("description", "unknown error")
     retry_match = re.search(r"retry after\s+(\d+)", description, re.IGNORECASE)
     if attempt >= 3 or not retry_match:
-        raise SystemExit(f"Telegram setWebhook failed: {description}")
+        print(f"telegram_webhook_reset_warning={description}")
+        raise SystemExit(0)
     time.sleep(max(1, int(retry_match.group(1))) + 1)
 
 print("telegram_webhook_reset_ok")

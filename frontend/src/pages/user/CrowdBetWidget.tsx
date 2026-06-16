@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, Users } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
-import { CrowdBetResponse } from '../../schemas/schemas';
+import { CrowdBetFundResponse, CrowdBetResponse } from '../../schemas/schemas';
+import { notifyError, notifyPending } from '../../utils/notify';
 
 interface CrowdBetWidgetProps {
   onFunded?: () => void;
@@ -30,16 +31,27 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
 
     try {
       setFunding(true);
-      const data = await apiFetch(`/crowd-bets/${crowdBet.id}/fund`, {
+      const data = await apiFetch<CrowdBetFundResponse>(`/crowd-bets/${crowdBet.id}/fund`, {
         method: 'POST',
         body: JSON.stringify({ amount_xtr: amountXtr }),
       });
-      setCrowdBet(data);
-      if (data.status === 'opened' && onFunded) {
-        onFunded();
+      setCrowdBet(data.crowd_bet);
+
+      const tg = window.Telegram?.WebApp;
+      if (tg && typeof tg.openInvoice === 'function') {
+        tg.openInvoice(data.invoice_url, async (paymentStatus: string) => {
+          if (paymentStatus === 'paid') {
+            notifyPending('Оплата прошла в Telegram. Обновляем складчину после webhook.');
+            const refreshed = await apiFetch<CrowdBetResponse>('/crowd-bets/active');
+            setCrowdBet(refreshed);
+            if (refreshed.status === 'opened' && onFunded) onFunded();
+          }
+        });
+      } else {
+        notifyError('Вклад за Stars доступен внутри Telegram.');
       }
     } catch (err: any) {
-      alert(err.message || 'Не удалось внести XTR');
+      notifyError(err.message || 'Не удалось создать счет на оплату');
     } finally {
       setFunding(false);
     }

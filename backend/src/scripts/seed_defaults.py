@@ -84,7 +84,14 @@ async def seed_promos(db) -> int:
 
 async def seed_demo(db) -> dict[str, int]:
     now = datetime.now(timezone.utc)
-    created = {"bets": 0, "pulse": 0, "quiz": 0, "pvp": 0, "marathon": 0, "crowd": 0}
+    created = {
+        "bets": 0,
+        "pulse": 0,
+        "quiz": 0,
+        "pvp": 0,
+        "marathon": 0,
+        "crowd": 0,
+    }
 
     result = await db.execute(select(Bet).filter(Bet.event_name == "Реал - Барселона"))
     conversion_bet = result.scalars().first()

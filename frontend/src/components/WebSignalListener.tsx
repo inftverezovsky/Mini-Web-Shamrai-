@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 
-import { AUTH_TOKEN_STORAGE_KEY, buildApiWebSocketUrl } from '../utils/api';
+import { apiFetch, buildApiWebSocketUrl } from '../utils/api';
+import { getStoredAuthToken } from '../utils/authStorage';
 import { notifyInfo } from '../utils/notify';
 import { playIncomingSignalSound, unlockIncomingSignalSound } from '../utils/signalAudio';
 import { isTelegramMiniApp } from '../utils/telegramSdk';
@@ -17,6 +18,14 @@ interface PersonalSignal {
 interface WebSignalListenerProps {
   enabled: boolean;
 }
+
+interface SignalStreamTicketResponse {
+  ticket: string;
+  expires_in: number;
+}
+
+export const WEB_SIGNAL_EVENT = 'shamrai:personal-signal';
+export const WEB_SIGNAL_STATUS_EVENT = 'shamrai:signal-stream-status';
 
 function signalNoticeText(signal: PersonalSignal) {
   const sourceText = signal.data?.message_text || signal.text;
@@ -55,18 +64,47 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
   useEffect(() => {
     if (!enabled || isTelegramMiniApp()) return;
 
-    const token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    const token = getStoredAuthToken();
     if (!token || token === 'mock_debug_access_token') return;
 
     let socket: WebSocket | null = null;
     let reconnectTimer: number | undefined;
     let pingTimer: number | undefined;
     let closedByUnmount = false;
+    let reconnectAttempt = 0;
 
-    const connect = () => {
-      socket = new WebSocket(buildApiWebSocketUrl('/api/signals/stream', { token }));
+    const emitStatus = (state: 'connecting' | 'online' | 'offline') => {
+      window.dispatchEvent(new CustomEvent(WEB_SIGNAL_STATUS_EVENT, { detail: { state } }));
+    };
+
+    const scheduleReconnect = () => {
+      if (closedByUnmount) return;
+      const baseDelay = Math.min(30_000, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
+      const jitter = Math.floor(Math.random() * 600);
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(connect, baseDelay + jitter);
+    };
+
+    const connect = async () => {
+      emitStatus('connecting');
+      let ticket: string;
+      try {
+        const ticketResponse = await apiFetch<SignalStreamTicketResponse>('/signals/stream-ticket', {
+          method: 'POST',
+        });
+        ticket = ticketResponse.ticket;
+      } catch {
+        emitStatus('offline');
+        scheduleReconnect();
+        return;
+      }
+      if (closedByUnmount) return;
+
+      socket = new WebSocket(buildApiWebSocketUrl('/api/signals/stream', { ticket }));
 
       socket.onopen = () => {
+        reconnectAttempt = 0;
+        emitStatus('online');
         if (pingTimer) window.clearInterval(pingTimer);
         pingTimer = window.setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) socket.send('ping');
@@ -80,6 +118,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
           const signal = payload as PersonalSignal;
           if (seenSignalIdsRef.current.has(signal.id)) return;
           seenSignalIdsRef.current.add(signal.id);
+          window.dispatchEvent(new CustomEvent(WEB_SIGNAL_EVENT, { detail: signal }));
           notifyInfo(signalNoticeText(signal), 'Личный бот Shamrai');
           void playIncomingSignalSound();
         } catch {
@@ -89,9 +128,8 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
 
       socket.onclose = () => {
         if (pingTimer) window.clearInterval(pingTimer);
-        if (!closedByUnmount) {
-          reconnectTimer = window.setTimeout(connect, 3500);
-        }
+        emitStatus('offline');
+        scheduleReconnect();
       };
 
       socket.onerror = () => {
@@ -99,7 +137,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
       };
     };
 
-    connect();
+    void connect();
 
     return () => {
       closedByUnmount = true;

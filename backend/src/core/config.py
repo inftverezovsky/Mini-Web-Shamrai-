@@ -6,6 +6,9 @@ LOCAL_DEV_JWT_SECRET = "BET_TMA_LOCAL_DEV_SECRET_CHANGE_ME"
 class Settings(BaseSettings):
     APP_ENV: str = "local"
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/shamrai"
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_BOT_USERNAME: str = "Shamra1_bot"
     OWNER_TELEGRAM_ID: Optional[int] = None
@@ -14,6 +17,12 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = LOCAL_DEV_JWT_SECRET
     CORS_ALLOWED_ORIGINS: str = "https://shamra1.pro,https://www.shamra1.pro,http://localhost:8082,http://127.0.0.1:8082"
     ENABLE_BACKGROUND_TASKS: bool = False
+    DELIVERY_OUTBOX_BATCH_SIZE: int = 50
+    DELIVERY_OUTBOX_IDLE_SECONDS: float = 5.0
+    DELIVERY_OUTBOX_DEFAULT_CONCURRENCY: int = 2
+    DELIVERY_OUTBOX_CHANNEL_CONCURRENCY: str = "telegram_message=3,vk_message=2,web_push_signal=5,forecast_auto_delivery=1,forecast_full_delivery=1"
+    DELIVERY_OUTBOX_RETRY_BASE_SECONDS: int = 30
+    DELIVERY_OUTBOX_STALE_LOCK_SECONDS: int = 300
     TELEGRAM_VIP_CHAT_ID: str = "-100200300400"
     TELEGRAM_WEBHOOK_SECRET_TOKEN: str = ""
     TELEGRAM_SHAMRAI_CUSTOM_EMOJI_ID: str = ""
@@ -37,6 +46,9 @@ class Settings(BaseSettings):
     VK_CALLBACK_SECRET: str = ""
     VK_API_VERSION: str = "5.199"
     VK_BROADCAST_CONCURRENCY: int = 8
+    VK_DIALOG_POLLING_ENABLED: bool = False
+    VK_DIALOG_POLLING_INTERVAL_SECONDS: float = 4.0
+    VK_DIALOG_POLLING_BATCH_SIZE: int = 20
     WEB_PUSH_VAPID_PUBLIC_KEY: str = ""
     WEB_PUSH_VAPID_PRIVATE_KEY: str = ""
     WEB_PUSH_VAPID_SUBJECT: str = "mailto:support@shamra1.pro"
@@ -45,7 +57,27 @@ class Settings(BaseSettings):
     YOOKASSA_SHOP_ID: str = ""
     YOOKASSA_SECRET_KEY: str = ""
     YOOKASSA_RETURN_URL: str = ""
+    TEGRO_SHOP_ID: str = ""
+    TEGRO_API_KEY: str = ""
+    TEGRO_SECRET_KEY: str = ""
+    TEGRO_RETURN_URL: str = ""
+    TEGRO_API_BASE_URL: str = "https://tegro.money/api"
     HTTPS_PROXY: str = ""
+    SECURITY_RATE_LIMIT_MODE: str = "enforce"
+    SECURITY_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    SECURITY_RATE_LIMIT_GROUP_RULES: str = (
+        "public_read=120:40,auth=20:10,payment=30:10,webhook=120:60,"
+        "admin=60:20,upload=20:5,default=180:60"
+    )
+    SECURITY_RATE_LIMIT_MAX_TRACKED_KEYS: int = 10000
+    SECURITY_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS: int = 60
+    SECURITY_JSON_BODY_MAX_BYTES: int = 1048576
+    SECURITY_UPLOAD_BODY_MAX_BYTES: int = 10485760
+    SECURITY_TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    STATS_EXPORT_UNIT_STAKE_RUB: int = 10000
+    GOOGLE_DRIVE_STATS_ENABLED: bool = False
+    GOOGLE_DRIVE_STATS_FOLDER_ID: str = ""
+    GOOGLE_SERVICE_ACCOUNT_JSON_B64: str = ""
 
     @property
     def sales_manager_telegram_id(self) -> Optional[int]:
@@ -83,6 +115,22 @@ class Settings(BaseSettings):
         return bool(self.YOOKASSA_SHOP_ID.strip() and self.YOOKASSA_SECRET_KEY.strip())
 
     @property
+    def has_tegro_credentials(self) -> bool:
+        return bool(self.TEGRO_SHOP_ID.strip() and self.TEGRO_SECRET_KEY.strip())
+
+    @property
+    def has_tegro_api_credentials(self) -> bool:
+        return bool(
+            self.TEGRO_SHOP_ID.strip()
+            and self.TEGRO_API_KEY.strip()
+            and self.TEGRO_SECRET_KEY.strip()
+        )
+
+    @property
+    def has_ruble_payment_provider(self) -> bool:
+        return self.has_yookassa_credentials or self.has_tegro_credentials
+
+    @property
     def is_production(self) -> bool:
         return self.APP_ENV.strip().lower() in {"production", "prod"}
 
@@ -116,11 +164,20 @@ class Settings(BaseSettings):
             if not self.TELEGRAM_WEBHOOK_SECRET_TOKEN.strip():
                 raise RuntimeError("TELEGRAM_WEBHOOK_SECRET_TOKEN must be set for Telegram webhook verification")
 
-        if payment_providers_required and not self.has_yookassa_credentials:
-            raise RuntimeError("YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY must be set for production payments")
+        if payment_providers_required and not self.has_ruble_payment_provider:
+            raise RuntimeError("YooKassa or Tegro credentials must be set for production payments")
 
         if self.is_production and not (self.YOOKASSA_RETURN_URL.strip() or self.FRONTEND_BASE_URL.strip()):
             raise RuntimeError("YOOKASSA_RETURN_URL or FRONTEND_BASE_URL must be set in production")
+
+        if self.is_production and self.SECURITY_RATE_LIMIT_MODE.strip().lower() != "enforce":
+            raise RuntimeError("SECURITY_RATE_LIMIT_MODE must be enforce in production")
+
+        if self.is_production and self.VK_GROUP_ID.strip():
+            if not self.VK_CALLBACK_CONFIRMATION_CODE.strip():
+                raise RuntimeError("VK_CALLBACK_CONFIRMATION_CODE must be set when VK callbacks are enabled in production")
+            if not self.VK_CALLBACK_SECRET.strip():
+                raise RuntimeError("VK_CALLBACK_SECRET must be set when VK callbacks are enabled in production")
 
     class Config:
         env_file = ".env"

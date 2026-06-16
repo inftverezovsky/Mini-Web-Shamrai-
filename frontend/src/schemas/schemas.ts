@@ -46,6 +46,7 @@ export interface UserResponse {
   tg_chat_joined: boolean;
   has_used_shield: boolean;
   alert_min_coef: number;
+  odds_drop_notifications_enabled: boolean;
   is_night_mode: boolean;
   night_mode_start: string;
   night_mode_end: string;
@@ -115,7 +116,7 @@ export interface BetResponse {
   coupon_image_url: string | null;
   match_link: string | null;
   bookmaker_links: BookmakerLink[];
-  delivery_mode: 'feed' | 'sales_private';
+  delivery_mode: 'feed' | 'sales_private' | 'paid_set';
   auto_send_on_interest: boolean;
   odds_dropped_to: string | number | null;
   odds_drop_notified_at: string | null;
@@ -151,6 +152,71 @@ export interface ForecastRequestResponse {
   user: ForecastRequestUserResponse;
 }
 
+export interface PaginatedResponse<T> {
+  items: T[];
+  next_cursor: string | null;
+  has_more: boolean;
+  total?: number;
+  filtered_total?: number;
+}
+
+export interface UserPreferencesResponse {
+  alert_min_coef: number;
+  odds_drop_notifications_enabled: boolean;
+  is_night_mode: boolean;
+  night_mode_start: string;
+  night_mode_end: string;
+  preferred_sports?: string[];
+  stats_display_mode: 'percent' | 'flat';
+}
+
+export interface ReferralInfoResponse {
+  referral_code: string;
+  referral_link: string;
+  invited_count: number;
+  purchased_invited_count: number;
+  discount_step_percent: number;
+  referral_discount_percent: number;
+  earned_bonus_days?: number;
+  pending_rewards?: number;
+}
+
+export interface PaymentHistoryResponse {
+  transactions: Array<{
+    id: string | number;
+    plan_name: string;
+    amount: number | string;
+    amount_currency?: string;
+    amount_stars?: number | null;
+    payment_provider?: string | null;
+    status: string;
+    created_at: string;
+    start_date?: string | null;
+    end_date?: string | null;
+  }>;
+  total: number;
+}
+
+export interface VkDeliveryStatusResponse {
+  vk_user_id: string | null;
+  group_id: number | null;
+  configured: boolean;
+  group_member: boolean;
+  messages_allowed: boolean;
+  notifications_allowed: boolean;
+}
+
+export interface ProfileDashboardResponse {
+  user: UserResponse;
+  bookmakers: BookmakerResponse[];
+  selected_bookmaker_ids: number[];
+  preferences: UserPreferencesResponse;
+  subscription: SubscriptionResponse | null;
+  payments: PaymentHistoryResponse;
+  referral: ReferralInfoResponse;
+  vk_delivery_status: VkDeliveryStatusResponse;
+}
+
 export interface UserStats {
   total_bets_taken: number;
   won_bets: number;
@@ -170,6 +236,170 @@ export interface AdminAnalytics {
   roi: number;
   net_profit: string | number;
   average_coefficient: number;
+}
+
+export interface MessageTemplateVariableResponse {
+  key: string;
+  label: string;
+  example: string;
+}
+
+export interface MessageTemplateResponse {
+  key: string;
+  title: string;
+  description: string;
+  body: string;
+  default_body: string;
+  variables: MessageTemplateVariableResponse[];
+  is_custom: boolean;
+  updated_by: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export type PeriodFilter = 'week' | 'month' | 'quarter' | 'all';
+
+export interface PerformanceSummary {
+  bets: number;
+  wins: number;
+  losses: number;
+  winrate: number;
+  roi: number;
+  profit_units: number;
+  average_coefficient: number;
+  max_win_streak: number;
+  max_loss_streak: number;
+  current_streak: number;
+  current_streak_type: 'win' | 'loss' | null;
+}
+
+export interface PerformanceBetItem {
+  id: string;
+  event_name: string;
+  status: 'win' | 'loss';
+  coefficient: number;
+  profit_units: number;
+  resolved_at: string;
+  created_at: string | null;
+  taken_at: string | null;
+  delivery_mode: 'feed' | 'sales_private' | 'paid_set';
+  source_type: 'feed' | 'private';
+  sport_type: string | null;
+  outcome: string | null;
+  bookmakers: Array<Pick<BookmakerResponse, 'id' | 'name' | 'code'>>;
+  bookmaker_names: string[];
+  access_type?: string | null;
+  match_charged?: boolean | null;
+}
+
+export interface PerformanceDayGroup {
+  key: string;
+  label: string;
+  summary: PerformanceSummary;
+  bets: PerformanceBetItem[];
+}
+
+export interface PerformanceMonthGroup {
+  key: string;
+  label: string;
+  summary: PerformanceSummary;
+  days: PerformanceDayGroup[];
+}
+
+export interface PerformanceBreakdownItem {
+  key: string;
+  label: string;
+  summary: PerformanceSummary;
+}
+
+export interface SourceSplit {
+  all: PerformanceSummary;
+  feed: PerformanceSummary;
+  private: PerformanceSummary;
+}
+
+export interface PerformanceTimelineResponse {
+  period: PeriodFilter;
+  period_label: string;
+  summary: PerformanceSummary;
+  source_split: SourceSplit;
+  timeline: PerformanceMonthGroup[];
+  bookmaker_breakdown: PerformanceBreakdownItem[];
+  sport_breakdown: PerformanceBreakdownItem[];
+  default_expanded_month_key: string;
+  default_expanded_day_key: string;
+  excluded_summary?: PerformanceSummary;
+  excluded_bets?: PerformanceBetItem[];
+}
+
+export interface ClientSituation {
+  code: string;
+  label: string;
+  tone: 'success' | 'warning' | 'danger' | 'neutral';
+  description: string;
+}
+
+export interface AdminAuthorTimelineResponse extends PerformanceTimelineResponse {
+  author: {
+    telegram_id: number;
+    name: string;
+    username: string | null;
+  };
+}
+
+export interface AdminClientStatsItem {
+  telegram_id: number;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  photo_url: string | null;
+  name: string;
+  matches_remaining: number;
+  guarantee_active: boolean;
+  client_group: string | null;
+  client_tag: string | null;
+  summary: PerformanceSummary;
+  source_split: SourceSplit;
+  recent_results: Array<'win' | 'loss'>;
+  situation: ClientSituation;
+}
+
+export interface AdminClientsStatsResponse {
+  period: PeriodFilter;
+  period_label: string;
+  clients_count: number;
+  active_clients_count: number;
+  active_clients_with_stats_count: number;
+  summary: PerformanceSummary;
+  clients: AdminClientStatsItem[];
+}
+
+export interface AdminClientTimelineResponse extends PerformanceTimelineResponse {
+  user: Omit<AdminClientStatsItem, 'summary' | 'source_split' | 'recent_results' | 'situation'>;
+  situation: ClientSituation;
+  recent_results: Array<'win' | 'loss'>;
+}
+
+export type StatsDriveExportScope = 'shamrai' | 'clients' | 'all';
+export type StatsDriveExportFormat = 'xlsx' | 'google_sheet';
+
+export interface StatsDriveExportLink {
+  title: string;
+  url: string;
+  id: string;
+  format: 'folder' | StatsDriveExportFormat;
+}
+
+export interface StatsDriveExportJob {
+  id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  scope: StatsDriveExportScope;
+  period: PeriodFilter;
+  formats: StatsDriveExportFormat[];
+  links: StatsDriveExportLink[];
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SwipeCandidateResponse {
@@ -235,9 +465,25 @@ export interface CrowdBetResponse {
   is_participant: boolean;
 }
 
+export interface CrowdBetFundResponse {
+  crowd_bet: CrowdBetResponse;
+  attempt_id: string;
+  invoice_url: string;
+  amount_xtr: number;
+  status: 'invoice_created';
+}
+
 export interface BetHintResponse {
   bet_id: string;
   paid_xtr: number;
   hint: string;
   reveal_level: 'analysis_only';
+}
+
+export interface BetHintInvoiceResponse {
+  bet_id: string;
+  attempt_id: string;
+  invoice_url: string;
+  price_xtr: number;
+  status: 'invoice_created';
 }

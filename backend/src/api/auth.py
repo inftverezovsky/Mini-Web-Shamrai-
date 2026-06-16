@@ -9,7 +9,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from src.api.deps import get_current_user, get_optional_user
 from src.core.config import settings
 from src.core.roles import is_valid_role, normalize_role
 from src.core.security import (
+    ACCESS_TOKEN_EXPIRE_DAYS,
     create_access_token,
     verify_telegram_init_data,
     verify_telegram_login_widget,
@@ -53,6 +54,7 @@ from src.services.telegram_auth import (
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 REFERRAL_START_PARAM_RE = re.compile(r"^ref_(\d+)$")
+AUTH_COOKIE_NAME = "shamrai_access_token"
 
 
 class LoginRequest(BaseModel):
@@ -240,8 +242,22 @@ def _telegram_phone_from_data(tg_data: dict[str, Any]) -> Optional[str]:
     return _normalize_phone_number(tg_data.get("phone") or tg_data.get("phone_number"))
 
 
-def _build_login_response(user: User) -> LoginResponse:
+def _set_auth_cookie(response: Response, access_token: str) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        access_token,
+        max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://"),
+        samesite="lax",
+        path="/api",
+    )
+
+
+def _build_login_response(user: User, response: Optional[Response] = None) -> LoginResponse:
     access_token = create_access_token({"sub": str(user.telegram_id), "role": user.role})
+    if response is not None:
+        _set_auth_cookie(response, access_token)
     return LoginResponse(access_token=access_token, user=user)
 
 
@@ -422,6 +438,7 @@ PROFILE_TRANSFER_FIELDS = (
     "tg_chat_joined",
     "has_used_shield",
     "alert_min_coef",
+    "odds_drop_notifications_enabled",
     "is_night_mode",
     "night_mode_start",
     "night_mode_end",
@@ -731,6 +748,7 @@ async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
 @router.post("/login", response_model=LoginResponse)
 async def login_user(
     request_data: LoginRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -742,12 +760,13 @@ async def login_user(
     await db.commit()
 
     hydrated_user = await _load_user_with_profile(db, telegram_id)
-    return _build_login_response(hydrated_user)
+    return _build_login_response(hydrated_user, response)
 
 
 @router.post("/telegram-widget", response_model=LoginResponse)
 async def login_telegram_widget(
     request_data: TelegramWidgetLoginRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -759,12 +778,13 @@ async def login_telegram_widget(
     await db.commit()
 
     hydrated_user = await _load_user_with_profile(db, telegram_id)
-    return _build_login_response(hydrated_user)
+    return _build_login_response(hydrated_user, response)
 
 
 @router.get("/telegram/callback", response_model=LoginResponse)
 async def telegram_callback(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -780,7 +800,7 @@ async def telegram_callback(
     await db.commit()
 
     hydrated_user = await _load_user_with_profile(db, telegram_id)
-    return _build_login_response(hydrated_user)
+    return _build_login_response(hydrated_user, response)
 
 
 @router.post("/telegram/bot-session", response_model=TelegramBotAuthStartResponse)
@@ -804,6 +824,7 @@ async def start_telegram_bot_auth_session():
 @router.get("/telegram/bot-session/{auth_token}", response_model=TelegramBotAuthStatusResponse)
 async def poll_telegram_bot_auth_session(
     auth_token: str,
+    response: Response,
     current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -819,7 +840,7 @@ async def poll_telegram_bot_auth_session(
     await consume_telegram_bot_auth_session(auth_token)
 
     hydrated_user = await _load_user_with_profile(db, telegram_id)
-    login_response = _build_login_response(hydrated_user)
+    login_response = _build_login_response(hydrated_user, response)
     return TelegramBotAuthStatusResponse(
         status="confirmed",
         access_token=login_response.access_token,
@@ -831,6 +852,7 @@ async def poll_telegram_bot_auth_session(
 @router.post("/vk/login", response_model=LoginResponse)
 async def vk_id_login(
     request_data: VkOAuthCodeRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -854,7 +876,7 @@ async def vk_id_login(
         await db.commit()
         user = await _load_user_with_profile(db, telegram_id)
 
-    return _build_login_response(user)
+    return _build_login_response(user, response)
 
 
 @router.post("/vk/link", response_model=VkLinkResponse)

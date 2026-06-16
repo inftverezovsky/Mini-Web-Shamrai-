@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../../utils/api';
+import { DEBUG_AUTH_ENABLED } from '../../config/api';
 import { SubscriptionPlanResponse } from '../../schemas/schemas';
-import { CreditCard, Sparkles, Check, Loader2 } from 'lucide-react';
+import { BadgeRussianRuble, CreditCard, Sparkles, Check, Loader2 } from 'lucide-react';
 import ProfitSimulator from './ProfitSimulator';
 import { useAuth } from '../../context/AuthContext';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
+import { trackEvent } from '../../utils/analytics';
 
 interface TariffsProps {
   onSubscriptionActivated?: () => void;
@@ -12,13 +14,13 @@ interface TariffsProps {
 
 export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const { login } = useAuth();
-  const debugCheckoutEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [referralDiscountPercent, setReferralDiscountPercent] = useState(0);
   const [loading, setLoading] = useState(true);
   
   // Checkout state variables
-  const [buyingId, setBuyingId] = useState<number | null>(null);
+  const [buying, setBuying] = useState<{ planId: number; provider: 'tegro' | 'yookassa' } | null>(null);
   const [successPopup, setSuccessPopup] = useState(false);
 
   // Promo code states
@@ -54,13 +56,18 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
     try {
       setValidatingPromo(true);
       setPromoError(null);
+      trackEvent('Promo Validate Started');
 
       // GET /api/payments/promo/validate?code=...
       const data = await apiFetch(`/payments/promo/validate?code=${encodeURIComponent(trimmed)}`);
       setAppliedPromo(data);
+      trackEvent('Promo Validate Success', {
+        discount_percent: data.discount_percent,
+      });
     } catch (err: any) {
       setAppliedPromo(null);
       setPromoError(err.message || 'Неверный или истекший промокод');
+      trackEvent('Promo Validate Failed');
     } finally {
       setValidatingPromo(false);
     }
@@ -70,6 +77,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
     setPromoCodeInput('');
     setAppliedPromo(null);
     setPromoError(null);
+    trackEvent('Promo Cleared');
   };
 
   const refreshAccount = async () => {
@@ -79,9 +87,96 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
     }
   };
 
-  const handleBuyYooKassa = async (planId: number) => {
+  const handleBuyTegro = async (planId: number) => {
+    const plan = plans.find((item) => item.id === planId);
+    const activeDiscountPercent = appliedPromo?.discount_percent ?? referralDiscountPercent;
+
     try {
-      setBuyingId(planId);
+      setBuying({ planId, provider: 'tegro' });
+      trackEvent('Checkout Started', {
+        provider: 'tegro',
+        plan_id: planId,
+        matches: plan?.match_count,
+        has_promo: Boolean(appliedPromo),
+        discount_percent: activeDiscountPercent,
+      });
+
+      const paymentData = await apiFetch('/payments/tegro/create', {
+        method: 'POST',
+        body: JSON.stringify({
+          plan_id: planId,
+          promo_code: appliedPromo ? appliedPromo.code : undefined
+        })
+      });
+
+      if (paymentData.mock) {
+        if (!debugCheckoutEnabled) {
+          throw new Error('Debug checkout выключен на фронте');
+        }
+        await apiFetch('/payments/tegro/debug-complete', {
+          method: 'POST',
+          body: JSON.stringify({
+            plan_id: planId,
+            promo_code: appliedPromo ? appliedPromo.code : undefined,
+            attempt_id: paymentData.attempt_id,
+          })
+        });
+        setSuccessPopup(true);
+        notifySuccess('Debug-оплата Tegro проведена, пакет матчей начислен.');
+        trackEvent('Checkout Completed', {
+          provider: 'tegro_debug',
+          plan_id: planId,
+          matches: plan?.match_count,
+          has_promo: Boolean(appliedPromo),
+          discount_percent: activeDiscountPercent,
+        });
+        handleClearPromo();
+        await refreshAccount();
+        setTimeout(() => setSuccessPopup(false), 5000);
+        return;
+      }
+
+      if (paymentData.confirmation_url) {
+        notifyPending('Сейчас откроется защищенная страница Tegro.');
+        trackEvent('Checkout Redirected', {
+          provider: 'tegro',
+          plan_id: planId,
+          matches: plan?.match_count,
+          has_promo: Boolean(appliedPromo),
+          discount_percent: activeDiscountPercent,
+        });
+        window.location.href = paymentData.confirmation_url;
+      } else {
+        throw new Error('Tegro не вернул ссылку на оплату');
+      }
+    } catch (err: any) {
+      notifyError(err.message || 'Ошибка оплаты через Tegro');
+      trackEvent('Checkout Failed', {
+        provider: 'tegro',
+        plan_id: planId,
+        matches: plan?.match_count,
+        has_promo: Boolean(appliedPromo),
+        discount_percent: activeDiscountPercent,
+      });
+    } finally {
+      setBuying(null);
+    }
+  };
+
+  const handleBuyYooKassa = async (planId: number) => {
+    const plan = plans.find((item) => item.id === planId);
+    const activeDiscountPercent = appliedPromo?.discount_percent ?? referralDiscountPercent;
+
+    try {
+      setBuying({ planId, provider: 'yookassa' });
+      trackEvent('Checkout Started', {
+        provider: 'yookassa',
+        plan_id: planId,
+        matches: plan?.match_count,
+        has_promo: Boolean(appliedPromo),
+        discount_percent: activeDiscountPercent,
+      });
+
       const paymentData = await apiFetch('/payments/yookassa/create', {
         method: 'POST',
         body: JSON.stringify({
@@ -104,6 +199,13 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
         });
         setSuccessPopup(true);
         notifySuccess('Debug-оплата проведена, пакет матчей начислен.');
+        trackEvent('Checkout Completed', {
+          provider: 'yookassa_debug',
+          plan_id: planId,
+          matches: plan?.match_count,
+          has_promo: Boolean(appliedPromo),
+          discount_percent: activeDiscountPercent,
+        });
         handleClearPromo();
         await refreshAccount();
         setTimeout(() => setSuccessPopup(false), 5000);
@@ -112,14 +214,28 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
 
       if (paymentData.confirmation_url) {
         notifyPending('Сейчас откроется защищенная страница ЮKassa.');
+        trackEvent('Checkout Redirected', {
+          provider: 'yookassa',
+          plan_id: planId,
+          matches: plan?.match_count,
+          has_promo: Boolean(appliedPromo),
+          discount_percent: activeDiscountPercent,
+        });
         window.location.href = paymentData.confirmation_url;
       } else {
         throw new Error('ЮKassa не вернула ссылку на оплату');
       }
     } catch (err: any) {
       notifyError(err.message || 'Ошибка оплаты через ЮKassa');
+      trackEvent('Checkout Failed', {
+        provider: 'yookassa',
+        plan_id: planId,
+        matches: plan?.match_count,
+        has_promo: Boolean(appliedPromo),
+        discount_percent: activeDiscountPercent,
+      });
     } finally {
-      setBuyingId(null);
+      setBuying(null);
     }
   };
 
@@ -262,16 +378,30 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
               {/* Action checkout button */}
               <div>
                 <button
-                  onClick={() => handleBuyYooKassa(plan.id)}
-                  disabled={buyingId !== null}
-                  className="w-full bg-indigo-500 hover:bg-indigo-600 active:scale-[0.98] disabled:opacity-50 text-white text-xs font-black py-3 px-3 rounded-xl flex items-center justify-center space-x-1.5 transition-all shadow-neon-indigo"
+                  onClick={() => handleBuyTegro(plan.id)}
+                  disabled={buying !== null}
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 active:scale-[0.98] disabled:opacity-50 text-slate-950 text-xs font-black py-3 px-3 rounded-xl flex items-center justify-center space-x-1.5 transition-all shadow-neon-green"
                 >
-                  {buyingId === plan.id ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                  {buying?.planId === plan.id && buying.provider === 'tegro' ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
                   ) : (
                     <>
-                      <CreditCard className="w-4 h-4" />
-                      <span>Оплатить {discountedRubPrice.toLocaleString('ru-RU')} ₽</span>
+                      <BadgeRussianRuble className="w-4 h-4" />
+                      <span>СБП / карта {discountedRubPrice.toLocaleString('ru-RU')} ₽</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => handleBuyYooKassa(plan.id)}
+                  disabled={buying !== null}
+                  className="mt-2 w-full bg-white/[0.04] hover:bg-white/[0.08] active:scale-[0.98] disabled:opacity-50 text-slate-300 border border-white/10 text-[10px] font-black py-2.5 px-3 rounded-xl flex items-center justify-center space-x-1.5 transition-all"
+                >
+                  {buying?.planId === plan.id && buying.provider === 'yookassa' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-300" />
+                  ) : (
+                    <>
+                      <CreditCard className="w-3.5 h-3.5" />
+                      <span>Запасной вариант: ЮKassa</span>
                     </>
                   )}
                 </button>

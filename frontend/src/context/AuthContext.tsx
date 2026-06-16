@@ -1,7 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { UserResponse } from '../schemas/schemas';
 import { AUTH_EXPIRED_EVENT, apiFetch } from '../utils/api';
-import { ensureTelegramSdk, getTelegramWebApp } from '../utils/telegramSdk';
+import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
+import { clearStoredAuthToken, getStoredAuthToken, setStoredAuthToken } from '../utils/authStorage';
+import { ensureTelegramSdk, getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
 import { consumeVkRedirectResult, isVkRedirectStartedError, loginVkProfile } from '../utils/vkId';
 
 export interface TelegramWidgetPayload {
@@ -44,8 +46,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const TOKEN_STORAGE_KEY = 'bet_tma_jwt_token';
-const DEBUG_ROLE_STORAGE_KEY = 'bet_tma_debug_role';
 const TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS = 1800;
 
 function wait(ms: number) {
@@ -53,13 +53,13 @@ function wait(ms: number) {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_STORAGE_KEY));
+  const [token, setToken] = useState<string | null>(getStoredAuthToken());
   const [user, setUser] = useState<UserResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
-  const allowDebugAuth = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEBUG_AUTH === 'true';
+  const API_URL = API_BASE_URL;
+  const allowDebugAuth = DEBUG_AUTH_ENABLED;
   const allowLocalMock = allowDebugAuth;
 
   const createMockUser = useCallback((): UserResponse => {
@@ -102,6 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       tg_chat_joined: true,
       has_used_shield: false,
       alert_min_coef: 1.5,
+      odds_drop_notifications_enabled: true,
       is_night_mode: false,
       night_mode_start: '23:00',
       night_mode_end: '08:00',
@@ -119,18 +120,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const clearStoredAuth = useCallback(() => {
     setToken(null);
     setUser(null);
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    clearStoredAuthToken();
   }, []);
 
   const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
     setToken(data.access_token);
     setUser(data.user);
-    localStorage.setItem(TOKEN_STORAGE_KEY, data.access_token);
+    setStoredAuthToken(data.access_token);
     setError(null);
   }, []);
 
   const fetchCurrentUser = useCallback(async (candidateToken: string) => {
     const response = await fetch(`${API_URL}/api/users/me`, {
+      credentials: 'include',
       headers: {
         Authorization: `Bearer ${candidateToken}`,
       },
@@ -143,13 +145,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const freshUser = await response.json();
     setToken(candidateToken);
     setUser(freshUser);
-    localStorage.setItem(TOKEN_STORAGE_KEY, candidateToken);
+    setStoredAuthToken(candidateToken);
     setError(null);
   }, [API_URL]);
 
   const runTelegramMiniAppLogin = useCallback(async (initData: string) => {
     const response = await fetch(`${API_URL}/api/auth/login`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -168,7 +171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(true);
       setError(null);
 
-      const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+      const storedToken = getStoredAuthToken();
       if (allowLocalMock && storedToken === 'mock_debug_access_token') {
         setToken(storedToken);
         setUser(createMockUser());
@@ -184,9 +187,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      await ensureTelegramSdk();
-      const tg = getTelegramWebApp<{ initData?: string }>();
-      const initData = tg?.initData || '';
+      let initData = '';
+      if (getTelegramWebApp() || hasTelegramLaunchParams()) {
+        await ensureTelegramSdk(1200);
+        const tg = getTelegramWebApp<{ initData?: string }>();
+        initData = tg?.initData || '';
+      }
 
       if (initData) {
         await runTelegramMiniAppLogin(initData);
@@ -206,7 +212,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const mockToken = 'mock_debug_access_token';
         setToken(mockToken);
         setUser(createMockUser());
-        localStorage.setItem(TOKEN_STORAGE_KEY, mockToken);
+        setStoredAuthToken(mockToken);
         setError(null);
         return;
       }
@@ -263,7 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return true;
       }
 
-      const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+      const storedToken = getStoredAuthToken();
       if (!storedToken) {
         throw new Error('Telegram-сессия устарела. Войдите через Telegram и повторите привязку VK.');
       }
@@ -288,6 +294,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(null);
       const response = await fetch(`${API_URL}/api/auth/telegram-widget`, {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },

@@ -79,15 +79,11 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exc.exception.status_code, 403)
 
-    async def test_message_events_accept_missing_server_secret(self):
+    async def test_message_events_reject_missing_server_secret(self):
         settings.VK_CALLBACK_SECRET = ""
 
-        with (
-            patch.object(vk_callback, "_run_background") as run_background,
-            patch.object(vk_callback, "_refresh_message_permission_from_message_new", new=Mock(return_value=object())),
-            patch.object(vk_callback, "_process_plain_text_status_message", new=Mock(return_value=object())),
-        ):
-            response = await vk_callback.vk_callback(
+        with self.assertRaises(HTTPException) as exc:
+            await vk_callback.vk_callback(
                 FakeRequest(
                     {
                         "type": "message_new",
@@ -97,9 +93,7 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.body.decode("utf-8"), "ok")
-        self.assertEqual(run_background.call_count, 2)
+        self.assertEqual(exc.exception.status_code, 503)
 
     async def test_message_events_reject_missing_server_secret_in_production(self):
         settings.APP_ENV = "production"

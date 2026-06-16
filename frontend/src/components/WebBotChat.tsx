@@ -3,7 +3,9 @@ import { motion } from 'framer-motion';
 import { Bot, Check, ExternalLink, Image as ImageIcon, Loader2, Radio, ShieldCheck, WifiOff, X, Zap } from 'lucide-react';
 
 import { BookmakerLogoFrame } from './LogoFrame';
-import { API_BASE_URL, AUTH_TOKEN_STORAGE_KEY, apiFetch, buildApiWebSocketUrl } from '../utils/api';
+import { WEB_SIGNAL_EVENT, WEB_SIGNAL_STATUS_EVENT } from './WebSignalListener';
+import { API_BASE_URL, apiFetch } from '../utils/api';
+import { getStoredAuthToken } from '../utils/authStorage';
 import { notifyError, notifyInfo, notifySuccess } from '../utils/notify';
 import { unlockIncomingSignalSound } from '../utils/signalAudio';
 import { isTelegramMiniApp } from '../utils/telegramSdk';
@@ -34,6 +36,8 @@ interface PersonalSignal {
     outcome?: string | null;
     coefficient?: string | number | null;
     sport_type?: string | null;
+    request_kind?: string;
+    price_text?: string | null;
   };
   created_at: string;
 }
@@ -63,13 +67,24 @@ function signalAccent(type: string) {
   return 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100';
 }
 
-function forecastStatusLabel(status?: string) {
+function signalKindLabel(signal: PersonalSignal) {
+  if (signal.data?.request_kind === 'paid_set') return 'Набор';
+  return 'Прогноз';
+}
+
+function forecastStatusLabel(signal: PersonalSignal) {
+  const status = signal.data?.forecast_status;
+  const isPaidSet = signal.data?.request_kind === 'paid_set';
   if (status === 'interested' || status === 'processing') return 'Заявка отправлена';
-  if (status === 'sent' || status === 'manual_sent') return 'Прогноз оформлен';
+  if (status === 'sent' || status === 'manual_sent') return isPaidSet ? 'Заявка закрыта' : 'Прогноз оформлен';
   if (status === 'declined') return 'Отказ учтен';
   if (status === 'cancelled') return 'Заявка отменена';
-  if (status === 'removed') return 'Анонс остановлен';
+  if (status === 'removed') return isPaidSet ? 'Набор остановлен' : 'Анонс остановлен';
   return '';
+}
+
+function signalActionLabel(signal: PersonalSignal) {
+  return signal.data?.request_kind === 'paid_set' ? 'Взять' : 'Взять';
 }
 
 function signalCanShowForecastActions(signal: PersonalSignal) {
@@ -244,10 +259,11 @@ export default function WebBotChat() {
         { method: 'POST' },
       );
       updateSignalForecastStatus(requestId, response.status);
+      const kindLabel = signalKindLabel(signal);
       if (action === 'take') {
-        notifySuccess(response.message || 'Заявка отправлена продажнику', 'Прогноз');
+        notifySuccess(response.message || 'Заявка отправлена продажнику', kindLabel);
       } else {
-        notifyInfo(response.message || 'Отказ учтен', 'Прогноз');
+        notifyInfo(response.message || 'Отказ учтен', kindLabel);
       }
     } catch (error: any) {
       notifyError(error?.message || 'Не удалось обработать заявку');
@@ -309,54 +325,28 @@ export default function WebBotChat() {
 
   useEffect(() => {
     if (isTma) return;
-    const token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    const token = getStoredAuthToken();
     if (!token || token === 'mock_debug_access_token') {
       setStreamState(token ? 'online' : 'offline');
       return;
     }
 
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | undefined;
-    let closedByUnmount = false;
-
-    const connect = () => {
-      setStreamState('connecting');
-      socket = new WebSocket(buildApiWebSocketUrl('/api/signals/stream', { token }));
-
-      socket.onopen = () => {
-        setStreamState('online');
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload?.type === 'pong') return;
-          const signal = payload as PersonalSignal;
-          if (seenSignalIdsRef.current.has(signal.id)) return;
-          seenSignalIdsRef.current.add(signal.id);
-          appendSignal(signal);
-        } catch {
-          // Ignore malformed stream frames.
-        }
-      };
-
-      socket.onclose = () => {
-        setStreamState('offline');
-        if (!closedByUnmount) {
-          reconnectTimer = window.setTimeout(connect, 3500);
-        }
-      };
-
-      socket.onerror = () => {
-        socket?.close();
-      };
+    const handleStatus = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: 'connecting' | 'online' | 'offline' }>).detail?.state;
+      if (state) setStreamState(state);
+    };
+    const handleSignal = (event: Event) => {
+      const signal = (event as CustomEvent<PersonalSignal>).detail;
+      if (!signal || seenSignalIdsRef.current.has(signal.id)) return;
+      seenSignalIdsRef.current.add(signal.id);
+      appendSignal(signal);
     };
 
-    connect();
+    window.addEventListener(WEB_SIGNAL_STATUS_EVENT, handleStatus);
+    window.addEventListener(WEB_SIGNAL_EVENT, handleSignal);
     return () => {
-      closedByUnmount = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      socket?.close();
+      window.removeEventListener(WEB_SIGNAL_STATUS_EVENT, handleStatus);
+      window.removeEventListener(WEB_SIGNAL_EVENT, handleSignal);
     };
   }, [appendSignal, isTma]);
 
@@ -484,7 +474,7 @@ export default function WebBotChat() {
                     className="inline-flex min-h-[38px] items-center gap-2 rounded-xl border border-emerald-300/35 bg-emerald-400/15 px-3 py-2 text-xs font-black text-emerald-50 transition-all hover:bg-emerald-400/25 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
                   >
                     {actionBusy === `${signal.data?.forecast_request_id}:take` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                    <span>Взять</span>
+                    <span>{signalActionLabel(signal)}</span>
                   </button>
                   <button
                     type="button"
@@ -497,9 +487,9 @@ export default function WebBotChat() {
                   </button>
                 </div>
               )}
-              {!signalCanShowForecastActions(signal) && signal.data?.forecast_request_id && forecastStatusLabel(signal.data?.forecast_status) && (
+              {!signalCanShowForecastActions(signal) && signal.data?.forecast_request_id && forecastStatusLabel(signal) && (
                 <p className="mt-3 inline-flex rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-white/65">
-                  {forecastStatusLabel(signal.data?.forecast_status)}
+                  {forecastStatusLabel(signal)}
                 </p>
               )}
               <p className="mt-2 text-[10px] font-black uppercase tracking-[0.14em] text-white/45">

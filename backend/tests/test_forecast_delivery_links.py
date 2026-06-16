@@ -12,6 +12,7 @@ from src.core import telegram_text
 from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
 from src.models.models import DeliveryOutbox
 from src.services import forecast_delivery as delivery
+from src.services import telegram_bot
 from src.services.delivery_outbox import (
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
@@ -128,7 +129,7 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        serialized = payments._telegram_multipart_field_value(reply_markup)
+        serialized = telegram_bot._telegram_multipart_field_value(reply_markup)
 
         self.assertEqual(json.loads(serialized), reply_markup)
         self.assertIn('"inline_keyboard"', serialized)
@@ -677,7 +678,7 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
 
         original_vk = delivery.send_full_forecast_to_vk_client
         try:
-            delivery.send_full_forecast_to_vk_client = lambda _request: {
+            delivery.send_full_forecast_to_vk_client = lambda _request, **_kwargs: {
                 "ok": False,
                 "error": {"error_code": 901, "error_msg": "Can't send messages for users without permission"},
             }
