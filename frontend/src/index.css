@@ -4,12 +4,16 @@
 
 @layer base {
   :root {
-    --shamrai-ui-scale: 0.5;
+    --shamrai-ui-scale: 1;
     --brand-cyan: #00d2ff;
     --brand-pink: #ff007f;
     --brand-violet: #7c3aed;
     --brand-green: #10b981;
     --brand-gold: #f59e0b;
+  }
+
+  html {
+    font-size: 15px;
   }
 
   body {
