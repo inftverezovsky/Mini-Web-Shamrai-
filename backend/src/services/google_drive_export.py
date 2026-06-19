@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import settings
 from src.models.database import AsyncSessionLocal
 from src.services.stats_export import (
+    FLAT_FORMAT,
+    build_client_info_export_workbook,
     build_stats_export_workbook,
+    load_client_info_export_rows,
     load_client_export_groups,
     load_clients_export_items,
     load_shamrai_export_items,
@@ -132,6 +135,7 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
 
     if scope in {"clients", "all"}:
         client_items = await load_clients_export_items(db, period)
+        client_info_rows = await load_client_info_export_rows(db, period)
         artifacts.append({
             "folder": "Клиенты",
             "title": f"Клиенты - свод - {period_label}",
@@ -140,6 +144,16 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
                 title="СТАТИСТИКА КЛИЕНТОВ SHAMRAI",
                 period_label=period_label,
                 include_client=True,
+                value_format=FLAT_FORMAT,
+                value_label="флеты",
+            ),
+        })
+        artifacts.append({
+            "folder": "Клиенты/Инфа",
+            "title": f"Клиенты - инфа - {period_label}",
+            "xlsx": build_client_info_export_workbook(
+                client_info_rows,
+                period_label=period_label,
             ),
         })
         for group in await load_client_export_groups(db, period):
@@ -152,6 +166,8 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
                     title=f"СТАТИСТИКА КЛИЕНТА: {group.client_name}",
                     period_label=period_label,
                     include_client=True,
+                    value_format=FLAT_FORMAT,
+                    value_label="флеты",
                 ),
             })
 
@@ -161,6 +177,14 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
 def _safe_filename(value: str) -> str:
     clean = "".join(ch for ch in value if ch not in r'<>:"/\|?*').strip()
     return clean[:80] or "Клиент"
+
+
+def _folder_path_segments(value: str) -> list[str]:
+    return [
+        _safe_filename(segment)
+        for segment in str(value or "").replace("\\", "/").split("/")
+        if _safe_filename(segment)
+    ] or ["Экспорт"]
 
 
 def _credentials_info() -> dict[str, Any]:
@@ -255,7 +279,7 @@ def _upload_artifacts(artifacts: list[dict[str, Any]], formats: list[str]) -> li
         name=datetime.now().strftime("%Y-%m-%d %H-%M"),
         parent_id=exports_root["id"],
     )
-    folder_cache: dict[str, str] = {}
+    folder_cache: dict[tuple[str, ...], str] = {}
     links: list[dict[str, str]] = [
         {
             "title": exports_root["name"],
@@ -274,16 +298,21 @@ def _upload_artifacts(artifacts: list[dict[str, Any]], formats: list[str]) -> li
     with tempfile.TemporaryDirectory(prefix="shamrai-stats-") as tmp_dir:
         tmp_path = Path(tmp_dir)
         for artifact in artifacts:
-            folder_name = artifact["folder"]
-            if folder_name not in folder_cache:
-                folder = _create_folder(service, name=folder_name, parent_id=run_folder["id"])
-                folder_cache[folder_name] = folder["id"]
-                links.append({
-                    "title": folder["name"],
-                    "url": folder.get("webViewLink", ""),
-                    "id": folder["id"],
-                    "format": "folder",
-                })
+            parent_id = run_folder["id"]
+            path_key: list[str] = []
+            for folder_name in _folder_path_segments(artifact["folder"]):
+                path_key.append(folder_name)
+                cache_key = tuple(path_key)
+                if cache_key not in folder_cache:
+                    folder = _create_folder(service, name=folder_name, parent_id=parent_id)
+                    folder_cache[cache_key] = folder["id"]
+                    links.append({
+                        "title": "/".join(path_key),
+                        "url": folder.get("webViewLink", ""),
+                        "id": folder["id"],
+                        "format": "folder",
+                    })
+                parent_id = folder_cache[cache_key]
             xlsx_path = tmp_path / f"{_safe_filename(artifact['title'])}.xlsx"
             xlsx_path.write_bytes(artifact["xlsx"])
             if "xlsx" in formats:
@@ -291,7 +320,7 @@ def _upload_artifacts(artifacts: list[dict[str, Any]], formats: list[str]) -> li
                     service,
                     path=xlsx_path,
                     title=f"{artifact['title']}.xlsx",
-                    parent_id=folder_cache[folder_name],
+                    parent_id=parent_id,
                     as_google_sheet=False,
                 ))
             if "google_sheet" in formats:
@@ -299,7 +328,7 @@ def _upload_artifacts(artifacts: list[dict[str, Any]], formats: list[str]) -> li
                     service,
                     path=xlsx_path,
                     title=artifact["title"],
-                    parent_id=folder_cache[folder_name],
+                    parent_id=parent_id,
                     as_google_sheet=True,
                 ))
     return links

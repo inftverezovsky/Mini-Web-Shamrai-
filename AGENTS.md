@@ -17,8 +17,10 @@ Preferred repair/deploy commands:
 ```powershell
 $env:SHAMRAI_SSH_PASSWORD = '<provide at runtime, do not store>'
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\shamrai-deploy-agent\scripts\repair-shamrai-server.ps1"
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\shamrai-deploy-agent\scripts\deploy-shamrai.ps1" -Mode preview -RepairShamraiConflicts
+powershell -ExecutionPolicy Bypass -File ".\scripts\deploy-public-shamrai-web.ps1" -RepairShamraiConflicts
 ```
+
+Public `https://shamra1.pro/` is served by host nginx from `/var/www/shamrai_web/dist`, while the canonical Docker preview still listens on `127.0.0.1:8082`. Any frontend redeploy intended to be visible on the public domain must publish the built `frontend/dist` to that public web root and verify that `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css` files. Do not treat a healthy `shamrai-frontend` container alone as proof that the public site changed.
 
 ## VK Callback And Delivery Guard
 

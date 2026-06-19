@@ -61,7 +61,7 @@ function LiveTimer({ endsAt, now }: { endsAt: string; now: number }) {
     : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 
   return (
-    <span className="shimmer-border bg-rose-500/10 border border-rose-500/25 px-2.5 py-0.5 rounded-full font-black text-rose-400 shadow-neon-rose animate-pulse text-[8.5px] uppercase tracking-wider flex items-center space-x-1 shrink-0 select-none relative">
+    <span className="shimmer-border relative flex shrink-0 select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose animate-pulse">
       <Flame className="w-3 h-3 fill-rose-500 text-rose-500 animate-bounce" />
       <span>Live</span>
       <span className="ml-1 font-mono text-[9px]">{timeLeft}</span>
@@ -269,13 +269,13 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   }
 
   return (
-    <div className={`${isCompact ? 'mx-auto max-w-md space-y-4' : 'space-y-5'} animate-slide-up pb-10`}>
+    <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} animate-slide-up pb-8`}>
       
       {promoFlags.marathon && <MarathonWidget />}
       {promoFlags.swipe && <SwipeCard />}
 
       {hasActivePromo && (
-        <div className="grid grid-cols-1 gap-4">
+        <div className="grid grid-cols-1 gap-3">
           {promoFlags.pvp && <PvPWidget />}
           {promoFlags.quiz && <QuizWidget />}
           {promoFlags.crowdBet && <CrowdBetWidget onFunded={loadFeed} />}
@@ -284,8 +284,8 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 2. Account Access Banner */}
       {!active && (
-        <div className="promo-status-panel motion-card shimmer-border spark-field bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 border border-indigo-500/20 backdrop-blur-md p-4 rounded-2xl flex items-center justify-between text-xs text-slate-200 shadow-glass relative overflow-hidden">
-          <div className="space-y-0.5">
+        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-0.5">
             <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
               <Sparkles className="iridescent-icon w-3.5 h-3.5 mr-1.5 shrink-0" />
               Нужен абонемент
@@ -293,14 +293,14 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                 В разработке
               </span>
             </p>
-            <p className="text-[10px] text-slate-400">
+          <p className="text-[9px] text-slate-400">
               Купите пакет матчей, чтобы открыть премиум-ленту прогнозов.
             </p>
           </div>
           {onNavigateToBilling && (
             <button 
               onClick={handleNavigateToBilling}
-              className="bg-indigo-500 text-white font-extrabold px-3 py-1.5 rounded-lg text-[10px] active:scale-95 transition-all shadow-glass"
+              className="inline-flex min-h-[36px] w-full items-center justify-center rounded-lg bg-indigo-500 px-3 py-1.5 text-[10px] font-extrabold text-white shadow-glass transition-all active:scale-95 sm:w-auto"
             >
               Купить матчи
             </button>
@@ -310,15 +310,15 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 3. Bets Feed Grid list */}
       {bets.length === 0 ? (
-        <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-8 text-center rounded-3xl relative overflow-hidden">
-          <Trophy className="iridescent-icon w-10 h-10 mx-auto mb-2.5" />
+        <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-5 text-center rounded-2xl relative overflow-hidden">
+          <Trophy className="iridescent-icon w-8 h-8 mx-auto mb-2" />
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
           <p className="text-slate-400 text-[10px] mt-1 leading-relaxed">
             {active ? 'Сейчас нет активных прогнозов. Ожидайте уведомлений.' : 'Премиум-лента откроется после покупки абонемента.'}
           </p>
         </div>
       ) : (
-        <div className={isCompact ? 'space-y-4' : 'grid grid-cols-1 gap-4 xl:grid-cols-2'}>
+        <div className={isCompact ? 'space-y-3' : 'grid grid-cols-1 gap-3 xl:grid-cols-2'}>
           {bets.map((bet, idx) => {
           const isTaken = bet.is_taken || takenBetIds.includes(bet.id);
           const unlocked = bet.is_unlocked;
@@ -334,21 +334,21 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
           return (
             <div 
               key={bet.id} 
-              className="bet-feed-card motion-card shimmer-border bg-white/[0.04] border border-white/15 backdrop-blur-md p-5 rounded-3xl space-y-3.5 relative overflow-hidden shadow-glass transition-all duration-300 hover:border-cyan-400/30 hover:scale-[1.02] hover:-translate-y-0.5 animate-fade-in"
+              className="bet-feed-card motion-card shimmer-border relative min-w-0 animate-fade-in space-y-2.5 overflow-hidden rounded-2xl border border-white/15 bg-white/[0.04] p-3.5 shadow-glass backdrop-blur-md transition-all duration-300 hover:border-cyan-400/30 hover:scale-[1.01] hover:-translate-y-0.5"
               style={{ animationDelay: `${Math.min(idx * 70, 420)}ms` }}
             >
               {/* Header: Date & Status (and Countdown Timer if Live) */}
-              <div className="flex justify-between items-center text-[10px] text-slate-400 z-10 relative">
-                <span className="flex items-center font-medium">
+              <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 text-[9px] text-slate-400">
+                <span className="flex min-w-0 items-center font-medium">
                   <Calendar className="w-3 h-3 mr-1 text-cyan-300/70" />
                   {formatDate(bet.created_at)}
                 </span>
                 
-                <div className="flex items-center space-x-1.5">
+                <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
                   {bet.sport_type && (
-                    <span className="bg-slate-900/60 border border-white/10 pl-1 pr-2.5 py-0.5 rounded-full font-bold text-[8.5px] uppercase tracking-wider flex items-center gap-1.5 text-slate-200 hover:border-pink-500/30 transition-all duration-300 shadow-sm">
+                    <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/60 py-0.5 pl-1 pr-2.5 text-[8.5px] font-bold uppercase tracking-wider text-slate-200 shadow-sm transition-all duration-300 hover:border-pink-500/30">
                       <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full overflow-hidden" />
-                      {bet.sport_type}
+                      <span className="min-w-0 truncate">{bet.sport_type}</span>
                     </span>
                   )}
                   {isLive && bet.live_ends_at ? (
@@ -365,26 +365,26 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
               <div className={!unlocked ? "select-none opacity-45 pointer-events-none" : ""}>
                 {/* Event Info */}
                 <div>
-                  <h4 className="text-sm font-extrabold text-white leading-snug">{bet.event_name}</h4>
+                  <h4 className="text-xs font-extrabold text-white leading-snug">{bet.event_name}</h4>
                 </div>
 
                 {unlocked && bet.coupon_image_url && (
-                  <div className="mt-3 bg-black/20 border border-white/10 rounded-xl p-2">
-                    <div className="flex items-center space-x-1.5 text-[9px] text-slate-500 font-extrabold uppercase tracking-wider mb-2 px-0.5">
+                  <div className="mt-2 bg-black/20 border border-white/10 rounded-xl p-1.5">
+                    <div className="flex items-center space-x-1.5 text-[8px] text-slate-500 font-extrabold uppercase tracking-wider mb-1.5 px-0.5">
                       <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
                       <span>Скрин купона</span>
                     </div>
                     <img
                       src={resolveAssetUrl(bet.coupon_image_url) || ''}
                       alt="Скрин купона"
-                      className="w-full max-h-64 object-contain rounded-lg border border-white/5 bg-slate-950/60"
+                      className="w-full max-h-56 object-contain rounded-lg border border-white/5 bg-slate-950/60"
                       loading="lazy"
                     />
                   </div>
                 )}
 
                 {betBookmakers.length > 0 && (
-                  <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className="mt-2 grid grid-cols-1 gap-1.5 min-[360px]:grid-cols-2">
                     {betBookmakers.map((bookmaker) => {
                       const bookmakerUrl = unlocked ? getBookmakerLinkUrl(bet, bookmaker.id) : null;
                       const bookmakerContent = (
@@ -423,30 +423,30 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                 )}
 
                 {unlocked && bet.outcome && (
-                  <div className="mt-3 bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-xl">
+                  <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 p-2.5 rounded-xl">
                     <span className="text-[8px] text-emerald-300/70 font-extrabold uppercase tracking-wider block">
                       Ставка
                     </span>
-                    <span className="text-sm font-black text-emerald-300">{bet.outcome}</span>
+                    <span className="text-xs font-black text-emerald-300">{bet.outcome}</span>
                   </div>
                 )}
 
                 {/* Description */}
                 {bet.description && (
-                  <p className="text-slate-300 text-xs leading-normal bg-black/20 p-3 rounded-xl border border-white/5 mt-3">
+                  <p className="text-slate-300 text-[11px] leading-normal bg-black/20 p-2.5 rounded-xl border border-white/5 mt-2">
                     {bet.description}
                   </p>
                 )}
 
                 {/* Live Match Scoreboard Tracker */}
                 {unlocked && isLive && bet.api_match_id && (
-                  <div className="mt-3">
+                  <div className="mt-2">
                     <LiveTracker apiMatchId={bet.api_match_id} />
                   </div>
                 )}
 
                 {unlocked && bet.match_link && (
-                  <div className="mt-3 space-y-2.5">
+                  <div className="mt-2 space-y-2">
                     <a
                       href={bet.match_link}
                       target="_blank"
@@ -455,7 +455,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                         sport: bet.sport_type,
                         category: bet.category,
                       })}
-                      className="bg-cyan-500/10 border border-cyan-500/20 text-cyan-200 text-[10px] font-extrabold py-2.5 px-3 rounded-xl flex items-center justify-center space-x-1.5 active:scale-[0.98] transition-all"
+                      className="bg-cyan-500/10 border border-cyan-500/20 text-cyan-200 text-[9px] font-extrabold py-2 px-3 rounded-xl flex items-center justify-center space-x-1.5 active:scale-[0.98] transition-all"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
                       <span>Открыть матч</span>
@@ -465,15 +465,15 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
               </div>
 
               {/* Odds & Action button */}
-              <div className="flex items-center justify-between pt-2 border-t border-white/5 mt-2 z-10 relative">
-                <div>
+              <div className="relative z-10 mt-1 flex flex-wrap items-center justify-between gap-2 border-t border-white/5 pt-2">
+                <div className="min-w-0">
                   <span className="text-[9px] uppercase font-bold text-slate-500 block">Коэффициент</span>
-                  <span className="text-lg font-black text-emerald-400 text-glow-green">{parseFloat(bet.coefficient as any).toFixed(2)}</span>
+                  <span className="text-base font-black text-emerald-400 text-glow-green">{parseFloat(bet.coefficient as any).toFixed(2)}</span>
                 </div>
 
                 {unlocked ? (
                   isTaken ? (
-                    <div className="bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-[10px] font-extrabold py-2.5 px-4 rounded-xl flex items-center space-x-1.5 shadow-neon-green animate-pulse">
+                    <div className="flex min-h-[36px] items-center gap-1.5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[9px] font-extrabold text-emerald-400 shadow-neon-green animate-pulse">
                       <Check className="w-3.5 h-3.5" />
                       <span>Принято</span>
                     </div>
@@ -483,7 +483,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                     <button
                       onClick={() => handleTakeBet(bet.id)}
                       disabled={isActionLoading}
-                      className="bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 text-xs font-black py-2.5 px-4 rounded-xl flex items-center space-x-1.5 shadow-neon-green transition-all duration-300"
+                      className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-green transition-all duration-300 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50"
                     >
                       {isActionLoading ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -499,7 +499,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                   <button
                     onClick={() => handleBuyBet(bet.id)}
                     disabled={isActionLoading}
-                    className="bg-amber-500 hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 text-xs font-black py-2.5 px-4 rounded-xl flex items-center space-x-1.5 shadow-neon-amber transition-all duration-300"
+                    className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-amber transition-all duration-300 hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50"
                   >
                     {isActionLoading ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -528,7 +528,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
             void feedQuery.fetchNextPage();
           }}
           disabled={feedQuery.isFetchingNextPage}
-          className="mx-auto flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-cyan-300/25 bg-cyan-300/10 px-4 text-xs font-black text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
+          className="mx-auto flex min-h-[36px] items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/10 px-3 text-[11px] font-black text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
         >
           {feedQuery.isFetchingNextPage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
           <span>{feedQuery.isFetchingNextPage ? 'Загружаем...' : 'Показать еще'}</span>

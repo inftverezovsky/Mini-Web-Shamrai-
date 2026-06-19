@@ -5,44 +5,46 @@ const AdminBets = lazy(() => import('./AdminBets'));
 const AdminBroadcast = lazy(() => import('./AdminBroadcast'));
 const AdminResults = lazy(() => import('./AdminResults'));
 
-type AdminTabId = 'bets' | 'results' | 'broadcast';
+type AdminTabId = 'bets' | 'broadcast' | 'requests' | 'results';
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<AdminTabId>('bets');
 
   const adminTabs: Array<{ id: AdminTabId; label: string }> = [
-    { id: 'bets', label: 'Прогнозы' },
-    { id: 'results', label: 'Результаты' },
+    { id: 'bets', label: 'Прогноз' },
     { id: 'broadcast', label: 'Рассылки' },
+    { id: 'requests', label: 'Заявки' },
+    { id: 'results', label: 'Результаты' },
   ];
 
   const renderActiveTab = () => {
     if (activeTab === 'bets') return <AdminBets />;
+    if (activeTab === 'broadcast') return <AdminBroadcast />;
+    if (activeTab === 'requests') return <AdminBroadcast initialMode="requests" showModeTabs={false} />;
     if (activeTab === 'results') return <AdminResults />;
-    return <AdminBroadcast />;
+    return <AdminBets />;
   };
 
   return (
-    <div className="space-y-6 animate-slide-up pb-10">
+    <div className="space-y-4 animate-slide-up pb-8">
       
       {/* 1. Header Title */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-black text-white flex items-center uppercase tracking-wider">
-            <Settings className="w-5 h-5 text-indigo-400 mr-2 animate-spin-slow" />
+          <h2 className="text-base font-black text-white flex items-center uppercase tracking-wider">
+            <Settings className="w-4 h-4 text-indigo-400 mr-2 animate-spin-slow" />
             Панель управления
           </h2>
-          <p className="text-slate-400 text-[10px] uppercase font-bold tracking-widest mt-0.5">Административный центр</p>
         </div>
       </div>
 
       {/* 2. Sub-Tab bar Navigation */}
-      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-3 gap-1.5 shadow-inner">
+      <div className="bg-white/[0.03] border border-white/10 p-1 rounded-xl grid grid-cols-4 gap-1 shadow-inner">
         {adminTabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`min-w-0 text-[10px] font-black uppercase tracking-wider py-2.5 px-2 rounded-xl transition-all ${
+            className={`min-w-0 text-[9px] font-black uppercase tracking-wider py-2 px-1.5 rounded-lg transition-all ${
               activeTab === tab.id
                 ? 'bg-indigo-500 text-white shadow-neon-indigo'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'

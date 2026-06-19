@@ -54,6 +54,7 @@ from src.core.message_templates import (
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE, enqueue_delivery
 from src.services.match_access import log_match_balance_event, record_user_bet_access
+from src.services.statistics import is_paid_client_access
 from src.services.coupon_uploads import store_coupon_image
 from src.services.signals import broadcast_live_signal
 from src.services.vk_delivery import html_to_vk_text, user_can_receive_vk_messages
@@ -714,9 +715,21 @@ async def get_user_stats(
     db: AsyncSession = Depends(get_read_db)
 ):
     """Calculates statistics for dashboard display."""
-    query = select(Bet).join(user_bets).filter(user_bets.c.user_id == current_user.telegram_id)
+    query = (
+        select(Bet, user_bets.c.access_type, user_bets.c.match_charged)
+        .join(user_bets, user_bets.c.bet_id == Bet.id)
+        .filter(
+            user_bets.c.user_id == current_user.telegram_id,
+            Bet.status.in_(["win", "loss", "refund"]),
+            Bet.resolved_at.isnot(None),
+        )
+    )
     result = await db.execute(query)
-    bets = result.scalars().all()
+    bets = [
+        bet
+        for bet, access_type, match_charged in result.all()
+        if is_paid_client_access(access_type, match_charged)
+    ]
     
     total = len(bets)
     won = 0
@@ -726,20 +739,21 @@ async def get_user_stats(
     coefficient_sum = Decimal("0.00")
     
     for bet in bets:
-        coefficient_sum += bet.coefficient
         if bet.status == "win":
             won += 1
             profit += (bet.coefficient - Decimal("1.00"))
+            coefficient_sum += bet.coefficient
         elif bet.status == "loss":
             lost += 1
             profit -= Decimal("1.00")
+            coefficient_sum += bet.coefficient
         elif bet.status == "refund":
             refunded += 1
             
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
-    roi = (float(profit) / total * 100) if total > 0 else 0.0
-    average_coefficient = float(coefficient_sum / Decimal(total)) if total > 0 else 0.0
+    roi = (float(profit) / resolved * 100) if resolved > 0 else 0.0
+    average_coefficient = float(coefficient_sum / Decimal(resolved)) if resolved > 0 else 0.0
     
     return UserStats(
         total_bets_taken=total,
@@ -1256,18 +1270,19 @@ async def get_admin_analytics(
     coefficient_sum = Decimal("0.00")
     
     for bet in bets:
-        coefficient_sum += bet.coefficient
         if bet.status == "win":
             won += 1
             profit += (bet.coefficient - Decimal("1.00"))
+            coefficient_sum += bet.coefficient
         elif bet.status == "loss":
             lost += 1
             profit -= Decimal("1.00")
+            coefficient_sum += bet.coefficient
             
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
-    roi = (float(profit) / total_bets * 100) if total_bets > 0 else 0.0
-    average_coefficient = float(coefficient_sum / Decimal(total_bets)) if total_bets > 0 else 0.0
+    roi = (float(profit) / resolved * 100) if resolved > 0 else 0.0
+    average_coefficient = float(coefficient_sum / Decimal(resolved)) if resolved > 0 else 0.0
     
     return AdminAnalytics(
         total_subscribers=total_users,

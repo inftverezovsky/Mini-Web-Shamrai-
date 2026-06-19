@@ -1,4 +1,4 @@
-const CACHE_NAME = 'shamrai-pwa-v5';
+const CACHE_NAME = 'shamrai-pwa-v11';
 const APP_SHELL_URLS = ['/', '/app', '/manifest.json'];
 
 function safeNotificationPath(rawUrl) {

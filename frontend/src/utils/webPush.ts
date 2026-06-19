@@ -79,7 +79,8 @@ export async function registerPwaServiceWorker(): Promise<void> {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
 
   try {
-    await navigator.serviceWorker.register('/service-worker.js');
+    const registration = await navigator.serviceWorker.register('/service-worker.js');
+    await registration.update();
   } catch {
     // PWA shell registration is best-effort; the app itself should still load normally.
   }

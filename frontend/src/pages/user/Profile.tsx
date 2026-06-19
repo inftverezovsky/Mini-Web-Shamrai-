@@ -17,6 +17,7 @@ import { useLayoutMode } from '../../context/LayoutModeContext';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
+import SmoothCollapse from '../../components/SmoothCollapse';
 import AdminPlans from '../admin/AdminPlans';
 import AdminAccess from '../admin/AdminAccess';
 import AdminMarketing from '../admin/AdminMarketing';
@@ -108,12 +109,12 @@ function CollapsibleSection({
   children,
 }: CollapsibleSectionProps) {
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03]">
+    <div className="smooth-surface overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03]">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={isOpen}
-        className="w-full flex items-center justify-between gap-3 px-3.5 py-3 text-left transition-all hover:bg-white/[0.04] active:bg-white/[0.06]"
+        className="smooth-pressable w-full flex items-center justify-between gap-3 px-3.5 py-3 text-left transition-all hover:bg-white/[0.04] active:bg-white/[0.06]"
       >
         <span className="flex items-center gap-2 min-w-0">
           {icon}
@@ -140,11 +141,11 @@ function CollapsibleSection({
           />
         </span>
       </button>
-      {isOpen && (
-        <div className="border-t border-white/5 px-3.5 py-3.5 animate-slide-down">
+      <SmoothCollapse open={isOpen} className="border-t border-white/5">
+        <div className="px-3.5 py-3.5">
           {children}
         </div>
-      )}
+      </SmoothCollapse>
     </div>
   );
 }
@@ -762,11 +763,6 @@ export default function Profile() {
                     {telegramLinked ? 'привязан' : 'можно подключить'}
                   </span>
                 </div>
-                <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-400">
-                  {telegramLinked
-                    ? `Telegram ID ${userProfile?.telegram_id} подключен к этому кабинету.`
-                    : 'Подключите Telegram, чтобы получать бот-уведомления и открывать этот же кабинет внутри Mini App.'}
-                </p>
               </div>
             </div>
 
@@ -809,9 +805,6 @@ export default function Profile() {
               <span className="min-w-0 flex-1">
                 <span className="block text-xs font-black uppercase tracking-wider text-white">
                   Синхронизация VK
-                </span>
-                <span className="mt-1 block text-[11px] font-semibold leading-relaxed text-slate-400">
-                  Для доставки нужен VK ID и разрешенные личные сообщения от сообщества.
                 </span>
               </span>
             </span>
@@ -902,11 +895,6 @@ export default function Profile() {
                             {vkMessagesAllowed ? 'доставка включена' : 'нужно разрешить'}
                           </span>
                         </div>
-                        <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-400">
-                          {vkMessagesAllowed
-                            ? 'Прогнозы и анонсы можно отправлять вам в VK.'
-                            : 'Разрешите сообщения от сообщества Shamrai, чтобы клиентские прогнозы приходили прямо в VK.'}
-                        </p>
                       </div>
                     </div>
 
@@ -953,11 +941,6 @@ export default function Profile() {
                     )}
                   </div>
 
-                  {!vkMiniAppRuntime && !vkMessagesAllowed && (
-                    <p className="rounded-xl border border-white/10 bg-white/[0.035] px-3 py-2 text-[11px] font-semibold leading-relaxed text-slate-400">
-                      Откройте диалог VK, напишите любое сообщение сообществу, затем вернитесь в профиль. Сервер перепроверит разрешение автоматически.
-                    </p>
-                  )}
                 </div>
               )}
             </div>

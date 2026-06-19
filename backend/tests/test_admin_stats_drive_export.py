@@ -112,6 +112,7 @@ class GoogleDriveUploadTests(unittest.TestCase):
         artifacts = [
             {"folder": "Шамрай", "title": "Шамрай - статистика", "xlsx": b"shamrai"},
             {"folder": "Клиенты", "title": "Клиенты - свод", "xlsx": b"clients"},
+            {"folder": "Клиенты/Инфа", "title": "Клиенты - инфа", "xlsx": b"client-info"},
         ]
         fake_googleapiclient = types.ModuleType("googleapiclient")
         fake_http = types.ModuleType("googleapiclient.http")
@@ -136,7 +137,13 @@ class GoogleDriveUploadTests(unittest.TestCase):
         self.assertEqual(folder_names[:2], ["Shamrai Stats Exports", links[1]["title"]])
         self.assertIn("Шамрай", folder_names)
         self.assertIn("Клиенты", folder_names)
-        self.assertEqual(len(service.files_resource.uploaded), 4)
+        self.assertIn("Инфа", folder_names)
+        clients_folder = next(body for body in service.files_resource.created if body["name"] == "Клиенты")
+        info_folder = next(body for body in service.files_resource.created if body["name"] == "Инфа")
+        self.assertEqual(info_folder["parents"], [f"id-{service.files_resource.created.index(clients_folder) + 1}"])
+        client_info_upload = next(body for body in service.files_resource.uploaded if body["name"] == "Клиенты - инфа.xlsx")
+        self.assertEqual(client_info_upload["parents"], [f"id-{service.files_resource.created.index(info_folder) + 1}"])
+        self.assertEqual(len(service.files_resource.uploaded), 6)
         self.assertEqual({link["format"] for link in links}, {"folder", "xlsx", "google_sheet"})
         self.assertIn("name='Shamrai Stats Exports'", service.files_resource.list_queries[0]["q"])
 

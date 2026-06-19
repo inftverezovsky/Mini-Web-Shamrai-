@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
+import LogoText from './LogoText';
 import { getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
 
 interface WelcomeSplashProps {
@@ -170,9 +171,9 @@ export default function WelcomeSplash({
         </div>
 
         <div className="welcome-splash__caption">
-          <div className="flex items-center justify-center gap-1.5">
+          <div className="flex items-center justify-center gap-1.5" aria-hidden="true">
             <Sparkles className="iridescent-icon h-4 w-4" />
-            <span>SHAMRAI</span>
+            <LogoText className="welcome-splash__wordmark" ariaLabel="SHAMRAI" width={190} height={58} />
           </div>
           <p>{statusText}</p>
         </div>

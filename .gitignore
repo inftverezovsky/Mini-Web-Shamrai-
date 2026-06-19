@@ -29,6 +29,7 @@ deploy.tar.gz
 *.tar.gz
 output/
 .playwright-cli/
+.playwright-mcp/
 backend/static/coupons/*
 !backend/static/coupons/.gitkeep
 

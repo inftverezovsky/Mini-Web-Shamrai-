@@ -56,6 +56,34 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertEqual(summary["roi"], 25.0)
         self.assertEqual(summary["winrate"], 50.0)
 
+    def test_payload_keeps_author_and_client_aggregate_math_consistent(self):
+        resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)
+        items = [
+            stat_item_from_bet(_bet(status="win", coefficient="2.20", resolved_at=resolved_at, delivery_mode="feed")),
+            stat_item_from_bet(_bet(status="loss", coefficient="1.80", resolved_at=resolved_at, delivery_mode="sales_private")),
+            stat_item_from_bet(_bet(status="win", coefficient="1.50", resolved_at=resolved_at, delivery_mode="sales_private")),
+        ]
+        payload = build_performance_payload([item for item in items if item], period="all")
+
+        self.assertEqual(payload["summary"]["bets"], 3)
+        self.assertEqual(payload["summary"]["wins"], 2)
+        self.assertEqual(payload["summary"]["losses"], 1)
+        self.assertEqual(payload["summary"]["profit_units"], 0.7)
+        self.assertEqual(payload["summary"]["winrate"], 66.67)
+        self.assertEqual(payload["summary"]["roi"], 23.33)
+
+        self.assertEqual(payload["source_split"]["feed"]["bets"], 1)
+        self.assertEqual(payload["source_split"]["feed"]["profit_units"], 1.2)
+        self.assertEqual(payload["source_split"]["feed"]["roi"], 120.0)
+        self.assertEqual(payload["source_split"]["private"]["bets"], 2)
+        self.assertEqual(payload["source_split"]["private"]["profit_units"], -0.5)
+        self.assertEqual(payload["source_split"]["private"]["roi"], -25.0)
+
+        month_summary = payload["timeline"][0]["summary"]
+        day_summary = payload["timeline"][0]["days"][0]["summary"]
+        self.assertEqual(month_summary, payload["summary"])
+        self.assertEqual(day_summary, payload["summary"])
+
     def test_paid_client_access_detection(self):
         self.assertTrue(is_paid_client_access("paid_match", True))
         self.assertTrue(is_paid_client_access("telegram_stars_single_bet", False))

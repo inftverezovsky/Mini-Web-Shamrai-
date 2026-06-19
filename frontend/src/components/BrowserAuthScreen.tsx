@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import LogoText from './LogoText';
 import { getVkIdConfig } from '../utils/vkId';
 import { trackEvent, trackPageView } from '../utils/analytics';
 
@@ -52,33 +53,26 @@ export default function BrowserAuthScreen() {
   };
 
   return (
-    <div className="relative z-10 flex min-h-screen items-center justify-center px-4 py-8 text-slate-50">
+    <div className="app-shell start-screen compact-ui relative z-10 flex min-h-screen items-center justify-center px-4 py-8 text-slate-50">
       <div className="ambient-field" aria-hidden="true">
         <div className="ambient-field__grid" />
         <div className="ambient-field__rings" />
       </div>
 
-      <section className="relative w-full max-w-[430px] overflow-hidden rounded-[2rem] border border-white/10 bg-slate-950/55 p-5 shadow-glass backdrop-blur-2xl">
+      <section className="shamrai-glass-panel relative z-10 w-full max-w-[430px] overflow-hidden rounded-[2rem] p-5">
         <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/70 to-transparent" />
 
         <div className="space-y-5">
           <div className="flex items-center gap-3">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-200">
+            <div className="shamrai-glass-button grid h-12 w-12 place-items-center rounded-2xl text-cyan-200">
               <ShieldCheck className="h-6 w-6" />
             </div>
             <div className="min-w-0">
-              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200/80">
-                Shamrai
-              </p>
-              <h1 className="mt-1 text-xl font-black leading-tight text-white">
+              <LogoText className="h-8 w-32" ariaLabel="Shamrai" width={160} height={48} />
+              <h1 className="auth-readable-title mt-1 text-xl font-black leading-tight text-white">
                 Вход в кабинет
               </h1>
             </div>
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3.5 text-xs leading-relaxed text-slate-300">
-            Можно начать с VK ID или Telegram. Второй канал подключается позже в профиле,
-            а баланс, тарифы и настройки останутся в одном кабинете.
           </div>
 
           <div className="space-y-4">
@@ -87,7 +81,7 @@ export default function BrowserAuthScreen() {
                 type="button"
                 onClick={handleVkLogin}
                 disabled={vkBusy || loading}
-                className="group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl border border-[#4c8dff]/35 bg-[#2787f5]/18 px-4 py-3 text-sm font-black text-white shadow-glass transition-all hover:bg-[#2787f5]/26 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
+                className="auth-readable-action shamrai-glass-button group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 {vkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
                 <span>Войти или создать через VK ID</span>
@@ -95,7 +89,7 @@ export default function BrowserAuthScreen() {
             ) : vkConfig.configured ? (
               <a
                 href={secureAppUrl}
-                className="group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl border border-[#4c8dff]/35 bg-[#2787f5]/18 px-4 py-3 text-sm font-black text-white shadow-glass transition-all hover:bg-[#2787f5]/26 active:scale-[0.98]"
+                className="auth-readable-action shamrai-glass-button group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3 text-sm font-black text-white transition-all active:scale-[0.98]"
               >
                 <ExternalLink className="h-4 w-4" />
                 <span>Открыть защищенный вход</span>
@@ -112,7 +106,7 @@ export default function BrowserAuthScreen() {
                   type="button"
                   onClick={handleTelegramLogin}
                   disabled={telegramBusy || loading}
-                  className="group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-2xl border border-cyan-300/35 bg-cyan-300/14 px-4 py-3.5 text-sm font-black text-white shadow-glass transition-all hover:bg-cyan-300/22 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
+                  className="auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   {telegramBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
                   <span>Войти или создать через Telegram</span>

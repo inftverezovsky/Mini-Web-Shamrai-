@@ -55,6 +55,29 @@ function Invoke-NativeChecked {
   }
 }
 
+function Get-FrontendDistAssets {
+  param([string]$DistPath)
+
+  $indexPath = Join-Path $DistPath "index.html"
+  if (-not (Test-Path -LiteralPath $indexPath)) {
+    throw "Frontend dist index was not found: $indexPath"
+  }
+
+  $html = Get-Content -Raw -LiteralPath $indexPath
+  $matches = [regex]::Matches($html, "/?assets/[^`"'<>\s]+\.(?:css|js)")
+  $assets = @(
+    foreach ($match in $matches) {
+      $match.Value.TrimStart("/")
+    }
+  ) | Sort-Object -Unique
+
+  if ($assets.Count -eq 0) {
+    throw "Frontend dist index has no CSS/JS assets: $indexPath"
+  }
+
+  return $assets
+}
+
 function Get-ShamraiSshPassword {
   param([bool]$ForcePrompt = $false)
 
@@ -235,6 +258,8 @@ $password = Get-ShamraiSshPassword -ForcePrompt:$PromptPassword
 $deployDir = Join-Path $Workspace ".deploy"
 $repoArchive = Join-Path $deployDir "shamrai-public-repo.tar.gz"
 $webArchive = Join-Path $deployDir "shamrai-web-dist.tar.gz"
+$frontendDistPath = Join-Path $Workspace "frontend\dist"
+$frontendPublicAssets = @()
 $nginxConfig = Join-Path $Workspace "deploy\nginx\shamrai.conf"
 $remoteGuardScript = Join-Path $deployDir "shamrai-public-guard.sh"
 $remoteDeployScript = Join-Path $deployDir "shamrai-public-remote-deploy.sh"
@@ -322,7 +347,8 @@ Invoke-Step "Create deployment archives" {
     Pop-Location
   }
 
-  Push-Location (Join-Path $Workspace "frontend\dist")
+  $frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
+  Push-Location $frontendDistPath
   try {
     Invoke-NativeChecked "tar" "-czf" $webArchive "."
   } finally {
@@ -378,8 +404,9 @@ def patch_env(path, values):
         if "=" in line and not line.lstrip().startswith("#"):
             key = line.split("=", 1)[0]
             if key in values:
-                out.append(f"{key}={values[key]}")
-                seen.add(key)
+                if key not in seen:
+                    out.append(f"{key}={values[key]}")
+                    seen.add(key)
                 continue
         out.append(line)
     for key, value in values.items():
@@ -653,6 +680,10 @@ try {
     if ($VkGroupId -notmatch "^\d+$") {
       throw "VK group id must be numeric for deploy verification."
     }
+    $expectedAssetArgs = ($frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
+    if ([string]::IsNullOrWhiteSpace($expectedAssetArgs)) {
+      throw "No expected public frontend assets were captured from local dist."
+    }
     $vkCallbackPayload = ConvertTo-ShellSingleQuoted ('{"type":"confirmation","group_id":' + $VkGroupId + '}')
     $remote = @"
 set -e
@@ -666,13 +697,15 @@ expected_vk_callback_confirmation=$expectedVkCode
 vk_callback_payload=$vkCallbackPayload
 runtime_vk_callback_confirmation="`$(python3 - <<'PY'
 from pathlib import Path
-value = ""
 path = Path("backend/.env")
+values = []
 if path.exists():
     for line in path.read_text().splitlines():
         if line.startswith("VK_CALLBACK_CONFIRMATION_CODE="):
-            value = line.split("=", 1)[1].strip()
-print(value)
+            values.append(line.split("=", 1)[1].strip())
+if len(values) > 1:
+    raise SystemExit("duplicate VK_CALLBACK_CONFIRMATION_CODE entries in backend/.env")
+print(values[-1] if values else "")
 PY
 )"
 if [ -z "`$runtime_vk_callback_confirmation" ]; then
@@ -698,6 +731,12 @@ fi
 curl -I -fsS http://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/app/ | head -n 8
+html="`$(curl -fsS https://shamra1.pro/)"
+for asset in $expectedAssetArgs; do
+  printf '%s' "`$html" | grep -F "`$asset" >/dev/null
+  curl -fsS -I "https://shamra1.pro/`$asset" >/dev/null
+done
+echo 'public_frontend_assets_match_dist'
 "@
     $normalizedRemote = ((($remote -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
     $encodedRemote = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedRemote))

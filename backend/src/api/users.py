@@ -690,7 +690,7 @@ async def get_my_taken_bets_timeline(
     current_user: User = Depends(get_current_user_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> dict[str, Any]:
-    """Resolved paid client bets grouped by settlement month/day with 1-unit ROI stats."""
+    """Resolved paid client bets grouped by settlement month/day with flat-stake ROI stats."""
     normalized_period = normalize_period(period)
     query = (
         select(Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
@@ -780,7 +780,7 @@ def _user_xlsx_response(rows: list[dict[str, Any]], filename: str) -> StreamingR
         ("event_name", "Матч"),
         ("status", "Результат"),
         ("coefficient", "КФ"),
-        ("profit_units", "Profit, u"),
+        ("profit_units", "Прибыль, флеты"),
         ("roi_percent", "ROI ставки, %"),
         ("source", "Источник"),
         ("sport", "Спорт"),
@@ -857,13 +857,21 @@ async def generate_user_pdf_report(
     """
     # 1. Fetch user stats (similar to /api/bets/stats)
     query = (
-        select(Bet)
-        .join(user_bets)
-        .filter(user_bets.c.user_id == current_user.telegram_id)
+        select(Bet, user_bets.c.access_type, user_bets.c.match_charged)
+        .join(user_bets, user_bets.c.bet_id == Bet.id)
+        .filter(
+            user_bets.c.user_id == current_user.telegram_id,
+            Bet.status.in_(["win", "loss", "refund"]),
+            Bet.resolved_at.isnot(None),
+        )
         .order_by(Bet.created_at.desc())
     )
     result = await db.execute(query)
-    bets = result.scalars().all()
+    bets = [
+        bet
+        for bet, access_type, match_charged in result.all()
+        if is_paid_client_access(access_type, match_charged)
+    ]
     
     total = len(bets)
     won = 0
@@ -883,7 +891,7 @@ async def generate_user_pdf_report(
             
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
-    roi = (profit / total * 100) if total > 0 else 0.0
+    roi = (profit / resolved * 100) if resolved > 0 else 0.0
 
     # 2. Build PDF Document using reportlab
     from reportlab.lib.pagesizes import letter

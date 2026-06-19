@@ -70,6 +70,7 @@ from src.services.statistics import (
 )
 from src.services.google_drive_export import get_drive_export_job, start_drive_export_job
 from src.services.stats_export import (
+    FLAT_FORMAT,
     build_stats_export_workbook,
     load_author_export_items,
     load_clients_export_items,
@@ -285,7 +286,8 @@ async def get_admin_dashboard_stats(
     )
     won_expr = case((Bet.status == "win", 1), else_=0)
     lost_expr = case((Bet.status == "loss", 1), else_=0)
-    settled_expr = case((Bet.status.in_(["win", "loss", "refund"]), 1), else_=0)
+    resolved_expr = case((Bet.status.in_(["win", "loss"]), 1), else_=0)
+    resolved_coefficient_expr = case((Bet.status.in_(["win", "loss"]), Bet.coefficient), else_=None)
 
     async def summarize_bets(author_id: Optional[int] = None) -> Dict[str, float]:
         filters = []
@@ -296,24 +298,24 @@ async def get_admin_dashboard_stats(
                 func.count(Bet.id),
                 func.coalesce(func.sum(won_expr), 0),
                 func.coalesce(func.sum(lost_expr), 0),
-                func.coalesce(func.sum(settled_expr), 0),
+                func.coalesce(func.sum(resolved_expr), 0),
                 func.coalesce(func.sum(profit_expr), Decimal("0.00")),
-                func.coalesce(func.avg(Bet.coefficient), Decimal("0.00")),
+                func.coalesce(func.avg(resolved_coefficient_expr), Decimal("0.00")),
             )
             .filter(*filters)
         )
-        total_bets, won, lost, settled_total, profit, average_coefficient = result.one()
+        total_bets, won, lost, resolved_total, profit, average_coefficient = result.one()
         total_bets = int(total_bets or 0)
         won = int(won or 0)
         lost = int(lost or 0)
-        settled_total = int(settled_total or 0)
+        resolved_total = int(resolved_total or 0)
         profit = Decimal(str(profit or "0.00"))
         resolved = won + lost
 
         return {
             "total_bets": total_bets,
             "winrate": round((won / resolved * 100) if resolved else 0.0, 2),
-            "roi": round((float(profit) / settled_total * 100) if settled_total else 0.0, 2),
+            "roi": round((float(profit) / resolved_total * 100) if resolved_total else 0.0, 2),
             "average_coefficient": round(float(average_coefficient or 0), 2),
         }
 
@@ -796,6 +798,8 @@ async def export_admin_stats(
                 title="СТАТИСТИКА КЛИЕНТОВ SHAMRAI",
                 period_label=period_label,
                 include_client=True,
+                value_format=FLAT_FORMAT,
+                value_label="флеты",
             )
         else:
             export_items = await load_author_export_items(

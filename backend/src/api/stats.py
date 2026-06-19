@@ -44,7 +44,7 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
     profit = Decimal(str(profit or "0.00"))
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
-    roi = (float(profit) / total * 100) if total > 0 else 0.0
+    roi = (float(profit) / resolved * 100) if resolved > 0 else 0.0
 
     date_ref = func.coalesce(Bet.resolved_at, Bet.created_at)
     year_part = extract("year", date_ref)

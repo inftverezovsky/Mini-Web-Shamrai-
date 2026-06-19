@@ -282,7 +282,7 @@ function buildMockBet(id: string, overrides: Record<string, any> = {}) {
     event_name: 'Зенит - Спартак',
     coefficient: 1.92,
     bookmaker_id: bookmakers[0]?.id ?? null,
-    description: 'Тестовый прогноз для локальной проверки интерфейса. В реальном режиме данные приходят с backend.',
+    description: null,
     status: 'pending',
     author_id: 987654321,
     created_at: nowIso(),
@@ -1189,6 +1189,20 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       ...payload,
       excluded_summary: mockSummary([]),
       excluded_bets: [],
+    };
+  }
+  if (endpoint === '/bets/feed-page') {
+    const limit = Math.max(1, Number(queryParams.get('limit')) || 20);
+    const cursor = Math.max(0, Number(queryParams.get('cursor')) || 0);
+    const items = getMockBets().filter((bet: any) => bet.delivery_mode === 'feed');
+    const pageItems = items.slice(cursor, cursor + limit);
+    const nextCursor = cursor + pageItems.length;
+    return {
+      items: pageItems,
+      next_cursor: nextCursor < items.length ? String(nextCursor) : null,
+      has_more: nextCursor < items.length,
+      total: items.length,
+      filtered_total: items.length,
     };
   }
   if (endpoint === '/bets/feed') return getMockBets().filter((bet: any) => bet.delivery_mode === 'feed');

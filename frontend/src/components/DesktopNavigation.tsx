@@ -28,32 +28,35 @@ export default function DesktopNavigation({
     : userTabs.filter((tab) => showWebChat || tab.id !== 'chat');
 
   return (
-    <aside className="flex h-auto w-full shrink-0 flex-col justify-between rounded-3xl border border-white/10 bg-slate-950/58 p-4 shadow-glass backdrop-blur-2xl lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:w-72">
-      <div className="space-y-5">
-        <div className="flex items-center gap-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.06] p-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950/70 text-cyan-200 ring-1 ring-cyan-300/20">
-            <PanelLeft className="h-5 w-5" />
+    <aside className="shamrai-glass-panel flex h-auto w-full shrink-0 flex-col justify-between rounded-2xl p-3 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:w-72">
+      <div className="space-y-3.5">
+        <div className="shamrai-glass-card flex items-center gap-2.5 rounded-xl p-2.5">
+          <div className="relative grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-cyan-200/20 text-cyan-200">
+            <img src="/brand-logo-poster.jpg" alt="" className="absolute inset-0 h-full w-full object-cover opacity-70" />
+            <div className="absolute inset-0 bg-slate-950/34" />
+            <PanelLeft className="relative h-4 w-4 drop-shadow-[0_0_8px_rgba(0,210,255,0.65)]" />
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-black text-white">{userLabel}</p>
-            <p className="mt-0.5 text-[10px] font-black uppercase tracking-wider text-cyan-200/70">
+            <p className="mt-0.5 text-xs font-semibold tracking-normal text-cyan-200/80">
               {roleLabelText}
             </p>
           </div>
         </div>
 
-        <nav className="space-y-1.5">
-          {tabs.map(({ id, label, Icon }) => {
+        <nav className="space-y-1" aria-label={role === 'admin' ? 'Навигация администратора' : 'Навигация приложения'}>
+          {tabs.map(({ id, label, Icon, tone = 'cyan' }) => {
             const active = activeTab === id;
             return (
               <button
                 key={id}
                 type="button"
                 onClick={() => onChangeTab(id)}
-                className={`flex w-full items-center gap-3 rounded-2xl border px-3.5 py-3 text-left text-sm font-extrabold transition-all ${
+                aria-current={active ? 'page' : undefined}
+                className={`flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-sm font-bold transition-all ${
                   active
-                    ? 'border-cyan-300/35 bg-cyan-300/[0.12] text-white shadow-neon-cyan'
-                    : 'border-white/5 bg-white/[0.035] text-slate-400 hover:border-white/12 hover:bg-white/[0.055] hover:text-slate-200'
+                    ? `shamrai-glass-button shamrai-glass-button--${tone} text-white shadow-neon-cyan`
+                    : 'shamrai-glass-card text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <Icon className={`h-4 w-4 shrink-0 ${active ? 'text-cyan-200' : 'text-slate-500'}`} />
@@ -64,7 +67,7 @@ export default function DesktopNavigation({
         </nav>
       </div>
 
-      {adminPreviewControl && <div className="space-y-3">{adminPreviewControl}</div>}
+      {adminPreviewControl && <div className="space-y-2">{adminPreviewControl}</div>}
     </aside>
   );
 }

@@ -5,7 +5,6 @@ import {
   Settings2,
   SlidersHorizontal,
   TrendingUp,
-  Trophy,
   User as UserIcon,
   Users,
   type LucideIcon,
@@ -26,22 +25,22 @@ interface TabConfig<T extends BottomTabId> {
   id: T;
   label: string;
   Icon: LucideIcon;
+  tone?: 'cyan' | 'emerald' | 'violet' | 'gold' | 'rose';
 }
 
 export const userTabs: TabConfig<UserTabId>[] = [
-  { id: 'feed', label: 'Лента', Icon: Newspaper },
-  { id: 'chat', label: 'ЧАТ', Icon: MessageCircle },
-  { id: 'stats', label: 'Статистика', Icon: TrendingUp },
-  { id: 'my_bets', label: 'Мои ставки', Icon: Trophy },
-  { id: 'profile', label: 'Профиль', Icon: UserIcon },
+  { id: 'feed', label: 'Лента', Icon: Newspaper, tone: 'emerald' },
+  { id: 'chat', label: 'Чат', Icon: MessageCircle, tone: 'cyan' },
+  { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
+  { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'violet' },
 ];
 
 export const adminTabs: TabConfig<AdminShellTabId>[] = [
-  { id: 'manage_bets', label: 'Панель', Icon: Settings2 },
-  { id: 'stats', label: 'Статистика', Icon: TrendingUp },
-  { id: 'clients', label: 'Клиенты', Icon: Users },
-  { id: 'settings', label: 'Настройки', Icon: SlidersHorizontal },
-  { id: 'profile', label: 'Профиль', Icon: UserIcon },
+  { id: 'manage_bets', label: 'Панель', Icon: Settings2, tone: 'emerald' },
+  { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
+  { id: 'clients', label: 'Клиенты', Icon: Users, tone: 'cyan' },
+  { id: 'settings', label: 'Настройки', Icon: SlidersHorizontal, tone: 'violet' },
+  { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'rose' },
 ];
 
 export default function BottomNavigation({ role, activeTab, onChangeTab, showWebChat = false }: BottomNavigationProps) {
@@ -52,37 +51,42 @@ export default function BottomNavigation({ role, activeTab, onChangeTab, showWeb
   const getTabStyles = (isActive: boolean) => {
     if (isActive) {
       return {
-        color: 'var(--tg-theme-button-color, #10B981)',
-        textShadow: '0 0 10px rgba(16, 185, 129, 0.26)',
+        color: '#F8FBFF',
+        textShadow: '0 1px 8px rgba(0, 0, 0, 0.72), 0 0 12px rgba(0, 210, 255, 0.22)',
       };
     }
 
     return {
-      color: 'var(--tg-theme-hint-color, rgba(255, 255, 255, 0.3))',
+      color: 'rgba(226, 238, 250, 0.72)',
     };
   };
 
   return (
-    <nav className="bottom-nav-aurora shimmer-border fixed bottom-4 left-4 right-4 isolate mx-auto flex max-w-md items-center justify-around gap-1 rounded-3xl border border-white/10 px-2.5 py-2.5 shadow-glass backdrop-blur-xl transition-all duration-300 z-45">
-      {tabs.map(({ id, label, Icon }) => {
+    <nav
+      className={`bottom-nav-aurora bottom-nav-aurora--${role} shimmer-border isolate flex min-w-0 items-center justify-around gap-1 rounded-2xl border border-white/10 px-2 py-2 shadow-glass backdrop-blur-xl transition-all duration-300`}
+      aria-label={role === 'admin' ? 'Навигация администратора' : 'Навигация приложения'}
+    >
+      {tabs.map(({ id, label, Icon, tone = 'cyan' }) => {
         const isActive = activeTab === id;
 
         return (
           <button
             key={id}
+            type="button"
             onClick={() => onChangeTab(id)}
-            className={`bottom-nav-aurora__item group relative flex min-w-0 flex-1 flex-col items-center overflow-hidden rounded-2xl py-1.5 transition-all duration-300 hover:scale-105 active:scale-95 ${
+            aria-current={isActive ? 'page' : undefined}
+            className={`bottom-nav-aurora__item bottom-nav-aurora__item--${tone} group smooth-pressable relative flex min-w-0 flex-1 flex-col items-center overflow-hidden rounded-xl px-1.5 py-1.5 transition-all duration-200 ${
               isActive ? 'bottom-nav-aurora__item--active' : ''
             }`}
             style={getTabStyles(isActive)}
           >
             {isActive && <span className="nav-glow-dot" aria-hidden="true" />}
             <Icon
-              className={`h-5 w-5 transition-all duration-300 ${
+              className={`h-[18px] w-[18px] transition-all duration-300 ${
                 isActive ? 'iridescent-icon scale-110' : 'opacity-[0.55] group-hover:opacity-75'
               }`}
             />
-            <span className="mt-1 max-w-full truncate text-[8.5px] font-extrabold tracking-wide opacity-80">
+            <span className="bottom-nav-aurora__label mt-1 text-xs font-extrabold tracking-normal opacity-100">
               {label}
             </span>
           </button>

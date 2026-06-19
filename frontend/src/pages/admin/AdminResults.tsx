@@ -641,7 +641,6 @@ export default function AdminResults() {
                       <div className="rounded-xl border border-white/10 bg-black/[0.16] p-2.5">
                         <BookmakerMultiSelect
                           label="Букмекеры"
-                          hint="Кнопки контор под прогнозом"
                           bookmakers={bookmakers}
                           selectedIds={editDraft.selectedBookmakerIds}
                           onChange={(ids) => handleEditBookmakers(bet.id, ids)}

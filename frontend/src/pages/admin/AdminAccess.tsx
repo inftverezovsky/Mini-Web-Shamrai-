@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import {
   AlertTriangle,
+  ChevronDown,
   Check,
   Clock3,
   Crown,
@@ -22,6 +23,7 @@ import {
   roleLabel,
 } from '../../utils/roles';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
+import SmoothCollapse from '../../components/SmoothCollapse';
 
 interface StaffUser {
   telegram_id: number;
@@ -58,6 +60,7 @@ const actionLabels: Record<string, string> = {
 };
 
 const roleOptions: StaffRole[] = ['owner', 'admin', 'moderator'];
+const ALL_AUDIT_ACTIONS = 'all';
 
 function getDisplayName(user: Pick<StaffUser, 'telegram_id' | 'username' | 'first_name' | 'last_name'>) {
   const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim();
@@ -90,6 +93,9 @@ export default function AdminAccess() {
   const [saving, setSaving] = useState(false);
   const [telegramId, setTelegramId] = useState('');
   const [grantRole, setGrantRole] = useState<StaffRole>('admin');
+  const [staffListOpen, setStaffListOpen] = useState(false);
+  const [auditLogOpen, setAuditLogOpen] = useState(false);
+  const [auditActionFilter, setAuditActionFilter] = useState<string>(ALL_AUDIT_ACTIONS);
   const [pendingRoleChange, setPendingRoleChange] = useState<PendingRoleChange | null>(null);
 
   const canManageAccess = isPrivilegedRole(currentAdmin?.role);
@@ -99,6 +105,20 @@ export default function AdminAccess() {
     if (currentAdmin?.role === 'owner' || !ownerExists) return roleOptions;
     return roleOptions.filter(role => role !== 'owner');
   }, [currentAdmin?.role, ownerExists]);
+
+  const auditActionOptions = useMemo(
+    () => Array.from(new Set(auditLog.map(log => log.action))),
+    [auditLog],
+  );
+
+  const filteredAuditLog = useMemo(
+    () => (
+      auditActionFilter === ALL_AUDIT_ACTIONS
+        ? auditLog
+        : auditLog.filter(log => log.action === auditActionFilter)
+    ),
+    [auditActionFilter, auditLog],
+  );
 
   const loadAccessData = async () => {
     try {
@@ -252,98 +272,178 @@ export default function AdminAccess() {
       </div>
 
       <div className="space-y-3">
-        {admins.map(admin => (
-          <div
-            key={admin.telegram_id}
-            className="bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg space-y-3"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h4 className="font-extrabold text-white text-xs leading-snug truncate">
-                  {getDisplayName(admin)}
-                </h4>
-                <p className="text-[10px] text-slate-400 font-bold truncate mt-0.5">
-                  {admin.username ? `@${admin.username}` : 'без юзернейма'} • ID: {admin.telegram_id}
-                </p>
+        <button
+          type="button"
+          onClick={() => setStaffListOpen(open => !open)}
+          aria-expanded={staffListOpen}
+          aria-controls="admin-staff-list"
+          className="smooth-pressable w-full bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg flex items-center justify-between gap-3 text-left transition-all hover:border-white/20"
+        >
+          <div className="min-w-0">
+            <h3 className="text-xs font-black text-white uppercase tracking-wider flex items-center">
+              <ShieldCheck className="w-4 h-4 text-emerald-300 mr-1.5 shrink-0" />
+              Команда доступа
+            </h3>
+            <p className="text-[10px] text-slate-500 mt-1 leading-normal">
+              Владелец, администраторы и модераторы • {admins.length}
+            </p>
+          </div>
+          <ChevronDown className={`w-5 h-5 text-slate-400 shrink-0 transition-transform ${staffListOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        <SmoothCollapse open={staffListOpen}>
+          <div id="admin-staff-list" className="space-y-3">
+            {admins.length === 0 ? (
+              <div className="bg-slate-900/50 border border-slate-800 text-slate-500 rounded-xl p-4 text-center text-xs">
+                Список команды пуст.
               </div>
-              <span className={`border text-[8px] font-black uppercase tracking-wider rounded-lg px-2 py-1 shrink-0 flex items-center gap-1 ${roleBadgeClass(admin.role)}`}>
-                {admin.role === 'owner' ? <Crown className="w-3 h-3" /> : <ShieldCheck className="w-3 h-3" />}
-                {roleLabel(admin.role)}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-1.5">
-              {roleOptions.map(role => {
-                const disabled =
-                  saving ||
-                  !canManageAccess ||
-                  admin.role === role ||
-                  (role === 'owner' && currentAdmin?.role !== 'owner' && ownerExists);
-                return (
-                  <button
-                    key={role}
-                    onClick={() => requestRoleChange(admin, role)}
-                    disabled={disabled}
-                    className={`min-h-[34px] border rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all disabled:opacity-35 ${
-                      admin.role === role
-                        ? roleBadgeClass(role)
-                        : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <Shield className="w-3.5 h-3.5" />
-                    {roleLabel(role)}
-                  </button>
-                );
-              })}
-              <button
-                onClick={() => requestRoleChange(admin, 'user')}
-                disabled={saving || !canManageAccess || admin.telegram_id === currentAdmin?.telegram_id}
-                className="min-h-[34px] border border-rose-500/25 bg-rose-500/10 text-rose-400 rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all hover:bg-rose-500 hover:text-white disabled:opacity-35"
+            ) : admins.map(admin => (
+              <div
+                key={admin.telegram_id}
+                className="bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg space-y-3"
               >
-                <ShieldOff className="w-3.5 h-3.5" />
-                Снять
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg space-y-3">
-        <h3 className="text-xs font-black text-white uppercase tracking-wider flex items-center">
-          <History className="w-4 h-4 text-sky-300 mr-1.5 shrink-0" />
-          Журнал действий
-        </h3>
-        {auditLog.length === 0 ? (
-          <div className="bg-slate-900/50 border border-slate-800 text-slate-500 rounded-xl p-4 text-center text-xs">
-            Записей пока нет.
-          </div>
-        ) : (
-          <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-            {auditLog.map(log => (
-              <div key={log.id} className="bg-slate-900/50 border border-slate-800 rounded-xl p-3 text-xs space-y-1.5">
-                <div className="flex items-start justify-between gap-2">
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-white font-black truncate">
-                      {actionLabels[log.action] || log.action}
-                    </div>
-                    <div className="text-[10px] text-slate-500 font-bold truncate">
-                      {log.actor_username ? `@${log.actor_username}` : log.actor_first_name || `ID ${log.actor_id || '-'}`}
-                      {' -> '}
-                      {log.target_username ? `@${log.target_username}` : log.target_first_name || `ID ${log.target_user_id || '-'}`}
-                    </div>
+                    <h4 className="font-extrabold text-white text-xs leading-snug truncate">
+                      {getDisplayName(admin)}
+                    </h4>
+                    <p className="text-[10px] text-slate-400 font-bold truncate mt-0.5">
+                      {admin.username ? `@${admin.username}` : 'без юзернейма'} • ID: {admin.telegram_id}
+                    </p>
                   </div>
-                  <span className="text-[9px] text-slate-500 font-bold shrink-0 flex items-center gap-1">
-                    <Clock3 className="w-3 h-3" />
-                    {new Date(log.created_at).toLocaleDateString('ru-RU')}
+                  <span className={`border text-[8px] font-black uppercase tracking-wider rounded-lg px-2 py-1 shrink-0 flex items-center gap-1 ${roleBadgeClass(admin.role)}`}>
+                    {admin.role === 'owner' ? <Crown className="w-3 h-3" /> : <ShieldCheck className="w-3 h-3" />}
+                    {roleLabel(admin.role)}
                   </span>
                 </div>
-                <div className="text-[10px] text-slate-400 font-semibold">
-                  {formatAuditDetails(log)}
+
+                <div className="grid grid-cols-2 gap-1.5">
+                  {roleOptions.map(role => {
+                    const disabled =
+                      saving ||
+                      !canManageAccess ||
+                      admin.role === role ||
+                      (role === 'owner' && currentAdmin?.role !== 'owner' && ownerExists);
+                    return (
+                      <button
+                        key={role}
+                        onClick={() => requestRoleChange(admin, role)}
+                        disabled={disabled}
+                        className={`min-h-[34px] border rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all disabled:opacity-35 ${
+                          admin.role === role
+                            ? roleBadgeClass(role)
+                            : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <Shield className="w-3.5 h-3.5" />
+                        {roleLabel(role)}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => requestRoleChange(admin, 'user')}
+                    disabled={saving || !canManageAccess || admin.telegram_id === currentAdmin?.telegram_id}
+                    className="min-h-[34px] border border-rose-500/25 bg-rose-500/10 text-rose-400 rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all hover:bg-rose-500 hover:text-white disabled:opacity-35"
+                  >
+                    <ShieldOff className="w-3.5 h-3.5" />
+                    Снять
+                  </button>
                 </div>
               </div>
             ))}
           </div>
-        )}
+        </SmoothCollapse>
+      </div>
+
+      <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg space-y-3">
+        <button
+          type="button"
+          onClick={() => setAuditLogOpen(open => !open)}
+          aria-expanded={auditLogOpen}
+          aria-controls="admin-audit-log"
+          className="smooth-pressable w-full flex items-center justify-between gap-3 text-left"
+        >
+          <div className="min-w-0">
+            <h3 className="text-xs font-black text-white uppercase tracking-wider flex items-center">
+              <History className="w-4 h-4 text-sky-300 mr-1.5 shrink-0" />
+              Журнал действий
+            </h3>
+            <p className="text-[10px] text-slate-500 mt-1 leading-normal">
+              {filteredAuditLog.length} из {auditLog.length} записей
+            </p>
+          </div>
+          <ChevronDown className={`w-5 h-5 text-slate-400 shrink-0 transition-transform ${auditLogOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        <SmoothCollapse open={auditLogOpen}>
+          <div id="admin-audit-log" className="space-y-3">
+            {auditLog.length > 0 && (
+              <div className="flex gap-1.5 overflow-x-auto pb-1" aria-label="Фильтр действий">
+                <button
+                  type="button"
+                  onClick={() => setAuditActionFilter(ALL_AUDIT_ACTIONS)}
+                  className={`shrink-0 border px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all ${
+                    auditActionFilter === ALL_AUDIT_ACTIONS
+                      ? 'bg-sky-500/15 border-sky-400/40 text-sky-200'
+                      : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Все
+                </button>
+                {auditActionOptions.map(action => (
+                  <button
+                    type="button"
+                    key={action}
+                    onClick={() => setAuditActionFilter(action)}
+                    className={`shrink-0 border px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all ${
+                      auditActionFilter === action
+                        ? 'bg-sky-500/15 border-sky-400/40 text-sky-200'
+                        : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {actionLabels[action] || action}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {auditLog.length === 0 ? (
+              <div className="bg-slate-900/50 border border-slate-800 text-slate-500 rounded-xl p-4 text-center text-xs">
+                Записей пока нет.
+              </div>
+            ) : filteredAuditLog.length === 0 ? (
+              <div className="bg-slate-900/50 border border-slate-800 text-slate-500 rounded-xl p-4 text-center text-xs">
+                Нет записей по выбранному действию.
+              </div>
+            ) : (
+              <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
+                {filteredAuditLog.map(log => (
+                  <div key={log.id} className="bg-slate-900/50 border border-slate-800 rounded-xl p-3 text-xs space-y-1.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-white font-black truncate">
+                          {actionLabels[log.action] || log.action}
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-bold truncate">
+                          {log.actor_username ? `@${log.actor_username}` : log.actor_first_name || `ID ${log.actor_id || '-'}`}
+                          {' -> '}
+                          {log.target_username ? `@${log.target_username}` : log.target_first_name || `ID ${log.target_user_id || '-'}`}
+                        </div>
+                      </div>
+                      <span className="text-[9px] text-slate-500 font-bold shrink-0 flex items-center gap-1">
+                        <Clock3 className="w-3 h-3" />
+                        {new Date(log.created_at).toLocaleDateString('ru-RU')}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-semibold">
+                      {formatAuditDetails(log)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </SmoothCollapse>
       </div>
 
       {pendingRoleChange && (

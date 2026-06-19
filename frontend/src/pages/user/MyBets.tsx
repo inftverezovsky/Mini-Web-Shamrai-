@@ -1,102 +1,101 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertCircle,
   BarChart3,
-  CalendarDays,
-  ChevronDown,
-  ChevronRight,
-  CircleDollarSign,
-  Download,
-  FileSpreadsheet,
-  Loader2,
-  Target,
-  TrendingDown,
-  TrendingUp,
+  RefreshCw,
   Trophy,
 } from 'lucide-react';
 
-import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
-import { EMPTY_SUMMARY, MiniSummary, PeriodSelector, StatTile, pct, signed, summaryTone } from '../../features/performance/performanceUi';
-import { PerformanceBetItem, PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
+import {
+  EMPTY_SUMMARY,
+  ExpandedMap,
+  ExportActions,
+  PeriodSelector,
+  ProfitCurve,
+  BreakdownBars,
+  MomentumStrip,
+  StatsHero,
+  StatsKpiGrid,
+  StatsSkeleton,
+  StatTile,
+  TimelineSectionBlock,
+  recentResultCodes,
+} from '../../features/performance/performanceUi';
+import { PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
 import { apiFetch, downloadApiFile } from '../../utils/api';
 
-type ExpandedMap = Record<string, boolean>;
+type ClientStatsView = 'shamrai' | 'mine';
 
-function resultLabel(status: PerformanceBetItem['status']) {
-  return status === 'win' ? 'Выигрыш' : 'Проигрыш';
+interface GlobalStatsData {
+  winrate: number;
+  roi: number;
+  net_profit: number;
+  total_bets: number;
+  won_bets: number;
+  lost_bets: number;
+  refund_bets: number;
+  average_coefficient?: number;
+  chart_points: Array<{ month: string; profit: number }>;
 }
 
-function resultClass(status: PerformanceBetItem['status']) {
-  return status === 'win'
-    ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100'
-    : 'border-rose-300/25 bg-rose-400/10 text-rose-100';
-}
+function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimelineResponse | null {
+  if (!stats) return null;
 
-function formatDateTime(value: string | null) {
-  if (!value) return '—';
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
-}
+  const summary: PerformanceSummary = {
+    bets: Number(stats.total_bets || 0),
+    wins: Number(stats.won_bets || 0),
+    losses: Number(stats.lost_bets || 0),
+    winrate: Number(stats.winrate || 0),
+    roi: Number(stats.roi || 0),
+    profit_units: Number(stats.net_profit || 0),
+    average_coefficient: Number(stats.average_coefficient || 0),
+    max_win_streak: 0,
+    max_loss_streak: 0,
+    current_streak: 0,
+    current_streak_type: null,
+  };
+  let previousProfit = 0;
+  const days = (stats.chart_points || []).map((point, index) => {
+    const profit = Number(point.profit || 0);
+    const delta = Number((profit - previousProfit).toFixed(2));
+    previousProfit = profit;
+    return {
+      key: `global-${String(index).padStart(3, '0')}`,
+      label: point.month,
+      summary: {
+        ...EMPTY_SUMMARY,
+        profit_units: delta,
+      },
+      bets: [],
+    };
+  });
 
-function SummaryStrip({ summary }: { summary: PerformanceSummary }) {
-  return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      <StatTile label="Ставок" value={summary.bets} hint={`${summary.wins}W / ${summary.losses}L`} />
-      <StatTile label="Прибыль" value={`${signed(summary.profit_units)}u`} tone={summaryTone(summary)} />
-      <StatTile label="ROI" value={pct(summary.roi)} tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-rose-300'} />
-      <StatTile label="Winrate" value={pct(summary.winrate)} tone="text-cyan-200" />
-    </div>
-  );
-}
-
-function BetRow({ bet }: { bet: PerformanceBetItem }) {
-  const profitTone = bet.profit_units >= 0 ? 'text-emerald-300' : 'text-rose-300';
-  return (
-    <div className="rounded-2xl border border-white/10 bg-slate-950/35 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h4 className="break-words text-sm font-black leading-snug text-white">{bet.event_name}</h4>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {bet.bookmakers.map((bookmaker) => (
-              <span
-                key={bookmaker.id}
-                className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/70 py-0.5 pl-1 pr-2 text-[9px] font-bold text-slate-200"
-              >
-                <BookmakerLogoFrame bookmaker={bookmaker as any} size="badge" className="rounded-full" />
-                {bookmaker.name}
-              </span>
-            ))}
-            {bet.sport_type && (
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/70 py-0.5 pl-1 pr-2 text-[9px] font-bold text-slate-200">
-                <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full" />
-                {bet.sport_type}
-              </span>
-            )}
-            <span className={`rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-[0.1em] ${resultClass(bet.status)}`}>
-              {resultLabel(bet.status)}
-            </span>
-          </div>
-        </div>
-        <div className="shrink-0 text-right">
-          <div className={`text-base font-black ${profitTone}`}>{signed(bet.profit_units)}u</div>
-          <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-500">КФ {bet.coefficient.toFixed(2)}</div>
-        </div>
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-bold text-slate-500">
-        <span>Расчет: {formatDateTime(bet.resolved_at)}</span>
-        {bet.outcome && <span className="text-slate-400">Исход: {bet.outcome}</span>}
-        <span>{bet.source_type === 'private' ? 'Закрытая выдача' : 'Лента'}</span>
-      </div>
-    </div>
-  );
+  return {
+    period: 'all',
+    period_label: 'Все время',
+    summary,
+    source_split: {
+      all: summary,
+      feed: summary,
+      private: EMPTY_SUMMARY,
+    },
+    timeline: days.length ? [{
+      key: 'global',
+      label: 'Динамика',
+      summary,
+      days,
+    }] : [],
+    bookmaker_breakdown: [],
+    sport_breakdown: [],
+    default_expanded_month_key: '',
+    default_expanded_day_key: '',
+  };
 }
 
 export default function MyBets() {
   const [data, setData] = useState<PerformanceTimelineResponse | null>(null);
+  const [shamraiStats, setShamraiStats] = useState<GlobalStatsData | null>(null);
+  const [view, setView] = useState<ClientStatsView>('shamrai');
   const [period, setPeriod] = useState<PeriodFilter>('all');
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
@@ -110,12 +109,11 @@ export default function MyBets() {
       setError(null);
       const timeline = await apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`);
       setData(timeline);
-      setExpandedMonths({
-        [timeline.default_expanded_month_key]: true,
-      });
-      setExpandedDays({
-        [timeline.default_expanded_day_key]: true,
-      });
+      apiFetch<GlobalStatsData>('/stats/global')
+        .then(setShamraiStats)
+        .catch(() => setShamraiStats(null));
+      setExpandedMonths({});
+      setExpandedDays({});
     } catch (err: any) {
       setError(err.message || 'Ошибка загрузки ставок');
     } finally {
@@ -128,11 +126,9 @@ export default function MyBets() {
   }, [loadMyBets]);
 
   const summary = data?.summary ?? EMPTY_SUMMARY;
-  const bestBookmaker = useMemo(() => {
-    return data?.bookmaker_breakdown
-      ?.filter((item) => item.summary.bets > 0)
-      .sort((a, b) => b.summary.roi - a.summary.roi)[0];
-  }, [data]);
+  const momentumResults = recentResultCodes(data, 14);
+  const shamraiTimeline = globalStatsToTimeline(shamraiStats);
+  const shamraiSummary = shamraiTimeline?.summary ?? EMPTY_SUMMARY;
 
   const exportMyBets = async (format: 'csv' | 'xlsx') => {
     try {
@@ -148,201 +144,118 @@ export default function MyBets() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[40vh] flex-col items-center justify-center space-y-3">
-        <Loader2 className="h-7 w-7 animate-spin text-emerald-500" />
-        <span className="text-xs text-slate-400">Собираем вашу статистику...</span>
-      </div>
-    );
+    return <StatsSkeleton />;
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center space-y-2 p-6 text-center text-xs text-rose-400">
-        <AlertCircle className="h-8 w-8" />
-        <span>Ошибка: {error}</span>
-        <button type="button" onClick={loadMyBets} className="text-indigo-300 underline">Повторить</button>
+      <div className="mx-auto max-w-md rounded-[26px] border border-rose-500/25 bg-rose-500/10 p-8 text-center">
+        <AlertCircle className="mx-auto h-8 w-8 text-rose-400" />
+        <h4 className="mt-3 text-sm font-bold text-white">Ошибка загрузки</h4>
+        <p className="mt-2 text-xs text-slate-400">{error}</p>
+        <button
+          type="button"
+          onClick={loadMyBets}
+          className="mx-auto mt-4 inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-white/15 active:scale-[0.98]"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Повторить
+        </button>
       </div>
     );
   }
 
   return (
     <div className="space-y-5 pb-10">
-      <section className="rounded-3xl border border-white/10 bg-white/[0.045] p-4 shadow-glass backdrop-blur-xl">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200">
-              <CircleDollarSign className="h-4 w-4" />
-              Моя эффективность
-            </div>
-            <h2 className="mt-1 text-xl font-black text-white">Купленные прогнозы</h2>
-          </div>
-          <div className="flex w-full flex-col gap-2 sm:w-[380px]">
-            <PeriodSelector value={period} onChange={setPeriod} />
-            <div className="grid grid-cols-[1fr_auto_auto] gap-2">
-              <div className={`rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-right ${summaryTone(summary)}`}>
-                <div className="text-lg font-black">{signed(summary.profit_units)}u</div>
-                <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-500">{data?.period_label || 'profit'}</div>
+      <div className="grid grid-cols-2 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-1">
+        {([
+          ['shamrai', 'Статистика Shamrai'],
+          ['mine', 'Моя статистика'],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setView(value)}
+            className={`min-h-[38px] rounded-xl px-2 text-[10px] font-black uppercase tracking-[0.08em] transition-all active:scale-[0.98] ${
+              view === value
+                ? 'bg-cyan-200/15 text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'shamrai' ? (
+        <>
+          <StatsHero
+            title="Статистика Shamrai"
+            eyebrow="Общая платформа"
+            periodLabel={shamraiTimeline?.period_label || 'Все время'}
+            summary={shamraiSummary}
+            valueMode="rub"
+            controls={(
+              <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-3">
+                <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.13em] text-slate-500">
+                  <BarChart3 className="h-4 w-4 text-cyan-300" />
+                  Верифицированные расчеты
+                </div>
+                <div className="mt-1 text-sm font-black text-white">{shamraiSummary.bets} ставок</div>
               </div>
-              <button
-                type="button"
-                onClick={() => void exportMyBets('csv')}
-                disabled={exporting !== null}
-                title="Скачать CSV"
-                className="inline-flex min-h-[48px] min-w-[54px] items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-slate-200 transition-all hover:bg-white/[0.09] disabled:opacity-50"
-              >
-                <Download className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void exportMyBets('xlsx')}
-                disabled={exporting !== null}
-                title="Скачать XLSX"
-                className="inline-flex min-h-[48px] min-w-[54px] items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-100 transition-all hover:bg-emerald-300/15 disabled:opacity-50"
-              >
-                <FileSpreadsheet className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4">
-          <SummaryStrip summary={summary} />
-        </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <StatTile label="Средний КФ" value={summary.average_coefficient.toFixed(2)} tone="text-indigo-200" />
-          <StatTile
-            label="Текущая серия"
-            value={summary.current_streak ? `${summary.current_streak} ${summary.current_streak_type === 'win' ? 'W' : 'L'}` : '—'}
-            tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
+            )}
+            actions={<div className="min-h-[48px]" />}
           />
-        </div>
+          <StatsKpiGrid summary={shamraiSummary} valueMode="rub" />
+          <ProfitCurve data={shamraiTimeline} valueMode="rub" title="Динамика Shamrai" />
+        </>
+      ) : (
+        <>
+          <StatsHero
+            title="Моя статистика"
+            eyebrow="Взятые прогнозы"
+            periodLabel={data?.period_label || 'Выбранный период'}
+            summary={summary}
+            valueMode="flats"
+            controls={<PeriodSelector value={period} onChange={setPeriod} />}
+            actions={<ExportActions exporting={exporting} onCsv={() => void exportMyBets('csv')} onXlsx={() => void exportMyBets('xlsx')} />}
+          />
 
-        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <div className="rounded-2xl border border-white/10 bg-slate-950/30 p-3">
-            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
-              <TrendingUp className="h-3.5 w-3.5 text-emerald-300" />
-              Лента
+          <MomentumStrip results={momentumResults} title="Мой импульс" />
+
+          <StatsKpiGrid summary={summary} valueMode="flats" showProfit={false} />
+
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Макс. серия W" value={summary.max_win_streak} tone="text-emerald-200" />
+            <StatTile
+              label="Текущая серия"
+              value={summary.current_streak ? `${summary.current_streak} ${summary.current_streak_type === 'win' ? 'W' : 'L'}` : '-'}
+              tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <BreakdownBars title="Букмекеры" items={data?.bookmaker_breakdown ?? []} valueMode="flats" icon={<Trophy className="h-4 w-4 text-emerald-300" />} limit={4} />
+            <BreakdownBars title="Виды спорта" items={data?.sport_breakdown ?? []} valueMode="flats" icon={<Trophy className="h-4 w-4 text-cyan-300" />} limit={4} />
+          </div>
+
+          <TimelineSectionBlock
+            data={data}
+            expandedMonths={expandedMonths}
+            expandedDays={expandedDays}
+            onToggleMonth={(key) => setExpandedMonths((current) => ({ ...current, [key]: !(current[key] ?? false) }))}
+            onToggleDay={(key) => setExpandedDays((current) => ({ ...current, [key]: !(current[key] ?? false) }))}
+            valueMode="flats"
+            title="История ставок"
+          />
+
+          {!data?.timeline.length ? (
+            <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-8 text-center">
+              <Trophy className="mx-auto h-10 w-10 text-slate-600" />
+              <p className="mt-2 text-xs font-semibold text-slate-400">Пока нет купленных рассчитанных ставок</p>
             </div>
-            <MiniSummary summary={data?.source_split.feed ?? EMPTY_SUMMARY} />
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-slate-950/30 p-3">
-            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
-              <Target className="h-3.5 w-3.5 text-cyan-300" />
-              Закрытые
-            </div>
-            <MiniSummary summary={data?.source_split.private ?? EMPTY_SUMMARY} />
-          </div>
-        </div>
-      </section>
-
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">
-            <CalendarDays className="h-4 w-4 text-cyan-300" />
-            История по расчету
-          </h3>
-          {bestBookmaker && (
-            <span className="text-[10px] font-bold text-slate-500">Лучший БК: {bestBookmaker.label}</span>
-          )}
-        </div>
-
-        {!data?.timeline.length ? (
-          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-8 text-center">
-            <Trophy className="mx-auto h-10 w-10 text-slate-600" />
-            <p className="mt-2 text-xs font-semibold text-slate-400">Пока нет купленных рассчитанных ставок</p>
-          </div>
-        ) : (
-          data.timeline.map((month) => {
-            const monthOpen = expandedMonths[month.key] ?? false;
-            return (
-              <div key={month.key} className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.04]">
-                <button
-                  type="button"
-                  onClick={() => setExpandedMonths((current) => ({ ...current, [month.key]: !monthOpen }))}
-                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    {monthOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
-                    <div>
-                      <div className="text-sm font-black text-white">{month.label}</div>
-                      <MiniSummary summary={month.summary} />
-                    </div>
-                  </div>
-                  <div className={`shrink-0 text-right text-sm font-black ${summaryTone(month.summary)}`}>
-                    {signed(month.summary.profit_units)}u
-                  </div>
-                </button>
-
-                {monthOpen && (
-                  <div className="space-y-2 border-t border-white/10 p-3">
-                    {month.days.map((day) => {
-                      const dayOpen = expandedDays[day.key] ?? false;
-                      return (
-                        <div key={day.key} className="rounded-2xl border border-white/10 bg-black/15">
-                          <button
-                            type="button"
-                            onClick={() => setExpandedDays((current) => ({ ...current, [day.key]: !dayOpen }))}
-                            className="flex w-full items-center justify-between gap-2 px-3 py-3 text-left"
-                          >
-                            <div className="flex min-w-0 items-center gap-2">
-                              {dayOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
-                              <div>
-                                <div className="text-xs font-black text-white">{day.label}</div>
-                                <MiniSummary summary={day.summary} />
-                              </div>
-                            </div>
-                            {day.summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 shrink-0 text-emerald-300" /> : <TrendingDown className="h-4 w-4 shrink-0 text-rose-300" />}
-                          </button>
-
-                          {dayOpen && (
-                            <div className="space-y-2 border-t border-white/10 p-2">
-                              {day.bets.map((bet) => <BetRow key={bet.id} bet={bet} />)}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-      </section>
-
-      {Boolean(data?.sport_breakdown.length || data?.bookmaker_breakdown.length) && (
-        <section className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
-            <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-slate-400">
-              <BarChart3 className="h-4 w-4 text-cyan-300" />
-              По спорту
-            </h3>
-            <div className="mt-3 space-y-2">
-              {data?.sport_breakdown.slice(0, 5).map((item) => (
-                <div key={item.key} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-950/30 px-3 py-2">
-                  <span className="text-xs font-bold text-white">{item.label}</span>
-                  <span className={`text-xs font-black ${summaryTone(item.summary)}`}>{signed(item.summary.profit_units)}u · ROI {pct(item.summary.roi)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-4">
-            <h3 className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-slate-400">
-              <BarChart3 className="h-4 w-4 text-emerald-300" />
-              По БК
-            </h3>
-            <div className="mt-3 space-y-2">
-              {data?.bookmaker_breakdown.slice(0, 5).map((item) => (
-                <div key={item.key} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-950/30 px-3 py-2">
-                  <span className="text-xs font-bold text-white">{item.label}</span>
-                  <span className={`text-xs font-black ${summaryTone(item.summary)}`}>{signed(item.summary.profit_units)}u · ROI {pct(item.summary.roi)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+          ) : null}
+        </>
       )}
     </div>
   );

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import type { MessageTemplateResponse } from '../../schemas/schemas';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
+import SmoothCollapse from '../../components/SmoothCollapse';
 import {
   AlertTriangle,
   Braces,
@@ -215,7 +216,7 @@ export default function AdminSettings() {
   const [activeKey, setActiveKey] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Record<ChannelGroupId, boolean>>({
-    telegram: true,
+    telegram: false,
     vk: false,
     site: false,
   });
@@ -425,7 +426,7 @@ export default function AdminSettings() {
                     type="button"
                     onClick={() => toggleGroup(group.id)}
                     aria-expanded={open}
-                    className={`flex w-full items-center gap-3 border px-3 py-3 text-left transition-all active:scale-[0.99] ${tone.header}`}
+                    className={`smooth-pressable flex w-full items-center gap-3 border px-3 py-3 text-left transition-all ${tone.header}`}
                   >
                     <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-[10px] font-black ${tone.marker}`}>
                       <GroupIcon className="h-4 w-4" />
@@ -456,7 +457,7 @@ export default function AdminSettings() {
                     </span>
                   </button>
 
-                  {open && (
+                  <SmoothCollapse open={open}>
                     <div className="space-y-2 p-2">
                       {group.templates.length === 0 ? (
                         <div className="rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-3 text-[10px] font-bold text-slate-500">
@@ -497,7 +498,7 @@ export default function AdminSettings() {
                         );
                       })}
                     </div>
-                  )}
+                  </SmoothCollapse>
                 </div>
               );
             })}

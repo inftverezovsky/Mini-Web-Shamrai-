@@ -195,9 +195,6 @@ export default function VkConsentWizard() {
               <h3 className="mt-1 text-base font-black leading-tight text-white">
                 Подключаем {groupName}
               </h3>
-              <p className="mt-1 text-xs font-semibold leading-relaxed text-slate-400">
-                Это можно сделать сейчас или позже в профиле. Кабинет уже работает.
-              </p>
             </div>
           </div>
 
@@ -225,9 +222,6 @@ export default function VkConsentWizard() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-black uppercase tracking-wider text-white">{step.title}</p>
-                    <p className={`mt-0.5 text-[11px] font-semibold ${isFailed ? 'text-rose-100' : 'text-slate-400'}`}>
-                      {step.caption}
-                    </p>
                   </div>
                   {!isDone && vkRuntime && (
                     <button
@@ -255,9 +249,6 @@ export default function VkConsentWizard() {
 
           {showFallback && (
             <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-3">
-              <p className="text-xs font-semibold leading-relaxed text-slate-300">
-                Если системное окно VK не открылось, напишите любое сообщение сообществу и проверьте доступ.
-              </p>
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {messagesUrl && (
                   <a

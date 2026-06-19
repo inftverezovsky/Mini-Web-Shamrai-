@@ -126,19 +126,24 @@ expected = sys.argv[1]
 path = Path(sys.argv[2])
 lines = path.read_text().splitlines() if path.exists() else []
 out = []
-seen = False
-previous = ""
+replaced_count = 0
+previous_lengths = []
 for line in lines:
     if line.startswith("VK_CALLBACK_CONFIRMATION_CODE="):
         previous = line.split("=", 1)[1]
-        out.append(f"VK_CALLBACK_CONFIRMATION_CODE={expected}")
-        seen = True
-    else:
-        out.append(line)
-if not seen:
+        previous_lengths.append(str(len(previous)))
+        replaced_count += 1
+        if replaced_count == 1:
+            out.append(f"VK_CALLBACK_CONFIRMATION_CODE={expected}")
+        continue
+    out.append(line)
+if replaced_count == 0:
     out.append(f"VK_CALLBACK_CONFIRMATION_CODE={expected}")
 path.write_text("\n".join(out).rstrip() + "\n")
-print(f"vk_callback_confirmation_env_updated previous_len={len(previous)} new_len={len(expected)}")
+print(
+    "vk_callback_confirmation_env_updated "
+    f"replaced_count={replaced_count} previous_lens={','.join(previous_lengths) or 'none'} new_len={len(expected)}"
+)
 PY
 
 docker compose -p "`$CANON_PROJECT" up -d --force-recreate backend

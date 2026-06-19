@@ -13,8 +13,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from src.models.database import Base
 from src.models.models import Bet, User, user_bets
 from src.services.stats_export import (
+    CLIENT_EXPORT_STAKE,
+    FLAT_FORMAT,
+    build_client_info_export_workbook,
     build_stats_export_workbook,
     export_item_from_bet,
+    load_client_info_export_rows,
     load_client_export_groups,
     summarize_export_items,
 )
@@ -56,7 +60,7 @@ class StatsExportServiceTests(unittest.TestCase):
         self.assertEqual(summary["winrate"], 0.5)
         self.assertEqual(summary["roi"], Decimal("0.25"))
 
-    def test_workbook_contains_expected_sheets_and_odds_drop_column(self):
+    def test_shamrai_workbook_uses_rub_stake_and_contains_odds_drop_column(self):
         items = [export_item_from_bet(_bet(status="win", coefficient="1.90", odds_dropped_to="1.55"))]
         content = build_stats_export_workbook(
             [item for item in items if item],
@@ -70,8 +74,35 @@ class StatsExportServiceTests(unittest.TestCase):
         detail = wb["Детально"]
         headers = [cell.value for cell in detail[1]]
         self.assertIn("Упал до", headers)
+        self.assertIn("Оборот, ₽", headers)
+        self.assertIn("Прибыль, ₽", headers)
         odds_col = headers.index("Упал до") + 1
+        profit_col = headers.index("Прибыль, ₽") + 1
         self.assertEqual(detail.cell(row=2, column=odds_col).value, 1.55)
+        self.assertEqual(detail.cell(row=2, column=profit_col).value, 9000)
+
+    def test_client_workbook_uses_flat_labels_and_values(self):
+        item = export_item_from_bet(
+            _bet(status="win", coefficient="1.90"),
+            unit_stake=CLIENT_EXPORT_STAKE,
+            client_name="Client",
+        )
+        content = build_stats_export_workbook(
+            [item],
+            title="СТАТИСТИКА КЛИЕНТОВ SHAMRAI",
+            period_label="Весь период",
+            include_client=True,
+            value_format=FLAT_FORMAT,
+            value_label="флеты",
+        )
+
+        wb = load_workbook(BytesIO(content))
+        detail = wb["Детально"]
+        headers = [cell.value for cell in detail[1]]
+        self.assertIn("Оборот, флеты", headers)
+        self.assertIn("Прибыль, флеты", headers)
+        profit_col = headers.index("Прибыль, флеты") + 1
+        self.assertEqual(detail.cell(row=2, column=profit_col).value, 0.9)
 
 
 class StatsExportClientAccessTests(unittest.IsolatedAsyncioTestCase):
@@ -94,12 +125,12 @@ class StatsExportClientAccessTests(unittest.IsolatedAsyncioTestCase):
             role=role,
         )
 
-    def _bet(self, index: int) -> Bet:
+    def _bet(self, index: int, *, status: str = "win", coefficient: str = "1.90") -> Bet:
         return Bet(
             id=uuid.uuid4(),
             event_name=f"Team {index} A - Team {index} B",
-            coefficient=Decimal("1.90"),
-            status="win",
+            coefficient=Decimal(coefficient),
+            status=status,
             created_at=datetime(2026, 6, index, 12, tzinfo=timezone.utc),
             resolved_at=datetime(2026, 6, index, 15, tzinfo=timezone.utc),
             sport_type="Футбол",
@@ -140,6 +171,50 @@ class StatsExportClientAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0].user_id, paid_user.telegram_id)
         self.assertEqual([item.access_type for item in groups[0].items], ["paid_match", "telegram_stars_single_bet"])
+
+    async def test_client_info_export_rows_include_all_non_staff_clients(self):
+        async with self.Session() as session:
+            paid_user = self._user(101)
+            paid_user.matches_remaining = 4
+            paid_user.client_group = "VIP"
+            paid_user.client_tag = "контроль"
+            no_stats_user = self._user(202)
+            no_stats_user.purchased_bets_balance = 2
+            staff_user = self._user(900, role="admin")
+            bets = [
+                self._bet(1, status="win", coefficient="1.90"),
+                self._bet(2, status="loss", coefficient="1.90"),
+            ]
+            session.add_all([paid_user, no_stats_user, staff_user, *bets])
+            await session.flush()
+
+            await self._add_access(session, user=paid_user, bet=bets[0], access_type="paid_match", match_charged=True)
+            await self._add_access(session, user=paid_user, bet=bets[1], access_type="paid_match", match_charged=True)
+            await session.commit()
+
+            rows = await load_client_info_export_rows(session, "all")
+
+        rows_by_id = {row.user_id: row for row in rows}
+        self.assertEqual(set(rows_by_id), {101, 202})
+        self.assertEqual(rows_by_id[101].matches_remaining, 4)
+        self.assertEqual(rows_by_id[101].client_group, "VIP")
+        self.assertEqual(rows_by_id[101].wins, 1)
+        self.assertEqual(rows_by_id[101].losses, 1)
+        self.assertEqual(rows_by_id[101].recent_results, ["loss", "win"])
+        self.assertEqual(rows_by_id[101].situation_label, "Рабочая просадка")
+        self.assertEqual(rows_by_id[202].matches_remaining, 2)
+        self.assertEqual(rows_by_id[202].bets, 0)
+        self.assertEqual(rows_by_id[202].situation_label, "Нет расчетов")
+
+        content = build_client_info_export_workbook(rows, period_label="Весь период")
+        wb = load_workbook(BytesIO(content))
+        ws = wb["Инфа"]
+        headers = [cell.value for cell in ws[1]]
+        self.assertIn("Матчей осталось", headers)
+        self.assertIn("Победы", headers)
+        self.assertIn("Поражения", headers)
+        self.assertIn("Ситуация", headers)
+        self.assertEqual(ws.max_row, 3)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import { SPORT_FILTER_OPTIONS } from '../../constants/sports';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
+import SmoothCollapse from '../../components/SmoothCollapse';
 import {
   AlertTriangle,
   BellRing,
@@ -30,10 +31,15 @@ import {
 } from 'lucide-react';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 
-type BroadcastMode = 'announcement' | 'forecast' | 'requests';
+export type BroadcastMode = 'announcement' | 'forecast' | 'requests';
 type BetCategory = 'prematch' | 'live';
 type FullForecastMode = 'prepare' | 'send' | 'bulkSend';
 type ForecastRequestStatus = ForecastRequestResponse['status'];
+
+interface AdminBroadcastProps {
+  initialMode?: BroadcastMode;
+  showModeTabs?: boolean;
+}
 
 interface DeliveryResult {
   sent: number;
@@ -292,9 +298,6 @@ function UploadDropzone({
             <p className="text-xs font-black text-emerald-300 uppercase tracking-wider">
               Скрин купона уже загружен
             </p>
-            <p className="text-[10px] text-slate-500 mt-0.5">
-              Нажмите, чтобы заменить изображение
-            </p>
           </div>
           <input
             ref={inputRef}
@@ -317,10 +320,6 @@ function UploadDropzone({
           }`}
         >
           <Upload className={`w-7 h-7 mb-2 ${dragging ? 'text-[#ff007f]' : 'text-[#00d2ff]/70'}`} />
-          <p className="text-xs font-bold text-slate-300">
-            {dragging ? 'Отпустите файл сюда' : 'Перетащите изображение или нажмите'}
-          </p>
-          <p className="text-[10px] text-slate-600 mt-1">PNG, JPG, WEBP до 5 МБ</p>
           <input
             ref={inputRef}
             type="file"
@@ -352,8 +351,8 @@ function UploadDropzone({
   );
 }
 
-export default function AdminBroadcast() {
-  const [mode, setMode] = useState<BroadcastMode>('announcement');
+export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs = true }: AdminBroadcastProps) {
+  const [mode, setMode] = useState<BroadcastMode>(initialMode);
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [bookmakersLoading, setBookmakersLoading] = useState(true);
 
@@ -404,6 +403,13 @@ export default function AdminBroadcast() {
   const [deliveryResult, setDeliveryResult] = useState<DeliveryResult | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMode(initialMode);
+    setDeliveryResult(null);
+    setSuccessMessage(null);
+    setSubmitError(null);
+  }, [initialMode]);
 
   useEffect(() => {
     async function loadBookmakers() {
@@ -1148,6 +1154,7 @@ export default function AdminBroadcast() {
     () => new Set(expandedForecastMatchKeys),
     [expandedForecastMatchKeys],
   );
+  const isRequestsPanel = mode === 'requests' && !showModeTabs;
 
   const toggleForecastMatchGroup = (groupKey: string) => {
     setExpandedForecastMatchKeys((current) => (
@@ -1162,62 +1169,53 @@ export default function AdminBroadcast() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-black text-white flex items-center uppercase tracking-wider">
-            <Megaphone className="w-5 h-5 text-[#ff007f] mr-2" />
-            Рассылка
+            {isRequestsPanel ? (
+              <Inbox className="w-5 h-5 text-[#00d2ff] mr-2" />
+            ) : (
+              <Megaphone className="w-5 h-5 text-[#ff007f] mr-2" />
+            )}
+            {isRequestsPanel ? 'Заявки' : 'Рассылка'}
           </h2>
           <p className="text-slate-400 text-[10px] uppercase font-bold tracking-widest mt-0.5">
-            Набор, прогноз и заявки
+            {isRequestsPanel ? 'Наборы и прогнозы клиентов' : 'Прогноз и набор'}
           </p>
         </div>
       </div>
 
-      <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-3 gap-1.5 shadow-inner">
-        <button
-          type="button"
-          onClick={() => {
-            setMode('announcement');
-            resetFeedback();
-          }}
-          className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
-            mode === 'announcement'
-              ? 'bg-[#ff007f] text-white shadow-[0_0_18px_rgba(255,0,127,0.28)]'
-              : 'text-slate-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Radio className="w-3.5 h-3.5" />
-          <span>Набор</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode('forecast');
-            resetFeedback();
-          }}
-          className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
-            mode === 'forecast'
-              ? 'bg-emerald-500 text-slate-950 shadow-neon-green'
-              : 'text-slate-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <ClipboardList className="w-3.5 h-3.5" />
-          <span>Прогноз</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode('requests');
-            resetFeedback();
-          }}
-          className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
-            mode === 'requests'
-              ? 'bg-[#00d2ff] text-slate-950 shadow-[0_0_18px_rgba(0,210,255,0.24)]'
-              : 'text-slate-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Inbox className="w-3.5 h-3.5" />
-          <span>Заявки</span>
-        </button>
-      </div>
+      {showModeTabs && (
+        <div className="bg-white/[0.03] border border-white/10 p-1.5 rounded-2xl grid grid-cols-2 gap-1.5 shadow-inner">
+          <button
+            type="button"
+            onClick={() => {
+              setMode('forecast');
+              resetFeedback();
+            }}
+            className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
+              mode === 'forecast'
+                ? 'bg-emerald-500 text-slate-950 shadow-neon-green'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <ClipboardList className="w-3.5 h-3.5" />
+            <span>Прогноз</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode('announcement');
+              resetFeedback();
+            }}
+            className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
+              mode === 'announcement'
+                ? 'bg-[#ff007f] text-white shadow-[0_0_18px_rgba(255,0,127,0.28)]'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>Набор</span>
+          </button>
+        </div>
+      )}
 
       {mode === 'announcement' && (
         <div className="backdrop-blur-xl bg-slate-950/40 border border-white/10 rounded-2xl p-4 flex items-center justify-between">
@@ -1310,7 +1308,6 @@ export default function AdminBroadcast() {
 
             <BookmakerMultiSelect
               label="Букмекерские конторы"
-              hint="Выберите БК для платного набора."
               bookmakers={bookmakers}
               selectedIds={announcementBkIds}
               onChange={setAnnouncementBkIds}
@@ -1383,7 +1380,6 @@ export default function AdminBroadcast() {
 
             <BookmakerMultiSelect
               label="Букмекеры"
-              hint="Обязательно: анонс уйдет только клиентам, у которых выбрана хотя бы одна из этих БК."
               bookmakers={bookmakers}
               selectedIds={forecastBkIds}
               onChange={setForecastBkIds}
@@ -1549,7 +1545,7 @@ export default function AdminBroadcast() {
                         type="button"
                         onClick={() => toggleForecastMatchGroup(group.key)}
                         aria-expanded={expanded}
-                        className="min-w-0 flex-1 text-left flex items-center gap-3 rounded-lg hover:bg-white/[0.03] transition-all"
+                      className="smooth-pressable min-w-0 flex-1 text-left flex items-center gap-3 rounded-lg hover:bg-white/[0.03] transition-all"
                       >
                         <div className="min-w-0 flex-1">
                           <span className="block text-[10px] text-slate-500 font-black uppercase tracking-wider">
@@ -1599,8 +1595,8 @@ export default function AdminBroadcast() {
                       </button>
                     </div>
 
-                    {expanded && (
-                      <div className="space-y-3 border-t border-white/10 p-3">
+                    <SmoothCollapse open={expanded} className="border-t border-white/10">
+                      <div className="space-y-3 p-3">
                         {group.requests.map((request) => {
                           const processable = canProcessForecastRequest(request);
                           const removable = canRemoveForecastRequest(request);
@@ -1800,7 +1796,7 @@ export default function AdminBroadcast() {
                           );
                         })}
                       </div>
-                    )}
+                    </SmoothCollapse>
                   </div>
                 );
               })}

@@ -6,6 +6,7 @@ param(
   [string]$HostKey = "ssh-ed25519 255 SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
+  [string]$PublicWebRoot = "/var/www/shamrai_web/dist",
   [string]$VkGroupId = "239419819",
   [string]$ExpectedVkCallbackConfirmationCode = $env:SHAMRAI_EXPECTED_VK_CALLBACK_CONFIRMATION_CODE,
   [switch]$RepairShamraiConflicts,
@@ -53,6 +54,29 @@ function Invoke-NativeChecked {
   if ($LASTEXITCODE -ne 0) {
     throw "Command failed with exit code ${LASTEXITCODE}: $FilePath"
   }
+}
+
+function Get-FrontendDistAssets {
+  param([string]$DistPath)
+
+  $indexPath = Join-Path $DistPath "index.html"
+  if (-not (Test-Path -LiteralPath $indexPath)) {
+    throw "Frontend dist index was not found: $indexPath"
+  }
+
+  $html = Get-Content -Raw -LiteralPath $indexPath
+  $matches = [regex]::Matches($html, "/?assets/[^`"'<>\s]+\.(?:css|js)")
+  $assets = @(
+    foreach ($match in $matches) {
+      $match.Value.TrimStart("/")
+    }
+  ) | Sort-Object -Unique
+
+  if ($assets.Count -eq 0) {
+    throw "Frontend dist index has no CSS/JS assets: $indexPath"
+  }
+
+  return $assets
 }
 
 function New-ShamraiServerGuardScript {
@@ -208,7 +232,7 @@ function Invoke-RemoteSh {
   param([string]$Script)
   $normalizedScript = ((($Script -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
   $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedScript))
-  $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | sh"
+  $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | bash"
   & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
   if ($LASTEXITCODE -ne 0) {
     throw "Remote command failed with exit code ${LASTEXITCODE}."
@@ -223,6 +247,10 @@ Invoke-Step "Server port/project guard" {
 $deployDir = Join-Path $Workspace ".deploy"
 New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
 $deployId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
+$frontendDistPath = Join-Path $Workspace "frontend\dist"
+$webArchive = Join-Path $deployDir "shamrai-web-dist-fast.tar.gz"
+$frontendPublicAssets = @()
+$publishPublicFrontend = $Target -eq "frontend" -or $Target -eq "all"
 
 $services = @()
 if ($Target -eq "backend" -or $Target -eq "all") { $services += "backend" }
@@ -276,6 +304,23 @@ curl -fsS http://127.0.0.1:8082/api/health
   Invoke-RemoteSh -Script $remote
 }
 
+function Invoke-PublicFrontendRollback {
+  $remote = @"
+set -e
+backup_root='$RemotePath/.deploy-backups/fast-$deployId'
+if [ ! -d "`$backup_root/public-web-root" ]; then
+  echo "No public web root backup found for fast deploy $deployId; leaving current public files in place." >&2
+  exit 0
+fi
+web_failed='$PublicWebRoot.failed.fast-manual.$deployId'
+[ -e '$PublicWebRoot' ] && mv '$PublicWebRoot' "`$web_failed" || true
+mv "`$backup_root/public-web-root" '$PublicWebRoot'
+nginx -t
+systemctl reload nginx
+"@
+  Invoke-RemoteSh -Script $remote
+}
+
 if (-not $SkipChecks) {
   if ($Target -eq "backend" -or $Target -eq "all") {
     Invoke-Step "Backend compile/import" {
@@ -299,6 +344,22 @@ if (-not $SkipChecks) {
   }
 }
 
+if ($publishPublicFrontend) {
+  Invoke-Step "Pack public frontend dist" {
+    $frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
+    if (Test-Path -LiteralPath $webArchive) {
+      Remove-Item -LiteralPath $webArchive -Force
+    }
+
+    Push-Location $frontendDistPath
+    try {
+      Invoke-NativeChecked "tar" "-czf" $webArchive "."
+    } finally {
+      Pop-Location
+    }
+  }
+}
+
 try {
   Invoke-Step "Create fast redeploy server snapshot" {
     $remote = @"
@@ -312,6 +373,12 @@ if [ -f .env ]; then cp -a .env "`$backup_root/root.env"; else touch "`$backup_r
 if [ -f backend/.env ]; then cp -a backend/.env "`$backup_root/backend.env"; else touch "`$backup_root/backend.env.absent"; fi
 "@
     Invoke-RemoteSh -Script $remote
+  }
+
+  if ($publishPublicFrontend) {
+    Invoke-Step "Upload public frontend dist archive" {
+      Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $webArchive "${Server}:/tmp/shamrai-web-dist-fast.tar.gz"
+    }
   }
 
   foreach ($service in $services) {
@@ -418,8 +485,9 @@ def patch_env(path, values):
         if "=" in line and not line.lstrip().startswith("#"):
             key = line.split("=", 1)[0]
             if key in values:
-                out.append(f"{key}={values[key]}")
-                seen.add(key)
+                if key not in seen:
+                    out.append(f"{key}={values[key]}")
+                    seen.add(key)
                 continue
         out.append(line)
     for key, value in values.items():
@@ -548,13 +616,15 @@ expected_vk_callback_confirmation=$expectedVkCode
 vk_callback_payload=$vkCallbackPayload
 runtime_vk_callback_confirmation="`$(python3 - <<'PY'
 from pathlib import Path
-value = ""
 path = Path("backend/.env")
+values = []
 if path.exists():
     for line in path.read_text().splitlines():
         if line.startswith("VK_CALLBACK_CONFIRMATION_CODE="):
-            value = line.split("=", 1)[1].strip()
-print(value)
+            values.append(line.split("=", 1)[1].strip())
+if len(values) > 1:
+    raise SystemExit("duplicate VK_CALLBACK_CONFIRMATION_CODE entries in backend/.env")
+print(values[-1] if values else "")
 PY
 )"
 if [ -z "`$runtime_vk_callback_confirmation" ]; then
@@ -580,6 +650,83 @@ fi
 curl -fsS -I http://127.0.0.1:8082/ | head -n 8
 "@
     Invoke-RemoteSh -Script $remote
+  }
+
+  if ($publishPublicFrontend) {
+    Invoke-Step "Publish public frontend static root" {
+      $remote = @"
+set -e
+deploy_id='fast-$deployId'
+web_stage='$PublicWebRoot.stage.'`$deploy_id
+web_failed='$PublicWebRoot.failed.'`$deploy_id
+backup_root='$RemotePath/.deploy-backups/fast-$deployId'
+web_backup="`$backup_root/public-web-root"
+rm -rf "`$web_stage"
+mkdir -p "`$(dirname '$PublicWebRoot')" "`$web_stage" "`$backup_root"
+tar -xzf /tmp/shamrai-web-dist-fast.tar.gz -C "`$web_stage"
+test -f "`$web_stage/index.html"
+
+restore_public() {
+  status="`$?"
+  echo "Public frontend publish failed; restoring previous public web root." >&2
+  if [ -e '$PublicWebRoot' ]; then
+    rm -rf "`$web_failed"
+    mv '$PublicWebRoot' "`$web_failed" || true
+  fi
+  if [ -d "`$web_backup" ]; then
+    mv "`$web_backup" '$PublicWebRoot'
+  fi
+  nginx -t && systemctl reload nginx || true
+  exit "`$status"
+}
+
+trap restore_public ERR
+if [ -e '$PublicWebRoot' ]; then
+  rm -rf "`$web_backup"
+  mv '$PublicWebRoot' "`$web_backup"
+fi
+mv "`$web_stage" '$PublicWebRoot'
+nginx -t
+systemctl reload nginx
+trap - ERR
+"@
+      Invoke-RemoteSh -Script $remote
+    }
+
+    Invoke-Step "Public frontend asset verification" {
+      $expectedAssetArgs = ($frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
+      if ([string]::IsNullOrWhiteSpace($expectedAssetArgs)) {
+        throw "No expected public frontend assets were captured from local dist."
+      }
+
+      $remote = @"
+set -e
+html="`$(curl -fsS https://shamra1.pro/)"
+for asset in $expectedAssetArgs; do
+  printf '%s' "`$html" | grep -F "`$asset" >/dev/null
+  curl -fsS -I "https://shamra1.pro/`$asset" >/dev/null
+done
+curl -fsS https://shamra1.pro/api/health >/dev/null
+echo 'public_frontend_assets_match_dist'
+"@
+      try {
+        Invoke-RemoteSh -Script $remote
+      } catch {
+        Write-Warning "Public asset verification failed; rolling back public web root from fast deploy backup $deployId."
+        Invoke-PublicFrontendRollback
+        throw
+      }
+    }
+
+    Invoke-Step "Cleanup fast deploy temporary archives" {
+      $remote = @"
+set -e
+rm -f /tmp/shamrai-web-dist-fast.tar.gz
+rm -f /tmp/shamrai-frontend-fast.tar.gz /tmp/shamrai-backend-fast.tar.gz /tmp/shamrai-docker-compose.yml
+rm -rf '$RemotePath/.deploy-stage/fast-$deployId'
+"@
+      Invoke-RemoteSh -Script $remote
+    }
   }
 } catch {
   if ($rollbackArmed) {

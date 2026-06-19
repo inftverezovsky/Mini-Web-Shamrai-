@@ -104,6 +104,8 @@ Codex/agent preview deploys must use a single canonical server target:
 
 Do not create new compose projects, app directories, or ports to work around conflicts. First inspect Docker/ports and repair stale Shamrai/sports-betting containers, then deploy the canonical project.
 
+Public `https://shamra1.pro/` serves the frontend from host nginx root `/var/www/shamrai_web/dist`; it is not updated just because the Docker preview frontend on `8082` is healthy. Public frontend deploys must publish the freshly built `frontend/dist` there and verify that the public HTML references the new hashed `assets/*.js` and `assets/*.css` files.
+
 ```bash
 cp .env.example .env
 cp backend/.env.example backend/.env
@@ -159,6 +161,12 @@ Webhook Tegro проверяет MD5-подпись уведомления, св
 
 ## Проверки
 
+Полная локальная проверка:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-local.ps1
+```
+
 Frontend:
 
 ```powershell
@@ -174,6 +182,7 @@ cd backend
 .\.venv\Scripts\python.exe -m compileall -q src alembic
 .\.venv\Scripts\alembic.exe heads
 .\.venv\Scripts\python.exe -c "import src.main; print('backend_import_ok')"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Docker smoke:

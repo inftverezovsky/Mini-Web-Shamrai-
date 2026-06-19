@@ -498,7 +498,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
 
   return (
     <section
-      className={`relative min-h-[82vh] w-full overflow-hidden rounded-[1.8rem] ${GLASS_SURFACE} p-3 shadow-glass transition duration-500`}
+      className={`start-screen relative min-h-[82vh] w-full overflow-hidden rounded-[1.8rem] ${GLASS_SURFACE} p-3 shadow-glass transition duration-500`}
       style={{ boxShadow: glow }}
     >
       <div

@@ -17,13 +17,24 @@ from sqlalchemy.orm import selectinload
 from src.core.config import settings
 from src.core.roles import STAFF_ROLES
 from src.models.models import Bet, User, user_bets
-from src.services.statistics import MONTH_LABELS, as_moscow_datetime, is_paid_client_access, period_start
+from src.services.statistics import (
+    MONTH_LABELS,
+    as_moscow_datetime,
+    client_situation,
+    is_paid_client_access,
+    last_result_codes,
+    period_start,
+    stat_item_from_bet,
+    summarize_items,
+)
 
 EXPORT_STATUSES = {"win", "loss", "refund"}
 MONEY_FORMAT = '#,##0" ₽"'
+FLAT_FORMAT = '0.00" флет"'
 PERCENT_FORMAT = "0.0%"
 COEF_FORMAT = "0.00"
 DATE_FORMAT = "dd.mm.yyyy hh:mm"
+CLIENT_EXPORT_STAKE = Decimal("1")
 
 SPORT_ICONS = {
     "Футбол": "⚽",
@@ -94,6 +105,33 @@ class ClientStatsExportGroup:
     items: list[StatsExportItem]
 
 
+@dataclass
+class ClientInfoExportRow:
+    user_id: int
+    client_name: str
+    username: str
+    client_group: str
+    client_tag: str
+    matches_remaining: int
+    guarantee_active: bool
+    bets: int
+    wins: int
+    losses: int
+    winrate: float
+    roi: float
+    profit_units: float
+    average_coefficient: float
+    current_streak: int
+    current_streak_type: Optional[str]
+    max_win_streak: int
+    max_loss_streak: int
+    recent_results: list[str]
+    situation_code: str
+    situation_label: str
+    situation_tone: str
+    situation_description: str
+
+
 def export_unit_stake() -> Decimal:
     return Decimal(str(settings.STATS_EXPORT_UNIT_STAKE_RUB or 10000))
 
@@ -109,6 +147,14 @@ def _display_user(user: User) -> str:
     if user.username:
         return f"@{user.username}"
     return str(user.telegram_id)
+
+
+def _user_match_balance(user: User) -> int:
+    return int(
+        user.purchased_bets_balance
+        if (user.purchased_bets_balance or 0) != 0
+        else (user.matches_remaining or 0)
+    )
 
 
 def _bookmakers_for_bet(bet: Bet) -> list[dict[str, Any]]:
@@ -160,7 +206,7 @@ def export_item_from_bet(
     if not resolved_at:
         return None
     coefficient = Decimal(str(bet.coefficient or "0"))
-    stake = unit_stake or export_unit_stake()
+    stake = unit_stake if unit_stake is not None else export_unit_stake()
     turnover = stake if bet.status in {"win", "loss"} else Decimal("0")
     profit = _profit_for_status(str(bet.status), coefficient, stake)
     bookmakers = _bookmakers_for_bet(bet)
@@ -296,16 +342,25 @@ def _set_border(ws, min_row: int, max_row: int, min_col: int, max_col: int) -> N
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
 
-def _format_summary_value(cell, key: str) -> None:
+def _format_summary_value(cell, key: str, value_format: str = MONEY_FORMAT) -> None:
     if key in {"winrate", "roi"}:
         cell.number_format = PERCENT_FORMAT
     elif key in {"turnover", "profit"}:
-        cell.number_format = MONEY_FORMAT
+        cell.number_format = value_format
     elif key == "average_coefficient":
         cell.number_format = COEF_FORMAT
 
 
-def _write_kpi(ws, start_row: int, start_col: int, label: str, value: Any, key: str) -> None:
+def _write_kpi(
+    ws,
+    start_row: int,
+    start_col: int,
+    label: str,
+    value: Any,
+    key: str,
+    *,
+    value_format: str = MONEY_FORMAT,
+) -> None:
     ws.merge_cells(start_row=start_row, start_column=start_col, end_row=start_row, end_column=start_col + 1)
     ws.merge_cells(start_row=start_row + 1, start_column=start_col, end_row=start_row + 1, end_column=start_col + 1)
     label_cell = ws.cell(row=start_row, column=start_col, value=label)
@@ -316,13 +371,32 @@ def _write_kpi(ws, start_row: int, start_col: int, label: str, value: Any, key: 
     value_cell.font = Font(bold=True, size=14, color="111827")
     value_cell.fill = PatternFill("solid", fgColor="F3F4F6")
     value_cell.alignment = Alignment(horizontal="center")
-    _format_summary_value(value_cell, key)
+    _format_summary_value(value_cell, key, value_format)
 
 
-def _write_monthly_table(ws, start_row: int, items: list[StatsExportItem]) -> int:
+def _write_monthly_table(
+    ws,
+    start_row: int,
+    items: list[StatsExportItem],
+    *,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> int:
     ws.cell(row=start_row, column=1, value="Помесячная сводка").font = Font(bold=True, size=13)
     header_row = start_row + 1
-    headers = ["Месяц", "Ставки", "Побед", "Пораж.", "Возврат", "Выкуп", "Проход", "Ср. коэфф.", "Оборот", "Прибыль", "ROI"]
+    headers = [
+        "Месяц",
+        "Ставки",
+        "Побед",
+        "Пораж.",
+        "Возврат",
+        "Выкуп",
+        "Проход",
+        "Ср. коэфф.",
+        f"Оборот, {value_label}",
+        f"Прибыль, {value_label}",
+        "ROI",
+    ]
     for col, header in enumerate(headers, 1):
         ws.cell(row=header_row, column=col, value=header)
     _style_range_header(ws, header_row, 1, len(headers), "0F766E")
@@ -345,7 +419,7 @@ def _write_monthly_table(ws, start_row: int, items: list[StatsExportItem]) -> in
         for col, value in enumerate(values, 1):
             ws.cell(row=row, column=col, value=value)
         for col, key in [(7, "winrate"), (8, "average_coefficient"), (9, "turnover"), (10, "profit"), (11, "roi")]:
-            _format_summary_value(ws.cell(row=row, column=col), key)
+            _format_summary_value(ws.cell(row=row, column=col), key, value_format)
         if row_data["label"] == "ИТОГО":
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row, column=col).font = Font(bold=True)
@@ -356,14 +430,21 @@ def _write_monthly_table(ws, start_row: int, items: list[StatsExportItem]) -> in
     return end_row + 3
 
 
-def _write_compact_breakdowns(ws, start_row: int, items: list[StatsExportItem]) -> None:
+def _write_compact_breakdowns(
+    ws,
+    start_row: int,
+    items: list[StatsExportItem],
+    *,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> None:
     bookmaker_rows = _breakdown_rows(items, kind="bookmaker")
     sport_rows = _breakdown_rows(items, kind="sport")
 
     ws.cell(row=start_row, column=1, value="БУКМЕКЕРЫ").font = Font(bold=True, size=12)
     ws.cell(row=start_row, column=8, value="ВИДЫ СПОРТА").font = Font(bold=True, size=12)
-    headers = ["Иконка", "БК", "Ставки", "Проход", "Прибыль", "ROI"]
-    sport_headers = ["Иконка", "Вид спорта", "Ставки", "Проход", "Прибыль", "ROI"]
+    headers = ["Иконка", "БК", "Ставки", "Проход", f"Прибыль, {value_label}", "ROI"]
+    sport_headers = ["Иконка", "Вид спорта", "Ставки", "Проход", f"Прибыль, {value_label}", "ROI"]
     for idx, header in enumerate(headers, 1):
         ws.cell(row=start_row + 1, column=idx, value=header)
     for idx, header in enumerate(sport_headers, 8):
@@ -377,7 +458,7 @@ def _write_compact_breakdowns(ws, start_row: int, items: list[StatsExportItem]) 
         for col, value in enumerate(values, 1):
             ws.cell(row=row, column=col, value=value)
         for col, key in [(4, "winrate"), (5, "profit"), (6, "roi")]:
-            _format_summary_value(ws.cell(row=row, column=col), key)
+            _format_summary_value(ws.cell(row=row, column=col), key, value_format)
 
     for offset, row_data in enumerate(sport_rows, 2):
         row = start_row + offset
@@ -385,14 +466,22 @@ def _write_compact_breakdowns(ws, start_row: int, items: list[StatsExportItem]) 
         for col, value in enumerate(values, 8):
             ws.cell(row=row, column=col, value=value)
         for col, key in [(11, "winrate"), (12, "profit"), (13, "roi")]:
-            _format_summary_value(ws.cell(row=row, column=col), key)
+            _format_summary_value(ws.cell(row=row, column=col), key, value_format)
 
     max_rows = max(len(bookmaker_rows), len(sport_rows)) + start_row + 1
     _set_border(ws, start_row + 1, max_rows, 1, 6)
     _set_border(ws, start_row + 1, max_rows, 8, 13)
 
 
-def _setup_statistics_sheet(wb: Workbook, title: str, period_label: str, items: list[StatsExportItem]) -> None:
+def _setup_statistics_sheet(
+    wb: Workbook,
+    title: str,
+    period_label: str,
+    items: list[StatsExportItem],
+    *,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> None:
     ws = wb.active
     ws.title = "Статистика"
     ws.sheet_view.showGridLines = False
@@ -404,22 +493,28 @@ def _setup_statistics_sheet(wb: Workbook, title: str, period_label: str, items: 
     ws["A2"].font = Font(italic=True, color="4B5563")
 
     summary = summarize_export_items(items)
-    _write_kpi(ws, 4, 1, "Всего ставок", summary["bets"], "bets")
-    _write_kpi(ws, 4, 4, "Проходимость", summary["winrate"], "winrate")
-    _write_kpi(ws, 4, 7, "Прибыль", summary["profit"], "profit")
-    _write_kpi(ws, 4, 10, "ROI", summary["roi"], "roi")
-    _write_kpi(ws, 7, 1, "Оборот", summary["turnover"], "turnover")
-    _write_kpi(ws, 7, 4, "Ср. коэфф.", summary["average_coefficient"], "average_coefficient")
-    _write_kpi(ws, 7, 7, "Побед", summary["wins"], "wins")
-    _write_kpi(ws, 7, 10, "Поражений", summary["losses"], "losses")
+    _write_kpi(ws, 4, 1, "Всего ставок", summary["bets"], "bets", value_format=value_format)
+    _write_kpi(ws, 4, 4, "Проходимость", summary["winrate"], "winrate", value_format=value_format)
+    _write_kpi(ws, 4, 7, f"Прибыль, {value_label}", summary["profit"], "profit", value_format=value_format)
+    _write_kpi(ws, 4, 10, "ROI", summary["roi"], "roi", value_format=value_format)
+    _write_kpi(ws, 7, 1, f"Оборот, {value_label}", summary["turnover"], "turnover", value_format=value_format)
+    _write_kpi(ws, 7, 4, "Ср. коэфф.", summary["average_coefficient"], "average_coefficient", value_format=value_format)
+    _write_kpi(ws, 7, 7, "Побед", summary["wins"], "wins", value_format=value_format)
+    _write_kpi(ws, 7, 10, "Поражений", summary["losses"], "losses", value_format=value_format)
 
-    next_row = _write_monthly_table(ws, 11, items)
-    _write_compact_breakdowns(ws, next_row, items)
+    next_row = _write_monthly_table(ws, 11, items, value_format=value_format, value_label=value_label)
+    _write_compact_breakdowns(ws, next_row, items, value_format=value_format, value_label=value_label)
     _autosize(ws)
     ws.freeze_panes = "A12"
 
 
-def _write_breakdown_sheet(wb: Workbook, items: list[StatsExportItem]) -> None:
+def _write_breakdown_sheet(
+    wb: Workbook,
+    items: list[StatsExportItem],
+    *,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> None:
     ws = wb.create_sheet("Свод по БК и спорту")
     ws.sheet_view.showGridLines = False
     ws["A1"] = "СВОД ПО БУКМЕКЕРАМ"
@@ -427,8 +522,8 @@ def _write_breakdown_sheet(wb: Workbook, items: list[StatsExportItem]) -> None:
     for cell in ["A1", "H1"]:
         ws[cell].font = Font(bold=True, size=14, color="111827")
 
-    headers = ["Иконка", "БК", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", "Оборот", "Прибыль", "ROI"]
-    sport_headers = ["Иконка", "Вид спорта", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", "Оборот", "Прибыль", "ROI"]
+    headers = ["Иконка", "БК", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", f"Оборот, {value_label}", f"Прибыль, {value_label}", "ROI"]
+    sport_headers = ["Иконка", "Вид спорта", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", f"Оборот, {value_label}", f"Прибыль, {value_label}", "ROI"]
     for col, header in enumerate(headers, 1):
         ws.cell(row=2, column=col, value=header)
     for col, header in enumerate(sport_headers, 13):
@@ -437,9 +532,9 @@ def _write_breakdown_sheet(wb: Workbook, items: list[StatsExportItem]) -> None:
     _style_range_header(ws, 2, 13, 23, "1D4ED8")
 
     for offset, row_data in enumerate(_breakdown_rows(items, kind="bookmaker"), 3):
-        _write_breakdown_detail_row(ws, offset, 1, row_data)
+        _write_breakdown_detail_row(ws, offset, 1, row_data, value_format=value_format)
     for offset, row_data in enumerate(_breakdown_rows(items, kind="sport"), 3):
-        _write_breakdown_detail_row(ws, offset, 13, row_data)
+        _write_breakdown_detail_row(ws, offset, 13, row_data, value_format=value_format)
 
     max_row = max(len(_breakdown_rows(items, kind="bookmaker")), len(_breakdown_rows(items, kind="sport"))) + 2
     _set_border(ws, 2, max_row, 1, 11)
@@ -448,7 +543,14 @@ def _write_breakdown_sheet(wb: Workbook, items: list[StatsExportItem]) -> None:
     ws.freeze_panes = "A3"
 
 
-def _write_breakdown_detail_row(ws, row: int, start_col: int, row_data: dict[str, Any]) -> None:
+def _write_breakdown_detail_row(
+    ws,
+    row: int,
+    start_col: int,
+    row_data: dict[str, Any],
+    *,
+    value_format: str = MONEY_FORMAT,
+) -> None:
     values = [
         row_data["icon"],
         row_data["label"],
@@ -465,10 +567,17 @@ def _write_breakdown_detail_row(ws, row: int, start_col: int, row_data: dict[str
     for index, value in enumerate(values):
         ws.cell(row=row, column=start_col + index, value=value)
     for offset, key in [(6, "winrate"), (7, "average_coefficient"), (8, "turnover"), (9, "profit"), (10, "roi")]:
-        _format_summary_value(ws.cell(row=row, column=start_col + offset), key)
+        _format_summary_value(ws.cell(row=row, column=start_col + offset), key, value_format)
 
 
-def _write_detail_sheet(wb: Workbook, items: list[StatsExportItem], *, include_client: bool) -> None:
+def _write_detail_sheet(
+    wb: Workbook,
+    items: list[StatsExportItem],
+    *,
+    include_client: bool,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> None:
     ws = wb.create_sheet("Детально")
     ws.sheet_view.showGridLines = False
     headers = [
@@ -483,8 +592,8 @@ def _write_detail_sheet(wb: Workbook, items: list[StatsExportItem], *, include_c
         "Упал до",
         "Ставка",
         "Исход",
-        "Оборот",
-        "Прибыль",
+        f"Оборот, {value_label}",
+        f"Прибыль, {value_label}",
     ]
     if include_client:
         headers.append("Клиент")
@@ -520,8 +629,8 @@ def _write_detail_sheet(wb: Workbook, items: list[StatsExportItem], *, include_c
         ws.cell(row=row_idx, column=8).number_format = COEF_FORMAT
         ws.cell(row=row_idx, column=9).number_format = COEF_FORMAT
         money_start_col = 12
-        ws.cell(row=row_idx, column=money_start_col).number_format = MONEY_FORMAT
-        ws.cell(row=row_idx, column=money_start_col + 1).number_format = MONEY_FORMAT
+        ws.cell(row=row_idx, column=money_start_col).number_format = value_format
+        ws.cell(row=row_idx, column=money_start_col + 1).number_format = value_format
         if item.status == "win":
             fill = PatternFill("solid", fgColor="ECFDF5")
         elif item.status == "loss":
@@ -544,18 +653,124 @@ def _autosize(ws) -> None:
         ws.column_dimensions[letter].width = min(max(max_length + 2, 10), 48)
 
 
+def _result_label_short(result: str) -> str:
+    if result == "win":
+        return "П"
+    if result == "loss":
+        return "Л"
+    return str(result or "")
+
+
+def _streak_label(streak_type: Optional[str], count: int) -> str:
+    if not streak_type or count <= 0:
+        return ""
+    label = "побед" if streak_type == "win" else "пораж."
+    return f"{count} {label}"
+
+
+def build_client_info_export_workbook(
+    rows: Iterable[ClientInfoExportRow],
+    *,
+    period_label: str,
+) -> bytes:
+    row_list = list(rows)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Инфа"
+    ws.sheet_view.showGridLines = False
+    headers = [
+        "Период",
+        "ID",
+        "Клиент",
+        "Username",
+        "Группа",
+        "Тег",
+        "Матчей осталось",
+        "Гарантия",
+        "Ставки",
+        "Победы",
+        "Поражения",
+        "Winrate",
+        "ROI",
+        "Профит, флеты",
+        "Ср. кф",
+        "Текущая серия",
+        "Макс. побед",
+        "Макс. пораж.",
+        "Последние исходы",
+        "Ситуация",
+        "Описание",
+    ]
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_range_header(ws, 1, 1, len(headers), "111827")
+
+    for row_idx, row_data in enumerate(row_list, 2):
+        values = [
+            period_label,
+            row_data.user_id,
+            row_data.client_name,
+            f"@{row_data.username}" if row_data.username else "",
+            row_data.client_group,
+            row_data.client_tag,
+            row_data.matches_remaining,
+            "Да" if row_data.guarantee_active else "Нет",
+            row_data.bets,
+            row_data.wins,
+            row_data.losses,
+            row_data.winrate / 100,
+            row_data.roi / 100,
+            row_data.profit_units,
+            row_data.average_coefficient,
+            _streak_label(row_data.current_streak_type, row_data.current_streak),
+            row_data.max_win_streak,
+            row_data.max_loss_streak,
+            " ".join(_result_label_short(result) for result in row_data.recent_results),
+            row_data.situation_label,
+            row_data.situation_description,
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_idx, column=col, value=value)
+        ws.cell(row=row_idx, column=12).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=13).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=14).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=15).number_format = COEF_FORMAT
+        if row_data.situation_tone == "danger":
+            fill = PatternFill("solid", fgColor="FEF2F2")
+        elif row_data.situation_tone == "warning":
+            fill = PatternFill("solid", fgColor="FFFBEB")
+        elif row_data.situation_tone == "success":
+            fill = PatternFill("solid", fgColor="ECFDF5")
+        else:
+            fill = PatternFill("solid", fgColor="F8FAFC")
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=row_idx, column=col).fill = fill
+
+    if row_list:
+        _set_border(ws, 1, len(row_list) + 1, 1, len(headers))
+    else:
+        _set_border(ws, 1, 1, 1, len(headers))
+    _autosize(ws)
+    ws.freeze_panes = "A2"
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def build_stats_export_workbook(
     items: Iterable[StatsExportItem],
     *,
     title: str,
     period_label: str,
     include_client: bool = False,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
 ) -> bytes:
     item_list = _sorted_items(items)
     wb = Workbook()
-    _setup_statistics_sheet(wb, title, period_label, item_list)
-    _write_breakdown_sheet(wb, item_list)
-    _write_detail_sheet(wb, item_list, include_client=include_client)
+    _setup_statistics_sheet(wb, title, period_label, item_list, value_format=value_format, value_label=value_label)
+    _write_breakdown_sheet(wb, item_list, value_format=value_format, value_label=value_label)
+    _write_detail_sheet(wb, item_list, include_client=include_client, value_format=value_format, value_label=value_label)
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -638,7 +853,12 @@ async def load_client_export_groups(db: AsyncSession, period: str) -> list[Clien
         if not is_paid_client_access(access_type, match_charged):
             continue
         client_name = _display_user(user)
-        item = export_item_from_bet(bet, client_name=client_name, access_type=str(access_type or ""))
+        item = export_item_from_bet(
+            bet,
+            unit_stake=CLIENT_EXPORT_STAKE,
+            client_name=client_name,
+            access_type=str(access_type or ""),
+        )
         if not item:
             continue
         if user.telegram_id not in grouped:
@@ -655,3 +875,79 @@ async def load_client_export_groups(db: AsyncSession, period: str) -> list[Clien
 async def load_clients_export_items(db: AsyncSession, period: str) -> list[StatsExportItem]:
     groups = await load_client_export_groups(db, period)
     return [item for group in groups for item in group.items]
+
+
+async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[ClientInfoExportRow]:
+    users_result = await db.execute(
+        select(User)
+        .filter(User.role.notin_(list(STAFF_ROLES)))
+        .order_by(User.created_at.desc(), User.telegram_id.desc())
+    )
+    users = users_result.scalars().all()
+    grouped_items: dict[int, list[dict[str, Any]]] = {user.telegram_id: [] for user in users}
+
+    query = (
+        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        .join(user_bets, user_bets.c.user_id == User.telegram_id)
+        .join(Bet, Bet.id == user_bets.c.bet_id)
+        .filter(
+            User.role.notin_(list(STAFF_ROLES)),
+            Bet.status.in_(["win", "loss"]),
+            Bet.resolved_at.isnot(None),
+        )
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(User.telegram_id.asc(), Bet.resolved_at.desc())
+    )
+    start = period_start(period)
+    if start:
+        query = query.filter(Bet.resolved_at >= start)
+
+    for user, bet, access_type, match_charged, taken_at in (await db.execute(query)).all():
+        if not is_paid_client_access(access_type, match_charged):
+            continue
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+        )
+        if item:
+            grouped_items.setdefault(user.telegram_id, []).append(item)
+
+    rows: list[ClientInfoExportRow] = []
+    for user in users:
+        items = grouped_items.get(user.telegram_id, [])
+        summary = summarize_items(items)
+        situation = client_situation(summary)
+        rows.append(ClientInfoExportRow(
+            user_id=user.telegram_id,
+            client_name=_display_user(user),
+            username=user.username or "",
+            client_group=user.client_group or "",
+            client_tag=user.client_tag or "",
+            matches_remaining=_user_match_balance(user),
+            guarantee_active=bool(user.guarantee_active),
+            bets=int(summary["bets"]),
+            wins=int(summary["wins"]),
+            losses=int(summary["losses"]),
+            winrate=float(summary["winrate"]),
+            roi=float(summary["roi"]),
+            profit_units=float(summary["profit_units"]),
+            average_coefficient=float(summary["average_coefficient"]),
+            current_streak=int(summary["current_streak"]),
+            current_streak_type=summary["current_streak_type"],
+            max_win_streak=int(summary["max_win_streak"]),
+            max_loss_streak=int(summary["max_loss_streak"]),
+            recent_results=last_result_codes(items),
+            situation_code=situation["code"],
+            situation_label=situation["label"],
+            situation_tone=situation["tone"],
+            situation_description=situation["description"],
+        ))
+
+    return sorted(rows, key=lambda row: (
+        row.situation_tone != "danger",
+        -row.matches_remaining,
+        -row.profit_units,
+        row.client_name.lower(),
+    ))

@@ -178,15 +178,15 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       
-      <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-5 rounded-2xl shadow-xl space-y-4 relative overflow-hidden">
-        <h3 className="text-sm font-black text-white flex items-center uppercase tracking-wider">
-          <Send className="w-4.5 h-4.5 text-indigo-400 mr-2 shrink-0" />
+      <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-3.5 rounded-2xl shadow-xl space-y-3 relative overflow-hidden">
+        <h3 className="text-xs font-black text-white flex items-center uppercase tracking-wider">
+          <Send className="w-4 h-4 text-indigo-400 mr-2 shrink-0" />
           Новая публикация
         </h3>
 
-        <form onSubmit={handlePublish} className="space-y-3.5 text-xs text-slate-300">
+        <form onSubmit={handlePublish} className="space-y-2.5 text-[11px] text-slate-300">
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Событие</label>
             <EmojiTextField
@@ -194,7 +194,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               value={eventName}
               onValueChange={setEventName}
               placeholder="Реал Мадрид - Барселона"
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
             />
           </div>
 
@@ -205,7 +205,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               value={outcome}
               onValueChange={setOutcome}
               placeholder="П1 / победа Реала / тотал больше 2.5"
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
             />
           </div>
 
@@ -217,7 +217,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               value={coefficient}
               onChange={e => setCoefficient(e.target.value)}
               placeholder="1.95"
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
             />
           </div>
 
@@ -227,14 +227,13 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               type="number"
               value={priceStars}
               onChange={e => setPriceStars(e.target.value)}
-              placeholder="Оставьте пустым для бесплатной публикации"
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
+              placeholder=""
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
             />
           </div>
 
           <BookmakerMultiSelect
             label="Букмекеры (таргет)"
-            hint="Выберите конторы, которые появятся кнопками под купоном в ленте."
             bookmakers={bookmakers}
             selectedIds={selectedBkIds}
             onChange={handleBookmakerSelectionChange}
@@ -269,7 +268,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                         }));
                       }}
                       placeholder="https://..."
-                      className="min-w-0 w-full bg-slate-800/60 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
+              className="min-w-0 w-full bg-slate-800/60 border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
                     />
                   </div>
                 ))}
@@ -308,7 +307,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             <select
               value={sportType}
               onChange={e => setSportType(e.target.value)}
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-semibold"
             >
               <option value="">Без фильтра по спорту</option>
               {SPORT_OPTIONS.map((sport) => (
@@ -327,9 +326,9 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               multiline
               value={description}
               onValueChange={setDescription}
-              placeholder="Введите аналитический разбор матча..."
-              rows={3}
-              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all"
+              placeholder=""
+              rows={2}
+              className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all"
             />
           </div>
 
@@ -338,21 +337,19 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               Скриншот купона <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
             </label>
             {!couponPreview ? (
-              <label className="relative flex flex-col items-center justify-center border border-dashed border-slate-700/80 hover:border-indigo-500/50 bg-slate-900/40 hover:bg-slate-900/60 rounded-xl p-4 cursor-pointer transition-all group">
+              <label className="relative flex flex-col items-center justify-center border border-dashed border-slate-700/80 hover:border-indigo-500/50 bg-slate-900/40 hover:bg-slate-900/60 rounded-xl p-3 cursor-pointer transition-all group">
                 <input
                   type="file"
                   accept="image/*"
                   onChange={handleFileChange}
                   className="hidden"
                 />
-                <Upload className="w-5 h-5 text-slate-500 group-hover:text-indigo-400 mb-1.5 transition-colors" />
-                <span className="text-[10px] text-slate-400 group-hover:text-slate-300 font-semibold">Нажмите для выбора изображения</span>
-                <span className="text-[8px] text-slate-600 mt-0.5">PNG, JPG, JPEG, WEBP, GIF (до 5 МБ)</span>
+                <Upload className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 mb-1 transition-colors" />
               </label>
             ) : (
-              <div className="relative border border-white/10 bg-slate-950/40 rounded-xl p-2.5 flex items-center justify-between">
+              <div className="relative border border-white/10 bg-slate-950/40 rounded-xl p-2 flex items-center justify-between">
                 <div className="flex items-center space-x-2.5 overflow-hidden">
-                  <div className="w-10 h-10 rounded-lg overflow-hidden border border-white/5 bg-slate-950 shrink-0">
+                  <div className="w-8 h-8 rounded-lg overflow-hidden border border-white/5 bg-slate-950 shrink-0">
                     <img
                       src={couponPreview}
                       alt="Купон"
@@ -391,7 +388,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 font-black py-3 rounded-xl flex items-center justify-center space-x-1.5 transition-all shadow-neon-green"
+            className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 font-black py-2.5 rounded-xl flex items-center justify-center space-x-1.5 transition-all shadow-neon-green"
           >
             {submitting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
