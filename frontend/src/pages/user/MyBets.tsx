@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   AlertCircle,
   BarChart3,
@@ -93,51 +94,41 @@ function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimeli
 }
 
 export default function MyBets() {
-  const [data, setData] = useState<PerformanceTimelineResponse | null>(null);
-  const [shamraiStats, setShamraiStats] = useState<GlobalStatsData | null>(null);
-  const [view, setView] = useState<ClientStatsView>('shamrai');
-  const [period, setPeriod] = useState<PeriodFilter>('all');
-  const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [expandedMonths, setExpandedMonths] = useState<ExpandedMap>({});
   const [expandedDays, setExpandedDays] = useState<ExpandedMap>({});
+  const [view, setView] = useState<ClientStatsView>('shamrai');
+  const [period, setPeriod] = useState<PeriodFilter>('all');
+  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
-  const loadMyBets = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const timeline = await apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`);
-      setData(timeline);
-      apiFetch<GlobalStatsData>('/stats/global')
-        .then(setShamraiStats)
-        .catch(() => setShamraiStats(null));
-      setExpandedMonths({});
-      setExpandedDays({});
-    } catch (err: any) {
-      setError(err.message || 'Ошибка загрузки ставок');
-    } finally {
-      setLoading(false);
-    }
-  }, [period]);
+  const timelineQuery = useQuery<PerformanceTimelineResponse>({
+    queryKey: ['my-bets-timeline', period],
+    queryFn: () => apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`),
+    staleTime: 60_000,
+  });
 
-  useEffect(() => {
-    void loadMyBets();
-  }, [loadMyBets]);
+  const shamraiStatsQuery = useQuery<GlobalStatsData>({
+    queryKey: ['global-stats'],
+    queryFn: () => apiFetch<GlobalStatsData>('/stats/global'),
+    staleTime: 60_000,
+  });
 
+  const data = timelineQuery.data ?? null;
+  const loading = timelineQuery.isLoading;
+  const error = timelineQuery.error?.message || exportError;
   const summary = data?.summary ?? EMPTY_SUMMARY;
   const momentumResults = recentResultCodes(data, 14);
-  const shamraiTimeline = globalStatsToTimeline(shamraiStats);
+  const shamraiTimeline = globalStatsToTimeline(shamraiStatsQuery.data ?? null);
   const shamraiSummary = shamraiTimeline?.summary ?? EMPTY_SUMMARY;
 
   const exportMyBets = async (format: 'csv' | 'xlsx') => {
     try {
       setExporting(format);
-      setError(null);
+      setExportError(null);
       const params = new URLSearchParams({ period, format });
       await downloadApiFile(`/users/me/bets/timeline/export?${params.toString()}`, `shamrai_my_bets_${period}.${format}`);
     } catch (err: any) {
-      setError(err.message || 'Не удалось скачать экспорт');
+      setExportError(err.message || 'Не удалось скачать экспорт');
     } finally {
       setExporting(null);
     }
@@ -155,7 +146,7 @@ export default function MyBets() {
         <p className="mt-2 text-xs text-slate-400">{error}</p>
         <button
           type="button"
-          onClick={loadMyBets}
+          onClick={() => void timelineQuery.refetch()}
           className="mx-auto mt-4 inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-white/15 active:scale-[0.98]"
         >
           <RefreshCw className="h-4 w-4" />

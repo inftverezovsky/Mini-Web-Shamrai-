@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { UserResponse } from '../schemas/schemas';
 import { AUTH_EXPIRED_EVENT, apiFetch } from '../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
@@ -57,6 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const bootStartedRef = useRef(false);
 
   const API_URL = API_BASE_URL;
   const allowDebugAuth = DEBUG_AUTH_ENABLED;
@@ -351,6 +352,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [applyLoginResponse]);
 
   useEffect(() => {
+    if (bootStartedRef.current) return;
+    bootStartedRef.current = true;
     let cancelled = false;
 
     async function bootAuth() {

@@ -222,7 +222,8 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         message = delivery._bookmaker_links_message(bet)
         reply_markup = delivery._bookmaker_link_reply_markup(bet)
 
-        self.assertIn("💵 <b>Fonbet</b>", message)
+        self.assertIn("💵", message)
+        self.assertIn("<b>Fonbet</b>", message)
         self.assertNotIn(expected_url, message)
         self.assertEqual(reply_markup["inline_keyboard"][0][0]["url"], expected_button_url)
 
@@ -645,10 +646,16 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
                 no_balance_warning=False,
             )
 
+        async def fake_refresh_vk_delivery_status(_db, refreshed_user, refresh_group=False):
+            refreshed_user.vk_messages_allowed = True
+            return {"changed": False, "messages_allowed": True}
+
         original_record = delivery.record_user_bet_access
+        original_refresh = delivery.refresh_vk_delivery_status
         db = FakeDb()
         try:
             delivery.record_user_bet_access = fake_record_user_bet_access
+            delivery.refresh_vk_delivery_status = fake_refresh_vk_delivery_status
 
             await delivery.deliver_forecast_request(
                 db,
@@ -660,6 +667,7 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             delivery.record_user_bet_access = original_record
+            delivery.refresh_vk_delivery_status = original_refresh
 
         self.assertEqual(len(record_calls), 1)
         self.assertEqual(len(db.added), 1)

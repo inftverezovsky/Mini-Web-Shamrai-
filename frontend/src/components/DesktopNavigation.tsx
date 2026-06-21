@@ -8,6 +8,7 @@ interface DesktopNavigationProps {
   role: 'user' | 'admin';
   activeTab: DesktopTabId;
   onChangeTab: (tab: DesktopTabId) => void;
+  onPreloadTab?: (tab: DesktopTabId) => void;
   userLabel: string;
   roleLabelText: string;
   adminPreviewControl?: React.ReactNode;
@@ -18,6 +19,7 @@ export default function DesktopNavigation({
   role,
   activeTab,
   onChangeTab,
+  onPreloadTab,
   userLabel,
   roleLabelText,
   adminPreviewControl,
@@ -52,6 +54,8 @@ export default function DesktopNavigation({
                 key={id}
                 type="button"
                 onClick={() => onChangeTab(id)}
+                onPointerEnter={() => onPreloadTab?.(id)}
+                onFocus={() => onPreloadTab?.(id)}
                 aria-current={active ? 'page' : undefined}
                 className={`flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-sm font-bold transition-all ${
                   active

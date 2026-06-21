@@ -18,6 +18,7 @@ interface BottomNavigationProps {
   role: 'user' | 'admin';
   activeTab: BottomTabId;
   onChangeTab: (tab: BottomTabId) => void;
+  onPreloadTab?: (tab: BottomTabId) => void;
   showWebChat?: boolean;
 }
 
@@ -43,7 +44,7 @@ export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'rose' },
 ];
 
-export default function BottomNavigation({ role, activeTab, onChangeTab, showWebChat = false }: BottomNavigationProps) {
+export default function BottomNavigation({ role, activeTab, onChangeTab, onPreloadTab, showWebChat = false }: BottomNavigationProps) {
   const tabs = role === 'user'
     ? userTabs.filter((tab) => showWebChat || tab.id !== 'chat')
     : adminTabs;
@@ -74,6 +75,9 @@ export default function BottomNavigation({ role, activeTab, onChangeTab, showWeb
             key={id}
             type="button"
             onClick={() => onChangeTab(id)}
+            onPointerEnter={() => onPreloadTab?.(id)}
+            onFocus={() => onPreloadTab?.(id)}
+            onTouchStart={() => onPreloadTab?.(id)}
             aria-current={isActive ? 'page' : undefined}
             className={`bottom-nav-aurora__item bottom-nav-aurora__item--${tone} group smooth-pressable relative flex min-w-0 flex-1 flex-col items-center overflow-hidden rounded-xl px-1.5 py-1.5 transition-all duration-200 ${
               isActive ? 'bottom-nav-aurora__item--active' : ''

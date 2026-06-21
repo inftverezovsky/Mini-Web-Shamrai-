@@ -12,11 +12,16 @@ export async function requestApi<T = any>(endpoint: string, options: RequestInit
     ...(options.headers || {}),
   };
 
-  const response = await fetch(`${API_BASE_URL}/api${endpoint}`, {
-    credentials: 'include',
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api${endpoint}`, {
+      credentials: 'include',
+      ...options,
+      headers,
+    });
+  } catch (error) {
+    throw new Error('Не удалось подключиться к серверу. Проверьте интернет и попробуйте еще раз.');
+  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));

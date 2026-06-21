@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState, useTransition } from 'react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
 import { useAuth } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
@@ -54,6 +54,24 @@ const AdminDashboard = lazy(loadAdminDashboard);
 const AdminCRM = lazy(loadAdminCRM);
 const AdminSettings = lazy(loadAdminSettings);
 const AdminStats = lazy(loadAdminStats);
+
+const userTabLoaders: Partial<Record<UserTabId, () => Promise<unknown>>> = {
+  feed: loadBetFeed,
+  chat: loadWebBotChat,
+  stats: loadMyBets,
+  my_bets: loadMyBets,
+  billing: loadTariffs,
+  profile: loadProfile,
+};
+
+const adminTabLoaders: Partial<Record<AdminShellTabId, () => Promise<unknown>>> = {
+  manage_bets: loadAdminDashboard,
+  stats: loadAdminStats,
+  clients: loadAdminCRM,
+  settings: loadAdminSettings,
+  profile: loadProfile,
+};
+
 
 function runWhenIdle(callback: () => void) {
   const requestIdleCallback = (window as any).requestIdleCallback as
@@ -336,9 +354,17 @@ export default function App() {
     );
   }
 
+  const preloadTab = (tab: UserTabId | AdminShellTabId) => {
+    const loader = showAdminInterface
+      ? adminTabLoaders[tab as AdminShellTabId]
+      : userTabLoaders[tab as UserTabId];
+    void loader?.().catch(() => undefined);
+  };
+
   const handleTabChange = (tab: UserTabId | AdminShellTabId) => {
     const role = showAdminInterface ? 'admin' : 'user';
     const from = showAdminInterface ? activeAdminTab : activeUserTab;
+    preloadTab(tab);
     trackEvent('Tab Switch', { role, from, to: tab });
 
     startTabTransition(() => {
@@ -421,18 +447,15 @@ export default function App() {
     return (
       <AppErrorBoundary resetKey={pageResetKey}>
         <Suspense fallback={<PageLoader />}>
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={pageResetKey}
-              className="page-transition-layer"
-              initial={reduceMotion ? false : { opacity: 0, y: 10, scale: 0.992, filter: 'blur(8px)' }}
-              animate={reduceMotion ? undefined : { opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
-              exit={reduceMotion ? undefined : { opacity: 0, y: -6, scale: 0.996, filter: 'blur(6px)' }}
-              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            >
-              {page}
-            </motion.div>
-          </AnimatePresence>
+          <motion.div
+            key={pageResetKey}
+            className="page-transition-layer"
+            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+            animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+            transition={{ duration: 0.1, ease: 'easeOut' }}
+          >
+            {page}
+          </motion.div>
         </Suspense>
       </AppErrorBoundary>
     );
@@ -505,6 +528,7 @@ export default function App() {
               role={showAdminInterface ? 'admin' : 'user'}
               activeTab={showAdminInterface ? activeAdminTab : activeUserTab}
               onChangeTab={handleTabChange}
+              onPreloadTab={preloadTab}
               showWebChat={showWebChatTab}
             />
           </>
@@ -514,6 +538,7 @@ export default function App() {
               role={showAdminInterface ? 'admin' : 'user'}
               activeTab={showAdminInterface ? activeAdminTab : activeUserTab}
               onChangeTab={handleTabChange}
+              onPreloadTab={preloadTab}
               userLabel={displayName}
               roleLabelText={roleText}
               adminPreviewControl={adminPreviewControl}

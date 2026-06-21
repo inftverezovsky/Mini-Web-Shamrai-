@@ -220,9 +220,7 @@ export function CollapsiblePanel({
   const reduceMotion = useReducedMotion();
 
   return (
-    <motion.section
-      layout={!reduceMotion}
-      transition={{ layout: { duration: 0.2, ease: [0.16, 1, 0.3, 1] } }}
+    <section
       className={`smooth-surface rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${className}`}
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -266,7 +264,7 @@ export function CollapsiblePanel({
       <SmoothCollapse open={open} className={bodyClassName}>
         {children}
       </SmoothCollapse>
-    </motion.section>
+    </section>
   );
 }
 
@@ -805,10 +803,8 @@ export function TimelineFeed({
       {data.timeline.map((month) => {
         const monthOpen = expandedMonths[month.key] ?? false;
         return (
-          <motion.div
+          <div
             key={month.key}
-            layout={!reduceMotion}
-            transition={{ layout: { duration: 0.18, ease: [0.16, 1, 0.3, 1] } }}
             className="smooth-surface overflow-hidden rounded-[20px] border border-white/10 bg-white/[0.04]"
           >
             <button
@@ -840,10 +836,8 @@ export function TimelineFeed({
                 {month.days.map((day) => {
                   const dayOpen = expandedDays[day.key] ?? false;
                   return (
-                    <motion.div
+                    <div
                       key={day.key}
-                      layout={!reduceMotion}
-                      transition={{ layout: { duration: 0.18, ease: [0.16, 1, 0.3, 1] } }}
                       className="smooth-surface rounded-xl border border-white/10 bg-black/15"
                     >
                       <button
@@ -872,12 +866,12 @@ export function TimelineFeed({
                           {day.bets.map((bet) => <BetResultRow key={bet.id} bet={bet} valueMode={valueMode} compact />)}
                         </div>
                       </SmoothCollapse>
-                    </motion.div>
+                    </div>
                   );
                 })}
               </div>
             </SmoothCollapse>
-          </motion.div>
+          </div>
         );
       })}
     </div>
