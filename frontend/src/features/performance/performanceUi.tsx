@@ -788,8 +788,6 @@ export function TimelineFeed({
   valueMode: StatsValueMode;
   emptyLabel?: string;
 }) {
-  const reduceMotion = useReducedMotion();
-
   if (!data?.timeline.length) {
     return (
       <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-5 text-center text-xs font-bold text-slate-500">
