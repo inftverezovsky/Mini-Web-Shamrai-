@@ -1,13 +1,26 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
+from urllib.parse import urlparse
+
+
+def _validate_http_or_relative_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    url = value.strip()
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("URL must use http or https")
+    return url
 
 # --- BOOKMAKER SCHEMAS ---
 class BookmakerBase(BaseModel):
-    name: str
-    code: str
+    name: str = Field(max_length=120)
+    code: str = Field(max_length=80)
     is_active: bool = True
 
 class BookmakerResponse(BookmakerBase):
@@ -30,11 +43,11 @@ class UserBadgeResponse(BaseModel):
 # --- USER SCHEMAS ---
 class UserBase(BaseModel):
     telegram_id: int
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    phone: Optional[str] = None
-    photo_url: Optional[str] = None
+    username: Optional[str] = Field(default=None, max_length=64)
+    first_name: Optional[str] = Field(default=None, max_length=128)
+    last_name: Optional[str] = Field(default=None, max_length=128)
+    phone: Optional[str] = Field(default=None, max_length=32)
+    photo_url: Optional[str] = Field(default=None, max_length=2048)
     is_web_only: bool = False
 
 class UserCreate(UserBase):
@@ -83,16 +96,16 @@ class UserResponse(UserBase):
         from_attributes = True
 
 class OnboardRequest(BaseModel):
-    anti_capper_pains: List[str] = Field(default_factory=list)
-    experience_level: str
-    bankroll_size: str
-    risk_tolerance: str
-    bookmakers: List[str] = Field(default_factory=list)
-    primary_bookmaker: Optional[str] = None
-    vk_user_id: Optional[str] = None
-    other_bookmaker_name: Optional[str] = None
-    bookmaker_ids: List[int] = Field(default_factory=list)
-    currency_preference: str = "RUB"
+    anti_capper_pains: List[str] = Field(default_factory=list, max_length=30)
+    experience_level: str = Field(max_length=80)
+    bankroll_size: str = Field(max_length=80)
+    risk_tolerance: str = Field(max_length=80)
+    bookmakers: List[str] = Field(default_factory=list, max_length=50)
+    primary_bookmaker: Optional[str] = Field(default=None, max_length=120)
+    vk_user_id: Optional[str] = Field(default=None, max_length=80)
+    other_bookmaker_name: Optional[str] = Field(default=None, max_length=120)
+    bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
+    currency_preference: str = Field(default="RUB", max_length=12)
 
 
 class OnboardRecommendationResponse(BaseModel):
@@ -112,31 +125,31 @@ class OnboardResponse(BaseModel):
     user: UserResponse
 
 class UserUpdateBankroll(BaseModel):
-    bankroll: float
+    bankroll: float = Field(ge=0, le=1_000_000_000)
 
 class UserUpdateBookmakers(BaseModel):
-    bookmaker_ids: List[int]
-    other_bookmaker_name: Optional[str] = None
+    bookmaker_ids: List[int] = Field(max_length=50)
+    other_bookmaker_name: Optional[str] = Field(default=None, max_length=120)
 
 class AdminUpdateUserPreferences(BaseModel):
-    role: Optional[str] = None  # "owner" | "admin" | "moderator" | "user"
-    stats_display_mode: Optional[str] = None  # "percent" | "flat"
-    bookmaker_ids: Optional[List[int]] = None
+    role: Optional[str] = Field(default=None, max_length=32)  # "owner" | "admin" | "moderator" | "user"
+    stats_display_mode: Optional[str] = Field(default=None, max_length=32)  # "percent" | "flat"
+    bookmaker_ids: Optional[List[int]] = Field(default=None, max_length=50)
     subscription_end_date: Optional[datetime] = None
-    matches_delta: Optional[int] = None
+    matches_delta: Optional[int] = Field(default=None, ge=-10000, le=10000)
     close_guarantee: Optional[bool] = None
-    other_bookmaker_name: Optional[str] = None
-    client_group: Optional[str] = None
-    client_tag: Optional[str] = None
+    other_bookmaker_name: Optional[str] = Field(default=None, max_length=120)
+    client_group: Optional[str] = Field(default=None, max_length=80)
+    client_tag: Optional[str] = Field(default=None, max_length=80)
 
 # --- SUBSCRIPTION PLAN SCHEMAS ---
 class SubscriptionPlanBase(BaseModel):
-    name: str
-    duration_days: int = 0
-    match_count: int = 1
-    price: Decimal
-    price_stars: int = 0
-    currency: str = "RUB"
+    name: str = Field(max_length=120)
+    duration_days: int = Field(default=0, ge=0, le=3650)
+    match_count: int = Field(default=1, ge=1, le=10000)
+    price: Decimal = Field(ge=0, le=Decimal("10000000"))
+    price_stars: int = Field(default=0, ge=0, le=1000000)
+    currency: str = Field(default="RUB", max_length=12)
     is_active: bool = True
 
 class SubscriptionPlanCreate(SubscriptionPlanBase):
@@ -144,11 +157,11 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
 
 
 class SubscriptionPlanUpdate(BaseModel):
-    name: Optional[str] = None
-    match_count: Optional[int] = None
-    price: Optional[Decimal] = None
-    price_stars: Optional[int] = None
-    currency: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=120)
+    match_count: Optional[int] = Field(default=None, ge=1, le=10000)
+    price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("10000000"))
+    price_stars: Optional[int] = Field(default=None, ge=0, le=1000000)
+    currency: Optional[str] = Field(default=None, max_length=12)
     is_active: Optional[bool] = None
 
 class SubscriptionPlanResponse(SubscriptionPlanBase):
@@ -161,9 +174,9 @@ class SubscriptionPlanResponse(SubscriptionPlanBase):
 class SubscriptionBase(BaseModel):
     user_id: int
     plan_id: int
-    status: str = "pending"
-    payment_provider: Optional[str] = None
-    payment_id: Optional[str] = None
+    status: str = Field(default="pending", max_length=32)
+    payment_provider: Optional[str] = Field(default=None, max_length=80)
+    payment_id: Optional[str] = Field(default=None, max_length=160)
 
 class SubscriptionCreate(BaseModel):
     plan_id: int
@@ -185,51 +198,66 @@ class SubscriptionManualAssign(BaseModel):
 
 # --- BET SCHEMAS ---
 class BookmakerLink(BaseModel):
-    bookmaker_id: int
-    url: str
+    bookmaker_id: int = Field(ge=1)
+    url: str = Field(max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return _validate_http_or_relative_url(value) or ""
 
 
 class BetBase(BaseModel):
-    event_name: str
-    coefficient: Decimal
+    event_name: str = Field(min_length=1, max_length=200)
+    coefficient: Decimal = Field(ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
-    bookmaker_ids: List[int] = Field(default_factory=list)
-    description: Optional[str] = None
-    category: str = "prematch"
+    bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    category: str = Field(default="prematch", max_length=40)
     live_ends_at: Optional[datetime] = None
-    price_stars: Optional[int] = None
-    brain_score: Optional[int] = None
-    api_match_id: Optional[str] = None
-    sport_type: Optional[str] = None
-    outcome: Optional[str] = None
-    coupon_image_url: Optional[str] = None
-    match_link: Optional[str] = None
-    bookmaker_links: List[BookmakerLink] = Field(default_factory=list)
-    delivery_mode: str = "feed"
+    price_stars: Optional[int] = Field(default=None, ge=0, le=100000)
+    brain_score: Optional[int] = Field(default=None, ge=0, le=100)
+    api_match_id: Optional[str] = Field(default=None, max_length=160)
+    sport_type: Optional[str] = Field(default=None, max_length=120)
+    outcome: Optional[str] = Field(default=None, max_length=200)
+    coupon_image_url: Optional[str] = Field(default=None, max_length=2048)
+    match_link: Optional[str] = Field(default=None, max_length=2048)
+    bookmaker_links: List[BookmakerLink] = Field(default_factory=list, max_length=50)
+    delivery_mode: str = Field(default="feed", max_length=40)
     auto_send_on_interest: bool = False
 
+    @field_validator("coupon_image_url", "match_link")
+    @classmethod
+    def validate_url_fields(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_http_or_relative_url(value)
+
 class BetCreate(BetBase):
-    target_bookmaker_ids: Optional[List[int]] = None  # Specific list of bookmaker IDs for target audience filtering (optional)
+    target_bookmaker_ids: Optional[List[int]] = Field(default=None, max_length=50)  # Specific list of bookmaker IDs for target audience filtering (optional)
     live_alarm: Optional[bool] = None
 
 class BetResolve(BaseModel):
-    status: str  # "win" | "loss" | "refund"
+    status: str = Field(max_length=32)  # "win" | "loss" | "refund"
 
 
 class BetUpdate(BaseModel):
-    event_name: Optional[str] = None
-    coefficient: Optional[Decimal] = None
+    event_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
-    bookmaker_ids: Optional[List[int]] = None
-    sport_type: Optional[str] = None
-    outcome: Optional[str] = None
-    description: Optional[str] = None
-    match_link: Optional[str] = None
-    bookmaker_links: Optional[List[BookmakerLink]] = None
+    bookmaker_ids: Optional[List[int]] = Field(default=None, max_length=50)
+    sport_type: Optional[str] = Field(default=None, max_length=120)
+    outcome: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    match_link: Optional[str] = Field(default=None, max_length=2048)
+    bookmaker_links: Optional[List[BookmakerLink]] = Field(default=None, max_length=50)
+
+    @field_validator("match_link")
+    @classmethod
+    def validate_match_link(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_http_or_relative_url(value)
 
 
 class BetOddsDropUpdate(BaseModel):
-    odds_dropped_to: Optional[Decimal] = None
+    odds_dropped_to: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
 
 
 class BetResponse(BetBase):
@@ -299,7 +327,7 @@ class ForecastRequestResponse(BaseModel):
 
 
 class BetHintRequest(BaseModel):
-    amount_xtr: int = 20
+    amount_xtr: int = Field(default=20, ge=1, le=100000)
 
 
 class BetHintResponse(BaseModel):
@@ -318,7 +346,7 @@ class BetHintInvoiceResponse(BaseModel):
 
 
 class CrowdBetFundRequest(BaseModel):
-    amount_xtr: int
+    amount_xtr: int = Field(ge=1, le=100000)
 
 
 class CrowdBetResponse(BaseModel):
@@ -352,20 +380,20 @@ class SwipeCandidateResponse(BaseModel):
 
 class SwipeRequest(BaseModel):
     bet_id: Optional[UUID] = None
-    guess: str
+    guess: str = Field(max_length=200)
 
 
 class SwipeResponse(BaseModel):
     match: bool
     discount: int
-    promo_code: Optional[str] = None
+    promo_code: Optional[str] = Field(default=None, max_length=80)
     message: str
 
 
 class QuizQuestionResponse(BaseModel):
-    id: str
-    question: str
-    options: List[str]
+    id: str = Field(max_length=80)
+    question: str = Field(max_length=400)
+    options: List[str] = Field(max_length=10)
 
 
 class QuizActiveResponse(BaseModel):
@@ -378,7 +406,7 @@ class QuizActiveResponse(BaseModel):
 class QuizSubmitRequest(BaseModel):
     quiz_id: Optional[int] = None
     bet_id: Optional[UUID] = None
-    answers: Dict[str, str]
+    answers: Dict[str, str] = Field(default_factory=dict)
 
 
 class QuizSubmitResponse(BaseModel):
@@ -386,15 +414,15 @@ class QuizSubmitResponse(BaseModel):
     score: int
     total: int
     discount: int
-    promo_code: Optional[str] = None
+    promo_code: Optional[str] = Field(default=None, max_length=80)
     message: str
 
 
 class PvPBattleResponse(BaseModel):
     id: int
-    match_name: str
-    option_a: str
-    option_b: str
+    match_name: str = Field(max_length=200)
+    option_a: str = Field(max_length=200)
+    option_b: str = Field(max_length=200)
     votes_a: int
     votes_b: int
     percent_a: float
@@ -406,7 +434,7 @@ class PvPBattleResponse(BaseModel):
 
 class PvPVoteRequest(BaseModel):
     battle_id: Optional[int] = None
-    option: str
+    option: str = Field(max_length=200)
 
 
 class PvPVoteResponse(PvPBattleResponse):
@@ -463,8 +491,8 @@ class DailyRewardClaimResponse(BaseModel):
 
 
 class UserNoteCreate(BaseModel):
-    text: str
-    emotion_score: int  # 1-5
+    text: str = Field(min_length=1, max_length=4000)
+    emotion_score: int = Field(ge=1, le=5)  # 1-5
 
 
 class UserNoteResponse(BaseModel):
@@ -480,9 +508,9 @@ class UserNoteResponse(BaseModel):
 
 
 class ABTestConfigCreate(BaseModel):
-    plan_id: int
-    price_group_a: int
-    price_group_b: int
+    plan_id: int = Field(ge=1)
+    price_group_a: int = Field(ge=0, le=1000000)
+    price_group_b: int = Field(ge=0, le=1000000)
     is_active: bool = True
 
 
@@ -534,10 +562,10 @@ class AdminUserListResponse(BaseModel):
 
 class AdminGrantRequest(BaseModel):
     telegram_id: int
-    role: str = "admin"
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
+    role: str = Field(default="admin", max_length=32)
+    username: Optional[str] = Field(default=None, max_length=64)
+    first_name: Optional[str] = Field(default=None, max_length=128)
+    last_name: Optional[str] = Field(default=None, max_length=128)
 
 
 class AdminAuditLogResponse(BaseModel):
@@ -616,12 +644,17 @@ class PaymentTransactionResponse(BaseModel):
 
 # --- ANNOUNCEMENT SCHEMAS ---
 class AnnouncementCreate(BaseModel):
-    title: str
-    body: Optional[str] = None
-    announcement_type: str = "general"
-    sport_filter: Optional[str] = None
-    min_coef: Optional[float] = None
-    match_link: Optional[str] = None
+    title: str = Field(min_length=1, max_length=160)
+    body: Optional[str] = Field(default=None, max_length=4000)
+    announcement_type: str = Field(default="general", max_length=40)
+    sport_filter: Optional[str] = Field(default=None, max_length=80)
+    min_coef: Optional[float] = Field(default=None, ge=1.0, le=999.99)
+    match_link: Optional[str] = Field(default=None, max_length=2048)
+
+    @field_validator("match_link")
+    @classmethod
+    def validate_match_link(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_http_or_relative_url(value)
 
 
 class AnnouncementDeliveryResponse(BaseModel):

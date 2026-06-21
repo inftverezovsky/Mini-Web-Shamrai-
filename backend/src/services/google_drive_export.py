@@ -20,6 +20,7 @@ from src.services.stats_export import (
     build_client_info_export_workbook,
     build_stats_export_workbook,
     load_client_info_export_rows,
+    load_client_recent_bet_export_rows,
     load_client_export_groups,
     load_clients_export_items,
     load_shamrai_export_items,
@@ -136,6 +137,7 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
     if scope in {"clients", "all"}:
         client_items = await load_clients_export_items(db, period)
         client_info_rows = await load_client_info_export_rows(db, period)
+        client_recent_rows = await load_client_recent_bet_export_rows(db, period)
         artifacts.append({
             "folder": "Клиенты",
             "title": f"Клиенты - свод - {period_label}",
@@ -153,6 +155,7 @@ async def _build_artifacts(db: AsyncSession, *, scope: str, period: str) -> list
             "title": f"Клиенты - инфа - {period_label}",
             "xlsx": build_client_info_export_workbook(
                 client_info_rows,
+                recent_rows=client_recent_rows,
                 period_label=period_label,
             ),
         })

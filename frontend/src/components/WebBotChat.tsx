@@ -261,7 +261,7 @@ export default function WebBotChat() {
       updateSignalForecastStatus(requestId, response.status);
       const kindLabel = signalKindLabel(signal);
       if (action === 'take') {
-        notifySuccess(response.message || 'Заявка отправлена продажнику', kindLabel);
+        notifySuccess(response.message || 'Заявка отправлена Shamrai', kindLabel);
       } else {
         notifyInfo(response.message || 'Отказ учтен', kindLabel);
       }

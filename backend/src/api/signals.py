@@ -1,11 +1,13 @@
+import ipaddress
 import secrets
 import time
 from threading import RLock
 from typing import Any, Optional
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -43,14 +45,49 @@ class ForecastSignalActionResponse(BaseModel):
 
 
 class WebPushKeys(BaseModel):
-    p256dh: str
-    auth: str
+    p256dh: str = Field(min_length=16, max_length=512)
+    auth: str = Field(min_length=8, max_length=256)
 
 
 class WebPushSubscriptionPayload(BaseModel):
-    endpoint: str
-    expirationTime: Optional[int] = None
+    endpoint: str = Field(min_length=12, max_length=2048)
+    expirationTime: Optional[int] = Field(default=None, ge=0)
     keys: WebPushKeys
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        endpoint = value.strip()
+        parsed = urlparse(endpoint)
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            raise ValueError("Web Push endpoint must be a public HTTPS URL")
+        if parsed.username or parsed.password:
+            raise ValueError("Web Push endpoint credentials are not allowed")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("Web Push endpoint port is invalid") from exc
+
+        hostname = parsed.hostname.strip("[]").rstrip(".").lower()
+        reserved_names = ("localhost", ".localhost", ".local", ".invalid", ".test", ".example")
+        if hostname in {"localhost", "local"} or hostname.endswith(reserved_names[1:]):
+            raise ValueError("Web Push endpoint host must be public")
+
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return endpoint
+
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            raise ValueError("Web Push endpoint host must be public")
+        return endpoint
 
 
 class WebPushSubscriptionResponse(BaseModel):

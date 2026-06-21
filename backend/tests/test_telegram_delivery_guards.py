@@ -1,5 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from fastapi import HTTPException
+from fastapi.routing import APIRoute
 
 from src import main
 from src.api import telegram_webhook
@@ -63,6 +67,59 @@ class TelegramDeliveryGuardTests(unittest.TestCase):
         self.assertEqual(payload["ip_address"], "82.147.67.245")
         self.assertEqual(payload["secret_token"], "secret")
         self.assertIn("callback_query", payload["allowed_updates"])
+
+
+class HealthDiagnosticsAccessTests(unittest.TestCase):
+    def test_public_health_remains_public(self):
+        routes = [route for route in main.app.routes if isinstance(route, APIRoute) and route.path == "/api/health"]
+
+        self.assertEqual(len(routes), 1)
+        self.assertFalse(routes[0].dependant.dependencies)
+
+    def test_deep_health_endpoints_reject_anonymous_outside_debug(self):
+        async def run_check():
+            await main.require_health_diagnostics_access(None)
+
+        with patch.object(main.settings, "DEBUG_MODE", False):
+            with self.assertRaises(HTTPException) as exc:
+                self.async_run(run_check())
+
+        self.assertEqual(exc.exception.status_code, 403)
+
+    def test_diagnostics_routes_are_guarded(self):
+        diagnostic_paths = {
+            "/api/health/payments",
+            "/api/health/telegram",
+            "/api/health/vk",
+            "/api/health/vk/deep",
+        }
+        guarded_paths = set()
+        for route in main.app.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            if any(dependency.call is main.require_health_diagnostics_access for dependency in route.dependant.dependencies):
+                guarded_paths.add(route.path)
+
+        self.assertEqual(diagnostic_paths, guarded_paths & diagnostic_paths)
+
+    def test_diagnostics_allow_debug_mode_without_user(self):
+        async def run_check():
+            await main.require_health_diagnostics_access(None)
+
+        with patch.object(main.settings, "DEBUG_MODE", True):
+            self.async_run(run_check())
+
+    def test_diagnostics_allow_staff_user_outside_debug(self):
+        async def run_check():
+            await main.require_health_diagnostics_access(SimpleNamespace(role="admin"))
+
+        with patch.object(main.settings, "DEBUG_MODE", False):
+            self.async_run(run_check())
+
+    def async_run(self, coroutine):
+        import asyncio
+
+        return asyncio.run(coroutine)
 
 
 class TelegramForecastCallbackTests(unittest.IsolatedAsyncioTestCase):

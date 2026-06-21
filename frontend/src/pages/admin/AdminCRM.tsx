@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { BookmakerResponse, PaginatedResponse } from '../../schemas/schemas';
+import { BookmakerResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
@@ -15,6 +15,7 @@ import {
   CheckSquare,
   ChevronDown,
   Clock,
+  ExternalLink,
   Filter,
   Layers3,
   Loader2,
@@ -24,6 +25,7 @@ import {
   Sliders,
   Tags,
   Trash2,
+  UploadCloud,
   Users,
   X,
 } from 'lucide-react';
@@ -130,6 +132,14 @@ function getMatchStreak(results: ClientRecentMatchResult[]) {
   };
 }
 
+function driveStatusLabel(job: StatsDriveExportJob | null) {
+  if (!job) return null;
+  if (job.status === 'completed') return 'Выгрузка готова';
+  if (job.status === 'failed') return 'Ошибка выгрузки';
+  if (job.status === 'running') return 'Создаем Google Sheet';
+  return 'В очереди';
+}
+
 export default function AdminCRM() {
   const { user: currentAdmin } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
@@ -147,6 +157,9 @@ export default function AdminCRM() {
   const [editClientTag, setEditClientTag] = useState('');
   const [matchDelta, setMatchDelta] = useState('');
   const [saving, setSaving] = useState(false);
+  const [driveJob, setDriveJob] = useState<StatsDriveExportJob | null>(null);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
   const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
 
   const bookmakersQuery = useQuery<BookmakerResponse[]>({
@@ -191,6 +204,23 @@ export default function AdminCRM() {
   const loadCRM = useCallback(async () => {
     await Promise.all([usersQuery.refetch(), bookmakersQuery.refetch()]);
   }, [bookmakersQuery, usersQuery]);
+
+  useEffect(() => {
+    if (!driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
+    const timer = window.setInterval(async () => {
+      try {
+        const freshJob = await apiFetch<StatsDriveExportJob>(`/admin/stats/drive-export/${driveJob.id}`);
+        setDriveJob(freshJob);
+        if (freshJob.status === 'completed' || freshJob.status === 'failed') {
+          setDriveLoading(false);
+        }
+      } catch (err: any) {
+        setDriveError(err.message || 'Не удалось обновить статус Google Drive');
+        setDriveLoading(false);
+      }
+    }, 2200);
+    return () => window.clearInterval(timer);
+  }, [driveJob]);
 
   const groups = useMemo(() => (
     Array.from(new Set(users.map(user => user.client_group?.trim()).filter(Boolean) as string[])).sort()
@@ -404,6 +434,27 @@ export default function AdminCRM() {
     }
   };
 
+  const handleDriveExport = async () => {
+    try {
+      setDriveLoading(true);
+      setDriveError(null);
+      const job = await apiFetch<StatsDriveExportJob>('/admin/stats/drive-export', {
+        method: 'POST',
+        body: JSON.stringify({ scope: 'clients', period: 'all', formats: ['google_sheet'] }),
+      });
+      setDriveJob(job);
+      if (job.status === 'completed' || job.status === 'failed') {
+        setDriveLoading(false);
+      }
+      if (job.status === 'completed') {
+        notifySuccess('База клиентов выгружена в Google Drive');
+      }
+    } catch (err: any) {
+      setDriveError(err.message || 'Не удалось запустить выгрузку в Google Drive');
+      setDriveLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center py-8">
@@ -445,10 +496,55 @@ export default function AdminCRM() {
             Клиенты
           </h2>
         </div>
-        <div className="bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-xs px-3 py-1 rounded-full font-black">
-          {filteredUsers.length}/{paginationMeta.filteredTotal || users.length}
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            title="Выгрузить всю базу клиентов в Google Drive"
+            onClick={() => void handleDriveExport()}
+            disabled={driveLoading}
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/25 bg-cyan-300/10 text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
+          >
+            {driveLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
+          </button>
+          <div className="bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-xs px-3 py-1 rounded-full font-black">
+            {filteredUsers.length}/{paginationMeta.filteredTotal || users.length}
+          </div>
         </div>
       </div>
+      {(driveJob || driveError) && (
+        <div className={`rounded-2xl border px-3 py-2 text-[10px] font-bold ${
+          driveError || driveJob?.status === 'failed'
+            ? 'border-rose-500/25 bg-rose-500/10 text-rose-100'
+            : driveJob?.status === 'completed'
+              ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'
+              : 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100'
+        }`}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate uppercase tracking-wider">
+              {driveError || driveJob?.error || driveStatusLabel(driveJob)}
+            </span>
+            {driveJob?.status === 'completed' && (
+              <span className="shrink-0 uppercase tracking-wider text-emerald-200">Drive</span>
+            )}
+          </div>
+          {driveJob?.links?.length ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {driveJob.links.slice(0, 4).map((link) => (
+                <a
+                  key={`${link.format}:${link.id}`}
+                  href={link.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex max-w-full items-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1 text-[9px] font-bold text-cyan-50 hover:bg-white/[0.1]"
+                >
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{link.title}</span>
+                </a>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
       {paginationMeta.hasMore && (
         <div className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-cyan-100">
           Показаны первые {users.length} клиентов. Уточните поиск или фильтр, чтобы сузить список.

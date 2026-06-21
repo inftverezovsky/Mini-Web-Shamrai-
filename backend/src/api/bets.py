@@ -38,7 +38,7 @@ from src.api.payments import (
     _create_payment_attempt,
     create_telegram_stars_invoice_link,
 )
-from src.core.bookmaker_links import normalize_bookmaker_links
+from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
 from src.core.roles import is_staff_role
 from src.core.config import settings
 from src.core.message_templates import (
@@ -53,6 +53,7 @@ from src.core.message_templates import (
 )
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE, enqueue_delivery
+from src.services.forecast_delivery import enqueue_admin_group_forecast_result_notification
 from src.services.match_access import log_match_balance_event, record_user_bet_access
 from src.services.statistics import is_paid_client_access
 from src.services.coupon_uploads import store_coupon_image
@@ -321,6 +322,12 @@ async def _build_bet_response(
     bookmaker_links: Optional[object] = None,
     delivery_mode: str = "feed",
 ) -> BetResponse:
+    normalized_match_link = normalize_match_url(match_link)
+    if match_link and not normalized_match_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректная ссылка на матч",
+        )
     selected_bookmaker_ids = _merge_bookmaker_ids(bookmaker_id, bookmaker_ids)
     selected_bookmakers = []
     if selected_bookmaker_ids:
@@ -349,7 +356,7 @@ async def _build_bet_response(
         sport_type=sport_type,
         outcome=outcome,
         coupon_image_url=coupon_image_url,
-        match_link=match_link,
+        match_link=normalized_match_link or None,
         bookmaker_links=normalize_bookmaker_links(
             bookmaker_links,
             allowed_bookmaker_ids=selected_bookmaker_ids,
@@ -813,18 +820,18 @@ async def create_bet(
 @router.post("/with-coupon", response_model=BetResponse, status_code=status.HTTP_201_CREATED)
 async def create_bet_with_coupon(
     request: Request,
-    event_name: str = Form(...),
-    coefficient: Decimal = Form(...),
+    event_name: str = Form(..., min_length=1, max_length=200),
+    coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
     bookmaker_id: Optional[int] = Form(None),
-    description: Optional[str] = Form(None),
-    category: str = Form("prematch"),
+    description: Optional[str] = Form(None, max_length=4000),
+    category: str = Form("prematch", max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
-    price_stars: Optional[int] = Form(None),
-    brain_score: Optional[int] = Form(5),
-    api_match_id: Optional[str] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    outcome: Optional[str] = Form(None),
-    match_link: Optional[str] = Form(None),
+    price_stars: Optional[int] = Form(None, ge=0, le=100000),
+    brain_score: Optional[int] = Form(5, ge=0, le=100),
+    api_match_id: Optional[str] = Form(None, max_length=160),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    outcome: Optional[str] = Form(None, max_length=200),
+    match_link: Optional[str] = Form(None, max_length=2048),
     live_alarm: Optional[bool] = Form(False),
     coupon_image: Optional[UploadFile] = File(None),
     admin: User = Depends(get_current_admin),
@@ -928,6 +935,13 @@ async def update_bet(
         if field_name in update_payload:
             value = getattr(bet_data, field_name)
             clean_value = str(value).strip() if value is not None else ""
+            if field_name == "match_link" and clean_value:
+                clean_value = normalize_match_url(clean_value)
+                if not clean_value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Некорректная ссылка на матч",
+                    )
             setattr(bet, field_name, clean_value or None)
 
     selected_bookmaker_ids: Optional[List[int]] = None
@@ -1056,7 +1070,11 @@ async def resolve_bet(
             detail="Resolution status must be one of: win, loss, refund"
         )
         
-    result = await db.execute(select(Bet).filter(Bet.id == bet_id))
+    result = await db.execute(
+        select(Bet)
+        .filter(Bet.id == bet_id)
+        .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+    )
     bet = result.scalars().first()
     if not bet:
         raise HTTPException(
@@ -1192,6 +1210,18 @@ async def resolve_bet(
                             },
                         },
                     )
+
+        client_taker_count = sum(
+            1
+            for user_id, _match_charged, _access_type in takers
+            if (user := users_by_id.get(user_id)) is not None and not is_staff_role(user.role)
+        )
+        await enqueue_admin_group_forecast_result_notification(
+            db,
+            bet=bet,
+            status_value=resolution.status,
+            taker_count=client_taker_count,
+        )
 
     await db.commit()
 

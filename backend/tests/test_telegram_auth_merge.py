@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from src.api import auth
 from src.models.database import Base
 from src.models.models import User
+from src.services.telegram_auth import confirm_telegram_bot_auth_session, create_telegram_bot_auth_session
 
 
 class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +99,46 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(merged_user.matches_remaining, 6)
             self.assertTrue(merged_user.is_onboarded)
             self.assertEqual(merged_user.username, "tg_user")
+
+    async def test_bot_session_poll_links_telegram_to_current_vk_only_profile(self):
+        async with self.Session() as db:
+            web_user = await auth._create_vk_only_user(db, "741852963", "VK Client")
+            web_user.matches_remaining = 4
+            web_user.purchased_bets_balance = 4
+            await db.commit()
+            web_user = await auth._load_user_with_profile(db, web_user.telegram_id)
+
+            session = await create_telegram_bot_auth_session()
+            confirmed = await confirm_telegram_bot_auth_session(
+                session.auth_token,
+                {
+                    "id": 123456789,
+                    "first_name": "Telegram",
+                    "username": "tg_user",
+                },
+            )
+            self.assertTrue(confirmed)
+
+            response = await auth.poll_telegram_bot_auth_session(
+                session.auth_token,
+                response=Response(),
+                current_user=web_user,
+                db=db,
+            )
+
+            self.assertEqual(response.status, "confirmed")
+            self.assertIsNotNone(response.access_token)
+            self.assertIsNotNone(response.user)
+            self.assertEqual(response.user.telegram_id, 123456789)
+            self.assertFalse(response.user.is_web_only)
+            self.assertEqual(response.user.vk_user_id, "741852963")
+            self.assertEqual(response.user.matches_remaining, 4)
+
+            result = await db.execute(select(User))
+            users = result.scalars().all()
+            self.assertEqual(len(users), 1)
+            self.assertEqual(users[0].telegram_id, 123456789)
+            self.assertEqual(users[0].vk_user_id, "741852963")
 
     async def test_promotes_web_only_phone_profile_without_losing_balance(self):
         async with self.Session() as db:

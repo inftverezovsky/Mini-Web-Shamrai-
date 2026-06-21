@@ -1742,7 +1742,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
           format: 'folder',
         },
         {
-          title: 'Шамрай - статистика',
+          title: body.scope === 'clients' ? 'Клиенты - инфа' : 'Шамрай - статистика',
           url: 'https://docs.google.com/spreadsheets/',
           id: 'mock-sheet',
           format: 'google_sheet',
@@ -1758,15 +1758,21 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     return {
       id: driveExportMatch[1],
       status: 'completed',
-      scope: 'all',
+      scope: 'clients',
       period: 'all',
-      formats: ['xlsx', 'google_sheet'],
+      formats: ['google_sheet'],
       links: [
         {
           title: 'Mock Drive export',
           url: 'https://drive.google.com/',
           id: 'mock-folder',
           format: 'folder',
+        },
+        {
+          title: 'Клиенты - инфа',
+          url: 'https://docs.google.com/spreadsheets/',
+          id: 'mock-sheet',
+          format: 'google_sheet',
         },
       ],
       error: null,

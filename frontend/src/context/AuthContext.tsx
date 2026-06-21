@@ -52,6 +52,26 @@ function wait(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
+function isNetworkFetchMessage(message?: string | null) {
+  return Boolean(message && /failed to fetch|networkerror|load failed|network request failed/i.test(message));
+}
+
+function authErrorMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'object' && error && 'message' in error
+      ? String((error as { message?: unknown }).message || '')
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  if (isNetworkFetchMessage(message)) {
+    return 'Не удалось подключиться к серверу. Проверьте интернет и попробуйте еще раз.';
+  }
+
+  return message || fallback;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(getStoredAuthToken());
   const [user, setUser] = useState<UserResponse | null>(null);
@@ -217,7 +237,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setError(null);
         return;
       }
-      setError(err.message || 'Ошибка подключения к серверу авторизации');
+      setError(authErrorMessage(err, 'Ошибка подключения к серверу авторизации'));
     } finally {
       setLoading(false);
     }
@@ -238,8 +258,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       applyLoginResponse(data);
     } catch (err: any) {
       if (isVkRedirectStartedError(err)) return;
-      setError(err?.message || 'Не удалось войти через VK ID');
-      throw err;
+      const message = authErrorMessage(err, 'Не удалось войти через VK ID');
+      setError(message);
+      throw new Error(message);
     } finally {
       setLoading(false);
     }
@@ -250,7 +271,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       redirectResult = consumeVkRedirectResult();
     } catch (err: any) {
-      setError(err?.message || 'Не удалось обработать ответ VK ID');
+      setError(authErrorMessage(err, 'Не удалось обработать ответ VK ID'));
       setLoading(false);
       return true;
     }
@@ -282,7 +303,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await fetchCurrentUser(storedToken);
       return true;
     } catch (err: any) {
-      setError(err?.message || 'Не удалось завершить авторизацию VK ID');
+      setError(authErrorMessage(err, 'Не удалось завершить авторизацию VK ID'));
       return true;
     } finally {
       setLoading(false);
@@ -308,8 +329,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       applyLoginResponse(await response.json());
     } catch (err: any) {
-      setError(err?.message || 'Не удалось войти через Telegram');
-      throw err;
+      const message = authErrorMessage(err, 'Не удалось войти через Telegram');
+      setError(message);
+      throw new Error(message);
     } finally {
       setLoading(false);
     }
@@ -346,8 +368,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       throw new Error('Ссылка Telegram-входа устарела. Нажмите кнопку еще раз.');
     } catch (err: any) {
-      setError(err?.message || 'Не удалось войти через Telegram');
-      throw err;
+      const message = authErrorMessage(err, 'Не удалось войти через Telegram');
+      setError(message);
+      throw new Error(message);
     }
   }, [applyLoginResponse]);
 

@@ -104,8 +104,8 @@ def _decode_admin_user_cursor(cursor: Optional[str]) -> tuple[datetime, int] | N
         )
 
 class PromoCreate(BaseModel):
-    code: str
-    discount_percent: int
+    code: str = Field(min_length=1, max_length=80)
+    discount_percent: int = Field(ge=1, le=100)
     valid_until: datetime
 
 class MarathonCreateOrUpdate(BaseModel):

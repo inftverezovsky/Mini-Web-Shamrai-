@@ -9,7 +9,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import update
+from sqlalchemy import inspect as sa_inspect, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -25,6 +25,7 @@ from src.core.message_templates import (
     load_message_template_body,
     render_message_template_body,
 )
+from src.core.roles import is_admin_role
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
 from src.models.database import AsyncSessionLocal
@@ -113,10 +114,28 @@ def _format_rub_price(value: Optional[object]) -> str:
     return f"{amount:,}".replace(",", " ") + " ₽"
 
 
+def _trim_text(value: Optional[object], limit: int = 900) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _loaded_attr(instance: object, attr_name: str) -> object:
+    try:
+        state = sa_inspect(instance)
+        if attr_name in state.unloaded:
+            return None
+    except Exception:
+        pass
+    return getattr(instance, attr_name, None)
+
+
 def _bookmakers_for_bet(bet: Bet) -> list:
-    bookmakers = list(bet.bookmakers or [])
-    if not bookmakers and bet.bookmaker:
-        bookmakers = [bet.bookmaker]
+    bookmakers = list(_loaded_attr(bet, "bookmakers") or [])
+    bookmaker = _loaded_attr(bet, "bookmaker")
+    if not bookmakers and bookmaker:
+        bookmakers = [bookmaker]
     return bookmakers
 
 
@@ -1008,11 +1027,7 @@ def _full_forecast_ready_error(forecast_request: ForecastRequest) -> Optional[st
     return None
 
 
-def build_sales_manager_notification_delivery(forecast_request: ForecastRequest) -> Optional[dict[str, object]]:
-    sales_manager_id = settings.sales_manager_telegram_id
-    if not sales_manager_id:
-        return None
-
+def _build_take_admin_notification_content(forecast_request: ForecastRequest) -> tuple[str, dict]:
     user = forecast_request.user
     bet = forecast_request.bet
     is_paid_set = request_is_paid_set(forecast_request)
@@ -1040,6 +1055,8 @@ def build_sales_manager_notification_delivery(forecast_request: ForecastRequest)
             f"Клиент: <b>{_html(_client_display(user))}</b>\n"
             f"Telegram ID: <code>{user.telegram_id}</code>\n"
             f"Баланс матчей: <b>{balance}</b>\n\n"
+            f"Прогноз: <b>{_html(bet.event_name or PLACEHOLDER_EVENT_NAME)}</b>\n"
+            f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>\n"
             f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
             f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
             f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>"
@@ -1066,6 +1083,15 @@ def build_sales_manager_notification_delivery(forecast_request: ForecastRequest)
             ],
         ]
     }
+    return message, reply_markup
+
+
+def build_sales_manager_notification_delivery(forecast_request: ForecastRequest) -> Optional[dict[str, object]]:
+    sales_manager_id = settings.sales_manager_telegram_id
+    if not sales_manager_id:
+        return None
+
+    message, reply_markup = _build_take_admin_notification_content(forecast_request)
     return {
         "method": "sendMessage",
         "payload": {
@@ -1075,6 +1101,152 @@ def build_sales_manager_notification_delivery(forecast_request: ForecastRequest)
             "reply_markup": reply_markup,
         },
     }
+
+
+def _admin_group_chat_id() -> Optional[int]:
+    chat_id = settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+    if chat_id is None:
+        return None
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_admin_group_forecast_response_delivery(
+    forecast_request: ForecastRequest,
+    *,
+    action: str,
+) -> Optional[dict[str, object]]:
+    chat_id = _admin_group_chat_id()
+    if not chat_id:
+        return None
+
+    if action == "take":
+        message, reply_markup = _build_take_admin_notification_content(forecast_request)
+        return {
+            "method": "sendMessage",
+            "payload": {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+                "reply_markup": reply_markup,
+            },
+        }
+
+    if action != "decline":
+        return None
+
+    user = forecast_request.user
+    bet = forecast_request.bet
+    request_label = "платного набора" if request_is_paid_set(forecast_request) else "закрытого прогноза"
+    message = (
+        f"<b>Клиент отказался от {request_label}</b>\n\n"
+        f"Клиент: <b>{_html(_client_display(user))}</b>\n"
+        f"Telegram ID: <code>{user.telegram_id}</code>\n\n"
+        f"Прогноз: <b>{_html(bet.event_name or PLACEHOLDER_EVENT_NAME)}</b>\n"
+        f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>\n"
+        f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
+        f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
+        f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>"
+    )
+    return {
+        "method": "sendMessage",
+        "payload": {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+        },
+    }
+
+
+async def enqueue_admin_group_forecast_response_notification(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+    *,
+    action: str,
+) -> dict:
+    delivery = build_admin_group_forecast_response_delivery(forecast_request, action=action)
+    if not delivery:
+        return {"ok": False, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=forecast_request.user_id,
+        forecast_request_id=forecast_request.id,
+        dedupe_key=f"forecast_request:{forecast_request.id}:admin_group:{action}",
+        payload=delivery,
+    )
+    return {"ok": True, "queued": True}
+
+
+def _forecast_result_label(status_value: str) -> str:
+    return {
+        "win": "Выигрыш",
+        "loss": "Проигрыш",
+        "refund": "Возврат",
+    }.get(str(status_value or "").strip().lower(), str(status_value or "не указан"))
+
+
+def build_admin_group_forecast_result_delivery(
+    *,
+    bet: Bet,
+    status_value: str,
+    taker_count: int,
+) -> Optional[dict[str, object]]:
+    chat_id = _admin_group_chat_id()
+    if not chat_id:
+        return None
+
+    forecast_text = _trim_text(getattr(bet, "description", None), 1200)
+    forecast_block = f"\n\n<b>Прогноз:</b>\n{_html(forecast_text)}" if forecast_text else ""
+    message = (
+        "<b>Результат прогноза</b>\n\n"
+        f"Матч: <b>{_html(getattr(bet, 'event_name', None) or PLACEHOLDER_EVENT_NAME)}</b>\n"
+        f"Исход: <b>{_html(getattr(bet, 'outcome', None) or 'уточняется')}</b>\n"
+        f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
+        f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
+        f"Спорт: <b>{_html(getattr(bet, 'sport_type', None) or 'не указан')}</b>\n"
+        f"Результат: <b>{_html(_forecast_result_label(status_value))}</b>\n"
+        f"Взяли: <b>{max(0, int(taker_count or 0))}</b>"
+        f"{forecast_block}"
+    )
+    return {
+        "method": "sendMessage",
+        "payload": {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+    }
+
+
+async def enqueue_admin_group_forecast_result_notification(
+    db: AsyncSession,
+    *,
+    bet: Bet,
+    status_value: str,
+    taker_count: int,
+) -> dict:
+    delivery = build_admin_group_forecast_result_delivery(
+        bet=bet,
+        status_value=status_value,
+        taker_count=taker_count,
+    )
+    if not delivery:
+        return {"ok": False, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=None,
+        forecast_request_id=None,
+        dedupe_key=f"bet:{bet.id}:admin_group:result:{status_value}",
+        payload=delivery,
+    )
+    return {"ok": True, "queued": True}
 
 
 def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
@@ -1275,7 +1447,7 @@ async def set_forecast_request_interested(
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен.", False
     if forecast_request.status == FORECAST_STATUS_INTERESTED:
-        return forecast_request, "Заявка уже отправлена продажнику.", False
+        return forecast_request, "Заявка уже отправлена Shamrai.", False
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
         return forecast_request, "Заявка уже обрабатывается.", False
     if forecast_request.status == FORECAST_STATUS_DECLINED:
@@ -1300,7 +1472,7 @@ async def set_forecast_request_interested(
     if lock_result.rowcount != 1:
         latest_request = await load_forecast_request(db, request_id)
         if latest_request.status == FORECAST_STATUS_INTERESTED:
-            return latest_request, "Заявка уже отправлена продажнику.", False
+            return latest_request, "Заявка уже отправлена Shamrai.", False
         if latest_request.status in DELIVERED_STATUSES:
             return latest_request, "Прогноз уже оформлен.", False
         if latest_request.status == FORECAST_STATUS_DECLINED:
@@ -1318,6 +1490,7 @@ async def set_forecast_request_interested(
 
     forecast_request.status = FORECAST_STATUS_INTERESTED
     forecast_request.responded_at = responded_at
+    await enqueue_admin_group_forecast_response_notification(db, forecast_request, action="take")
     if forecast_request_should_auto_deliver(forecast_request):
         resolved_auto_delivery_method = (
             await refreshed_client_delivery_method(db, forecast_request.user)
@@ -1366,10 +1539,10 @@ async def set_forecast_request_interested(
         if not notify_result.get("ok"):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Продажник не поставлен в очередь уведомлений: {notify_result.get('description', 'unknown error')}",
+                detail=f"Shamrai не поставлен в очередь уведомлений: {notify_result.get('description', 'unknown error')}",
             )
-        return forecast_request, "Заявка отправлена продажнику.", False
-    return forecast_request, "Заявка отправлена продажнику.", True
+        return forecast_request, "Заявка отправлена Shamrai.", False
+    return forecast_request, "Заявка отправлена Shamrai.", True
 
 
 async def set_forecast_request_declined(
@@ -1390,7 +1563,7 @@ async def set_forecast_request_declined(
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен."
     if forecast_request.status == FORECAST_STATUS_INTERESTED:
-        return forecast_request, "Заявка уже у продажника."
+        return forecast_request, "Заявка уже у Shamrai."
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
         return forecast_request, "Заявка уже обрабатывается."
     if forecast_request.status == FORECAST_STATUS_DECLINED:
@@ -1402,6 +1575,7 @@ async def set_forecast_request_declined(
 
     forecast_request.status = FORECAST_STATUS_DECLINED
     forecast_request.responded_at = forecast_request.responded_at or _now()
+    await enqueue_admin_group_forecast_response_notification(db, forecast_request, action="decline")
     if request_is_paid_set(forecast_request):
         return forecast_request, "Ок, набор не берем."
     return forecast_request, "Ок, не берем."
@@ -1603,6 +1777,16 @@ async def cancel_forecast_request(
     return forecast_request, "Заявка отменена."
 
 
+async def _actor_can_handle_sales_callback(db: AsyncSession, actor_user_id: int) -> bool:
+    sales_manager_id = settings.sales_manager_telegram_id
+    if sales_manager_id and actor_user_id == sales_manager_id:
+        return True
+
+    result = await db.execute(select(User.role).filter(User.telegram_id == actor_user_id))
+    role = result.scalars().first()
+    return is_admin_role(getattr(role, "role", role))
+
+
 async def handle_sales_callback(
     db: AsyncSession,
     *,
@@ -1610,11 +1794,10 @@ async def handle_sales_callback(
     actor_user_id: int,
     action: str,
 ) -> tuple[ForecastRequest, str]:
-    sales_manager_id = settings.sales_manager_telegram_id
-    if not sales_manager_id or actor_user_id != sales_manager_id:
+    if not await _actor_can_handle_sales_callback(db, actor_user_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Эта кнопка доступна только назначенному продажнику",
+            detail="Эта кнопка доступна только Shamrai",
         )
 
     forecast_request = await load_forecast_request(db, request_id)

@@ -432,6 +432,7 @@ async def _apply_full_forecast_fields(
 ) -> Bet:
     clean_event_name = (event_name or "").strip()
     clean_outcome = (outcome or "").strip()
+    normalized_match_link = normalize_match_url(match_link)
     if not clean_event_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -441,6 +442,11 @@ async def _apply_full_forecast_fields(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Укажите исход для полной ставки",
+        )
+    if match_link and not normalized_match_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректная ссылка на матч",
         )
 
     coupon_url = await _store_coupon_image(coupon_image)
@@ -455,7 +461,7 @@ async def _apply_full_forecast_fields(
     bet.event_name = clean_event_name
     bet.outcome = clean_outcome
     bet.description = description.strip() if description else None
-    bet.match_link = match_link.strip() if match_link else None
+    bet.match_link = normalized_match_link or None
     if bookmaker_links is not None:
         bet.bookmaker_links = normalize_bookmaker_links(
             bookmaker_links,
@@ -595,15 +601,15 @@ def _web_push_report_values(report: Optional[dict]) -> dict:
 @router.post("/admin/announcements")
 async def create_announcement(
     request: Request,
-    title: str = Form(...),
-    body: Optional[str] = Form(None),
-    announcement_type: str = Form("general"),  # "general" | "bet_promo" | "flash_sale" | "urgent"
-    sport_filter: Optional[str] = Form(None),
+    title: str = Form(..., min_length=1, max_length=160),
+    body: Optional[str] = Form(None, max_length=4000),
+    announcement_type: str = Form("general", max_length=40),  # "general" | "bet_promo" | "flash_sale" | "urgent"
+    sport_filter: Optional[str] = Form(None, max_length=80),
     bookmaker_id: Optional[int] = Form(None),
-    bookmaker_name: Optional[str] = Form(None),
-    bookmaker_names: Optional[str] = Form(None),
-    min_coef: Optional[float] = Form(None),
-    match_link: Optional[str] = Form(None),
+    bookmaker_name: Optional[str] = Form(None, max_length=120),
+    bookmaker_names: Optional[str] = Form(None, max_length=1000),
+    min_coef: Optional[float] = Form(None, ge=1.0, le=999.99),
+    match_link: Optional[str] = Form(None, max_length=2048),
     coupon_image: Optional[UploadFile] = File(None),
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db)
@@ -792,15 +798,15 @@ async def create_announcement(
 @router.post("/admin/forecast-broadcast")
 async def create_forecast_broadcast(
     request: Request,
-    coefficient: Decimal = Form(...),
+    coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
     bookmaker_id: Optional[int] = Form(None),
-    category: str = Form("prematch"),
+    category: str = Form("prematch", max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
-    price_stars: Optional[int] = Form(None),
-    brain_score: Optional[int] = Form(5),
-    api_match_id: Optional[str] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    teaser_text: Optional[str] = Form(None),
+    price_stars: Optional[int] = Form(None, ge=0, le=100000),
+    brain_score: Optional[int] = Form(5, ge=0, le=100),
+    api_match_id: Optional[str] = Form(None, max_length=160),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    teaser_text: Optional[str] = Form(None, max_length=4000),
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -958,12 +964,12 @@ async def create_forecast_broadcast(
 @router.post("/admin/paid-set-broadcast")
 async def create_paid_set_broadcast(
     request: Request,
-    title: str = Form(PAID_SET_PLACEHOLDER_EVENT_NAME),
-    coefficient: Decimal = Form(...),
-    price_rub: int = Form(...),
+    title: str = Form(PAID_SET_PLACEHOLDER_EVENT_NAME, max_length=200),
+    coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
+    price_rub: int = Form(..., ge=1, le=1000000),
     bookmaker_id: Optional[int] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    teaser_text: Optional[str] = Form(None),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    teaser_text: Optional[str] = Form(None, max_length=4000),
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1159,13 +1165,13 @@ async def create_paid_set_broadcast(
 async def prepare_forecast_broadcast_full(
     bet_id: UUID,
     request: Request,
-    event_name: Optional[str] = Form(None),
-    outcome: Optional[str] = Form(None),
-    coefficient: Optional[Decimal] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    match_link: Optional[str] = Form(None),
-    category: Optional[str] = Form(None),
+    event_name: Optional[str] = Form(None, max_length=200),
+    outcome: Optional[str] = Form(None, max_length=200),
+    coefficient: Optional[Decimal] = Form(None, ge=Decimal("1.0"), le=Decimal("999.99")),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    description: Optional[str] = Form(None, max_length=4000),
+    match_link: Optional[str] = Form(None, max_length=2048),
+    category: Optional[str] = Form(None, max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
     auto_send_interested: bool = Form(False),
     coupon_image: Optional[UploadFile] = File(None),
@@ -1325,13 +1331,13 @@ async def list_forecast_requests_page(
 async def send_selected_forecast_requests_from_admin(
     request: Request,
     request_ids: List[UUID] = Form(...),
-    event_name: Optional[str] = Form(None),
-    outcome: Optional[str] = Form(None),
-    coefficient: Optional[Decimal] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    match_link: Optional[str] = Form(None),
-    category: Optional[str] = Form(None),
+    event_name: Optional[str] = Form(None, max_length=200),
+    outcome: Optional[str] = Form(None, max_length=200),
+    coefficient: Optional[Decimal] = Form(None, ge=Decimal("1.0"), le=Decimal("999.99")),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    description: Optional[str] = Form(None, max_length=4000),
+    match_link: Optional[str] = Form(None, max_length=2048),
+    category: Optional[str] = Form(None, max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
     coupon_image: Optional[UploadFile] = File(None),
     current_admin: User = Depends(get_current_privileged_admin),
@@ -1439,13 +1445,13 @@ async def send_selected_forecast_requests_from_admin(
 async def send_forecast_request_from_admin(
     request_id: UUID,
     request: Request,
-    event_name: Optional[str] = Form(None),
-    outcome: Optional[str] = Form(None),
-    coefficient: Optional[Decimal] = Form(None),
-    sport_type: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    match_link: Optional[str] = Form(None),
-    category: Optional[str] = Form(None),
+    event_name: Optional[str] = Form(None, max_length=200),
+    outcome: Optional[str] = Form(None, max_length=200),
+    coefficient: Optional[Decimal] = Form(None, ge=Decimal("1.0"), le=Decimal("999.99")),
+    sport_type: Optional[str] = Form(None, max_length=120),
+    description: Optional[str] = Form(None, max_length=4000),
+    match_link: Optional[str] = Form(None, max_length=2048),
+    category: Optional[str] = Form(None, max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
     coupon_image: Optional[UploadFile] = File(None),
     current_admin: User = Depends(get_current_privileged_admin),

@@ -86,6 +86,30 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
             formats=["xlsx", "google_sheet"],
         )
 
+    async def test_clients_drive_export_can_start_google_sheet_only_job(self):
+        with patch("src.api.admin.start_drive_export_job") as start_job:
+            start_job.return_value = {
+                "id": "job-clients",
+                "status": "pending",
+                "scope": "clients",
+                "period": "all",
+                "formats": ["google_sheet"],
+                "links": [],
+                "error": None,
+            }
+
+            result = await create_admin_stats_drive_export(
+                AdminStatsDriveExportRequest(scope="clients", period="all", formats=["google_sheet"]),
+                admin=object(),
+            )
+
+        self.assertEqual(result["id"], "job-clients")
+        start_job.assert_called_once_with(
+            scope="clients",
+            period="all",
+            formats=["google_sheet"],
+        )
+
     async def test_direct_xlsx_export_supports_shamrai_scope(self):
         db = object()
         with (
@@ -146,6 +170,32 @@ class GoogleDriveUploadTests(unittest.TestCase):
         self.assertEqual(len(service.files_resource.uploaded), 6)
         self.assertEqual({link["format"] for link in links}, {"folder", "xlsx", "google_sheet"})
         self.assertIn("name='Shamrai Stats Exports'", service.files_resource.list_queries[0]["q"])
+
+    def test_upload_artifacts_can_create_google_sheet_without_xlsx_duplicate(self):
+        service = _FakeDriveService()
+        artifacts = [
+            {"folder": "Клиенты/Инфа", "title": "Клиенты - инфа", "xlsx": b"client-info"},
+        ]
+        fake_googleapiclient = types.ModuleType("googleapiclient")
+        fake_http = types.ModuleType("googleapiclient.http")
+        fake_http.MediaFileUpload = lambda path, **_: Path(path)
+        fake_googleapiclient.http = fake_http
+
+        with (
+            patch.object(google_drive_export, "_build_drive_service", return_value=service),
+            patch.object(google_drive_export.settings, "GOOGLE_DRIVE_STATS_FOLDER_ID", "parent-folder"),
+            patch.dict(sys.modules, {
+                "googleapiclient": fake_googleapiclient,
+                "googleapiclient.http": fake_http,
+            }),
+        ):
+            links = google_drive_export._upload_artifacts(artifacts, ["google_sheet"])
+
+        uploaded_names = [body["name"] for body in service.files_resource.uploaded]
+        self.assertEqual(uploaded_names, ["Клиенты - инфа"])
+        self.assertEqual(service.files_resource.uploaded[0]["mimeType"], "application/vnd.google-apps.spreadsheet")
+        self.assertNotIn("Клиенты - инфа.xlsx", uploaded_names)
+        self.assertEqual({link["format"] for link in links}, {"folder", "google_sheet"})
 
 
 if __name__ == "__main__":

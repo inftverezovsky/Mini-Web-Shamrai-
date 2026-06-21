@@ -557,6 +557,130 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox_item.payload["method"], "sendMessage")
         self.assertEqual(outbox_item.payload["payload"]["chat_id"], 987654321)
 
+    async def test_admin_group_take_notification_is_enqueued(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        db = FakeDb()
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            forecast_request = self._forecast_request(self._user())
+            result = await delivery.enqueue_admin_group_forecast_response_notification(
+                db,
+                forecast_request,
+                action="take",
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(db.added), 1)
+        outbox_item = db.added[0]
+        self.assertIsInstance(outbox_item, DeliveryOutbox)
+        self.assertEqual(outbox_item.channel, CHANNEL_TELEGRAM_MESSAGE)
+        self.assertEqual(outbox_item.forecast_request_id, forecast_request.id)
+        payload = outbox_item.payload["payload"]
+        self.assertEqual(payload["chat_id"], -100555)
+        self.assertIn("хочет взять", payload["text"])
+        self.assertIn("France - Northern Ireland", payload["text"])
+        self.assertIn("Client (@client)", payload["text"])
+        self.assertEqual(
+            payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+            f"forecast:sales_send:{forecast_request.id}",
+        )
+
+    async def test_admin_group_decline_notification_is_enqueued_without_buttons(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        db = FakeDb()
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            forecast_request = self._forecast_request(self._user())
+            result = await delivery.enqueue_admin_group_forecast_response_notification(
+                db,
+                forecast_request,
+                action="decline",
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(db.added), 1)
+        payload = db.added[0].payload["payload"]
+        self.assertEqual(payload["chat_id"], -100555)
+        self.assertIn("отказался", payload["text"])
+        self.assertIn("France - Northern Ireland", payload["text"])
+        self.assertNotIn("reply_markup", payload)
+
+    async def test_admin_group_result_notification_includes_forecast_and_taker_count(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        db = FakeDb()
+        bet = self._bet()
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            result = await delivery.enqueue_admin_group_forecast_result_notification(
+                db,
+                bet=bet,
+                status_value="win",
+                taker_count=7,
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(db.added), 1)
+        outbox_item = db.added[0]
+        self.assertEqual(outbox_item.channel, CHANNEL_TELEGRAM_MESSAGE)
+        self.assertEqual(outbox_item.payload["payload"]["chat_id"], -100555)
+        text = outbox_item.payload["payload"]["text"]
+        self.assertIn("Результат прогноза", text)
+        self.assertIn("Выигрыш", text)
+        self.assertIn("Взяли: <b>7</b>", text)
+        self.assertIn("France - Northern Ireland", text)
+        self.assertIn("Total over 3.5", text)
+
+    async def test_sales_callback_authorizes_registered_admin_user(self):
+        admin_user = SimpleNamespace(role="admin")
+
+        class FakeResult:
+            def scalars(self):
+                return self
+
+            def first(self):
+                return admin_user
+
+        class FakeDb:
+            async def execute(self, _query):
+                return FakeResult()
+
+        previous_sales_manager = delivery.settings.SALES_MANAGER_TELEGRAM_ID
+        previous_owner = delivery.settings.OWNER_TELEGRAM_ID
+        try:
+            delivery.settings.SALES_MANAGER_TELEGRAM_ID = None
+            delivery.settings.OWNER_TELEGRAM_ID = None
+            self.assertTrue(await delivery._actor_can_handle_sales_callback(FakeDb(), 900))
+        finally:
+            delivery.settings.SALES_MANAGER_TELEGRAM_ID = previous_sales_manager
+            delivery.settings.OWNER_TELEGRAM_ID = previous_owner
+
     async def test_forecast_auto_delivery_is_enqueued(self):
         class FakeDb:
             def __init__(self):

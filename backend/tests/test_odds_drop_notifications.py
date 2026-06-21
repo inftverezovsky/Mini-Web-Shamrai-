@@ -9,8 +9,8 @@ from sqlalchemy.future import select
 
 from src.api import bets
 from src.models.database import Base
-from src.models.models import Bet, Bookmaker, DeliveryOutbox, User, user_bets
-from src.schemas.schemas import BetOddsDropUpdate, BetUpdate
+from src.models.models import Bet, Bookmaker, DeliveryOutbox, ForecastRequest, User, user_bets
+from src.schemas.schemas import BetOddsDropUpdate, BetResolve, BetUpdate
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE
 
 
@@ -252,3 +252,48 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(exc.exception.status_code, 400)
             self.assertIn("Нет клиентов", str(exc.exception.detail))
+
+    async def test_resolve_bet_queues_admin_group_result_summary(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            taker_one = self._user(101)
+            taker_two = self._user(102)
+            bet = self._bet()
+            request_one = ForecastRequest(
+                bet_id=bet.id,
+                user_id=taker_one.telegram_id,
+                status="sent",
+            )
+            request_two = ForecastRequest(
+                bet_id=bet.id,
+                user_id=taker_two.telegram_id,
+                status="manual_sent",
+            )
+            session.add_all([admin, taker_one, taker_two, bet, request_one, request_two])
+            await session.flush()
+            await self._add_access(session, user=taker_one, bet=bet)
+            await self._add_access(session, user=taker_two, bet=bet)
+            await session.commit()
+
+            previous_chat_id = bets.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+            try:
+                bets.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+                await bets.resolve_bet(
+                    bet.id,
+                    BetResolve(status="win"),
+                    admin=admin,
+                    db=session,
+                )
+            finally:
+                bets.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+            outbox_items = (await session.execute(select(DeliveryOutbox))).scalars().all()
+            group_items = [
+                item
+                for item in outbox_items
+                if item.payload["payload"]["chat_id"] == -100555
+            ]
+            self.assertEqual(len(group_items), 1)
+            self.assertIn("Результат прогноза", group_items[0].payload["payload"]["text"])
+            self.assertIn("Выигрыш", group_items[0].payload["payload"]["text"])
+            self.assertIn("Взяли: <b>2</b>", group_items[0].payload["payload"]["text"])

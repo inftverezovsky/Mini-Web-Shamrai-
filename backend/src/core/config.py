@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     TELEGRAM_USE_POLLING: bool = False
     TELEGRAM_WEBHOOK_IP_ADDRESS: str = ""
     SALES_MANAGER_TELEGRAM_ID: Optional[int] = None
+    TELEGRAM_ADMIN_GROUP_CHAT_ID: Optional[int] = None
     SHAMRAI_ONBOARDING_REPORT_CHAT_ID: Optional[int] = None
     NOTIFICATION_TIMEZONE: str = "Europe/Moscow"
     VK_ID_APP_ID: str = ""

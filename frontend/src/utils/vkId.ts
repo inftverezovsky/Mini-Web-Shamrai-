@@ -38,6 +38,8 @@ export interface VkRedirectResult {
 const VK_CODE_VERIFIER_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const VK_REDIRECT_FLOW_STORAGE_KEY = 'shamrai_vk_redirect_flow';
 const VK_REDIRECT_MAX_AGE_MS = 10 * 60 * 1000;
+const VK_ID_AUTHORIZE_URL = 'https://id.vk.ru/authorize';
+const VK_ID_SDK_VERSION = '2.6.5';
 
 export class VkRedirectStartedError extends Error {
   constructor() {
@@ -50,6 +52,41 @@ function generateVkOAuthToken(length = 64) {
   const bytes = new Uint8Array(length);
   window.crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => VK_CODE_VERIFIER_ALPHABET[byte % VK_CODE_VERIFIER_ALPHABET.length]).join('');
+}
+
+function base64UrlEncode(buffer: ArrayBuffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary).replace(/=*$/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+async function generateVkCodeChallenge(codeVerifier: string) {
+  if (!window.crypto?.subtle) {
+    throw new Error('Браузер не поддерживает защищенный VK ID вход. Обновите браузер и попробуйте еще раз.');
+  }
+
+  const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier));
+  return base64UrlEncode(digest);
+}
+
+async function buildVkRedirectUrl(appId: string, redirectUri: string, state: string, codeVerifier: string) {
+  const codeChallenge = await generateVkCodeChallenge(codeVerifier);
+  const url = new URL(VK_ID_AUTHORIZE_URL);
+  url.searchParams.set('scheme', 'dark');
+  url.searchParams.set('code_challenge', codeChallenge);
+  url.searchParams.set('code_challenge_method', 's256');
+  url.searchParams.set('client_id', appId);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('state', state);
+  url.searchParams.set('prompt', '');
+  url.searchParams.set('v', VK_ID_SDK_VERSION);
+  url.searchParams.set('sdk_type', 'vkid');
+  url.searchParams.set('app_id', appId);
+  url.searchParams.set('redirect_uri', redirectUri);
+  return url.toString();
 }
 
 function isVkAuthResponse(value: unknown): value is AuthResponse {
@@ -194,6 +231,7 @@ export async function startVkRedirectFlow(action: VkRedirectAction): Promise<nev
   const state = `shamrai_vk_${action}_${Date.now()}_${generateVkOAuthToken(24)}`;
   const returnPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
 
+  const redirectUrl = await buildVkRedirectUrl(String(appId), redirectUri, state, codeVerifier);
   sessionStorage.setItem(VK_REDIRECT_FLOW_STORAGE_KEY, JSON.stringify({
     action,
     state,
@@ -201,17 +239,7 @@ export async function startVkRedirectFlow(action: VkRedirectAction): Promise<nev
     returnPath,
     createdAt: Date.now(),
   } satisfies VkRedirectFlow));
-
-  VKID.Config.init({
-    app: Number(appId),
-    redirectUrl: redirectUri,
-    state,
-    codeVerifier,
-    mode: VKID.ConfigAuthMode.Redirect,
-    responseMode: VKID.ConfigResponseMode.Redirect,
-  });
-
-  await VKID.Auth.login({ scheme: VKID.Scheme.DARK });
+  window.location.assign(redirectUrl);
   throw new VkRedirectStartedError();
 }
 

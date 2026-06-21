@@ -1432,7 +1432,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   Заявки на наборы и прогнозы
                 </h3>
                 <p className="text-[10px] text-slate-500 font-bold truncate">
-                  Набор закрывается вручную, прогноз активируется после действия продажника
+                  Набор закрывается вручную, прогноз активируется после действия Shamrai
                 </p>
               </div>
             </div>

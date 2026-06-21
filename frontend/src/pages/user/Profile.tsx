@@ -526,6 +526,9 @@ export default function Profile() {
       setLinkingTelegram(true);
       setTelegramLinkError(null);
       await loginWithTelegramBot();
+      apiFetch('/users/me')
+        .then(setUser)
+        .catch(() => undefined);
     } catch (err: any) {
       setTelegramLinkError(err?.message || 'Не удалось привязать Telegram. Попробуйте еще раз.');
     } finally {

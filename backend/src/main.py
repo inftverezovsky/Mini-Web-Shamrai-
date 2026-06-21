@@ -1,17 +1,19 @@
 import asyncio
+from typing import Optional
 import socket
 import time
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from contextlib import suppress
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.future import select
 
 from src.models.database import Base, engine, AsyncSessionLocal
-from src.models.models import Subscription
+from src.models.models import Subscription, User
+from src.api.deps import get_optional_user_read
 from src.core.config import settings
 from src.core.roles import is_staff_role
 from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
@@ -1011,13 +1013,27 @@ app.include_router(vk_callback.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
 app.include_router(go.router, prefix="/api")
 
+
+async def require_health_diagnostics_access(
+    current_user: Optional[User] = Depends(get_optional_user_read),
+) -> None:
+    if settings.DEBUG_MODE:
+        return
+    if current_user and is_staff_role(current_user.role):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Health diagnostics require staff access",
+    )
+
+
 @app.get("/api/health")
 async def health_check():
     """Simple container sanity health-check."""
     return {"status": "ok", "message": "Betting TMA service active"}
 
 
-@app.get("/api/health/payments")
+@app.get("/api/health/payments", dependencies=[Depends(require_health_diagnostics_access)])
 async def payments_health_check():
     """Safe payment diagnostics without exposing provider credentials."""
     yookassa_return_url = settings.YOOKASSA_RETURN_URL.strip() or settings.FRONTEND_BASE_URL.strip()
@@ -1051,7 +1067,7 @@ async def payments_health_check():
     }
 
 
-@app.get("/api/health/telegram")
+@app.get("/api/health/telegram", dependencies=[Depends(require_health_diagnostics_access)])
 async def telegram_health_check():
     """Safe Telegram diagnostics without exposing tokens or secrets."""
     expected_webhook_url = _telegram_webhook_url()
@@ -1103,7 +1119,7 @@ async def telegram_health_check():
     }
 
 
-@app.get("/api/health/vk")
+@app.get("/api/health/vk", dependencies=[Depends(require_health_diagnostics_access)])
 async def vk_health_check():
     """Fast VK configuration diagnostics without exposing tokens or callback secrets."""
     group_id = vk_group_id()
@@ -1125,7 +1141,7 @@ async def vk_health_check():
     }
 
 
-@app.get("/api/health/vk/deep")
+@app.get("/api/health/vk/deep", dependencies=[Depends(require_health_diagnostics_access)])
 async def vk_deep_health_check():
     """Safe live VK API diagnostics without exposing tokens or callback secrets."""
     group_id = vk_group_id()

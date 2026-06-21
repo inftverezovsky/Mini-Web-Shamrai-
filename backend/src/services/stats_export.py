@@ -110,10 +110,19 @@ class ClientInfoExportRow:
     user_id: int
     client_name: str
     username: str
+    phone: str
+    vk_user_id: str
+    is_web_only: bool
+    bookmaker_names: str
     client_group: str
     client_tag: str
+    created_at: Optional[datetime]
     matches_remaining: int
     guarantee_active: bool
+    total_taken_bets: int
+    settled_bets: int
+    pending_bets: int
+    refund_bets: int
     bets: int
     wins: int
     losses: int
@@ -130,6 +139,33 @@ class ClientInfoExportRow:
     situation_label: str
     situation_tone: str
     situation_description: str
+
+
+@dataclass
+class ClientRecentBetExportRow:
+    user_id: int
+    client_name: str
+    username: str
+    phone: str
+    vk_user_id: str
+    is_web_only: bool
+    client_group: str
+    client_tag: str
+    matches_remaining: int
+    guarantee_active: bool
+    taken_at: Optional[datetime]
+    event_name: str
+    sport_type: str
+    bookmaker_names: str
+    coefficient: Decimal
+    outcome: str
+    status: str
+    result_label: str
+    resolved_at: Optional[datetime]
+    source_type: str
+    access_type: str
+    match_charged: bool
+    bet_id: str
 
 
 def export_unit_stake() -> Decimal:
@@ -157,6 +193,20 @@ def _user_match_balance(user: User) -> int:
     )
 
 
+def _bookmakers_for_user(user: User) -> str:
+    names: list[str] = []
+    seen = set()
+    for bookmaker in list(getattr(user, "bookmakers", None) or []):
+        name = str(getattr(bookmaker, "name", "") or "").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    other_name = str(getattr(user, "other_bookmaker_name", "") or "").strip()
+    if other_name and other_name.lower() not in seen:
+        names.append(other_name)
+    return ", ".join(names)
+
+
 def _bookmakers_for_bet(bet: Bet) -> list[dict[str, Any]]:
     bookmakers = []
     seen_ids = set()
@@ -181,6 +231,8 @@ def _status_label(status: str) -> str:
         return "Победа"
     if status == "loss":
         return "Поражение"
+    if status == "pending":
+        return "Ожидает расчета"
     return "Возврат"
 
 
@@ -668,12 +720,23 @@ def _streak_label(streak_type: Optional[str], count: int) -> str:
     return f"{count} {label}"
 
 
+def _yes_no(value: bool) -> str:
+    return "Да" if value else "Нет"
+
+
+def _excel_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    moscow_value = as_moscow_datetime(value)
+    return moscow_value.replace(tzinfo=None) if moscow_value else None
+
+
 def build_client_info_export_workbook(
     rows: Iterable[ClientInfoExportRow],
     *,
     period_label: str,
+    recent_rows: Optional[Iterable[ClientRecentBetExportRow]] = None,
 ) -> bytes:
     row_list = list(rows)
+    recent_row_list = list(recent_rows or [])
     wb = Workbook()
     ws = wb.active
     ws.title = "Инфа"
@@ -683,10 +746,19 @@ def build_client_info_export_workbook(
         "ID",
         "Клиент",
         "Username",
+        "Телефон",
+        "VK ID",
+        "Web/VK клиент",
         "Группа",
         "Тег",
+        "БК клиента",
+        "Дата регистрации",
         "Матчей осталось",
         "Гарантия",
+        "Взял матчей всего",
+        "Рассчитано матчей",
+        "Ожидают расчета",
+        "Возвраты",
         "Ставки",
         "Победы",
         "Поражения",
@@ -711,10 +783,19 @@ def build_client_info_export_workbook(
             row_data.user_id,
             row_data.client_name,
             f"@{row_data.username}" if row_data.username else "",
+            row_data.phone,
+            row_data.vk_user_id,
+            _yes_no(row_data.is_web_only),
             row_data.client_group,
             row_data.client_tag,
+            row_data.bookmaker_names,
+            _excel_datetime(row_data.created_at),
             row_data.matches_remaining,
-            "Да" if row_data.guarantee_active else "Нет",
+            _yes_no(row_data.guarantee_active),
+            row_data.total_taken_bets,
+            row_data.settled_bets,
+            row_data.pending_bets,
+            row_data.refund_bets,
             row_data.bets,
             row_data.wins,
             row_data.losses,
@@ -731,10 +812,11 @@ def build_client_info_export_workbook(
         ]
         for col, value in enumerate(values, 1):
             ws.cell(row=row_idx, column=col, value=value)
-        ws.cell(row=row_idx, column=12).number_format = PERCENT_FORMAT
-        ws.cell(row=row_idx, column=13).number_format = PERCENT_FORMAT
-        ws.cell(row=row_idx, column=14).number_format = FLAT_FORMAT
-        ws.cell(row=row_idx, column=15).number_format = COEF_FORMAT
+        ws.cell(row=row_idx, column=11).number_format = DATE_FORMAT
+        ws.cell(row=row_idx, column=21).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=22).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=23).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=24).number_format = COEF_FORMAT
         if row_data.situation_tone == "danger":
             fill = PatternFill("solid", fgColor="FEF2F2")
         elif row_data.situation_tone == "warning":
@@ -752,9 +834,90 @@ def build_client_info_export_workbook(
         _set_border(ws, 1, 1, 1, len(headers))
     _autosize(ws)
     ws.freeze_panes = "A2"
+    _write_client_recent_bets_sheet(wb, recent_row_list)
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExportRow]) -> None:
+    ws = wb.create_sheet("Последние 50")
+    ws.sheet_view.showGridLines = False
+    headers = [
+        "ID",
+        "Клиент",
+        "Username",
+        "Телефон",
+        "VK ID",
+        "Web/VK клиент",
+        "Группа",
+        "Тег",
+        "Матчей осталось",
+        "Гарантия",
+        "Дата взятия",
+        "Матч",
+        "Вид спорта",
+        "БК",
+        "Коэфф.",
+        "Ставка",
+        "Статус",
+        "Дата расчета",
+        "Источник",
+        "Тип доступа",
+        "Матч списан",
+        "ID ставки",
+    ]
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_range_header(ws, 1, 1, len(headers), "111827")
+
+    for row_idx, row_data in enumerate(rows, 2):
+        values = [
+            row_data.user_id,
+            row_data.client_name,
+            f"@{row_data.username}" if row_data.username else "",
+            row_data.phone,
+            row_data.vk_user_id,
+            _yes_no(row_data.is_web_only),
+            row_data.client_group,
+            row_data.client_tag,
+            row_data.matches_remaining,
+            _yes_no(row_data.guarantee_active),
+            _excel_datetime(row_data.taken_at),
+            row_data.event_name,
+            row_data.sport_type,
+            row_data.bookmaker_names,
+            row_data.coefficient,
+            row_data.outcome,
+            row_data.result_label,
+            _excel_datetime(row_data.resolved_at),
+            row_data.source_type,
+            row_data.access_type,
+            _yes_no(row_data.match_charged),
+            row_data.bet_id,
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_idx, column=col, value=value)
+        ws.cell(row=row_idx, column=11).number_format = DATE_FORMAT
+        ws.cell(row=row_idx, column=15).number_format = COEF_FORMAT
+        ws.cell(row=row_idx, column=18).number_format = DATE_FORMAT
+        if row_data.status == "win":
+            fill = PatternFill("solid", fgColor="ECFDF5")
+        elif row_data.status == "loss":
+            fill = PatternFill("solid", fgColor="FEF2F2")
+        elif row_data.status == "pending":
+            fill = PatternFill("solid", fgColor="FFFBEB")
+        else:
+            fill = PatternFill("solid", fgColor="F8FAFC")
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=row_idx, column=col).fill = fill
+
+    if rows:
+        _set_border(ws, 1, len(rows) + 1, 1, len(headers))
+    else:
+        _set_border(ws, 1, 1, 1, len(headers))
+    _autosize(ws)
+    ws.freeze_panes = "A2"
 
 
 def build_stats_export_workbook(
@@ -881,10 +1044,36 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
     users_result = await db.execute(
         select(User)
         .filter(User.role.notin_(list(STAFF_ROLES)))
+        .options(selectinload(User.bookmakers))
         .order_by(User.created_at.desc(), User.telegram_id.desc())
     )
     users = users_result.scalars().all()
     grouped_items: dict[int, list[dict[str, Any]]] = {user.telegram_id: [] for user in users}
+    taken_counts: dict[int, dict[str, int]] = {
+        user.telegram_id: {
+            "total": 0,
+            "settled": 0,
+            "pending": 0,
+            "refund": 0,
+        }
+        for user in users
+    }
+
+    counts_query = (
+        select(User.telegram_id, Bet.status, user_bets.c.access_type, user_bets.c.match_charged)
+        .join(user_bets, user_bets.c.user_id == User.telegram_id)
+        .join(Bet, Bet.id == user_bets.c.bet_id)
+        .filter(User.role.notin_(list(STAFF_ROLES)))
+    )
+    for user_id, bet_status, access_type, match_charged in (await db.execute(counts_query)).all():
+        counts = taken_counts.setdefault(user_id, {"total": 0, "settled": 0, "pending": 0, "refund": 0})
+        counts["total"] += 1
+        if bet_status in {"win", "loss"}:
+            counts["settled"] += 1
+        elif bet_status == "pending":
+            counts["pending"] += 1
+        elif bet_status == "refund":
+            counts["refund"] += 1
 
     query = (
         select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
@@ -923,10 +1112,19 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             user_id=user.telegram_id,
             client_name=_display_user(user),
             username=user.username or "",
+            phone=user.phone or "",
+            vk_user_id=user.vk_user_id or "",
+            is_web_only=bool(user.is_web_only),
+            bookmaker_names=_bookmakers_for_user(user),
             client_group=user.client_group or "",
             client_tag=user.client_tag or "",
+            created_at=user.created_at,
             matches_remaining=_user_match_balance(user),
             guarantee_active=bool(user.guarantee_active),
+            total_taken_bets=int(taken_counts.get(user.telegram_id, {}).get("total", 0)),
+            settled_bets=int(taken_counts.get(user.telegram_id, {}).get("settled", 0)),
+            pending_bets=int(taken_counts.get(user.telegram_id, {}).get("pending", 0)),
+            refund_bets=int(taken_counts.get(user.telegram_id, {}).get("refund", 0)),
             bets=int(summary["bets"]),
             wins=int(summary["wins"]),
             losses=int(summary["losses"]),
@@ -951,3 +1149,62 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         -row.profit_units,
         row.client_name.lower(),
     ))
+
+
+async def load_client_recent_bet_export_rows(
+    db: AsyncSession,
+    period: str,
+    *,
+    limit_per_client: int = 50,
+) -> list[ClientRecentBetExportRow]:
+    query = (
+        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        .join(user_bets, user_bets.c.user_id == User.telegram_id)
+        .join(Bet, Bet.id == user_bets.c.bet_id)
+        .filter(
+            User.role.notin_(list(STAFF_ROLES)),
+            Bet.status.in_(["pending", "win", "loss", "refund"]),
+        )
+        .options(selectinload(User.bookmakers), selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .order_by(User.telegram_id.asc(), user_bets.c.taken_at.desc(), Bet.created_at.desc())
+    )
+    start = period_start(period)
+    if start:
+        query = query.filter(user_bets.c.taken_at >= start)
+
+    rows: list[ClientRecentBetExportRow] = []
+    per_user_counts: dict[int, int] = defaultdict(int)
+    for user, bet, access_type, match_charged, taken_at in (await db.execute(query)).all():
+        if per_user_counts[user.telegram_id] >= limit_per_client:
+            continue
+        per_user_counts[user.telegram_id] += 1
+
+        bookmakers = _bookmakers_for_bet(bet)
+        bookmaker_names = ", ".join(bookmaker["name"] for bookmaker in bookmakers) or "Без БК"
+        delivery_mode = str(getattr(bet, "delivery_mode", None) or "feed")
+        rows.append(ClientRecentBetExportRow(
+            user_id=user.telegram_id,
+            client_name=_display_user(user),
+            username=user.username or "",
+            phone=user.phone or "",
+            vk_user_id=user.vk_user_id or "",
+            is_web_only=bool(user.is_web_only),
+            client_group=user.client_group or "",
+            client_tag=user.client_tag or "",
+            matches_remaining=_user_match_balance(user),
+            guarantee_active=bool(user.guarantee_active),
+            taken_at=taken_at,
+            event_name=str(getattr(bet, "event_name", "") or ""),
+            sport_type=str(getattr(bet, "sport_type", None) or "Без спорта"),
+            bookmaker_names=bookmaker_names,
+            coefficient=Decimal(str(getattr(bet, "coefficient", None) or "0")),
+            outcome=str(getattr(bet, "outcome", None) or ""),
+            status=str(getattr(bet, "status", "") or ""),
+            result_label=_status_label(str(getattr(bet, "status", "") or "")),
+            resolved_at=getattr(bet, "resolved_at", None),
+            source_type="feed" if delivery_mode == "feed" else "private",
+            access_type=str(access_type or ""),
+            match_charged=bool(match_charged),
+            bet_id=str(bet.id),
+        ))
+    return rows
