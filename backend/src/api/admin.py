@@ -16,6 +16,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from src.models.database import get_db, get_read_db
+from src.api.auth import _merge_web_only_user_into_telegram
 from src.models.models import (
     AdminAuditLog,
     Bet,
@@ -134,6 +135,11 @@ class AdminCrmDriveExportRequest(BaseModel):
     group: Optional[str] = None
     tag: Optional[str] = None
     formats: List[str] = Field(default_factory=lambda: ["google_sheet"])
+
+
+class AdminUserMergeRequest(BaseModel):
+    target_user_id: int = Field(gt=0)
+    reason: Optional[str] = Field(default=None, max_length=400)
 
 
 async def load_user_response(db: AsyncSession, telegram_id: int) -> User:
@@ -1698,6 +1704,73 @@ async def admin_update_user(
     telegram_id = user.telegram_id
     await db.commit()
     return await load_user_response(db, telegram_id)
+
+
+@router.post("/users/{source_user_id}/merge", response_model=UserResponse)
+async def admin_merge_user(
+    source_user_id: int,
+    data: AdminUserMergeRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    POST /api/admin/users/{source_user_id}/merge
+    Safely merges a legacy shadow/VK-only client profile into a canonical Telegram client.
+    """
+    if source_user_id == data.target_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Нельзя слить профиль сам в себя",
+        )
+
+    source = await load_user_response(db, source_user_id)
+    target = await load_user_response(db, data.target_user_id)
+    if not source or not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source или target пользователь не найден",
+        )
+
+    if normalize_role(source.role) != "user" or normalize_role(target.role) != "user":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Можно сливать только клиентские профили без staff-ролей",
+        )
+    if source.telegram_id > 0 and target.telegram_id > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Два реальных Telegram-профиля нельзя сливать автоматически",
+        )
+    if target.telegram_id < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target должен быть каноническим Telegram-профилем",
+        )
+    if source.vk_user_id and target.vk_user_id and source.vk_user_id != target.vk_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="VK ID source и target отличаются. Выберите правильный target вручную",
+        )
+
+    source_details = {
+        "source_user_id": source.telegram_id,
+        "target_user_id": target.telegram_id,
+        "source_vk_user_id": source.vk_user_id,
+        "target_vk_user_id": target.vk_user_id,
+        "reason": data.reason,
+    }
+    await _merge_web_only_user_into_telegram(db, source, target)
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="user_merged",
+        target_user_id=target.telegram_id,
+        details=source_details,
+    )
+
+    target_id = target.telegram_id
+    await db.commit()
+    return await load_user_response(db, target_id)
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_200_OK)

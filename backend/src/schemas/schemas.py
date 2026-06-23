@@ -55,6 +55,9 @@ class UserCreate(UserBase):
 
 class UserResponse(UserBase):
     role: str
+    identity_complete: bool = False
+    identity_providers: List[str] = Field(default_factory=list)
+    missing_identity_providers: List[str] = Field(default_factory=list)
     stats_display_mode: str
     bankroll: float
     is_onboarded: bool = False

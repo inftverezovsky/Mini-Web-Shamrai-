@@ -929,6 +929,20 @@ function getMockBookmakerIds() {
   }
 }
 
+function withMockIdentityFields<T extends { telegram_id: number; vk_user_id: string | null }>(user: T) {
+  const identityProviders = [
+    ...(user.telegram_id > 0 ? ['telegram'] : []),
+    ...(user.vk_user_id ? ['vk'] : []),
+  ];
+  const missingIdentityProviders = ['telegram', 'vk'].filter((provider) => !identityProviders.includes(provider));
+  return {
+    ...user,
+    identity_complete: missingIdentityProviders.length === 0,
+    identity_providers: identityProviders,
+    missing_identity_providers: missingIdentityProviders,
+  };
+}
+
 function getMockUser() {
   const mockRole = localStorage.getItem(DEBUG_ROLE_STORAGE_KEY) || 'user';
   const isAdmin = mockRole === 'admin';
@@ -938,7 +952,7 @@ function getMockUser() {
   const isOnboarded = onboardedOverride === null ? false : onboardedOverride === 'true';
   const preferences = getMockPreferences();
 
-  return {
+  return withMockIdentityFields({
     telegram_id: isAdmin ? 987654321 : 123456789,
     username: isAdmin ? 'debug_admin' : 'debug_user',
     first_name: isAdmin ? 'Алексей' : 'Иван',
@@ -983,7 +997,7 @@ function getMockUser() {
     updated_at: now,
     bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => bookmakerIds.includes(bookmaker.id)),
     badges: [],
-  };
+  });
 }
 
 export function mockApiFetch(endpoint: string, options: RequestInit) {
@@ -997,7 +1011,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     return {
       access_token: 'mock_debug_access_token',
       token_type: 'bearer',
-      user: {
+      user: withMockIdentityFields({
         ...getMockUser(),
         telegram_id: -1000741852963,
         username: null,
@@ -1007,7 +1021,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         role: 'user',
         tg_chat_joined: false,
         vk_user_id: vkUserId,
-      },
+      }),
     };
   }
 

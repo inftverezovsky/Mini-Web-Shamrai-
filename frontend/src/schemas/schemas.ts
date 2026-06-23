@@ -21,6 +21,9 @@ export interface UserResponse {
   phone: string | null;
   photo_url: string | null;
   is_web_only: boolean;
+  identity_complete: boolean;
+  identity_providers: string[];
+  missing_identity_providers: string[];
   role: 'owner' | 'admin' | 'moderator' | 'user';
   stats_display_mode: 'percent' | 'flat';
   bankroll: number;

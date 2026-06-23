@@ -1,0 +1,37 @@
+"""add identity device links
+
+Revision ID: 20260623_0027
+Revises: 20260623_0026
+Create Date: 2026-06-23
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "20260623_0027"
+down_revision = "20260623_0026"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "identity_device_links",
+        sa.Column("device_key_hash", sa.String(length=64), nullable=False),
+        sa.Column("source_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.ForeignKeyConstraint(["source_user_id"], ["users.telegram_id"], ondelete="SET NULL"),
+        sa.PrimaryKeyConstraint("device_key_hash"),
+    )
+    op.create_index(
+        "ix_identity_device_links_source_user_id",
+        "identity_device_links",
+        ["source_user_id"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_identity_device_links_source_user_id", table_name="identity_device_links")
+    op.drop_table("identity_device_links")

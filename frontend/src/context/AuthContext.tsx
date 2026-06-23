@@ -16,6 +16,7 @@ import {
   loginVkProfile,
   rememberVkAuthCooldownForMessage,
 } from '../utils/vkId';
+import { identityDeviceHeader } from '../utils/identityDevice';
 
 export interface TelegramWidgetPayload {
   id: number;
@@ -99,6 +100,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const onboardedOverride = localStorage.getItem('bet_tma_mock_is_onboarded');
     const isOnboarded = onboardedOverride === null ? false : onboardedOverride === 'true';
     const now = new Date().toISOString();
+    const vkUserId = localStorage.getItem('bet_tma_mock_vk_user_id');
+    const identityProviders = [
+      'telegram',
+      ...(vkUserId ? ['vk'] : []),
+    ];
+    const missingIdentityProviders = ['telegram', 'vk'].filter((provider) => !identityProviders.includes(provider));
 
     return {
       telegram_id: isAdmin ? 987654321 : 123456789,
@@ -108,6 +115,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       phone: null,
       photo_url: null,
       is_web_only: false,
+      identity_complete: missingIdentityProviders.length === 0,
+      identity_providers: identityProviders,
+      missing_identity_providers: missingIdentityProviders,
       role: isAdmin ? 'admin' : 'user',
       stats_display_mode: 'percent',
       bankroll: 50000,
@@ -117,7 +127,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       favorite_sports: [],
       risk_tolerance: 'balanced',
       primary_bookmaker: 'fonbet',
-      vk_user_id: localStorage.getItem('bet_tma_mock_vk_user_id'),
+      vk_user_id: vkUserId,
       vk_group_member: localStorage.getItem('bet_tma_mock_vk_group_member') === 'true',
       vk_messages_allowed: localStorage.getItem('bet_tma_mock_vk_messages_allowed') === 'true',
       vk_notifications_allowed: localStorage.getItem('bet_tma_mock_vk_notifications_allowed') === 'true',
@@ -163,10 +173,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const fetchCurrentUser = useCallback(async (candidateToken?: string | null) => {
-    const headers = candidateToken ? { Authorization: `Bearer ${candidateToken}` } : undefined;
+    const headers = {
+      ...identityDeviceHeader(),
+      ...(candidateToken ? { Authorization: `Bearer ${candidateToken}` } : {}),
+    };
     const response = await fetch(`${API_URL}/api/users/me`, {
       credentials: 'include',
-      ...(headers ? { headers } : {}),
+      headers,
     });
 
     if (!response.ok) {
@@ -188,6 +201,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
+        ...identityDeviceHeader(),
       },
       body: JSON.stringify({ initData }),
     });
@@ -336,6 +350,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
+          ...identityDeviceHeader(),
         },
         body: JSON.stringify(payload),
       });
@@ -421,6 +436,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     void fetch(`${API_URL}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include',
+      headers: identityDeviceHeader(),
       body: '',
     }).catch(() => undefined);
     clearStoredAuth();

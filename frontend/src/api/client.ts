@@ -1,6 +1,7 @@
 import { API_BASE_URL, AUTH_EXPIRED_EVENT } from '../config/api';
 import { formatApiErrorMessage } from './errors';
 import { clearStoredAuthToken, getStoredAuthToken } from '../utils/authStorage';
+import { identityDeviceHeader } from '../utils/identityDevice';
 
 export async function requestApi<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = getStoredAuthToken();
@@ -8,6 +9,7 @@ export async function requestApi<T = any>(endpoint: string, options: RequestInit
 
   const headers = {
     ...(!isFormData && options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...identityDeviceHeader(),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers || {}),
   };

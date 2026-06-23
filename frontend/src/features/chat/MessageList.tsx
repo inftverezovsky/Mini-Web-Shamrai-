@@ -13,7 +13,7 @@ interface MessageListProps {
   className?: string;
 }
 
-export default function MessageList({
+function MessageList({
   items,
   loading = false,
   empty,
@@ -24,7 +24,7 @@ export default function MessageList({
     count: items.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 132,
-    overscan: 7,
+    overscan: 1,
   });
 
   useEffect(() => {
@@ -36,7 +36,7 @@ export default function MessageList({
   }, [items.length]);
 
   return (
-    <div ref={parentRef} className={`web-bot-chat__list min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 ${className}`}>
+    <div ref={parentRef} className={`web-bot-chat__list min-h-0 min-w-0 flex-1 transform-gpu overflow-y-auto px-3 py-3 will-change-transform sm:px-4 sm:py-4 ${className}`}>
       {loading && (
         <div className="flex min-h-[118px] w-full items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-200" />
@@ -62,7 +62,7 @@ export default function MessageList({
                 key={item.key}
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
-                className="absolute left-0 top-0 w-full pb-3"
+                className="web-bot-chat__virtual-row absolute left-0 top-0 w-full transform-gpu pb-3 will-change-transform"
                 style={{ transform: `translateY(${virtualItem.start}px)` }}
               >
                 {item.element}
@@ -74,3 +74,5 @@ export default function MessageList({
     </div>
   );
 }
+
+export default React.memo(MessageList);

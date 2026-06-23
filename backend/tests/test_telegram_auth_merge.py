@@ -1,4 +1,6 @@
 import unittest
+import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -6,9 +8,25 @@ from fastapi import HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.api import admin as admin_api
 from src.api import auth
 from src.models.database import Base
-from src.models.models import User
+from src.models.models import (
+    AdminAuditLog,
+    Bet,
+    ChatConversation,
+    ChatMessage,
+    ChatReadCursor,
+    DeliveryOutbox,
+    IdentityDeviceLink,
+    MatchBalanceLog,
+    MessageTemplate,
+    PaymentAttempt,
+    PersonalSignal,
+    PersonalSignalReadCursor,
+    Subscription,
+    User,
+)
 from src.services.telegram_auth import confirm_telegram_bot_auth_session, create_telegram_bot_auth_session
 
 
@@ -196,6 +214,300 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(users), 1)
             self.assertEqual(users[0].telegram_id, 123456789)
             self.assertEqual(users[0].vk_user_id, "741852963")
+
+    async def test_vk_first_then_telegram_same_device_merges_into_one_user(self):
+        device_id = "550e8400-e29b-41d4-a716-446655440000"
+        async with self.Session() as db:
+            with patch.object(
+                auth,
+                "_exchange_vk_or_502",
+                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            ):
+                vk_response = await auth.vk_id_login(
+                    auth.VkOAuthCodeRequest(
+                        code="code",
+                        device_id="device",
+                        code_verifier="verifier",
+                        state="state",
+                    ),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
+
+            self.assertLess(vk_response.user.telegram_id, 0)
+            self.assertEqual(vk_response.user.identity_providers, ["vk"])
+            self.assertEqual(vk_response.user.missing_identity_providers, ["telegram"])
+
+            with patch.object(
+                auth,
+                "verify_telegram_init_data",
+                return_value={"id": 223456789, "first_name": "Telegram", "username": "tg_user"},
+            ):
+                tg_response = await auth.login_user(
+                    auth.LoginRequest(initData="signed"),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
+
+            self.assertEqual(tg_response.user.telegram_id, 223456789)
+            self.assertEqual(tg_response.user.vk_user_id, "741852963")
+            self.assertTrue(tg_response.user.identity_complete)
+            self.assertEqual(tg_response.user.identity_providers, ["telegram", "vk"])
+
+            result = await db.execute(select(User))
+            users = result.scalars().all()
+            self.assertEqual(len(users), 1)
+            self.assertEqual(users[0].telegram_id, 223456789)
+            self.assertEqual(users[0].vk_user_id, "741852963")
+
+    async def test_telegram_first_then_vk_same_device_attaches_vk_to_telegram_user(self):
+        device_id = "550e8400-e29b-41d4-a716-446655440001"
+        async with self.Session() as db:
+            with patch.object(
+                auth,
+                "verify_telegram_init_data",
+                return_value={"id": 323456789, "first_name": "Telegram", "username": "tg_user"},
+            ):
+                tg_response = await auth.login_user(
+                    auth.LoginRequest(initData="signed"),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
+
+            self.assertEqual(tg_response.user.telegram_id, 323456789)
+            self.assertFalse(tg_response.user.identity_complete)
+            self.assertEqual(tg_response.user.missing_identity_providers, ["vk"])
+
+            with patch.object(
+                auth,
+                "_exchange_vk_or_502",
+                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            ):
+                vk_response = await auth.vk_id_login(
+                    auth.VkOAuthCodeRequest(
+                        code="code",
+                        device_id="device",
+                        code_verifier="verifier",
+                        state="state",
+                    ),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
+
+            self.assertEqual(vk_response.user.telegram_id, 323456789)
+            self.assertEqual(vk_response.user.vk_user_id, "741852963")
+            self.assertTrue(vk_response.user.identity_complete)
+
+            result = await db.execute(select(User))
+            users = result.scalars().all()
+            self.assertEqual(len(users), 1)
+            self.assertEqual(users[0].telegram_id, 323456789)
+            self.assertEqual(users[0].vk_user_id, "741852963")
+
+    async def test_device_binding_does_not_auto_merge_different_real_telegram_profiles(self):
+        device_id = "550e8400-e29b-41d4-a716-446655440002"
+        async with self.Session() as db:
+            first_user = User(
+                telegram_id=111111111,
+                first_name="First",
+                role="user",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            db.add(first_user)
+            await db.flush()
+            await auth._bind_identity_device(db, device_id, first_user)
+            await db.commit()
+
+            with patch.object(
+                auth,
+                "verify_telegram_init_data",
+                return_value={"id": 222222222, "first_name": "Second"},
+            ):
+                response = await auth.login_user(
+                    auth.LoginRequest(initData="signed"),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
+
+            self.assertEqual(response.user.telegram_id, 222222222)
+            result = await db.execute(select(User).order_by(User.telegram_id))
+            users = result.scalars().all()
+            self.assertEqual([user.telegram_id for user in users], [111111111, 222222222])
+
+    async def test_vk_login_conflicts_when_vk_belongs_to_another_real_telegram(self):
+        device_id = "550e8400-e29b-41d4-a716-446655440003"
+        async with self.Session() as db:
+            existing_vk_owner = User(
+                telegram_id=111111111,
+                first_name="VK Owner",
+                role="user",
+                stats_display_mode="percent",
+                vk_user_id="741852963",
+                tg_chat_joined=False,
+            )
+            device_user = User(
+                telegram_id=222222222,
+                first_name="Device User",
+                role="user",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            db.add_all([existing_vk_owner, device_user])
+            await db.flush()
+            await auth._bind_identity_device(db, device_id, device_user)
+            await db.commit()
+
+            with patch.object(
+                auth,
+                "_exchange_vk_or_502",
+                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            ):
+                with self.assertRaises(HTTPException) as exc:
+                    await auth.vk_id_login(
+                        auth.VkOAuthCodeRequest(
+                            code="code",
+                            device_id="device",
+                            code_verifier="verifier",
+                            state="state",
+                        ),
+                        response=Response(),
+                        identity_device_id=device_id,
+                        current_user=None,
+                        db=db,
+                    )
+
+            self.assertEqual(exc.exception.status_code, 409)
+
+    async def test_admin_merge_moves_extended_user_related_records_and_deletes_source(self):
+        async with self.Session() as db:
+            admin_user = User(
+                telegram_id=999999999,
+                first_name="Admin",
+                role="admin",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            source = await auth._create_vk_only_user(db, "741852963", "VK Client")
+            target = User(
+                telegram_id=123456789,
+                first_name="Telegram",
+                role="user",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            bet = Bet(
+                id=uuid.uuid4(),
+                event_name="Test match",
+                coefficient=Decimal("1.90"),
+                author_id=source.telegram_id,
+            )
+            db.add_all([admin_user, target, bet])
+            await db.flush()
+
+            subscription = Subscription(user_id=source.telegram_id, status="active")
+            payment = PaymentAttempt(
+                user_id=source.telegram_id,
+                provider="debug",
+                status="pending",
+                amount=Decimal("10.00"),
+            )
+            balance_log = MatchBalanceLog(user_id=source.telegram_id, event_type="test", delta_matches=3)
+            signal = PersonalSignal(user_id=source.telegram_id, text="signal")
+            conversation = ChatConversation(
+                id=uuid.uuid4(),
+                owner_user_id=source.telegram_id,
+                kind="support",
+                status="open",
+            )
+            message = ChatMessage(
+                conversation_id=conversation.id,
+                sender_user_id=source.telegram_id,
+                sender_role="client",
+                text="hello",
+                client_message_id=uuid.uuid4(),
+            )
+            read_cursor = ChatReadCursor(
+                conversation_id=conversation.id,
+                user_id=source.telegram_id,
+            )
+            outbox = DeliveryOutbox(
+                id=uuid.uuid4(),
+                channel="vk",
+                user_id=source.telegram_id,
+                payload={},
+            )
+            audit_log = AdminAuditLog(
+                actor_id=source.telegram_id,
+                target_user_id=source.telegram_id,
+                action="legacy",
+                details={},
+            )
+            template = MessageTemplate(
+                key="identity_merge_test",
+                title="Test",
+                body="Body",
+                variables=[],
+                updated_by=source.telegram_id,
+            )
+            device_link = IdentityDeviceLink(
+                device_key_hash="a" * 64,
+                source_user_id=source.telegram_id,
+            )
+            db.add_all([
+                subscription,
+                payment,
+                balance_log,
+                signal,
+                conversation,
+                message,
+                read_cursor,
+                outbox,
+                audit_log,
+                template,
+                device_link,
+            ])
+            await db.flush()
+            signal_cursor = PersonalSignalReadCursor(
+                user_id=source.telegram_id,
+                last_read_signal_id=signal.id,
+            )
+            db.add(signal_cursor)
+            await db.commit()
+
+            response = await admin_api.admin_merge_user(
+                source.telegram_id,
+                admin_api.AdminUserMergeRequest(target_user_id=target.telegram_id, reason="duplicate"),
+                admin=admin_user,
+                db=db,
+            )
+
+            self.assertEqual(response.telegram_id, target.telegram_id)
+            self.assertEqual(response.vk_user_id, "741852963")
+            self.assertIsNone(await db.get(User, source.telegram_id))
+            self.assertEqual((await db.get(Subscription, subscription.id)).user_id, target.telegram_id)
+            self.assertEqual((await db.get(PaymentAttempt, payment.id)).user_id, target.telegram_id)
+            self.assertEqual((await db.get(MatchBalanceLog, balance_log.id)).user_id, target.telegram_id)
+            self.assertEqual((await db.get(PersonalSignal, signal.id)).user_id, target.telegram_id)
+            self.assertEqual((await db.get(ChatConversation, conversation.id)).owner_user_id, target.telegram_id)
+            self.assertEqual((await db.get(ChatMessage, message.id)).sender_user_id, target.telegram_id)
+            self.assertIsNotNone(await db.get(ChatReadCursor, {"conversation_id": conversation.id, "user_id": target.telegram_id}))
+            self.assertEqual((await db.get(PersonalSignalReadCursor, target.telegram_id)).last_read_signal_id, signal.id)
+            self.assertEqual((await db.get(DeliveryOutbox, outbox.id)).user_id, target.telegram_id)
+            self.assertEqual((await db.get(AdminAuditLog, audit_log.id)).actor_id, target.telegram_id)
+            self.assertEqual((await db.get(AdminAuditLog, audit_log.id)).target_user_id, target.telegram_id)
+            self.assertEqual((await db.get(MessageTemplate, template.key)).updated_by, target.telegram_id)
+            self.assertEqual((await db.get(IdentityDeviceLink, device_link.device_key_hash)).source_user_id, target.telegram_id)
 
     async def test_promotes_web_only_phone_profile_without_losing_balance(self):
         async with self.Session() as db:

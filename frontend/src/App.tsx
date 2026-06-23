@@ -9,6 +9,7 @@ import BottomNavigation from './components/BottomNavigation';
 import type { AdminShellTabId, UserTabId } from './components/BottomNavigation';
 import BrowserAuthScreen from './components/BrowserAuthScreen';
 import DesktopNavigation from './components/DesktopNavigation';
+import IdentityLinkGate from './components/IdentityLinkGate';
 import NotificationCenter from './components/NotificationCenter';
 import PwaPushGate from './components/PwaPushGate';
 import VkConsentWizard from './components/VkConsentWizard';
@@ -306,15 +307,35 @@ export default function App() {
   const isAdmin = userProfile ? isStaffRole(userProfile.role) : false;
   const showAdminInterface = isAdmin && !adminPreviewMode;
   const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
+  const requiresIdentityGate = Boolean(
+    userProfile
+    && !isStaffRole(userProfile.role)
+    && userProfile.identity_complete === false,
+  );
   const needsOnboarding = Boolean(
     userProfile
     && (forceOnboarding || userProfile.is_onboarded === false)
-    && !isStaffRole(userProfile.role),
+    && !isStaffRole(userProfile.role)
+    && !requiresIdentityGate,
   );
-  const showWebChatTab = Boolean(userProfile) && !runsInTelegramMiniApp && !showAdminInterface && !needsOnboarding;
+  const showWebChatTab = Boolean(userProfile)
+    && !runsInTelegramMiniApp
+    && !showAdminInterface
+    && !needsOnboarding
+    && !requiresIdentityGate;
 
   useEffect(() => {
     if (!introComplete || !userProfile) return;
+
+    if (requiresIdentityGate) {
+      trackPageView('/app/user/identity', {
+        role: 'user',
+        tab: 'identity',
+        layout: isCompact ? 'compact' : 'full',
+        onboarded: userProfile.is_onboarded !== false,
+      });
+      return;
+    }
 
     if (needsOnboarding) {
       trackPageView('/app/user/onboarding', {
@@ -345,6 +366,7 @@ export default function App() {
     introComplete,
     isCompact,
     needsOnboarding,
+    requiresIdentityGate,
     showAdminInterface,
     showWebChatTab,
     userProfile,
@@ -381,7 +403,7 @@ export default function App() {
     );
   }
 
-  if (error) {
+  if (error && !requiresIdentityGate) {
     return (
       <MotionConfig reducedMotion={motionReducedMode}>
         <div className="app-shell compact-ui flex min-h-[100dvh] flex-col items-center justify-center space-y-4 px-6 text-center text-slate-50">
@@ -394,6 +416,24 @@ export default function App() {
           >
             Повторить попытку
           </button>
+        </div>
+      </MotionConfig>
+    );
+  }
+
+  if (requiresIdentityGate) {
+    return (
+      <MotionConfig reducedMotion={motionReducedMode}>
+        <div
+          className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
+            isCompact ? 'mobile-app-shell w-full max-w-none min-w-0 px-3 pt-3' : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
+          }`}
+        >
+          <div className="ambient-field z-0 isolate transform-gpu will-change-transform" aria-hidden="true">
+            <div className="ambient-field__grid" />
+            <div className="ambient-field__rings" />
+          </div>
+          <IdentityLinkGate />
         </div>
       </MotionConfig>
     );
@@ -436,7 +476,8 @@ export default function App() {
     && userProfile.is_web_only
     && userProfile.vk_user_id
     && !runsInTelegramMiniApp
-    && !isStaffRole(userProfile.role),
+    && !isStaffRole(userProfile.role)
+    && !requiresIdentityGate,
   );
   const telegramLinkPrompt = showTelegramLinkPrompt ? (
     <TelegramLinkPrompt
@@ -512,7 +553,7 @@ export default function App() {
   return (
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
-        className={`app-shell compact-ui relative min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
+        className={`app-shell compact-ui relative isolate min-h-[100dvh] transform-gpu overflow-x-hidden selection:bg-pink-500/30 will-change-transform ${
           isCompact
             ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
             : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
@@ -528,7 +569,7 @@ export default function App() {
         <AdminWebChatListener enabled={showAdminInterface} />
         <VkConsentWizard />
       </AppErrorBoundary>
-      <div className="ambient-field" aria-hidden="true">
+      <div className="ambient-field z-0 isolate transform-gpu will-change-transform" aria-hidden="true">
         <div className="ambient-field__grid" />
         <div className="ambient-field__rings" />
       </div>
@@ -555,14 +596,14 @@ export default function App() {
           <>
             <div className="z-10 flex w-full flex-grow flex-col justify-between">
               {isAdmin && (
-                <div className="shamrai-glass-panel z-10 mb-3 flex items-center justify-between rounded-xl p-2 text-[11px]">
+                <div className="shamrai-glass-panel z-10 mb-3 flex transform-gpu items-center justify-between rounded-xl p-2 text-[11px] will-change-transform">
                   <span className="flex items-center text-slate-300">
                     <KeyRound className="mr-1.5 h-4 w-4 shrink-0 text-rose-400" />
                     Вы вошли как <strong className="ml-1 text-rose-400">{roleLabel(userProfile.role)}</strong>
                   </span>
                   <button
                     onClick={handleToggleAdminPreviewMode}
-                    className="shamrai-glass-button flex items-center space-x-1 rounded-xl px-2.5 py-1 text-[10px] text-white transition-all active:scale-95"
+                    className="shamrai-glass-button flex transform-gpu items-center space-x-1 rounded-xl px-2.5 py-1 text-[10px] text-white transition-all will-change-transform active:scale-95"
                   >
                     <Eye className="h-3.5 w-3.5 text-indigo-400" />
                     <span>{adminPreviewMode ? 'Админка' : 'Кабинет юзера'}</span>
@@ -596,7 +637,7 @@ export default function App() {
             />
 
             <div className="min-w-0 flex-1">
-              <header className="shamrai-glass-panel mb-4 flex items-center justify-between gap-3 rounded-2xl px-3 py-2.5">
+              <header className="shamrai-glass-panel mb-4 flex transform-gpu items-center justify-between gap-3 rounded-2xl px-3 py-2.5 will-change-transform">
                 <div className="min-w-0">
                   <LogoText className="h-7 w-28" ariaLabel="Shamrai" width={140} height={42} />
                   <h1 className="mt-0.5 truncate text-lg font-black text-white">{displayName}</h1>
@@ -604,7 +645,7 @@ export default function App() {
               </header>
 
               {telegramLinkPrompt}
-              <main className="shamrai-glass-panel min-h-[calc(100dvh-7rem)] overflow-hidden rounded-2xl p-2.5 sm:p-3 xl:p-4">
+              <main className="shamrai-glass-panel min-h-[calc(100dvh-7rem)] transform-gpu overflow-hidden rounded-2xl p-2.5 will-change-transform sm:p-3 xl:p-4">
                 {renderCurrentPage()}
               </main>
             </div>

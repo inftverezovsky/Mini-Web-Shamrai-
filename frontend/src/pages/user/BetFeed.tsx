@@ -1,5 +1,6 @@
-import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
+import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect, useSyncExternalStore } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
 import { BetResponse, PaginatedResponse } from '../../schemas/schemas';
@@ -91,7 +92,7 @@ const LiveTimer = memo(function LiveTimer({ endsAt }: { endsAt: string }) {
     : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 
   return (
-    <span className="shimmer-border relative flex shrink-0 select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose animate-pulse">
+    <span className="shimmer-border relative flex shrink-0 transform-gpu select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose will-change-transform animate-pulse">
       <Flame className="w-3 h-3 fill-rose-500 text-rose-500 animate-bounce" />
       <span>Live</span>
       <span className="ml-1 font-mono text-[9px]">{timeLeft}</span>
@@ -141,7 +142,7 @@ const BetFeedCard = memo(function BetFeedCard({
 
   return (
     <div
-      className="bet-feed-card motion-card shimmer-border relative min-w-0 animate-fade-in space-y-2.5 overflow-hidden rounded-2xl border border-white/15 bg-white/[0.04] p-3.5 shadow-glass backdrop-blur-md transition-all duration-300 hover:border-cyan-400/30 hover:scale-[1.01] hover:-translate-y-0.5"
+      className="bet-feed-card motion-card shimmer-border relative min-w-0 transform-gpu animate-fade-in space-y-2.5 overflow-hidden rounded-2xl border border-white/15 bg-white/[0.04] p-3.5 shadow-glass backdrop-blur-md transition-all duration-300 will-change-transform hover:border-cyan-400/30 hover:scale-[1.01] hover:-translate-y-0.5"
       style={{ animationDelay: `${Math.min(index * 70, 420)}ms` }}
     >
       <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 text-[9px] text-slate-400">
@@ -183,6 +184,7 @@ const BetFeedCard = memo(function BetFeedCard({
               alt="Скрин купона"
               className="w-full max-h-56 object-contain rounded-lg border border-white/5 bg-slate-950/60"
               loading="lazy"
+              decoding="async"
             />
           </div>
         )}
@@ -314,6 +316,103 @@ const BetFeedCard = memo(function BetFeedCard({
             )}
           </button>
         )}
+      </div>
+    </div>
+  );
+});
+
+interface BetFeedListProps {
+  bets: BetResponse[];
+  takenBetIds: string[];
+  actionLoadingId: string | null;
+  onTakeBet: (betId: string) => void;
+  onBuyBet: (betId: string) => void;
+}
+
+const BetFeedGridList = memo(function BetFeedGridList({
+  bets,
+  takenBetIds,
+  actionLoadingId,
+  onTakeBet,
+  onBuyBet,
+}: BetFeedListProps) {
+  return (
+    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {bets.map((bet, idx) => {
+        const isTaken = bet.is_taken || takenBetIds.includes(bet.id);
+        return (
+          <BetFeedCard
+            key={bet.id}
+            bet={bet}
+            index={idx}
+            isTaken={isTaken}
+            isActionLoading={actionLoadingId === bet.id}
+            onTakeBet={onTakeBet}
+            onBuyBet={onBuyBet}
+          />
+        );
+      })}
+    </div>
+  );
+});
+
+const VirtualBetFeedList = memo(function VirtualBetFeedList({
+  bets,
+  takenBetIds,
+  actionLoadingId,
+  onTakeBet,
+  onBuyBet,
+}: BetFeedListProps) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+
+  useLayoutEffect(() => {
+    const updateScrollMargin = () => {
+      setScrollMargin(listRef.current?.offsetTop ?? 0);
+    };
+
+    updateScrollMargin();
+    window.addEventListener('resize', updateScrollMargin);
+    return () => window.removeEventListener('resize', updateScrollMargin);
+  }, [bets.length]);
+
+  const virtualizer = useWindowVirtualizer<HTMLDivElement>({
+    count: bets.length,
+    estimateSize: () => 360,
+    getItemKey: (index) => bets[index]?.id ?? index,
+    overscan: 2,
+    scrollMargin,
+  });
+
+  return (
+    <div ref={listRef} className="relative w-full min-w-0">
+      <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map((virtualItem) => {
+          const bet = bets[virtualItem.index];
+          if (!bet) return null;
+          const isTaken = bet.is_taken || takenBetIds.includes(bet.id);
+
+          return (
+            <div
+              key={bet.id}
+              ref={virtualizer.measureElement}
+              data-index={virtualItem.index}
+              className="virtual-bet-feed-row absolute left-0 top-0 w-full transform-gpu pb-3 will-change-transform"
+              style={{
+                transform: `translate3d(0, ${virtualItem.start - scrollMargin}px, 0)`,
+              }}
+            >
+              <BetFeedCard
+                bet={bet}
+                index={virtualItem.index}
+                isTaken={isTaken}
+                isActionLoading={actionLoadingId === bet.id}
+                onTakeBet={onTakeBet}
+                onBuyBet={onBuyBet}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -519,7 +618,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   }
 
   return (
-    <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} animate-slide-up pb-8`}>
+    <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} transform-gpu pb-8 will-change-transform animate-slide-up`}>
       
       {promoFlags.marathon && (
         <PromoBoundary>
@@ -554,7 +653,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 2. Account Access Banner */}
       {!active && (
-        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
+        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex transform-gpu flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md will-change-transform sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-0.5">
             <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
               <Sparkles className="iridescent-icon w-3.5 h-3.5 mr-1.5 shrink-0" />
@@ -580,7 +679,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 3. Bets Feed Grid list */}
       {bets.length === 0 ? (
-        <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-5 text-center rounded-2xl relative overflow-hidden">
+        <div className="motion-card shimmer-border relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 text-center shadow-glass backdrop-blur-md transform-gpu will-change-transform">
           <Trophy className="iridescent-icon w-8 h-8 mx-auto mb-2" />
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
           <p className="text-slate-400 text-[10px] mt-1 leading-relaxed">
@@ -588,22 +687,23 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
           </p>
         </div>
       ) : (
-        <div className={isCompact ? 'space-y-3' : 'grid grid-cols-1 gap-3 xl:grid-cols-2'}>
-          {bets.map((bet, idx) => {
-            const isTaken = bet.is_taken || takenBetIds.includes(bet.id);
-            return (
-              <BetFeedCard
-                key={bet.id}
-                bet={bet}
-                index={idx}
-                isTaken={isTaken}
-                isActionLoading={actionLoadingId === bet.id}
-                onTakeBet={handleTakeBet}
-                onBuyBet={handleBuyBet}
-              />
-            );
-          })}
-        </div>
+        isCompact ? (
+          <VirtualBetFeedList
+            bets={bets}
+            takenBetIds={takenBetIds}
+            actionLoadingId={actionLoadingId}
+            onTakeBet={handleTakeBet}
+            onBuyBet={handleBuyBet}
+          />
+        ) : (
+          <BetFeedGridList
+            bets={bets}
+            takenBetIds={takenBetIds}
+            actionLoadingId={actionLoadingId}
+            onTakeBet={handleTakeBet}
+            onBuyBet={handleBuyBet}
+          />
+        )
       )}
 
       {hasNextPage && (

@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import { Bot, Check, Clock3, Image as ImageIcon, Mic, RefreshCw, User } from 'lucide-react';
 
 import { ChatMessageResponse } from '../../schemas/schemas';
@@ -93,6 +94,7 @@ function renderMessageBody(message: SupportMessageView) {
               alt={caption || 'Скриншот'}
               className="max-h-72 w-full object-contain"
               loading="lazy"
+              decoding="async"
             />
           </a>
         ) : (
@@ -142,7 +144,7 @@ function renderMessageBody(message: SupportMessageView) {
   );
 }
 
-export default function SupportMessageBubble({
+function SupportMessageBubble({
   message,
   ownerLabel = 'Клиент',
   onRetry,
@@ -158,20 +160,21 @@ export default function SupportMessageBubble({
   const cornerClass = alignRight ? 'rounded-br-md' : 'rounded-bl-md';
   const avatarClass = staff ? 'text-cyan-100' : 'text-fuchsia-100';
   const AvatarIcon = staff ? Bot : User;
+  const messageBody = useMemo(() => renderMessageBody(message), [message]);
 
   return (
-    <div className={`flex min-w-0 items-start gap-2 sm:gap-3 ${alignRight ? 'justify-end' : ''}`}>
+    <div className={`flex min-w-0 transform-gpu items-start gap-2 will-change-transform sm:gap-3 ${alignRight ? 'justify-end' : ''}`}>
       {!alignRight && (
         <div className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/75 ${avatarClass}`}>
           <AvatarIcon className="h-4 w-4" />
         </div>
       )}
 
-      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] rounded-2xl border px-3 py-3 sm:max-w-[86%] sm:px-3.5 ${cornerClass} ${accentClass} ${deliveryState === 'failed' ? 'border-rose-300/35 bg-rose-400/10' : ''}`}>
+      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] transform-gpu rounded-2xl border px-3 py-3 will-change-transform sm:max-w-[86%] sm:px-3.5 ${cornerClass} ${accentClass} ${deliveryState === 'failed' ? 'border-rose-300/35 bg-rose-400/10' : ''}`}>
         <p className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-white/45">
           {label}
         </p>
-        {renderMessageBody(message)}
+        {messageBody}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
           <span>{messageTime(message.created_at)}</span>
           {deliveryState === 'sending' && (
@@ -207,3 +210,5 @@ export default function SupportMessageBubble({
     </div>
   );
 }
+
+export default memo(SupportMessageBubble);

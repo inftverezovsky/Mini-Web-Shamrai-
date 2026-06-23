@@ -114,6 +114,35 @@ class User(Base):
     def is_web_only(self) -> bool:
         return self.telegram_id < 0 and bool(self.vk_user_id)
 
+    @property
+    def identity_providers(self) -> list[str]:
+        providers: list[str] = []
+        if self.telegram_id > 0:
+            providers.append("telegram")
+        if self.vk_user_id:
+            providers.append("vk")
+        return providers
+
+    @property
+    def missing_identity_providers(self) -> list[str]:
+        providers = set(self.identity_providers)
+        return [provider for provider in ("telegram", "vk") if provider not in providers]
+
+    @property
+    def identity_complete(self) -> bool:
+        return not self.missing_identity_providers
+
+
+class IdentityDeviceLink(Base):
+    __tablename__ = "identity_device_links"
+
+    device_key_hash = Column(String(64), primary_key=True)
+    source_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    source_user = relationship("User")
+
 class Bookmaker(Base):
     __tablename__ = "bookmakers"
 

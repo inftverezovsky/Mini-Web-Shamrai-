@@ -7,10 +7,10 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user, get_optional_user
 from src.core.config import settings
-from src.core.roles import is_valid_role, normalize_role
+from src.core.roles import is_staff_role, is_valid_role, normalize_role
 from src.core.security import (
     ACCESS_TOKEN_EXPIRE_DAYS,
     create_access_token,
@@ -30,11 +30,19 @@ from src.models.database import get_db
 from src.models.models import (
     AdminAuditLog,
     Bet,
+    ChatConversation,
+    ChatMessage,
+    ChatReadCursor,
     CrowdBetParticipant,
     DailyRewardClaim,
+    DeliveryOutbox,
     ForecastRequest,
+    IdentityDeviceLink,
     MatchBalanceLog,
+    MessageTemplate,
     PaymentAttempt,
+    PersonalSignal,
+    PersonalSignalReadCursor,
     PromoCode,
     PvPBattleVote,
     Subscription,
@@ -57,6 +65,8 @@ logger = logging.getLogger("uvicorn")
 
 REFERRAL_START_PARAM_RE = re.compile(r"^ref_(\d+)$")
 AUTH_COOKIE_NAME = "shamrai_access_token"
+IDENTITY_DEVICE_HEADER = "X-Shamrai-Device-Id"
+IDENTITY_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
 
 
 class LoginRequest(BaseModel):
@@ -237,6 +247,65 @@ def _normalize_vk_code_payload(payload: VkOAuthCodeRequest | dict[str, Any]) -> 
     return normalized
 
 
+def _current_user_or_none(value: Any) -> Optional[User]:
+    return value if isinstance(value, User) else None
+
+
+def _normalize_identity_device_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    clean_value = value.strip()
+    if not IDENTITY_DEVICE_ID_RE.fullmatch(clean_value):
+        return None
+    return clean_value
+
+
+def _identity_device_hash(device_id: str) -> str:
+    return hashlib.sha256(f"shamrai-identity-device:{device_id}".encode("utf-8")).hexdigest()
+
+
+async def _load_identity_device_user(db: AsyncSession, identity_device_id: Any) -> Optional[User]:
+    clean_device_id = _normalize_identity_device_id(identity_device_id)
+    if not clean_device_id:
+        return None
+
+    result = await db.execute(
+        select(IdentityDeviceLink).filter(
+            IdentityDeviceLink.device_key_hash == _identity_device_hash(clean_device_id)
+        )
+    )
+    link = result.scalars().first()
+    if not link or link.source_user_id is None:
+        return None
+
+    user = await _load_user_with_profile(db, link.source_user_id)
+    if user and is_staff_role(user.role):
+        return None
+    return user
+
+
+async def _bind_identity_device(db: AsyncSession, identity_device_id: Any, user: Optional[User]) -> None:
+    clean_device_id = _normalize_identity_device_id(identity_device_id)
+    if not clean_device_id or not user or is_staff_role(user.role):
+        return
+
+    device_key_hash = _identity_device_hash(clean_device_id)
+    link = await db.get(IdentityDeviceLink, device_key_hash)
+    now = datetime.now(timezone.utc)
+    if link:
+        link.source_user_id = user.telegram_id
+        link.last_seen_at = now
+        return
+
+    db.add(
+        IdentityDeviceLink(
+            device_key_hash=device_key_hash,
+            source_user_id=user.telegram_id,
+            last_seen_at=now,
+        )
+    )
+
+
 async def _load_user_with_profile(db: AsyncSession, telegram_id: int) -> Optional[User]:
     result = await db.execute(
         select(User)
@@ -250,6 +319,15 @@ async def _load_user_by_phone(db: AsyncSession, phone: str) -> Optional[User]:
     result = await db.execute(
         select(User)
         .filter(User.phone == phone)
+        .options(selectinload(User.bookmakers), selectinload(User.badges))
+    )
+    return result.scalars().first()
+
+
+async def _load_user_by_vk_id(db: AsyncSession, vk_user_id: str) -> Optional[User]:
+    result = await db.execute(
+        select(User)
+        .filter(User.vk_user_id == vk_user_id)
         .options(selectinload(User.bookmakers), selectinload(User.badges))
     )
     return result.scalars().first()
@@ -548,17 +626,150 @@ def _copy_web_profile_fields(target: User, source: User) -> None:
         target.client_tag = source.client_tag
 
 
+def _new_chat_read_cursor_like(cursor: ChatReadCursor, *, conversation_id: Any, user_id: int) -> ChatReadCursor:
+    return ChatReadCursor(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        last_read_message_id=cursor.last_read_message_id,
+        updated_at=cursor.updated_at,
+    )
+
+
+async def _merge_chat_cursor_row(
+    db: AsyncSession,
+    cursor: ChatReadCursor,
+    *,
+    conversation_id: Any,
+    user_id: int,
+) -> None:
+    existing = await db.get(
+        ChatReadCursor,
+        {"conversation_id": conversation_id, "user_id": user_id},
+    )
+    if existing:
+        if cursor.last_read_message_id and (
+            not existing.last_read_message_id
+            or cursor.last_read_message_id > existing.last_read_message_id
+        ):
+            existing.last_read_message_id = cursor.last_read_message_id
+        await db.delete(cursor)
+        return
+
+    db.add(_new_chat_read_cursor_like(cursor, conversation_id=conversation_id, user_id=user_id))
+    await db.delete(cursor)
+
+
+async def _merge_chat_read_cursors_for_conversation(
+    db: AsyncSession,
+    *,
+    source_conversation_id: Any,
+    target_conversation_id: Any,
+    source_id: int,
+    target_id: int,
+) -> None:
+    result = await db.execute(
+        select(ChatReadCursor).filter(ChatReadCursor.conversation_id == source_conversation_id)
+    )
+    for cursor in result.scalars().all():
+        await _merge_chat_cursor_row(
+            db,
+            cursor,
+            conversation_id=target_conversation_id,
+            user_id=target_id if cursor.user_id == source_id else cursor.user_id,
+        )
+
+
+async def _merge_chat_read_cursors_by_user(db: AsyncSession, source_id: int, target_id: int) -> None:
+    result = await db.execute(select(ChatReadCursor).filter(ChatReadCursor.user_id == source_id))
+    for cursor in result.scalars().all():
+        await _merge_chat_cursor_row(
+            db,
+            cursor,
+            conversation_id=cursor.conversation_id,
+            user_id=target_id,
+        )
+
+
+async def _merge_support_conversations(db: AsyncSession, source_id: int, target_id: int) -> None:
+    result = await db.execute(
+        select(ChatConversation).filter(ChatConversation.owner_user_id == source_id)
+    )
+    source_conversations = result.scalars().all()
+
+    for source_conversation in source_conversations:
+        target_result = await db.execute(
+            select(ChatConversation).filter(
+                ChatConversation.kind == source_conversation.kind,
+                ChatConversation.owner_user_id == target_id,
+            )
+        )
+        target_conversation = target_result.scalars().first()
+
+        if not target_conversation:
+            source_conversation.owner_user_id = target_id
+            continue
+
+        await db.execute(
+            update(ChatMessage)
+            .where(ChatMessage.conversation_id == source_conversation.id)
+            .values(conversation_id=target_conversation.id)
+        )
+        await _merge_chat_read_cursors_for_conversation(
+            db,
+            source_conversation_id=source_conversation.id,
+            target_conversation_id=target_conversation.id,
+            source_id=source_id,
+            target_id=target_id,
+        )
+        if source_conversation.last_message_at and (
+            not target_conversation.last_message_at
+            or source_conversation.last_message_at > target_conversation.last_message_at
+        ):
+            target_conversation.last_message_at = source_conversation.last_message_at
+        await db.delete(source_conversation)
+
+
+async def _merge_personal_signal_read_cursor(db: AsyncSession, source_id: int, target_id: int) -> None:
+    source_cursor = await db.get(PersonalSignalReadCursor, source_id)
+    if not source_cursor:
+        return
+
+    target_cursor = await db.get(PersonalSignalReadCursor, target_id)
+    if target_cursor:
+        if source_cursor.last_read_signal_id and (
+            not target_cursor.last_read_signal_id
+            or source_cursor.last_read_signal_id > target_cursor.last_read_signal_id
+        ):
+            target_cursor.last_read_signal_id = source_cursor.last_read_signal_id
+        await db.delete(source_cursor)
+        return
+
+    db.add(
+        PersonalSignalReadCursor(
+            user_id=target_id,
+            last_read_signal_id=source_cursor.last_read_signal_id,
+            updated_at=source_cursor.updated_at,
+        )
+    )
+    await db.delete(source_cursor)
+
+
 async def _move_user_references(db: AsyncSession, source_id: int, target_id: int) -> None:
     await _merge_user_bookmakers(db, source_id, target_id)
     await _merge_user_bets(db, source_id, target_id)
     await _merge_forecast_requests(db, source_id, target_id)
     await _merge_daily_rewards(db, source_id, target_id)
     await _merge_pvp_votes(db, source_id, target_id)
+    await _merge_support_conversations(db, source_id, target_id)
+    await _merge_chat_read_cursors_by_user(db, source_id, target_id)
+    await _merge_personal_signal_read_cursor(db, source_id, target_id)
 
     for model in (
         Subscription,
         PaymentAttempt,
         MatchBalanceLog,
+        PersonalSignal,
+        DeliveryOutbox,
         CrowdBetParticipant,
         PromoCode,
         UserBadge,
@@ -568,9 +779,13 @@ async def _move_user_references(db: AsyncSession, source_id: int, target_id: int
 
     await db.execute(update(User).where(User.referred_by_user_id == source_id).values(referred_by_user_id=target_id))
     await db.execute(update(Bet).where(Bet.author_id == source_id).values(author_id=target_id))
+    await db.execute(update(ChatConversation).where(ChatConversation.assigned_staff_id == source_id).values(assigned_staff_id=target_id))
+    await db.execute(update(ChatMessage).where(ChatMessage.sender_user_id == source_id).values(sender_user_id=target_id))
     await db.execute(update(ForecastRequest).where(ForecastRequest.handled_by == source_id).values(handled_by=target_id))
     await db.execute(update(AdminAuditLog).where(AdminAuditLog.actor_id == source_id).values(actor_id=target_id))
     await db.execute(update(AdminAuditLog).where(AdminAuditLog.target_user_id == source_id).values(target_user_id=target_id))
+    await db.execute(update(MessageTemplate).where(MessageTemplate.updated_by == source_id).values(updated_by=target_id))
+    await db.execute(update(IdentityDeviceLink).where(IdentityDeviceLink.source_user_id == source_id).values(source_user_id=target_id))
 
 
 async def _merge_user_bookmakers(db: AsyncSession, source_id: int, target_id: int) -> None:
@@ -722,7 +937,7 @@ async def _promote_web_user_to_telegram(
 async def _merge_web_only_user_into_telegram(db: AsyncSession, source: User, target: User) -> None:
     if source.telegram_id == target.telegram_id:
         return
-    if not _is_web_only_user(source) or target.telegram_id < 0:
+    if source.telegram_id >= 0 or target.telegram_id < 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Этот профиль уже привязан к другому Telegram-профилю",
@@ -755,8 +970,13 @@ async def _upsert_telegram_user_with_optional_web_profile(
     db: AsyncSession,
     tg_data: dict[str, Any],
     current_user: Optional[User] = None,
+    device_user: Optional[User] = None,
 ) -> User:
-    if not current_user or not _is_web_only_user(current_user):
+    source_user = current_user if current_user and _is_web_only_user(current_user) else None
+    if not source_user and device_user and _is_web_only_user(device_user):
+        source_user = device_user
+
+    if not source_user:
         return await _upsert_telegram_user(db, tg_data)
 
     tg_id = int(tg_data.get("id") or 0)
@@ -764,8 +984,8 @@ async def _upsert_telegram_user_with_optional_web_profile(
     if (
         target
         and target.vk_user_id
-        and current_user.vk_user_id
-        and target.vk_user_id != current_user.vk_user_id
+        and source_user.vk_user_id
+        and target.vk_user_id != source_user.vk_user_id
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -773,9 +993,63 @@ async def _upsert_telegram_user_with_optional_web_profile(
         )
 
     target = await _upsert_telegram_user(db, tg_data)
-    if current_user.telegram_id != target.telegram_id:
-        await _merge_web_only_user_into_telegram(db, current_user, target)
+    if source_user.telegram_id != target.telegram_id:
+        await _merge_web_only_user_into_telegram(db, source_user, target)
     return target
+
+
+async def _resolve_telegram_login_user(
+    db: AsyncSession,
+    tg_data: dict[str, Any],
+    *,
+    current_user: Optional[User],
+    identity_device_id: Any,
+) -> User:
+    device_user = None if current_user else await _load_identity_device_user(db, identity_device_id)
+    return await _upsert_telegram_user_with_optional_web_profile(
+        db,
+        tg_data,
+        current_user,
+        device_user,
+    )
+
+
+async def _resolve_vk_login_user(
+    db: AsyncSession,
+    vk_profile: dict,
+    *,
+    current_user: Optional[User],
+    identity_device_id: Any,
+) -> User:
+    vk_user_id = vk_profile["vk_user_id"]
+    source_user = current_user or await _load_identity_device_user(db, identity_device_id)
+    existing_user = await _load_user_by_vk_id(db, vk_user_id)
+
+    if source_user:
+        if source_user.vk_user_id and source_user.vk_user_id != vk_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Этот профиль уже привязан к другому VK ID",
+            )
+
+        if source_user.telegram_id > 0:
+            if existing_user and existing_user.telegram_id != source_user.telegram_id:
+                if not _is_web_only_user(existing_user):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Этот VK ID уже привязан к другому Telegram-профилю",
+                    )
+                await _merge_web_only_user_into_telegram(db, existing_user, source_user)
+            source_user.vk_user_id = vk_user_id
+            return source_user
+
+        if _is_web_only_user(source_user):
+            return existing_user or source_user
+
+    if existing_user:
+        return existing_user
+
+    return await _create_vk_only_user(db, vk_user_id, vk_profile.get("vk_display_name"))
 
 
 async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
@@ -800,13 +1074,22 @@ async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
 async def login_user(
     request_data: LoginRequest,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Verifies Telegram Mini App initData and returns a JWT for the Telegram profile.
     """
     tg_data = verify_telegram_init_data(request_data.initData)
-    user = await _upsert_telegram_user(db, tg_data)
+    source_user = _current_user_or_none(current_user)
+    user = await _resolve_telegram_login_user(
+        db,
+        tg_data,
+        current_user=source_user,
+        identity_device_id=identity_device_id,
+    )
+    await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
     await db.commit()
 
@@ -818,13 +1101,22 @@ async def login_user(
 async def login_telegram_widget(
     request_data: TelegramWidgetLoginRequest,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Verifies Telegram Login Widget payload for browser login and returns the same JWT type.
     """
     tg_data = verify_telegram_login_widget(request_data.model_dump(exclude_none=True))
-    user = await _upsert_telegram_user(db, tg_data)
+    source_user = _current_user_or_none(current_user)
+    user = await _resolve_telegram_login_user(
+        db,
+        tg_data,
+        current_user=source_user,
+        identity_device_id=identity_device_id,
+    )
+    await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
     await db.commit()
 
@@ -836,6 +1128,8 @@ async def login_telegram_widget(
 async def telegram_callback(
     request: Request,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -846,7 +1140,14 @@ async def telegram_callback(
     promoted into the verified Telegram account instead of creating a duplicate.
     """
     tg_data = verify_telegram_login_widget(dict(request.query_params))
-    user = await _upsert_telegram_user(db, tg_data)
+    source_user = _current_user_or_none(current_user)
+    user = await _resolve_telegram_login_user(
+        db,
+        tg_data,
+        current_user=source_user,
+        identity_device_id=identity_device_id,
+    )
+    await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
     await db.commit()
 
@@ -856,7 +1157,9 @@ async def telegram_callback(
 
 @router.post("/telegram/bot-session", response_model=TelegramBotAuthStartResponse)
 async def start_telegram_bot_auth_session(
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
     current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
 ):
     clean_bot_username = settings.TELEGRAM_BOT_USERNAME.strip().lstrip("@")
     if not clean_bot_username:
@@ -865,8 +1168,9 @@ async def start_telegram_bot_auth_session(
             detail="Telegram bot username is not configured",
         )
 
+    source_user = _current_user_or_none(current_user) or await _load_identity_device_user(db, identity_device_id)
     session = await create_telegram_bot_auth_session(
-        source_user_id=current_user.telegram_id if current_user else None,
+        source_user_id=source_user.telegram_id if source_user else None,
     )
     start_param = telegram_auth_start_param(session.auth_token)
     return TelegramBotAuthStartResponse(
@@ -880,6 +1184,7 @@ async def start_telegram_bot_auth_session(
 async def poll_telegram_bot_auth_session(
     auth_token: str,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
     current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -889,11 +1194,14 @@ async def poll_telegram_bot_auth_session(
     if session.status != "confirmed" or not session.telegram_user:
         return TelegramBotAuthStatusResponse(status=session.status)
 
-    source_user = current_user
+    source_user = _current_user_or_none(current_user)
     if not source_user and session.source_user_id is not None:
         source_user = await _load_user_with_profile(db, session.source_user_id)
+    if not source_user:
+        source_user = await _load_identity_device_user(db, identity_device_id)
 
     user = await _upsert_telegram_user_with_optional_web_profile(db, session.telegram_user, source_user)
+    await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
     await db.commit()
     await consume_telegram_bot_auth_session(auth_token)
@@ -912,6 +1220,8 @@ async def poll_telegram_bot_auth_session(
 async def vk_id_login(
     request_data: VkOAuthCodeRequest,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -920,20 +1230,17 @@ async def vk_id_login(
     """
     payload = _normalize_vk_code_payload(request_data)
     vk_profile = await _exchange_vk_or_502(payload)
-    vk_user_id = vk_profile["vk_user_id"]
-
-    result = await db.execute(
-        select(User)
-        .filter(User.vk_user_id == vk_user_id)
-        .options(selectinload(User.bookmakers), selectinload(User.badges))
+    source_user = _current_user_or_none(current_user)
+    user = await _resolve_vk_login_user(
+        db,
+        vk_profile,
+        current_user=source_user,
+        identity_device_id=identity_device_id,
     )
-    user = result.scalars().first()
-
-    if not user:
-        user = await _create_vk_only_user(db, vk_user_id, vk_profile.get("vk_display_name"))
-        telegram_id = user.telegram_id
-        await db.commit()
-        user = await _load_user_with_profile(db, telegram_id)
+    await _bind_identity_device(db, identity_device_id, user)
+    telegram_id = user.telegram_id
+    await db.commit()
+    user = await _load_user_with_profile(db, telegram_id)
 
     return _build_login_response(user, response)
 
@@ -941,6 +1248,7 @@ async def vk_id_login(
 @router.post("/vk/link", response_model=VkLinkResponse)
 async def vk_id_link(
     request_data: VkOAuthCodeRequest,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -951,8 +1259,14 @@ async def vk_id_link(
     payload = _normalize_vk_code_payload(request_data)
     vk_profile = await _exchange_vk_or_502(payload)
     vk_user_id = vk_profile["vk_user_id"]
+    current_profile = _current_user_or_none(current_user)
+    if not current_profile:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+        )
 
-    if current_user.vk_user_id and current_user.vk_user_id != vk_user_id:
+    if current_profile.vk_user_id and current_profile.vk_user_id != vk_user_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This Telegram profile is already linked to another VK profile",
@@ -962,16 +1276,22 @@ async def vk_id_link(
         select(User)
         .filter(
             User.vk_user_id == vk_user_id,
-            User.telegram_id != current_user.telegram_id,
+            User.telegram_id != current_profile.telegram_id,
         )
     )
     existing_user = existing_result.scalars().first()
 
     if existing_user:
-        await _merge_web_only_user_into_telegram(db, existing_user, current_user)
+        if not _is_web_only_user(existing_user):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Этот VK ID уже привязан к другому Telegram-профилю",
+            )
+        await _merge_web_only_user_into_telegram(db, existing_user, current_profile)
     else:
-        current_user.vk_user_id = vk_user_id
+        current_profile.vk_user_id = vk_user_id
 
+    await _bind_identity_device(db, identity_device_id, current_profile)
     await db.commit()
 
     return VkLinkResponse(

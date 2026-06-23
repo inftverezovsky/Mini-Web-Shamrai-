@@ -214,7 +214,7 @@ export function StatTile({
   minHeightClass?: string;
 }) {
   return (
-    <div className={`${minHeightClass} min-w-0 rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]`}>
+    <div className={`${minHeightClass} min-w-0 transform-gpu rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] will-change-transform`}>
       <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
       <div className={`mt-0.5 min-w-0 break-words text-base font-black tabular-nums ${tone}`}>{value}</div>
       {hint && <div className="mt-0.5 min-w-0 break-words text-[8px] font-bold uppercase tracking-[0.06em] text-slate-600">{hint}</div>}
@@ -236,7 +236,7 @@ function ExecutiveMetric({
   icon: React.ReactNode;
 }) {
   return (
-    <div className="smooth-surface relative min-h-[86px] min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]">
+    <div className="smooth-surface relative min-h-[86px] min-w-0 transform-gpu overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.055)] will-change-transform">
       <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-transparent via-white/18 to-transparent" />
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
@@ -330,7 +330,7 @@ export function CollapsiblePanel({
 
   return (
     <section
-      className={`smooth-surface rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${className}`}
+      className={`smooth-surface transform-gpu rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] will-change-transform ${className}`}
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <button
@@ -483,7 +483,7 @@ export function StatsHero({
 }) {
   const positive = summary.profit_units >= 0;
   return (
-    <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_82%_18%,rgba(16,185,129,0.09),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
+    <section className="relative isolate transform-gpu overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_82%_18%,rgba(16,185,129,0.09),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)] will-change-transform">
       <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
       <div className="pointer-events-none absolute bottom-0 right-8 h-px w-1/2 bg-gradient-to-r from-transparent via-emerald-200/20 to-transparent" />
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,32rem)]">
@@ -608,7 +608,7 @@ export function ExportStatusPanel({
   const message = error || job?.error || driveJobLabel(job);
 
   return (
-    <section className={`rounded-[22px] border ${toneClass} ${compact ? 'p-2.5' : 'p-3'} shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]`}>
+    <section className={`transform-gpu rounded-[22px] border ${toneClass} ${compact ? 'p-2.5' : 'p-3'} shadow-[inset_0_1px_0_rgba(255,255,255,0.055)] will-change-transform`}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-white/10 bg-slate-950/38">
@@ -703,7 +703,7 @@ export function ProfitCurve({
       };
 
   return (
-    <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className="relative transform-gpu overflow-hidden rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] will-change-transform">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h3 className="flex items-center gap-1.5 text-xs font-black text-white">

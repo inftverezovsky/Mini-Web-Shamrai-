@@ -233,6 +233,15 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_user_bets_user_taken ON user_bets (user_id, taken_at)",
             "CREATE INDEX IF NOT EXISTS ix_user_bets_bet_user ON user_bets (bet_id, user_id)",
             "CREATE INDEX IF NOT EXISTS ix_forecast_requests_bet_status ON forecast_requests (bet_id, status)",
+            """
+            CREATE TABLE IF NOT EXISTS identity_device_links (
+                device_key_hash VARCHAR(64) PRIMARY KEY,
+                source_user_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_identity_device_links_source_user_id ON identity_device_links (source_user_id)",
         ]
         for statement in statements:
             await conn.execute(text(statement))
@@ -349,6 +358,21 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_forecast_requests_status_created ON forecast_requests (status, created_at)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS identity_device_links (
+                device_key_hash VARCHAR(64) NOT NULL,
+                source_user_id BIGINT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (device_key_hash),
+                FOREIGN KEY (source_user_id) REFERENCES users(telegram_id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_identity_device_links_source_user_id ON identity_device_links (source_user_id)"
         )
         await conn.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_vk_user_id ON users (vk_user_id)"

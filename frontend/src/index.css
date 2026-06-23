@@ -294,7 +294,7 @@
 .app-shell::before {
   content: "";
   position: fixed;
-  inset: 0;
+  inset: -80px;
   pointer-events: none;
   z-index: 0;
   opacity: 0.55;
@@ -306,6 +306,9 @@
   background-size: auto, auto, 34px 34px, 34px 34px;
   background-position: 0 0, 0 0, 0 0, 0 0;
   mask-image: linear-gradient(to bottom, black, transparent 86%);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  contain: paint;
   animation: appGridDrift 18s linear infinite;
 }
 
@@ -327,6 +330,8 @@
   mix-blend-mode: screen;
   mask-image: radial-gradient(circle at 50% 46%, black 0 52%, transparent 78%);
   transform-origin: 52% 48%;
+  will-change: transform, opacity;
+  contain: paint;
   animation: emblemDrift 15s ease-in-out infinite alternate;
 }
 
@@ -344,6 +349,10 @@
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
+  isolation: isolate;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  contain: layout paint;
 }
 
 .ambient-field::before,
@@ -352,6 +361,7 @@
   position: absolute;
   pointer-events: none;
   mix-blend-mode: screen;
+  will-change: transform, opacity;
 }
 
 .ambient-field::before {
@@ -389,6 +399,7 @@
   background:
     conic-gradient(from 180deg at 50% 38%, rgba(0, 210, 255, 0.3), rgba(16, 185, 129, 0.16), rgba(217, 70, 239, 0.08), rgba(0, 210, 255, 0.26));
   filter: blur(72px);
+  will-change: transform, opacity;
   animation: auraDrift 12s ease-in-out infinite alternate, auraColorShift 9s ease-in-out infinite;
 }
 
@@ -401,6 +412,8 @@
   opacity: 0.7;
   background: linear-gradient(90deg, transparent, rgba(0, 210, 255, 0.92), rgba(16, 185, 129, 0.62), transparent);
   box-shadow: 0 0 26px rgba(0, 210, 255, 0.45);
+  transform: translate3d(0, 0, 0) rotate(-8deg);
+  will-change: transform, opacity;
   animation: fieldSweep 6.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
 }
 
@@ -415,6 +428,8 @@
   box-shadow:
     inset 0 0 40px rgba(124, 58, 237, 0.12),
     0 0 70px rgba(255, 0, 127, 0.08);
+  transform: translate3d(0, 0, 0);
+  will-change: transform, opacity;
   animation: haloSpin 18s linear infinite, ringGlowPulse 5.2s ease-in-out infinite;
 }
 
@@ -451,6 +466,10 @@
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
     0 18px 52px rgba(0, 0, 0, 0.28),
     0 0 34px rgba(0, 210, 255, 0.045);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  backface-visibility: hidden;
+  contain: paint;
 }
 
 .glass-card {
@@ -463,6 +482,10 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
     0 14px 36px rgba(0, 0, 0, 0.24);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  backface-visibility: hidden;
+  contain: paint;
 }
 
 .glass-card-hover {
@@ -495,6 +518,10 @@
     0 0 30px rgba(0, 210, 255, 0.045);
   backdrop-filter: blur(26px) saturate(172%) contrast(1.05);
   -webkit-backdrop-filter: blur(26px) saturate(172%) contrast(1.05);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  backface-visibility: hidden;
+  contain: paint;
   transition:
     border-color 0.24s ease,
     box-shadow 0.24s ease,
@@ -2577,7 +2604,7 @@
 
 .welcome-splash__stars {
   position: absolute;
-  inset: 0;
+  inset: -144px 0 0;
   opacity: 0.42;
   background-image:
     radial-gradient(circle, rgba(255, 255, 255, 0.76) 0 1px, transparent 1px),
@@ -2585,6 +2612,8 @@
   background-position: 0 0, 28px 34px;
   background-size: 72px 72px, 116px 116px;
   mask-image: linear-gradient(to bottom, black, transparent 74%);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
   animation: starDrift 14s linear infinite;
 }
 
@@ -2653,6 +2682,7 @@
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.1) 0 1px, transparent 1px 42px);
   transform: perspective(520px) rotateX(62deg);
   transform-origin: center top;
+  will-change: transform;
   animation: floorRun 2.8s linear infinite;
 }
 
@@ -3025,10 +3055,10 @@
 
 @keyframes appGridDrift {
   from {
-    background-position: 0 0, 0 0, 0 0, 0 0;
+    transform: translate3d(0, 0, 0);
   }
   to {
-    background-position: 0 0, 0 0, 34px 68px, 68px 34px;
+    transform: translate3d(34px, 68px, 0);
   }
 }
 
@@ -3067,10 +3097,10 @@
 
 @keyframes ambientArcSpin {
   from {
-    transform: rotate(0deg) scale(0.96);
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(0.96);
   }
   to {
-    transform: rotate(360deg) scale(1.02);
+    transform: translate3d(0, 0, 0) rotate(360deg) scale(1.02);
   }
 }
 
@@ -3086,13 +3116,13 @@
 @keyframes auraColorShift {
   0%,
   100% {
-    filter: blur(72px) saturate(1);
+    opacity: 0.42;
   }
   45% {
-    filter: blur(78px) saturate(1.26) hue-rotate(10deg);
+    opacity: 0.54;
   }
   72% {
-    filter: blur(70px) saturate(1.18) hue-rotate(-8deg);
+    opacity: 0.48;
   }
 }
 
@@ -3109,10 +3139,10 @@
 
 @keyframes starDrift {
   from {
-    background-position: 0 0, 28px 34px;
+    transform: translate3d(0, 0, 0);
   }
   to {
-    background-position: 0 144px, 28px 266px;
+    transform: translate3d(0, 144px, 0);
   }
 }
 
@@ -3130,16 +3160,16 @@
 
 @keyframes gateSpin {
   to {
-    transform: rotate(360deg);
+    transform: translate3d(0, 0, 0) rotate(360deg);
   }
 }
 
 @keyframes floorRun {
   from {
-    background-position: 0 0, 0 0, 0 0;
+    transform: perspective(520px) rotateX(62deg) translate3d(0, 0, 0);
   }
   to {
-    background-position: 0 0, 54px 0, 0 84px;
+    transform: perspective(520px) rotateX(62deg) translate3d(54px, 84px, 0);
   }
 }
 
@@ -3160,7 +3190,7 @@
 
 @keyframes haloSpin {
   to {
-    transform: rotate(360deg);
+    transform: translate3d(0, 0, 0) rotate(360deg);
   }
 }
 
@@ -3168,16 +3198,11 @@
   0%,
   100% {
     opacity: 0.72;
-    box-shadow:
-      inset 0 0 40px rgba(124, 58, 237, 0.12),
-      0 0 70px rgba(255, 0, 127, 0.08);
+    transform: translate3d(0, 0, 0) scale(1);
   }
   50% {
     opacity: 0.98;
-    box-shadow:
-      inset 0 0 56px rgba(0, 210, 255, 0.14),
-      inset 0 0 36px rgba(255, 0, 127, 0.08),
-      0 0 86px rgba(0, 210, 255, 0.12);
+    transform: translate3d(0, 0, 0) scale(1.035);
   }
 }
 
@@ -3434,10 +3459,10 @@
 @keyframes logoFloat {
   0%,
   100% {
-    transform: translateY(0) scale(1);
+    transform: translate3d(0, 0, 0) scale(1);
   }
   50% {
-    transform: translateY(-5px) scale(1.012);
+    transform: translate3d(0, -5px, 0) scale(1.012);
   }
 }
 
@@ -4284,15 +4309,33 @@
 
 /* Performance pass: keep the premium glass look, but remove idle animation work
    from repeated app surfaces so inputs, scrolling, and tab switches stay crisp. */
-#root .app-shell .page-transition-layer,
-#root .app-shell .smooth-pressable,
-#root .app-shell :is(.glass-panel, .glass-card, .motion-card, .bottom-nav-aurora__item, .logo-frame, button, input, textarea) {
-  will-change: auto !important;
+#root .app-shell :is(
+  .page-transition-layer,
+  .smooth-pressable,
+  .glass-panel,
+  .glass-card,
+  .shamrai-glass-panel,
+  .shamrai-glass-card,
+  .shamrai-glass-button,
+  .motion-card,
+  .smooth-surface,
+  .bottom-nav-aurora,
+  .bottom-nav-aurora__item,
+  .logo-frame,
+  .bet-feed-card,
+  .virtual-bet-feed-row,
+  .web-bot-chat,
+  .web-bot-chat__virtual-row,
+  [class*="backdrop-blur"]
+) {
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  backface-visibility: hidden;
 }
 
 #root .app-shell .smooth-surface {
   contain: layout paint style;
-  transform: none;
+  transform: translate3d(0, 0, 0);
 }
 
 #root .app-shell :is(.shamrai-glass-panel, .shamrai-glass-card),
@@ -4318,6 +4361,12 @@
 #root .app-shell :is(.shamrai-glass-card, .glass-card, .motion-card, .bet-feed-card) {
   content-visibility: auto;
   contain-intrinsic-size: auto 280px;
+}
+
+#root .app-shell :is(.virtual-bet-feed-row, .web-bot-chat__virtual-row) {
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 360px;
 }
 
 :root[data-shamrai-app-visible="false"] #root *,

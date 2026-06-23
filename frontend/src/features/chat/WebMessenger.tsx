@@ -442,7 +442,7 @@ export default function WebMessenger() {
     }, 80);
   }, []);
 
-  const answerForecastRequest = async (signal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
+  const answerForecastRequest = useCallback(async (signal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
     const requestId = signal.data?.forecast_request_id;
     if (!requestId) return;
 
@@ -471,7 +471,7 @@ export default function WebMessenger() {
     } finally {
       setActionBusy((current) => (current === busyKey ? null : current));
     }
-  };
+  }, [openSupportDraft, updateSignalForecastStatus]);
 
   const sendSupportText = useCallback(async (text: string, clientMessageId: string = crypto.randomUUID()) => {
     const cleanText = text.trim();
@@ -572,14 +572,14 @@ export default function WebMessenger() {
     }
   }, [loadConversations]);
 
-  const handleRetry = (message: SupportMessageView) => {
+  const handleRetry = useCallback((message: SupportMessageView) => {
     if (sendingClientIds.has(message.client_message_id)) return;
     if (message.retry_attachment) {
       void sendSupportAttachment(message.retry_attachment, message.text || '', message.client_message_id);
       return;
     }
     if (message.text) void sendSupportText(message.text, message.client_message_id);
-  };
+  }, [sendSupportAttachment, sendSupportText, sendingClientIds]);
 
   const markActiveRead = useCallback(() => {
     if (activeConversation === 'signals') {
@@ -608,6 +608,37 @@ export default function WebMessenger() {
     markActiveRead();
   }, [markActiveRead]);
 
+  const handleForecastAction = useCallback((nextSignal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
+    void answerForecastRequest(nextSignal, action);
+  }, [answerForecastRequest]);
+
+  const signalItems = useMemo(() => signals.map((signal, index) => {
+    const requestId = signal.data?.forecast_request_id;
+    const signalBusy = requestId && actionBusy?.startsWith(`${requestId}:`) ? actionBusy : null;
+    return {
+      key: `signal:${signal.id}`,
+      element: (
+        <SignalMessageCard
+          signal={signal}
+          index={index}
+          actionBusy={signalBusy}
+          onForecastAction={handleForecastAction}
+        />
+      ),
+    };
+  }), [actionBusy, handleForecastAction, signals]);
+
+  const supportItems = useMemo(() => supportMessages.map((message) => ({
+    key: `support:${message.client_message_id}:${message.id}`,
+    element: (
+      <SupportMessageBubble
+        message={message}
+        ownerLabel={message.direction === 'client' ? 'Вы' : undefined}
+        onRetry={handleRetry}
+      />
+    ),
+  })), [handleRetry, supportMessages]);
+
   if (isTma) return null;
 
   const activeSummary = activeConversation === 'signals' ? signalsConversation : supportConversation;
@@ -617,33 +648,10 @@ export default function WebMessenger() {
     : (supportStreamState === 'online' ? 'online' : supportStreamState === 'connecting' ? 'sync' : 'offline');
   const supportClosed = supportConversation?.status === 'closed';
 
-  const signalItems = signals.map((signal, index) => ({
-    key: `signal:${signal.id}`,
-    element: (
-      <SignalMessageCard
-        signal={signal}
-        index={index}
-        actionBusy={actionBusy}
-        onForecastAction={(nextSignal, action) => void answerForecastRequest(nextSignal, action)}
-      />
-    ),
-  }));
-
-  const supportItems = supportMessages.map((message) => ({
-    key: `support:${message.client_message_id}:${message.id}`,
-    element: (
-      <SupportMessageBubble
-        message={message}
-        ownerLabel={message.direction === 'client' ? 'Вы' : undefined}
-        onRetry={handleRetry}
-      />
-    ),
-  }));
-
   return (
     <section
       id="web-bot-chat"
-      className="web-bot-chat mb-0 flex min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
+      className="web-bot-chat mb-0 flex min-w-0 transform-gpu overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl will-change-transform"
     >
       <div className="border-b border-white/10 bg-slate-950/35 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
@@ -675,7 +683,7 @@ export default function WebMessenger() {
                 key={key}
                 type="button"
                 onClick={() => setActiveConversation(key)}
-                className={`min-w-0 rounded-2xl border px-3 py-2 text-left transition-all active:scale-[0.99] ${
+                className={`min-w-0 transform-gpu rounded-2xl border px-3 py-2 text-left transition-all will-change-transform active:scale-[0.99] ${
                   active
                     ? 'border-cyan-300/35 bg-cyan-300/12 text-white'
                     : 'border-white/10 bg-white/[0.035] text-slate-300 hover:border-cyan-300/20'
