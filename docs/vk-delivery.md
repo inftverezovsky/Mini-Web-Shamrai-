@@ -74,10 +74,13 @@ Useful checks:
 
 ```bash
 curl -fsS http://127.0.0.1:8082/api/health
-curl -fsS http://127.0.0.1:8082/api/health/vk
-curl -fsS http://127.0.0.1:8082/api/health/vk/deep
 docker compose -p shamrai logs --tail=200 backend
 ```
+
+`/api/health/vk` and `/api/health/vk/deep` require staff access unless
+`DEBUG_MODE=true`. For deploy/repair automation, prefer an internal backend probe
+that imports `settings` and `src.services.vk_delivery` inside the container without
+printing secret values.
 
 Safe callback shape checks should use placeholders, not real secrets:
 

@@ -11,10 +11,11 @@ import {
 import { ensureTelegramSdk, getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
 import {
   clearVkAuthCooldown,
+  completeVkRedirect,
   consumeVkRedirectResult,
   isVkRedirectStartedError,
   loginVkProfile,
-  rememberVkAuthCooldownForMessage,
+  rememberVkAuthCooldownForError,
 } from '../utils/vkId';
 import { identityDeviceHeader } from '../utils/identityDevice';
 
@@ -292,7 +293,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err: any) {
       if (isVkRedirectStartedError(err)) return;
       const message = authErrorMessage(err, 'Не удалось войти через VK ID');
-      rememberVkAuthCooldownForMessage(message);
+      rememberVkAuthCooldownForError(err, message);
       setError(message);
       throw new Error(message);
     } finally {
@@ -316,24 +317,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(true);
       setError(null);
 
-      if (redirectResult.action === 'login') {
-        const data = await apiFetch<{ access_token: string; user: UserResponse }>('/auth/vk/login', {
-          method: 'POST',
-          body: JSON.stringify(redirectResult.payload),
-        });
-        applyLoginResponse(data);
+      const data = await completeVkRedirect(redirectResult);
+      if ('access_token' in data && data.access_token && 'user' in data) {
+        applyLoginResponse(data as { access_token: string; user: UserResponse });
         return true;
       }
 
-      await apiFetch('/auth/vk/link', {
-        method: 'POST',
-        body: JSON.stringify(redirectResult.payload),
-      });
       await fetchCurrentUser(getStoredAuthToken());
       return true;
     } catch (err: any) {
       const message = authErrorMessage(err, 'Не удалось завершить авторизацию VK ID');
-      rememberVkAuthCooldownForMessage(message);
+      rememberVkAuthCooldownForError(err, message);
       setError(message);
       return true;
     } finally {

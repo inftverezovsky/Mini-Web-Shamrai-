@@ -148,7 +148,21 @@ PY
 
 docker compose -p "`$CANON_PROJECT" up -d --force-recreate backend
 curl -fsS "http://127.0.0.1:`$CANON_PORT/api/health" >/dev/null
-curl -fsS "http://127.0.0.1:`$CANON_PORT/api/health/vk/deep" >/dev/null
+docker compose -p "`$CANON_PROJECT" exec -T backend python - <<'PY'
+from src.core.config import settings
+from src.services.vk_delivery import vk_delivery_configured, vk_group_id
+
+errors = []
+if not settings.VK_ID_APP_ID.strip() or not settings.VK_ID_REDIRECT_URI.strip():
+    errors.append("vk id config missing")
+if not vk_group_id() or not vk_delivery_configured():
+    errors.append("vk delivery config missing")
+if not settings.VK_CALLBACK_SECRET.strip():
+    errors.append("vk callback secret missing")
+if errors:
+    raise SystemExit("; ".join(errors))
+print("vk_runtime_config_probe_ok")
+PY
 
 docker compose -p "`$CANON_PROJECT" exec -T backend python - <<'PY'
 import asyncio

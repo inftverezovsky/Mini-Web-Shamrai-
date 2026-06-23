@@ -138,10 +138,14 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.Session() as db:
             complete_response = Response()
-            with patch.object(
-                auth,
-                "_exchange_vk_or_502",
-                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            with (
+                patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+                patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+                patch.object(
+                    auth,
+                    "_exchange_vk_or_502",
+                    new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+                ),
             ):
                 result = await auth.vk_id_complete(
                     auth.VkAuthCompleteRequest(
@@ -157,7 +161,11 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(result.user.telegram_id, 0)
             self.assertTrue(result.user.is_web_only)
             self.assertEqual(result.user.vk_user_id, "741852963")
-            set_cookie = complete_response.headers.get("set-cookie", "")
+            set_cookie = "\n".join(
+                value.decode("latin-1")
+                for key, value in complete_response.raw_headers
+                if key.lower() == b"set-cookie"
+            )
             self.assertIn(auth.VK_FLOW_COOKIE_NAME, set_cookie)
             self.assertIn("Max-Age=0", set_cookie)
             self.assertIn(auth.AUTH_COOKIE_NAME, set_cookie)
@@ -185,10 +193,14 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             db.add(telegram_user)
             await db.commit()
 
-            with patch.object(
-                auth,
-                "_exchange_vk_or_502",
-                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            with (
+                patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+                patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+                patch.object(
+                    auth,
+                    "_exchange_vk_or_502",
+                    new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+                ),
             ):
                 result = await auth.vk_id_complete(
                     auth.VkAuthCompleteRequest(
