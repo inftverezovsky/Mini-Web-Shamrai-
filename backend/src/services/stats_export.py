@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from io import BytesIO
-from typing import Any, Iterable, Optional
+from pathlib import Path
+from typing import Any, Iterable, Literal, Optional
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.drawing.image import Image as WorksheetImage
+from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -24,17 +28,49 @@ from src.services.statistics import (
     is_paid_client_access,
     last_result_codes,
     period_start,
+    _prefer_fonbet_bookmakers,
     stat_item_from_bet,
     summarize_items,
 )
+from src.services.stats_export_styles import (
+    COEF_FORMAT,
+    COLOR_AMBER_FILL,
+    COLOR_BORDER,
+    COLOR_DANGER_FILL,
+    COLOR_GROUP_DAY,
+    COLOR_GROUP_MONTH,
+    COLOR_GROUP_YEAR,
+    COLOR_HEADER,
+    COLOR_HEADER_AMBER,
+    COLOR_HEADER_ROSE,
+    COLOR_HEADER_SAGE,
+    COLOR_HEADER_STEEL,
+    COLOR_INFO_FILL,
+    COLOR_KPI_LABEL,
+    COLOR_ROSE_FILL,
+    COLOR_SAGE_FILL,
+    COLOR_SUCCESS_FILL,
+    COLOR_SURFACE,
+    COLOR_SURFACE_ALT,
+    COLOR_TEXT,
+    COLOR_TEXT_MUTED,
+    COLOR_TITLE,
+    COLOR_TOTAL_FILL,
+    COLOR_WARNING_FILL,
+    DATE_FORMAT,
+    FLAT_FORMAT,
+    MONEY_FORMAT,
+    PERCENT_FORMAT,
+    XLSX_CALM_PALETTE,
+    _profit_fill,
+    _solid_fill,
+    _status_fill,
+    _tone_fill,
+)
 
 EXPORT_STATUSES = {"win", "loss", "refund"}
-MONEY_FORMAT = '#,##0" ₽"'
-FLAT_FORMAT = '0.00" флет"'
-PERCENT_FORMAT = "0.0%"
-COEF_FORMAT = "0.00"
-DATE_FORMAT = "dd.mm.yyyy hh:mm"
 CLIENT_EXPORT_STAKE = Decimal("1")
+LogoRenderMode = Literal["floating", "google_cell"]
 
 SPORT_ICONS = {
     "Футбол": "⚽",
@@ -64,13 +100,71 @@ SPORT_ICONS = {
 BOOKMAKER_CODES = {
     "Фонбет": "FB",
     "Винлайн": "WL",
-    "ЛигаСтавок": "LS",
-    "BetBoom": "BB",
-    "Leon": "LN",
-    "Olimp": "OL",
-    "Olimpbet": "OL",
-    "Марафон": "MR",
-    "Zenit": "ZN",
+    "Лига Ставок": "LS",
+    "БетБум": "BB",
+    "Леон": "LN",
+    "Олимпбет": "OL",
+    "Марафонбет": "MR",
+    "Зенит": "ZN",
+}
+
+BOOKMAKER_LOGO_DIR = Path(__file__).resolve().parents[1] / "assets" / "bookmakers"
+BOOKMAKER_LOGO_FILES = {
+    "fonbet": "fonbet.png",
+    "betboom": "betboom.png",
+    "winline": "winline.png",
+    "pari": "pari.png",
+    "ligastavok": "ligastavok.png",
+    "marathon": "marathon.png",
+    "betcity": "betcity.png",
+    "melbet": "melbet.png",
+    "leon": "leon.png",
+    "olimpbet": "olimpbet.png",
+    "zenit": "zenit.png",
+    "bettery": "bettery.png",
+}
+BOOKMAKER_LOGO_MAX_PER_CELL = 3
+BOOKMAKER_LOGO_MAX_WIDTH = 34
+BOOKMAKER_LOGO_MAX_HEIGHT = 18
+BOOKMAKER_LOGO_GAP = 4
+
+
+def _normalise_bookmaker_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").casefold().replace("ё", "е") if ch.isalnum())
+
+
+BOOKMAKER_LOGO_ALIASES = {
+    "fonbet": "fonbet",
+    "фонбет": "fonbet",
+    "betboom": "betboom",
+    "бетбум": "betboom",
+    "winline": "winline",
+    "винлайн": "winline",
+    "pari": "pari",
+    "пари": "pari",
+    "ligastavok": "ligastavok",
+    "лигаставок": "ligastavok",
+    "marathon": "marathon",
+    "marathonbet": "marathon",
+    "марафон": "marathon",
+    "марафонбет": "marathon",
+    "betcity": "betcity",
+    "бетсити": "betcity",
+    "melbet": "melbet",
+    "мелбет": "melbet",
+    "leon": "leon",
+    "леон": "leon",
+    "olimp": "olimpbet",
+    "olimpbet": "olimpbet",
+    "олимп": "olimpbet",
+    "олимпбет": "olimpbet",
+    "zenit": "zenit",
+    "зенит": "zenit",
+    "bettery": "bettery",
+    "беттери": "bettery",
+}
+BOOKMAKER_LOGO_CODES_BY_KEY = {
+    _normalise_bookmaker_key(key): code for key, code in BOOKMAKER_LOGO_ALIASES.items()
 }
 
 
@@ -95,6 +189,7 @@ class StatsExportItem:
     client_name: str = ""
     source_type: str = ""
     access_type: str = ""
+    bookmaker_logo_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -139,6 +234,8 @@ class ClientInfoExportRow:
     situation_label: str
     situation_tone: str
     situation_description: str
+    ab_group: str = ""
+    bookmaker_logo_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -166,6 +263,38 @@ class ClientRecentBetExportRow:
     access_type: str
     match_charged: bool
     bet_id: str
+    ab_group: str = ""
+    bookmaker_logo_codes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BookmakerLogoPng:
+    data: bytes
+    width: int
+    height: int
+    codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GoogleSheetIconCell:
+    sheet: str
+    row: int
+    column: int
+    codes: tuple[str, ...]
+    width: int
+    height: int
+
+
+@dataclass
+class StatsWorkbookArtifact:
+    xlsx: bytes
+    icon_cells: list[GoogleSheetIconCell] = field(default_factory=list)
+
+
+@dataclass
+class _LogoRenderContext:
+    mode: LogoRenderMode = "floating"
+    icon_cells: list[GoogleSheetIconCell] = field(default_factory=list)
 
 
 def export_unit_stake() -> Decimal:
@@ -194,17 +323,23 @@ def _user_match_balance(user: User) -> int:
 
 
 def _bookmakers_for_user(user: User) -> str:
-    names: list[str] = []
+    return ", ".join(bookmaker["name"] for bookmaker in _bookmaker_refs_for_user(user))
+
+
+def _bookmaker_refs_for_user(user: User) -> list[dict[str, str]]:
+    bookmakers: list[dict[str, str]] = []
     seen = set()
     for bookmaker in list(getattr(user, "bookmakers", None) or []):
         name = str(getattr(bookmaker, "name", "") or "").strip()
-        if name and name.lower() not in seen:
-            seen.add(name.lower())
-            names.append(name)
+        code = str(getattr(bookmaker, "code", "") or "").strip()
+        key = (code or name).lower()
+        if name and key not in seen:
+            seen.add(key)
+            bookmakers.append({"name": name, "code": code})
     other_name = str(getattr(user, "other_bookmaker_name", "") or "").strip()
     if other_name and other_name.lower() not in seen:
-        names.append(other_name)
-    return ", ".join(names)
+        bookmakers.append({"name": other_name, "code": ""})
+    return bookmakers
 
 
 def _bookmakers_for_bet(bet: Bet) -> list[dict[str, Any]]:
@@ -219,7 +354,49 @@ def _bookmakers_for_bet(bet: Bet) -> list[dict[str, Any]]:
     fallback = getattr(bet, "bookmaker", None)
     if fallback and fallback.id not in seen_ids:
         bookmakers.append({"id": fallback.id, "name": fallback.name, "code": fallback.code})
-    return bookmakers
+    return _prefer_fonbet_bookmakers(bookmakers)
+
+
+def _bookmaker_logo_code(*, name: str = "", code: str = "") -> Optional[str]:
+    for value in (code, name):
+        key = _normalise_bookmaker_key(value)
+        logo_code = BOOKMAKER_LOGO_CODES_BY_KEY.get(key)
+        if logo_code and (BOOKMAKER_LOGO_DIR / BOOKMAKER_LOGO_FILES[logo_code]).is_file():
+            return logo_code
+    return None
+
+
+def _bookmaker_logo_codes_for_refs(bookmakers: Iterable[dict[str, Any]]) -> list[str]:
+    codes: list[str] = []
+    seen = set()
+    for bookmaker in bookmakers:
+        logo_code = _bookmaker_logo_code(
+            name=str(bookmaker.get("name", "") or ""),
+            code=str(bookmaker.get("code", "") or ""),
+        )
+        if logo_code and logo_code not in seen:
+            seen.add(logo_code)
+            codes.append(logo_code)
+    return codes
+
+
+def _bookmaker_logo_codes_for_names(bookmaker_names: Iterable[str]) -> list[str]:
+    return _bookmaker_logo_codes_for_refs({"name": name, "code": ""} for name in bookmaker_names)
+
+
+def _compact_list_label(values: Iterable[str] | str, *, max_items: int = 3) -> str:
+    if isinstance(values, str):
+        items = [item.strip() for item in values.split(",")]
+    else:
+        items = [str(item or "").strip() for item in values]
+    clean_items = [item for item in items if item]
+    if len(clean_items) <= max_items:
+        return ", ".join(clean_items)
+    return f"{', '.join(clean_items[:max_items])} +{len(clean_items) - max_items}"
+
+
+def _logo_cell_text(codes: Iterable[str], fallback: str = "") -> str:
+    return "" if _unique_bookmaker_logo_codes(codes) else fallback
 
 
 def _month_label(value: datetime) -> str:
@@ -230,7 +407,7 @@ def _status_label(status: str) -> str:
     if status == "win":
         return "Победа"
     if status == "loss":
-        return "Поражение"
+        return "Неудача"
     if status == "pending":
         return "Ожидает расчета"
     return "Возврат"
@@ -266,7 +443,12 @@ def export_item_from_bet(
     first_bookmaker = bookmaker_names[0]
     sport_type = str(getattr(bet, "sport_type", None) or "Без спорта")
     delivery_mode = str(getattr(bet, "delivery_mode", None) or "feed")
-    source_type = "feed" if delivery_mode == "feed" else "private"
+    if delivery_mode == "feed":
+        source_type = "feed"
+    elif delivery_mode == "paid_set":
+        source_type = "paid_set"
+    else:
+        source_type = "private"
     odds_dropped_to = getattr(bet, "odds_dropped_to", None)
 
     return StatsExportItem(
@@ -289,6 +471,7 @@ def export_item_from_bet(
         client_name=client_name,
         source_type=source_type,
         access_type=access_type,
+        bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmakers),
     )
 
 
@@ -316,6 +499,18 @@ def summarize_export_items(items: Iterable[StatsExportItem]) -> dict[str, Any]:
         "profit": profit,
         "roi": (profit / turnover) if turnover else 0,
     }
+
+
+def _flat_stake_for_item(item: StatsExportItem) -> Decimal:
+    return Decimal("1") if item.status in {"win", "loss"} else Decimal("0")
+
+
+def _flat_profit_for_item(item: StatsExportItem) -> Decimal:
+    if item.status == "win":
+        return item.coefficient - Decimal("1")
+    if item.status == "loss":
+        return Decimal("-1")
+    return Decimal("0")
 
 
 def _sorted_items(items: Iterable[StatsExportItem]) -> list[StatsExportItem]:
@@ -349,6 +544,7 @@ def _breakdown_rows(items: list[StatsExportItem], *, kind: str) -> list[dict[str
                 groups[key] = {
                     "label": label,
                     "icon": BOOKMAKER_CODES.get(label, "") if kind == "bookmaker" else item.sport_icon,
+                    "logo_codes": _bookmaker_logo_codes_for_names([label]) if kind == "bookmaker" else [],
                     "items": [],
                 }
             groups[key]["items"].append(item)
@@ -357,6 +553,7 @@ def _breakdown_rows(items: list[StatsExportItem], *, kind: str) -> list[dict[str
         {
             "icon": group["icon"],
             "label": group["label"],
+            "logo_codes": group["logo_codes"],
             **summarize_export_items(group["items"]),
         }
         for group in groups.values()
@@ -372,26 +569,175 @@ def _safe_sheet_title(title: str) -> str:
 def _style_title(ws, max_col: int) -> None:
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_col)
     ws["A1"].font = Font(bold=True, size=18, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor="111827")
+    ws["A1"].fill = _solid_fill(COLOR_TITLE)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
 
 
-def _style_range_header(ws, row: int, start_col: int, end_col: int, fill: str = "1F2937") -> None:
+def _style_range_header(ws, row: int, start_col: int, end_col: int, fill: str = COLOR_HEADER) -> None:
     for col in range(start_col, end_col + 1):
         cell = ws.cell(row=row, column=col)
         cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor=fill)
+        cell.fill = _solid_fill(fill)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[row].height = max(float(ws.row_dimensions[row].height or 15), 24)
+
+
+def _format_stake_unit(value_label: str) -> str:
+    if value_label == "₽":
+        stake = export_unit_stake()
+        return f"{int(stake):,}".replace(",", " ") + " ₽"
+    if value_label == "флеты":
+        return "1 флет"
+    return value_label
+
+
+def _generated_at_text() -> str:
+    generated_at = as_moscow_datetime(datetime.now(timezone.utc))
+    return generated_at.strftime("%d.%m.%Y") if generated_at else ""
+
+
+def _write_metadata_row(ws, row: int, period_label: str, *, value_label: str) -> None:
+    metadata = [
+        (1, "Период", 2, period_label),
+        (4, "Дата выгрузки", 5, _generated_at_text()),
+        (7, "Ед. ставки", 8, _format_stake_unit(value_label)),
+    ]
+    for col in range(1, 14):
+        cell = ws.cell(row=row, column=col)
+        cell.fill = _solid_fill(COLOR_SURFACE)
+        cell.alignment = Alignment(vertical="center")
+    for label_col, label, value_col, value in metadata:
+        label_cell = ws.cell(row=row, column=label_col, value=label)
+        value_cell = ws.cell(row=row, column=value_col, value=value)
+        label_cell.font = Font(bold=True, color=COLOR_TEXT_MUTED)
+        value_cell.font = Font(bold=True, color=COLOR_TEXT)
+        label_cell.alignment = Alignment(horizontal="right", vertical="center")
+        value_cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[row].height = 22
+
+
+def _write_section_title(ws, row: int, start_col: int, end_col: int, title: str, *, fill: str) -> None:
+    ws.merge_cells(start_row=row, start_column=start_col, end_row=row, end_column=end_col)
+    cell = ws.cell(row=row, column=start_col, value=title)
+    cell.font = Font(bold=True, size=12, color=COLOR_TEXT)
+    cell.fill = _solid_fill(fill)
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[row].height = 22
+
+
+def _write_export_group_row(ws, row: int, max_col: int, label: str, *, level: int, fill: str) -> None:
+    ws.cell(row=row, column=1, value=label)
+    for col in range(1, max_col + 1):
+        cell = ws.cell(row=row, column=col)
+        cell.font = Font(bold=True, color=COLOR_TEXT)
+        cell.fill = _solid_fill(fill)
+        cell.alignment = Alignment(horizontal="left", vertical="center", shrink_to_fit=True)
+    ws.row_dimensions[row].height = 22
+    ws.row_dimensions[row].outlineLevel = level
+
+
+def _set_auto_filter(ws, min_row: int, max_row: int, min_col: int, max_col: int) -> None:
+    start = f"{get_column_letter(min_col)}{min_row}"
+    end = f"{get_column_letter(max_col)}{max(max_row, min_row)}"
+    ws.auto_filter.ref = f"{start}:{end}"
+
+
+def _set_column_widths(ws, widths: dict[str, float]) -> None:
+    for letter, width in widths.items():
+        ws.column_dimensions[letter].width = width
 
 
 def _set_border(ws, min_row: int, max_row: int, min_col: int, max_col: int) -> None:
-    side = Side(style="thin", color="D1D5DB")
+    side = Side(style="thin", color=COLOR_BORDER)
     border = Border(left=side, right=side, top=side, bottom=side)
     for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
         for cell in row:
             cell.border = border
             cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+
+def _polish_table_header(ws, row: int, start_col: int, end_col: int) -> None:
+    ws.row_dimensions[row].height = max(float(ws.row_dimensions[row].height or 15), 30)
+    for col in range(start_col, end_col + 1):
+        ws.cell(row=row, column=col).alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+            shrink_to_fit=True,
+        )
+
+
+def _polish_table_body(
+    ws,
+    min_row: int,
+    max_row: int,
+    max_col: int,
+    *,
+    center_cols: set[int],
+    wrap_cols: set[int] | None = None,
+    right_cols: set[int] | None = None,
+    row_height: float = 34,
+) -> None:
+    wrap_cols = wrap_cols or set()
+    right_cols = right_cols or set()
+    for row in range(min_row, max_row + 1):
+        has_wrapped_content = any(str(ws.cell(row=row, column=col).value or "") for col in wrap_cols)
+        effective_height = row_height + (8 if has_wrapped_content and wrap_cols else 0)
+        ws.row_dimensions[row].height = max(float(ws.row_dimensions[row].height or 15), effective_height)
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=row, column=col)
+            if col in right_cols:
+                horizontal = "right"
+            elif col in center_cols:
+                horizontal = "center"
+            else:
+                horizontal = "left"
+            cell.alignment = Alignment(
+                horizontal=horizontal,
+                vertical="center",
+                wrap_text=col in wrap_cols,
+                shrink_to_fit=col not in wrap_cols,
+            )
+
+
+def _truncate_cell_text(value: str, *, limit: int) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _apply_date_row_groups(ws, row_dates: list[tuple[int, Optional[datetime]]]) -> None:
+    dated_rows = [(row, as_moscow_datetime(value)) for row, value in row_dates if as_moscow_datetime(value)]
+    if not dated_rows:
+        return
+
+    ws.sheet_properties.outlinePr.summaryBelow = False
+
+    def group_by(key_func, level: int) -> None:
+        start_row: Optional[int] = None
+        end_row: Optional[int] = None
+        previous_key = object()
+        for row, value in dated_rows:
+            key = key_func(value)
+            if start_row is None:
+                start_row = end_row = row
+                previous_key = key
+                continue
+            if key == previous_key and end_row is not None and row == end_row + 1:
+                end_row = row
+                continue
+            if start_row is not None and end_row is not None:
+                ws.row_dimensions.group(start_row, end_row, outline_level=level, hidden=False)
+            start_row = end_row = row
+            previous_key = key
+        if start_row is not None and end_row is not None:
+            ws.row_dimensions.group(start_row, end_row, outline_level=level, hidden=False)
+
+    group_by(lambda value: value.year, 1)
+    group_by(lambda value: (value.year, value.month), 2)
+    group_by(lambda value: (value.year, value.month, value.day), 3)
 
 
 def _format_summary_value(cell, key: str, value_format: str = MONEY_FORMAT) -> None:
@@ -417,13 +763,128 @@ def _write_kpi(
     ws.merge_cells(start_row=start_row + 1, start_column=start_col, end_row=start_row + 1, end_column=start_col + 1)
     label_cell = ws.cell(row=start_row, column=start_col, value=label)
     value_cell = ws.cell(row=start_row + 1, column=start_col, value=value)
-    label_cell.font = Font(bold=True, color="FFFFFF")
-    label_cell.fill = PatternFill("solid", fgColor="374151")
+    label_cell.font = Font(bold=True, color=COLOR_TEXT_MUTED)
+    label_cell.fill = _solid_fill(COLOR_KPI_LABEL)
     label_cell.alignment = Alignment(horizontal="center")
-    value_cell.font = Font(bold=True, size=14, color="111827")
-    value_cell.fill = PatternFill("solid", fgColor="F3F4F6")
-    value_cell.alignment = Alignment(horizontal="center")
+    value_cell.font = Font(bold=True, size=14, color=COLOR_TEXT)
+    if key in {"profit", "roi"} and value:
+        value_cell.fill = _profit_fill(value)
+    else:
+        value_cell.fill = _solid_fill(COLOR_SURFACE)
+    ws.row_dimensions[start_row].height = 20
+    ws.row_dimensions[start_row + 1].height = 26
+    _set_border(ws, start_row, start_row + 1, start_col, start_col + 1)
+    label_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    value_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     _format_summary_value(value_cell, key, value_format)
+
+
+@lru_cache(maxsize=256)
+def _bookmaker_logo_artifact(codes_key: tuple[str, ...]) -> Optional[tuple[bytes, int, int]]:
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+
+    tiles = []
+    for code in codes_key[:BOOKMAKER_LOGO_MAX_PER_CELL]:
+        filename = BOOKMAKER_LOGO_FILES.get(code)
+        if not filename:
+            continue
+        path = BOOKMAKER_LOGO_DIR / filename
+        if not path.is_file():
+            continue
+        try:
+            with PILImage.open(path) as raw_image:
+                image = raw_image.convert("RGBA")
+                image.thumbnail((BOOKMAKER_LOGO_MAX_WIDTH, BOOKMAKER_LOGO_MAX_HEIGHT), PILImage.LANCZOS)
+                tiles.append(image.copy())
+        except Exception:
+            continue
+
+    if not tiles:
+        return None
+
+    width = sum(tile.width for tile in tiles) + BOOKMAKER_LOGO_GAP * (len(tiles) - 1)
+    height = max(tile.height for tile in tiles)
+    canvas = PILImage.new("RGBA", (width, height), (255, 255, 255, 0))
+    x = 0
+    for tile in tiles:
+        y = (height - tile.height) // 2
+        canvas.alpha_composite(tile, (x, y))
+        x += tile.width + BOOKMAKER_LOGO_GAP
+
+    buffer = BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue(), width, height
+
+
+def _unique_bookmaker_logo_codes(codes: Iterable[str]) -> tuple[str, ...]:
+    unique_codes: list[str] = []
+    seen = set()
+    for code in codes:
+        logo_code = _bookmaker_logo_code(code=code)
+        if logo_code and logo_code not in seen:
+            seen.add(logo_code)
+            unique_codes.append(logo_code)
+    return tuple(unique_codes)
+
+
+def build_bookmaker_logo_png(codes: Iterable[str]) -> Optional[BookmakerLogoPng]:
+    codes_key = _unique_bookmaker_logo_codes(codes)[:BOOKMAKER_LOGO_MAX_PER_CELL]
+    if not codes_key:
+        return None
+    artifact = _bookmaker_logo_artifact(codes_key)
+    if not artifact:
+        return None
+
+    data, width, height = artifact
+    return BookmakerLogoPng(data=data, width=width, height=height, codes=codes_key)
+
+
+def _fit_logo_cell(ws, row: int, col: int, *, width: int, height: int) -> None:
+    row_height = max(float(ws.row_dimensions[row].height or 15), height * 0.75 + 5)
+    ws.row_dimensions[row].height = row_height
+    letter = get_column_letter(col)
+    column_width = max(float(ws.column_dimensions[letter].width or 0), min(max(width / 7 + 2, 10), 26))
+    ws.column_dimensions[letter].width = column_width
+
+
+def _add_bookmaker_logos(
+    ws,
+    row: int,
+    col: int,
+    codes: Iterable[str],
+    *,
+    logo_context: Optional[_LogoRenderContext] = None,
+) -> bool:
+    codes_key = _unique_bookmaker_logo_codes(codes)[:BOOKMAKER_LOGO_MAX_PER_CELL]
+    if not codes_key:
+        return False
+    artifact = _bookmaker_logo_artifact(codes_key)
+    if not artifact:
+        return False
+
+    data, width, height = artifact
+    if logo_context and logo_context.mode == "google_cell":
+        logo_context.icon_cells.append(GoogleSheetIconCell(
+            sheet=str(ws.title),
+            row=row,
+            column=col,
+            codes=codes_key,
+            width=width,
+            height=height,
+        ))
+        _fit_logo_cell(ws, row, col, width=width, height=height)
+        return True
+
+    image = WorksheetImage(BytesIO(data))
+    image.width = width
+    image.height = height
+    ws.add_image(image, ws.cell(row=row, column=col).coordinate)
+
+    _fit_logo_cell(ws, row, col, width=width, height=height)
+    return True
 
 
 def _write_monthly_table(
@@ -434,7 +895,7 @@ def _write_monthly_table(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
 ) -> int:
-    ws.cell(row=start_row, column=1, value="Помесячная сводка").font = Font(bold=True, size=13)
+    _write_section_title(ws, start_row, 1, 11, "Помесячная сводка", fill=COLOR_INFO_FILL)
     header_row = start_row + 1
     headers = [
         "Месяц",
@@ -451,9 +912,10 @@ def _write_monthly_table(
     ]
     for col, header in enumerate(headers, 1):
         ws.cell(row=header_row, column=col, value=header)
-    _style_range_header(ws, header_row, 1, len(headers), "0F766E")
+    _style_range_header(ws, header_row, 1, len(headers), COLOR_HEADER_SAGE)
 
-    for offset, row_data in enumerate(_monthly_rows(items), 1):
+    monthly_rows = _monthly_rows(items)
+    for offset, row_data in enumerate(monthly_rows, 1):
         row = header_row + offset
         values = [
             row_data["label"],
@@ -475,9 +937,12 @@ def _write_monthly_table(
         if row_data["label"] == "ИТОГО":
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row, column=col).font = Font(bold=True)
-                ws.cell(row=row, column=col).fill = PatternFill("solid", fgColor="ECFDF5")
+                ws.cell(row=row, column=col).fill = _solid_fill(COLOR_TOTAL_FILL)
+        elif offset % 2 == 0:
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row, column=col).fill = _solid_fill(COLOR_SURFACE_ALT)
 
-    end_row = header_row + len(_monthly_rows(items))
+    end_row = header_row + len(monthly_rows)
     _set_border(ws, header_row, end_row, 1, len(headers))
     return end_row + 3
 
@@ -489,28 +954,40 @@ def _write_compact_breakdowns(
     *,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    logo_context: Optional[_LogoRenderContext] = None,
 ) -> None:
     bookmaker_rows = _breakdown_rows(items, kind="bookmaker")
     sport_rows = _breakdown_rows(items, kind="sport")
 
-    ws.cell(row=start_row, column=1, value="БУКМЕКЕРЫ").font = Font(bold=True, size=12)
-    ws.cell(row=start_row, column=8, value="ВИДЫ СПОРТА").font = Font(bold=True, size=12)
+    _write_section_title(ws, start_row, 1, 6, "Букмекеры", fill=COLOR_SAGE_FILL)
+    _write_section_title(ws, start_row, 8, 13, "Виды спорта", fill=COLOR_INFO_FILL)
     headers = ["Иконка", "БК", "Ставки", "Проход", f"Прибыль, {value_label}", "ROI"]
     sport_headers = ["Иконка", "Вид спорта", "Ставки", "Проход", f"Прибыль, {value_label}", "ROI"]
     for idx, header in enumerate(headers, 1):
         ws.cell(row=start_row + 1, column=idx, value=header)
     for idx, header in enumerate(sport_headers, 8):
         ws.cell(row=start_row + 1, column=idx, value=header)
-    _style_range_header(ws, start_row + 1, 1, 6, "0F766E")
-    _style_range_header(ws, start_row + 1, 8, 13, "1D4ED8")
+    _style_range_header(ws, start_row + 1, 1, 6, COLOR_HEADER_SAGE)
+    _style_range_header(ws, start_row + 1, 8, 13, COLOR_HEADER_STEEL)
 
     for offset, row_data in enumerate(bookmaker_rows, 2):
         row = start_row + offset
-        values = [row_data["icon"], row_data["label"], row_data["bets"], row_data["winrate"], row_data["profit"], row_data["roi"]]
+        values = [
+            _logo_cell_text(row_data["logo_codes"], row_data["icon"]),
+            row_data["label"],
+            row_data["bets"],
+            row_data["winrate"],
+            row_data["profit"],
+            row_data["roi"],
+        ]
         for col, value in enumerate(values, 1):
             ws.cell(row=row, column=col, value=value)
+        _add_bookmaker_logos(ws, row, 1, row_data["logo_codes"], logo_context=logo_context)
         for col, key in [(4, "winrate"), (5, "profit"), (6, "roi")]:
             _format_summary_value(ws.cell(row=row, column=col), key, value_format)
+        if offset % 2 == 1:
+            for col in range(1, 7):
+                ws.cell(row=row, column=col).fill = _solid_fill(COLOR_SURFACE_ALT)
 
     for offset, row_data in enumerate(sport_rows, 2):
         row = start_row + offset
@@ -519,6 +996,9 @@ def _write_compact_breakdowns(
             ws.cell(row=row, column=col, value=value)
         for col, key in [(11, "winrate"), (12, "profit"), (13, "roi")]:
             _format_summary_value(ws.cell(row=row, column=col), key, value_format)
+        if offset % 2 == 1:
+            for col in range(8, 14):
+                ws.cell(row=row, column=col).fill = _solid_fill(COLOR_SURFACE_ALT)
 
     max_rows = max(len(bookmaker_rows), len(sport_rows)) + start_row + 1
     _set_border(ws, start_row + 1, max_rows, 1, 6)
@@ -533,16 +1013,15 @@ def _setup_statistics_sheet(
     *,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    logo_context: Optional[_LogoRenderContext] = None,
 ) -> None:
     ws = wb.active
     ws.title = "Статистика"
     ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_TITLE
     ws["A1"] = title
     _style_title(ws, 13)
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=13)
-    ws["A2"] = period_label
-    ws["A2"].alignment = Alignment(horizontal="center")
-    ws["A2"].font = Font(italic=True, color="4B5563")
+    _write_metadata_row(ws, 2, period_label, value_label=value_label)
 
     summary = summarize_export_items(items)
     _write_kpi(ws, 4, 1, "Всего ставок", summary["bets"], "bets", value_format=value_format)
@@ -555,9 +1034,31 @@ def _setup_statistics_sheet(
     _write_kpi(ws, 7, 10, "Поражений", summary["losses"], "losses", value_format=value_format)
 
     next_row = _write_monthly_table(ws, 11, items, value_format=value_format, value_label=value_label)
-    _write_compact_breakdowns(ws, next_row, items, value_format=value_format, value_label=value_label)
+    _write_compact_breakdowns(
+        ws,
+        next_row,
+        items,
+        value_format=value_format,
+        value_label=value_label,
+        logo_context=logo_context,
+    )
     _autosize(ws)
-    ws.freeze_panes = "A12"
+    _set_column_widths(ws, {
+        "A": 14,
+        "B": 14,
+        "C": 10,
+        "D": 14,
+        "E": 14,
+        "F": 10,
+        "G": 16,
+        "H": 18,
+        "I": 15,
+        "J": 15,
+        "K": 12,
+        "L": 3,
+        "M": 15,
+    })
+    ws.freeze_panes = "A13"
 
 
 def _write_breakdown_sheet(
@@ -566,13 +1067,13 @@ def _write_breakdown_sheet(
     *,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    logo_context: Optional[_LogoRenderContext] = None,
 ) -> None:
     ws = wb.create_sheet("Свод по БК и спорту")
     ws.sheet_view.showGridLines = False
-    ws["A1"] = "СВОД ПО БУКМЕКЕРАМ"
-    ws["H1"] = "СВОД ПО ВИДАМ СПОРТА"
-    for cell in ["A1", "H1"]:
-        ws[cell].font = Font(bold=True, size=14, color="111827")
+    ws.sheet_properties.tabColor = COLOR_HEADER_SAGE
+    _write_section_title(ws, 1, 1, 11, "Свод по букмекерам", fill=COLOR_SAGE_FILL)
+    _write_section_title(ws, 1, 13, 23, "Свод по видам спорта", fill=COLOR_INFO_FILL)
 
     headers = ["Иконка", "БК", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", f"Оборот, {value_label}", f"Прибыль, {value_label}", "ROI"]
     sport_headers = ["Иконка", "Вид спорта", "Ставки", "Побед", "Пораж.", "Возврат", "Проход", "Ср. коэфф.", f"Оборот, {value_label}", f"Прибыль, {value_label}", "ROI"]
@@ -580,18 +1081,44 @@ def _write_breakdown_sheet(
         ws.cell(row=2, column=col, value=header)
     for col, header in enumerate(sport_headers, 13):
         ws.cell(row=2, column=col, value=header)
-    _style_range_header(ws, 2, 1, 11, "0F766E")
-    _style_range_header(ws, 2, 13, 23, "1D4ED8")
+    _style_range_header(ws, 2, 1, 11, COLOR_HEADER_SAGE)
+    _style_range_header(ws, 2, 13, 23, COLOR_HEADER_STEEL)
 
     for offset, row_data in enumerate(_breakdown_rows(items, kind="bookmaker"), 3):
-        _write_breakdown_detail_row(ws, offset, 1, row_data, value_format=value_format)
+        _write_breakdown_detail_row(
+            ws,
+            offset,
+            1,
+            row_data,
+            value_format=value_format,
+            add_bookmaker_logo=True,
+            logo_context=logo_context,
+        )
     for offset, row_data in enumerate(_breakdown_rows(items, kind="sport"), 3):
         _write_breakdown_detail_row(ws, offset, 13, row_data, value_format=value_format)
 
     max_row = max(len(_breakdown_rows(items, kind="bookmaker")), len(_breakdown_rows(items, kind="sport"))) + 2
     _set_border(ws, 2, max_row, 1, 11)
     _set_border(ws, 2, max_row, 13, 23)
+    _set_auto_filter(ws, 2, max_row, 1, 23)
     _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 13,
+        "B": 18,
+        "G": 12,
+        "H": 12,
+        "I": 15,
+        "J": 15,
+        "K": 12,
+        "L": 3,
+        "M": 13,
+        "N": 18,
+        "S": 12,
+        "T": 12,
+        "U": 15,
+        "V": 15,
+        "W": 12,
+    })
     ws.freeze_panes = "A3"
 
 
@@ -602,9 +1129,11 @@ def _write_breakdown_detail_row(
     row_data: dict[str, Any],
     *,
     value_format: str = MONEY_FORMAT,
+    add_bookmaker_logo: bool = False,
+    logo_context: Optional[_LogoRenderContext] = None,
 ) -> None:
     values = [
-        row_data["icon"],
+        _logo_cell_text(row_data["logo_codes"], row_data["icon"]) if add_bookmaker_logo else row_data["icon"],
         row_data["label"],
         row_data["bets"],
         row_data["wins"],
@@ -618,6 +1147,8 @@ def _write_breakdown_detail_row(
     ]
     for index, value in enumerate(values):
         ws.cell(row=row, column=start_col + index, value=value)
+    if add_bookmaker_logo:
+        _add_bookmaker_logos(ws, row, start_col, row_data["logo_codes"], logo_context=logo_context)
     for offset, key in [(6, "winrate"), (7, "average_coefficient"), (8, "turnover"), (9, "profit"), (10, "roi")]:
         _format_summary_value(ws.cell(row=row, column=start_col + offset), key, value_format)
 
@@ -629,11 +1160,14 @@ def _write_detail_sheet(
     include_client: bool,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    logo_context: Optional[_LogoRenderContext] = None,
 ) -> None:
     ws = wb.create_sheet("Детально")
     ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_HEADER
     headers = [
-        "Период",
+        "Месяц",
+        "День",
         "№",
         "Вид",
         "Вид спорта",
@@ -643,58 +1177,155 @@ def _write_detail_sheet(
         "Коэфф.",
         "Упал до",
         "Ставка",
-        "Исход",
+        "Ставка, флет",
+        "Результат",
         f"Оборот, {value_label}",
         f"Прибыль, {value_label}",
     ]
+    if value_label != "флеты":
+        headers.append("Прибыль, флеты")
     if include_client:
         headers.append("Клиент")
     headers.extend(["Источник", "ID"])
+    header_cols = {header: index + 1 for index, header in enumerate(headers)}
 
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
-    _style_range_header(ws, 1, 1, len(headers), "111827")
+    _style_range_header(ws, 1, 1, len(headers), COLOR_HEADER)
 
     month_counts: dict[str, int] = defaultdict(int)
-    for row_idx, item in enumerate(_sorted_items(items), 2):
+    row_idx = 2
+    current_year: Optional[int] = None
+    current_month: Optional[str] = None
+    current_day: Optional[str] = None
+    group_rows: set[int] = set()
+    for item in _sorted_items(items):
+        resolved_at_msk = as_moscow_datetime(item.resolved_at)
+        day_label = resolved_at_msk.strftime("%d.%m.%Y") if resolved_at_msk else ""
+        year_label = resolved_at_msk.year if resolved_at_msk else None
+        if year_label and year_label != current_year:
+            _write_export_group_row(ws, row_idx, len(headers), str(year_label), level=1, fill=COLOR_GROUP_YEAR)
+            group_rows.add(row_idx)
+            row_idx += 1
+            current_year = year_label
+            current_month = None
+            current_day = None
+        if item.period_label != current_month:
+            _write_export_group_row(ws, row_idx, len(headers), item.period_label, level=2, fill=COLOR_GROUP_MONTH)
+            group_rows.add(row_idx)
+            row_idx += 1
+            current_month = item.period_label
+            current_day = None
+        if day_label and day_label != current_day:
+            _write_export_group_row(ws, row_idx, len(headers), day_label, level=3, fill=COLOR_GROUP_DAY)
+            group_rows.add(row_idx)
+            row_idx += 1
+            current_day = day_label
+
         month_counts[item.period_key] += 1
         values = [
             item.period_label,
+            day_label,
             month_counts[item.period_key],
             item.sport_icon,
             item.sport_type,
             item.event_name,
-            item.bookmaker_icon,
-            ", ".join(item.bookmaker_names),
+            _logo_cell_text(item.bookmaker_logo_codes, item.bookmaker_icon),
+            _compact_list_label(item.bookmaker_names),
             item.coefficient,
             item.odds_dropped_to,
             item.stake_text,
+            _flat_stake_for_item(item),
             item.result_label,
             item.turnover,
             item.profit,
         ]
+        if value_label != "флеты":
+            values.append(_flat_profit_for_item(item))
         if include_client:
             values.append(item.client_name)
         values.extend([item.source_type, item.id])
         for col, value in enumerate(values, 1):
             ws.cell(row=row_idx, column=col, value=value)
-        ws.cell(row=row_idx, column=8).number_format = COEF_FORMAT
-        ws.cell(row=row_idx, column=9).number_format = COEF_FORMAT
-        money_start_col = 12
-        ws.cell(row=row_idx, column=money_start_col).number_format = value_format
-        ws.cell(row=row_idx, column=money_start_col + 1).number_format = value_format
-        if item.status == "win":
-            fill = PatternFill("solid", fgColor="ECFDF5")
-        elif item.status == "loss":
-            fill = PatternFill("solid", fgColor="FEF2F2")
-        else:
-            fill = PatternFill("solid", fgColor="F8FAFC")
+        _add_bookmaker_logos(
+            ws,
+            row_idx,
+            header_cols["Иконка БК"],
+            item.bookmaker_logo_codes,
+            logo_context=logo_context,
+        )
+        ws.cell(row=row_idx, column=header_cols["Коэфф."]).number_format = COEF_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Упал до"]).number_format = COEF_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Ставка, флет"]).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=header_cols[f"Оборот, {value_label}"]).number_format = value_format
+        ws.cell(row=row_idx, column=header_cols[f"Прибыль, {value_label}"]).number_format = value_format
+        if "Прибыль, флеты" in header_cols:
+            ws.cell(row=row_idx, column=header_cols["Прибыль, флеты"]).number_format = FLAT_FORMAT
+        fill = _status_fill(item.status)
         for col in range(1, len(headers) + 1):
             ws.cell(row=row_idx, column=col).fill = fill
+        ws.row_dimensions[row_idx].outlineLevel = 4
+        row_idx += 1
 
-    if items:
-        _set_border(ws, 1, len(items) + 1, 1, len(headers))
+    max_row = max(row_idx - 1, 1)
+    if max_row > 1:
+        _set_border(ws, 1, max_row, 1, len(headers))
+    else:
+        _set_border(ws, 1, 1, 1, len(headers))
+    for row in group_rows:
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=row, column=col).alignment = Alignment(horizontal="left", vertical="center", shrink_to_fit=True)
+    center_cols = {
+        header_cols["День"],
+        header_cols["№"],
+        header_cols["Вид"],
+        header_cols["Иконка БК"],
+        header_cols["Результат"],
+    }
+    wrap_cols = {
+        header_cols["Вид спорта"],
+        header_cols["Матч"],
+        header_cols["БК"],
+    }
+    if "Клиент" in header_cols:
+        wrap_cols.add(header_cols["Клиент"])
+    _polish_table_header(ws, 1, 1, len(headers))
+    _polish_table_body(
+        ws,
+        2,
+        max_row,
+        len(headers),
+        center_cols=center_cols,
+        wrap_cols=wrap_cols,
+        row_height=34,
+    )
+    for row in group_rows:
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=row, column=col).alignment = Alignment(horizontal="left", vertical="center", shrink_to_fit=True)
+    ws.sheet_properties.outlinePr.summaryBelow = False
+    _set_auto_filter(ws, 1, max_row, 1, len(headers))
     _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 16,
+        "B": 13,
+        "C": 8,
+        "D": 8,
+        "E": 15,
+        "F": 42,
+        "G": 18,
+        "H": 24,
+        "I": 11,
+        "J": 11,
+        "K": 14,
+        "L": 13,
+        "M": 14,
+        "N": 15,
+        "O": 15,
+        "P": 15,
+        "Q": 20,
+        "R": 14,
+        "S": 36,
+    })
     ws.freeze_panes = "A2"
 
 
@@ -702,7 +1333,8 @@ def _autosize(ws) -> None:
     for column_cells in ws.columns:
         letter = get_column_letter(column_cells[0].column)
         max_length = max(len(str(cell.value or "")) for cell in column_cells)
-        ws.column_dimensions[letter].width = min(max(max_length + 2, 10), 48)
+        current_width = float(ws.column_dimensions[letter].width or 0)
+        ws.column_dimensions[letter].width = max(current_width, min(max(max_length + 2, 10), 48))
 
 
 def _result_label_short(result: str) -> str:
@@ -729,18 +1361,617 @@ def _excel_datetime(value: Optional[datetime]) -> Optional[datetime]:
     return moscow_value.replace(tzinfo=None) if moscow_value else None
 
 
-def build_client_info_export_workbook(
+def _client_recent_metric_datetime(row: ClientRecentBetExportRow) -> Optional[datetime]:
+    if row.status in {"win", "loss", "refund"}:
+        return as_moscow_datetime(row.resolved_at) or as_moscow_datetime(row.taken_at)
+    return as_moscow_datetime(row.taken_at)
+
+
+def _client_recent_period_values(row: ClientRecentBetExportRow) -> tuple[str, str]:
+    value = _client_recent_metric_datetime(row)
+    if not value:
+        return "", ""
+    return _month_label(value), value.strftime("%d.%m.%Y")
+
+
+def _client_recent_flat_stake(row: ClientRecentBetExportRow) -> int:
+    return 1 if row.status in {"win", "loss"} else 0
+
+
+def _client_recent_flat_profit(row: ClientRecentBetExportRow) -> float:
+    if row.status == "win":
+        return float((Decimal(str(row.coefficient or "0")) - Decimal("1")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    if row.status == "loss":
+        return -1.0
+    return 0.0
+
+
+def _split_bookmaker_names(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _top_label(values: Iterable[str], default: str = "") -> str:
+    counts: dict[str, int] = defaultdict(int)
+    labels: dict[str, str] = {}
+    for value in values:
+        clean = str(value or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        counts[key] += 1
+        labels.setdefault(key, clean)
+    if not counts:
+        return default
+    key = sorted(counts, key=lambda item: (-counts[item], labels[item].lower()))[0]
+    return labels[key]
+
+
+def _client_period_summary(rows: list[ClientRecentBetExportRow]) -> dict[str, Any]:
+    wins = sum(1 for row in rows if row.status == "win")
+    losses = sum(1 for row in rows if row.status == "loss")
+    refunds = sum(1 for row in rows if row.status == "refund")
+    pending = sum(1 for row in rows if row.status == "pending")
+    settled = wins + losses
+    profit = sum((_client_recent_flat_profit(row) for row in rows), 0.0)
+    coefficient_rows = [row for row in rows if row.status in {"win", "loss"} and Decimal(str(row.coefficient or "0")) > 0]
+    coefficient_sum = sum((Decimal(str(row.coefficient or "0")) for row in coefficient_rows), Decimal("0"))
+    top_sport = _top_label((row.sport_type for row in rows), "Без спорта")
+    bookmaker_names = [name for row in rows for name in _split_bookmaker_names(row.bookmaker_names)]
+    top_bookmaker = _top_label(bookmaker_names, "Без БК")
+    top_bookmaker_logo_codes = []
+    for row in rows:
+        if top_bookmaker in _split_bookmaker_names(row.bookmaker_names):
+            top_bookmaker_logo_codes = list(row.bookmaker_logo_codes)
+            break
+
+    return {
+        "clients": len({row.user_id for row in rows}),
+        "bets": len(rows),
+        "wins": wins,
+        "losses": losses,
+        "refunds": refunds,
+        "pending": pending,
+        "winrate": (wins / settled) if settled else 0,
+        "roi": (profit / settled) if settled else 0,
+        "profit": profit,
+        "average_coefficient": float((coefficient_sum / Decimal(len(coefficient_rows))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) if coefficient_rows else 0,
+        "sport_icon": SPORT_ICONS.get(top_sport, "✨"),
+        "top_sport": top_sport,
+        "top_bookmaker": top_bookmaker,
+        "top_bookmaker_logo_codes": top_bookmaker_logo_codes,
+    }
+
+
+def _client_period_rows(rows: list[ClientRecentBetExportRow], *, kind: str) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        date_value = _client_recent_metric_datetime(row)
+        if not date_value:
+            continue
+        if kind == "month":
+            key = date_value.strftime("%Y-%m")
+            label = _month_label(date_value)
+        else:
+            key = date_value.strftime("%Y-%m-%d")
+            label = date_value.strftime("%d.%m.%Y")
+        groups.setdefault(key, {"label": label, "rows": []})["rows"].append(row)
+
+    period_rows = [
+        {
+            "label": group["label"],
+            **_client_period_summary(group["rows"]),
+        }
+        for key, group in sorted(groups.items())
+    ]
+    if period_rows:
+        period_rows.append({"label": "ИТОГО", **_client_period_summary(rows)})
+    return period_rows
+
+
+def _client_balance_bucket_value(matches_remaining: int, guarantee_active: bool) -> str:
+    if guarantee_active:
+        return "Гарантия"
+    if matches_remaining < 0:
+        return "Долг"
+    if matches_remaining == 0:
+        return "0 матчей"
+    if matches_remaining <= 2:
+        return "1-2 матча"
+    return "3+ матча"
+
+
+def _client_balance_bucket(row: ClientInfoExportRow | ClientRecentBetExportRow) -> str:
+    return _client_balance_bucket_value(row.matches_remaining, row.guarantee_active)
+
+
+def _client_recommended_action_value(matches_remaining: int, guarantee_active: bool, situation_tone: str = "") -> str:
+    if matches_remaining < 0:
+        return "Разобрать долг"
+    if guarantee_active:
+        return "Закрыть гарантию"
+    if matches_remaining == 0:
+        return "Продлить абонемент"
+    if matches_remaining <= 2:
+        return "Допродать матчи"
+    if situation_tone == "danger":
+        return "Проверить просадку"
+    if situation_tone == "warning":
+        return "Поддержать клиента"
+    return "Наблюдать"
+
+
+def _client_recommended_action(row: ClientInfoExportRow | ClientRecentBetExportRow) -> str:
+    return _client_recommended_action_value(
+        row.matches_remaining,
+        row.guarantee_active,
+        getattr(row, "situation_tone", ""),
+    )
+
+
+def _client_contact_channel_value(vk_user_id: str, username: str, phone: str, is_web_only: bool) -> str:
+    if vk_user_id:
+        return "VK"
+    if username:
+        return "Telegram"
+    if phone:
+        return "Телефон"
+    if is_web_only:
+        return "Web/VK"
+    return "Не указан"
+
+
+def _client_contact_channel(row: ClientInfoExportRow | ClientRecentBetExportRow) -> str:
+    return _client_contact_channel_value(row.vk_user_id, row.username, row.phone, row.is_web_only)
+
+
+def _client_priority_score(row: ClientInfoExportRow) -> tuple[int, int, float, str]:
+    if row.matches_remaining < 0:
+        priority = 0
+    elif row.guarantee_active:
+        priority = 1
+    elif row.matches_remaining == 0:
+        priority = 2
+    elif row.matches_remaining <= 2:
+        priority = 3
+    elif row.situation_tone in {"danger", "warning"}:
+        priority = 4
+    else:
+        priority = 5
+    return (priority, row.matches_remaining, -row.profit_units, row.client_name.lower())
+
+
+def filter_client_info_export_rows(
+    rows: list[ClientInfoExportRow],
+    *,
+    q: Optional[str],
+    activity: str,
+    group: Optional[str],
+    tag: Optional[str],
+) -> list[ClientInfoExportRow]:
+    clean_q = (q or "").strip().lower()
+    clean_group = (group or "").strip()
+    clean_tag = (tag or "").strip()
+
+    def row_matches(row: ClientInfoExportRow) -> bool:
+        if clean_q:
+            searchable = " ".join([
+                str(row.user_id),
+                row.client_name,
+                row.username,
+                row.phone,
+                row.vk_user_id,
+                row.bookmaker_names,
+                row.client_group,
+                row.client_tag,
+                row.ab_group,
+                _client_balance_bucket(row),
+                _client_recommended_action(row),
+                _client_contact_channel(row),
+                str(row.matches_remaining),
+                row.situation_label,
+                row.situation_description,
+            ]).lower()
+            if clean_q not in searchable:
+                return False
+        if activity == "active" and not (row.matches_remaining > 0 or row.guarantee_active):
+            return False
+        if activity == "empty" and (row.guarantee_active or row.matches_remaining > 0):
+            return False
+        if activity == "guarantee" and not row.guarantee_active:
+            return False
+        if clean_group and clean_group != "all" and row.client_group != clean_group:
+            return False
+        if clean_tag and clean_tag != "all" and row.client_tag != clean_tag:
+            return False
+        return True
+
+    return [row for row in rows if row_matches(row)]
+
+
+def filter_client_recent_export_rows(
+    rows: list[ClientRecentBetExportRow],
+    user_ids: set[int],
+) -> list[ClientRecentBetExportRow]:
+    return [row for row in rows if row.user_id in user_ids]
+
+
+def _style_chart(chart, *, title: str, height: float = 7.2, width: float = 13.5) -> None:
+    chart.title = title
+    chart.height = height
+    chart.width = width
+    chart.style = 10
+    chart.legend.position = "r"
+
+
+def _add_client_overview_charts(
+    ws,
+    *,
+    situation_start_row: int,
+    situation_end_row: int,
+    balance_start_row: int,
+    balance_end_row: int,
+    recent_start_row: int,
+    recent_end_row: int,
+) -> None:
+    if situation_end_row >= situation_start_row:
+        chart = PieChart()
+        labels = Reference(ws, min_col=1, min_row=situation_start_row, max_row=situation_end_row)
+        data = Reference(ws, min_col=2, min_row=situation_start_row - 1, max_row=situation_end_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(labels)
+        _style_chart(chart, title="Клиенты по ситуациям", height=7.0, width=12.0)
+        ws.add_chart(chart, "P3")
+
+    if balance_end_row >= balance_start_row:
+        chart = BarChart()
+        labels = Reference(ws, min_col=8, min_row=balance_start_row, max_row=balance_end_row)
+        data = Reference(ws, min_col=9, min_row=balance_start_row - 1, max_row=balance_end_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(labels)
+        _style_chart(chart, title="Остатки абона", height=7.0, width=12.0)
+        chart.y_axis.title = "Клиентов"
+        ws.add_chart(chart, "P18")
+
+    if recent_end_row >= recent_start_row:
+        chart = BarChart()
+        labels = Reference(ws, min_col=8, min_row=recent_start_row, max_row=recent_end_row)
+        data = Reference(ws, min_col=10, min_row=recent_start_row - 1, max_row=recent_end_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(labels)
+        _style_chart(chart, title="Ставки по дням", height=7.0, width=12.0)
+        chart.y_axis.title = "Ставок"
+        ws.add_chart(chart, "P33")
+
+
+def _write_client_overview_sheet(
+    wb: Workbook,
+    rows: list[ClientInfoExportRow],
+    recent_rows: list[ClientRecentBetExportRow],
+    period_label: str,
+) -> None:
+    ws = wb.create_sheet("Обзор", 0)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_TITLE
+    ws["A1"] = "CRM-ОТЧЕТ SHAMRAI"
+    _style_title(ws, 22)
+    _write_metadata_row(ws, 2, period_label, value_label="флеты")
+
+    total_clients = len(rows)
+    active_clients = sum(1 for row in rows if row.matches_remaining > 0 or row.guarantee_active)
+    empty_clients = sum(1 for row in rows if not row.guarantee_active and row.matches_remaining == 0)
+    debt_clients = sum(1 for row in rows if row.matches_remaining < 0)
+    guarantee_clients = sum(1 for row in rows if row.guarantee_active)
+    low_balance_clients = sum(1 for row in rows if not row.guarantee_active and 0 < row.matches_remaining <= 2)
+    remaining_matches = sum(row.matches_remaining for row in rows)
+    total_taken = sum(row.total_taken_bets for row in rows)
+    settled = sum(row.bets for row in rows)
+    wins = sum(row.wins for row in rows)
+    losses = sum(row.losses for row in rows)
+    pending = sum(row.pending_bets for row in rows)
+    refunds = sum(row.refund_bets for row in rows)
+    profit = sum(row.profit_units for row in rows)
+    coefficient_weight = sum(row.average_coefficient * row.bets for row in rows)
+    average_coefficient = (coefficient_weight / settled) if settled else 0
+    winrate = (wins / settled) if settled else 0
+    roi = (profit / settled) if settled else 0
+
+    ws["A3"] = "Коротко по базе: остатки абона, гарантия, клиенты без матчей и ситуация по результатам."
+    ws["A3"].font = Font(color=COLOR_TEXT_MUTED, italic=True)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=12)
+
+    _write_kpi(ws, 5, 1, "Клиенты", total_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 5, 4, "Активные", active_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 5, 7, "Матчей осталось", remaining_matches, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 5, 10, "Взял матчей", total_taken, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 8, 1, "Без матчей", empty_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 8, 4, "Гарантия", guarantee_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 8, 7, "Долг", debt_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 8, 10, "Осталось 1-2", low_balance_clients, "bets", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 11, 1, "Проход", winrate, "winrate", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 11, 4, "ROI", roi, "roi", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 11, 7, "Профит, флеты", profit, "profit", value_format=FLAT_FORMAT)
+    _write_kpi(ws, 11, 10, "Ср. кф", average_coefficient, "average_coefficient", value_format=FLAT_FORMAT)
+
+    _write_section_title(ws, 15, 1, 6, "Ситуации клиентов", fill=COLOR_SAGE_FILL)
+    situation_headers = ["Ситуация", "Клиентов", "Ставки", "Проход", "ROI", "Профит"]
+    for col, header in enumerate(situation_headers, 1):
+        ws.cell(row=16, column=col, value=header)
+    _style_range_header(ws, 16, 1, len(situation_headers), COLOR_HEADER_SAGE)
+    grouped: dict[str, list[ClientInfoExportRow]] = defaultdict(list)
+    for row in rows:
+        grouped[row.situation_label or "Нет статуса"].append(row)
+    situation_start_row = 17
+    situation_end_row = 16
+    for offset, (label, group_rows) in enumerate(sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0])), situation_start_row):
+        group_settled = sum(item.bets for item in group_rows)
+        group_wins = sum(item.wins for item in group_rows)
+        group_profit = sum(item.profit_units for item in group_rows)
+        values = [
+            label,
+            len(group_rows),
+            group_settled,
+            (group_wins / group_settled) if group_settled else 0,
+            (group_profit / group_settled) if group_settled else 0,
+            group_profit,
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=offset, column=col, value=value)
+        ws.cell(row=offset, column=4).number_format = PERCENT_FORMAT
+        ws.cell(row=offset, column=5).number_format = PERCENT_FORMAT
+        ws.cell(row=offset, column=6).number_format = FLAT_FORMAT
+        fill = _solid_fill(COLOR_SURFACE_ALT if offset % 2 else "FFFFFF")
+        for col in range(1, len(situation_headers) + 1):
+            ws.cell(row=offset, column=col).fill = fill
+        situation_end_row = offset
+
+    _write_section_title(ws, 15, 8, 14, "Срез по остаткам абона", fill=COLOR_AMBER_FILL)
+    balance_headers = ["Остаток", "Клиентов", "Матчей", "Гарантия", "Средний ROI", "Профит", "Комментарий"]
+    for col, header in enumerate(balance_headers, 8):
+        ws.cell(row=16, column=col, value=header)
+    _style_range_header(ws, 16, 8, 14, COLOR_HEADER_AMBER)
+    bucket_order = ["Долг", "0 матчей", "1-2 матча", "3+ матча", "Гарантия"]
+    balance_groups: dict[str, list[ClientInfoExportRow]] = defaultdict(list)
+    for row in rows:
+        balance_groups[_client_balance_bucket(row)].append(row)
+    balance_start_row = 17
+    balance_end_row = 16
+    for offset, label in enumerate([item for item in bucket_order if balance_groups.get(item)], balance_start_row):
+        bucket_rows = balance_groups[label]
+        bucket_bets = sum(item.bets for item in bucket_rows)
+        bucket_profit = sum(item.profit_units for item in bucket_rows)
+        values = [
+            label,
+            len(bucket_rows),
+            sum(item.matches_remaining for item in bucket_rows),
+            sum(1 for item in bucket_rows if item.guarantee_active),
+            (bucket_profit / bucket_bets) if bucket_bets else 0,
+            bucket_profit,
+            "Связаться" if label in {"Долг", "0 матчей", "1-2 матча", "Гарантия"} else "Рабочая группа",
+        ]
+        for col, value in enumerate(values, 8):
+            ws.cell(row=offset, column=col, value=value)
+        ws.cell(row=offset, column=12).number_format = PERCENT_FORMAT
+        ws.cell(row=offset, column=13).number_format = FLAT_FORMAT
+        fill = _solid_fill(COLOR_WARNING_FILL if offset % 2 else "FFFFFF")
+        for col in range(8, 15):
+            ws.cell(row=offset, column=col).fill = fill
+        balance_end_row = offset
+
+    activity_start_row = max(situation_end_row, balance_end_row, 23) + 3
+    _write_section_title(ws, activity_start_row, 1, 7, "Кому срочно написать", fill=COLOR_ROSE_FILL)
+    priority_headers = ["Клиент", "Матчей", "Сегмент", "Действие", "Канал", "A/B", "Почему"]
+    for col, header in enumerate(priority_headers, 1):
+        ws.cell(row=activity_start_row + 1, column=col, value=header)
+    _style_range_header(ws, activity_start_row + 1, 1, 7, COLOR_HEADER_ROSE)
+    priority_rows = sorted(rows, key=_client_priority_score)[:12]
+    for offset, row_data in enumerate(priority_rows, activity_start_row + 2):
+        values = [
+            row_data.client_name,
+            row_data.matches_remaining,
+            _client_balance_bucket(row_data),
+            _client_recommended_action(row_data),
+            _client_contact_channel(row_data),
+            row_data.ab_group or "A",
+            row_data.situation_description or row_data.situation_label,
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=offset, column=col, value=value)
+        fill_color = COLOR_DANGER_FILL if row_data.matches_remaining <= 0 or row_data.situation_tone == "danger" else COLOR_WARNING_FILL
+        for col in range(1, 8):
+            ws.cell(row=offset, column=col).fill = _solid_fill(fill_color)
+
+    _write_section_title(ws, activity_start_row, 8, 14, "Последние ставки: свод", fill=COLOR_INFO_FILL)
+    period_rows = _client_period_rows(recent_rows, kind="day")
+    recent_headers = ["День", "Клиентов", "Ставки", "Проход", "ROI", "Профит", "Топ спорт"]
+    for col, header in enumerate(recent_headers, 8):
+        ws.cell(row=activity_start_row + 1, column=col, value=header)
+    _style_range_header(ws, activity_start_row + 1, 8, 14, COLOR_HEADER_STEEL)
+    recent_start_row = activity_start_row + 2
+    recent_end_row = activity_start_row + 1
+    for offset, row_data in enumerate(period_rows[-8:] if period_rows else [], recent_start_row):
+        values = [
+            row_data["label"],
+            row_data["clients"],
+            row_data["bets"],
+            row_data["winrate"],
+            row_data["roi"],
+            row_data["profit"],
+            f'{row_data["sport_icon"]} {row_data["top_sport"]}',
+        ]
+        for col, value in enumerate(values, 8):
+            ws.cell(row=offset, column=col, value=value)
+        ws.cell(row=offset, column=11).number_format = PERCENT_FORMAT
+        ws.cell(row=offset, column=12).number_format = PERCENT_FORMAT
+        ws.cell(row=offset, column=13).number_format = FLAT_FORMAT
+        recent_end_row = offset
+
+    max_row = max(ws.max_row, activity_start_row + 1)
+    _set_border(ws, 16, max(situation_end_row, 16), 1, 6)
+    _set_border(ws, 16, max(balance_end_row, 16), 8, 14)
+    _set_border(ws, activity_start_row + 1, max(activity_start_row + 1 + len(priority_rows), activity_start_row + 1), 1, 7)
+    _set_border(ws, activity_start_row + 1, max(recent_end_row, activity_start_row + 1), 8, 14)
+    _add_client_overview_charts(
+        ws,
+        situation_start_row=situation_start_row,
+        situation_end_row=situation_end_row,
+        balance_start_row=balance_start_row,
+        balance_end_row=balance_end_row,
+        recent_start_row=recent_start_row,
+        recent_end_row=recent_end_row,
+    )
+    _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 20,
+        "B": 13,
+        "C": 13,
+        "D": 12,
+        "E": 12,
+        "F": 15,
+        "G": 3,
+        "H": 15,
+        "I": 13,
+        "J": 13,
+        "K": 12,
+        "L": 12,
+        "M": 15,
+        "N": 22,
+        "O": 3,
+        "P": 16,
+        "Q": 16,
+        "R": 16,
+        "S": 16,
+        "T": 16,
+        "U": 16,
+        "V": 16,
+    })
+    ws.freeze_panes = "A16"
+
+
+def _write_client_period_sheet(
+    wb: Workbook,
+    rows: list[ClientRecentBetExportRow],
+    *,
+    title: str,
+    kind: str,
+    index: int,
+    logo_context: Optional[_LogoRenderContext] = None,
+) -> None:
+    ws = wb.create_sheet(title, index)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_HEADER_SAGE if kind == "month" else COLOR_HEADER_STEEL
+    label_header = "Месяц" if kind == "month" else "День"
+    headers = [
+        label_header,
+        "Клиентов",
+        "Ставки",
+        "Победы",
+        "Поражения",
+        "Возвраты",
+        "Проход",
+        "ROI",
+        "Профит, флеты",
+        "Ср. кф",
+        "Ожидают",
+        "Вид",
+        "Топ спорт",
+        "Иконка БК",
+        "Топ БК",
+    ]
+    header_cols = {header: index + 1 for index, header in enumerate(headers)}
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_range_header(ws, 1, 1, len(headers), COLOR_HEADER)
+
+    period_rows = _client_period_rows(rows, kind=kind)
+    for row_idx, row_data in enumerate(period_rows, 2):
+        values = [
+            row_data["label"],
+            row_data["clients"],
+            row_data["bets"],
+            row_data["wins"],
+            row_data["losses"],
+            row_data["refunds"],
+            row_data["winrate"],
+            row_data["roi"],
+            row_data["profit"],
+            row_data["average_coefficient"],
+            row_data["pending"],
+            row_data["sport_icon"],
+            row_data["top_sport"],
+            _logo_cell_text(row_data["top_bookmaker_logo_codes"]),
+            row_data["top_bookmaker"],
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_idx, column=col, value=value)
+        _add_bookmaker_logos(
+            ws,
+            row_idx,
+            header_cols["Иконка БК"],
+            row_data["top_bookmaker_logo_codes"],
+            logo_context=logo_context,
+        )
+        ws.cell(row=row_idx, column=header_cols["Проход"]).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["ROI"]).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Профит, флеты"]).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Ср. кф"]).number_format = COEF_FORMAT
+        fill_color = COLOR_SUCCESS_FILL if row_data["profit"] > 0 else COLOR_DANGER_FILL if row_data["profit"] < 0 else COLOR_SURFACE
+        if row_data["label"] == "ИТОГО":
+            fill_color = COLOR_TOTAL_FILL
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=row_idx, column=col).fill = _solid_fill(fill_color)
+            if row_data["label"] == "ИТОГО":
+                ws.cell(row=row_idx, column=col).font = Font(bold=True, color=COLOR_TEXT)
+
+    max_row = max(ws.max_row, 1)
+    _set_border(ws, 1, max_row, 1, len(headers))
+    _set_auto_filter(ws, 1, max_row, 1, len(headers))
+    _polish_table_header(ws, 1, 1, len(headers))
+    if max_row > 1:
+        _polish_table_body(
+            ws,
+            2,
+            max_row,
+            len(headers),
+            center_cols=set(range(2, 15)),
+            wrap_cols={header_cols["Топ спорт"], header_cols["Топ БК"]},
+            row_height=34,
+        )
+    _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 16,
+        "B": 13,
+        "C": 12,
+        "D": 12,
+        "E": 12,
+        "F": 12,
+        "G": 12,
+        "H": 12,
+        "I": 15,
+        "J": 11,
+        "K": 12,
+        "L": 8,
+        "M": 18,
+        "N": 18,
+        "O": 22,
+    })
+    ws.freeze_panes = "A2"
+
+
+def build_client_info_export_workbook_artifact(
     rows: Iterable[ClientInfoExportRow],
     *,
     period_label: str,
     recent_rows: Optional[Iterable[ClientRecentBetExportRow]] = None,
-) -> bytes:
+    logo_mode: LogoRenderMode = "floating",
+) -> StatsWorkbookArtifact:
     row_list = list(rows)
     recent_row_list = list(recent_rows or [])
+    logo_context = _LogoRenderContext(mode=logo_mode)
     wb = Workbook()
     ws = wb.active
-    ws.title = "Инфа"
+    ws.title = "Клиенты"
     ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_HEADER
     headers = [
         "Период",
         "ID",
@@ -751,10 +1982,14 @@ def build_client_info_export_workbook(
         "Web/VK клиент",
         "Группа",
         "Тег",
+        "A/B",
         "БК клиента",
         "Дата регистрации",
         "Матчей осталось",
+        "Сегмент абона",
         "Гарантия",
+        "Рекомендованное действие",
+        "Канал связи",
         "Взял матчей всего",
         "Рассчитано матчей",
         "Ожидают расчета",
@@ -762,7 +1997,7 @@ def build_client_info_export_workbook(
         "Ставки",
         "Победы",
         "Поражения",
-        "Winrate",
+        "Проход",
         "ROI",
         "Профит, флеты",
         "Ср. кф",
@@ -773,9 +2008,10 @@ def build_client_info_export_workbook(
         "Ситуация",
         "Описание",
     ]
+    header_cols = {header: index + 1 for index, header in enumerate(headers)}
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
-    _style_range_header(ws, 1, 1, len(headers), "111827")
+    _style_range_header(ws, 1, 1, len(headers), COLOR_HEADER)
 
     for row_idx, row_data in enumerate(row_list, 2):
         values = [
@@ -788,10 +2024,14 @@ def build_client_info_export_workbook(
             _yes_no(row_data.is_web_only),
             row_data.client_group,
             row_data.client_tag,
+            row_data.ab_group or "A",
             row_data.bookmaker_names,
             _excel_datetime(row_data.created_at),
             row_data.matches_remaining,
+            _client_balance_bucket(row_data),
             _yes_no(row_data.guarantee_active),
+            _client_recommended_action(row_data),
+            _client_contact_channel(row_data),
             row_data.total_taken_bets,
             row_data.settled_bets,
             row_data.pending_bets,
@@ -812,19 +2052,12 @@ def build_client_info_export_workbook(
         ]
         for col, value in enumerate(values, 1):
             ws.cell(row=row_idx, column=col, value=value)
-        ws.cell(row=row_idx, column=11).number_format = DATE_FORMAT
-        ws.cell(row=row_idx, column=21).number_format = PERCENT_FORMAT
-        ws.cell(row=row_idx, column=22).number_format = PERCENT_FORMAT
-        ws.cell(row=row_idx, column=23).number_format = FLAT_FORMAT
-        ws.cell(row=row_idx, column=24).number_format = COEF_FORMAT
-        if row_data.situation_tone == "danger":
-            fill = PatternFill("solid", fgColor="FEF2F2")
-        elif row_data.situation_tone == "warning":
-            fill = PatternFill("solid", fgColor="FFFBEB")
-        elif row_data.situation_tone == "success":
-            fill = PatternFill("solid", fgColor="ECFDF5")
-        else:
-            fill = PatternFill("solid", fgColor="F8FAFC")
+        ws.cell(row=row_idx, column=header_cols["Дата регистрации"]).number_format = DATE_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Проход"]).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["ROI"]).number_format = PERCENT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Профит, флеты"]).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Ср. кф"]).number_format = COEF_FORMAT
+        fill = _tone_fill(row_data.situation_tone)
         for col in range(1, len(headers) + 1):
             ws.cell(row=row_idx, column=col).fill = fill
 
@@ -832,18 +2065,143 @@ def build_client_info_export_workbook(
         _set_border(ws, 1, len(row_list) + 1, 1, len(headers))
     else:
         _set_border(ws, 1, 1, 1, len(headers))
+    _set_auto_filter(ws, 1, len(row_list) + 1, 1, len(headers))
+    center_cols = {
+        header_cols["Период"],
+        header_cols["ID"],
+        header_cols["Телефон"],
+        header_cols["VK ID"],
+        header_cols["Web/VK клиент"],
+        header_cols["Группа"],
+        header_cols["Тег"],
+        header_cols["A/B"],
+        header_cols["Дата регистрации"],
+        header_cols["Матчей осталось"],
+        header_cols["Сегмент абона"],
+        header_cols["Гарантия"],
+        header_cols["Рекомендованное действие"],
+        header_cols["Канал связи"],
+        header_cols["Взял матчей всего"],
+        header_cols["Рассчитано матчей"],
+        header_cols["Ожидают расчета"],
+        header_cols["Возвраты"],
+        header_cols["Ставки"],
+        header_cols["Победы"],
+        header_cols["Поражения"],
+        header_cols["Проход"],
+        header_cols["ROI"],
+        header_cols["Профит, флеты"],
+        header_cols["Ср. кф"],
+        header_cols["Текущая серия"],
+        header_cols["Макс. побед"],
+        header_cols["Макс. пораж."],
+        header_cols["Последние исходы"],
+        header_cols["Ситуация"],
+    }
+    _polish_table_header(ws, 1, 1, len(headers))
+    if row_list:
+        _polish_table_body(
+            ws,
+            2,
+            len(row_list) + 1,
+            len(headers),
+            center_cols=center_cols,
+            wrap_cols={
+                header_cols["Клиент"],
+                header_cols["БК клиента"],
+                header_cols["Ситуация"],
+                header_cols["Описание"],
+            },
+            row_height=44,
+        )
     _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 16,
+        "B": 11,
+        "C": 24,
+        "D": 18,
+        "E": 17,
+        "F": 15,
+        "G": 13,
+        "H": 14,
+        "I": 14,
+        "J": 8,
+        "K": 52,
+        "L": 18,
+        "M": 14,
+        "N": 16,
+        "O": 12,
+        "P": 22,
+        "Q": 14,
+        "R": 16,
+        "S": 17,
+        "T": 17,
+        "U": 12,
+        "V": 12,
+        "W": 12,
+        "X": 12,
+        "Y": 12,
+        "Z": 12,
+        "AA": 15,
+        "AB": 11,
+        "AC": 16,
+        "AD": 12,
+        "AE": 12,
+        "AF": 18,
+        "AG": 20,
+        "AH": 44,
+    })
     ws.freeze_panes = "A2"
-    _write_client_recent_bets_sheet(wb, recent_row_list)
+    _write_client_overview_sheet(wb, row_list, recent_row_list, period_label)
+    _write_client_period_sheet(
+        wb,
+        recent_row_list,
+        title="По месяцам",
+        kind="month",
+        index=2,
+        logo_context=logo_context,
+    )
+    _write_client_period_sheet(
+        wb,
+        recent_row_list,
+        title="По дням",
+        kind="day",
+        index=3,
+        logo_context=logo_context,
+    )
+    _write_client_recent_bets_sheet(wb, recent_row_list, logo_context=logo_context)
     buffer = BytesIO()
     wb.save(buffer)
-    return buffer.getvalue()
+    return StatsWorkbookArtifact(xlsx=buffer.getvalue(), icon_cells=list(logo_context.icon_cells))
 
 
-def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExportRow]) -> None:
-    ws = wb.create_sheet("Последние 50")
+def build_client_info_export_workbook(
+    rows: Iterable[ClientInfoExportRow],
+    *,
+    period_label: str,
+    recent_rows: Optional[Iterable[ClientRecentBetExportRow]] = None,
+    logo_mode: LogoRenderMode = "floating",
+) -> bytes:
+    return build_client_info_export_workbook_artifact(
+        rows,
+        period_label=period_label,
+        recent_rows=recent_rows,
+        logo_mode=logo_mode,
+    ).xlsx
+
+
+def _write_client_recent_bets_sheet(
+    wb: Workbook,
+    rows: list[ClientRecentBetExportRow],
+    *,
+    logo_context: Optional[_LogoRenderContext] = None,
+) -> None:
+    ws = wb.create_sheet("Последние ставки")
     ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_HEADER_SAGE
     headers = [
+        "Месяц",
+        "День",
         "ID",
         "Клиент",
         "Username",
@@ -853,26 +2211,37 @@ def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExpo
         "Группа",
         "Тег",
         "Матчей осталось",
+        "Сегмент абона",
+        "Рекомендованное действие",
+        "Канал связи",
+        "A/B",
         "Гарантия",
         "Дата взятия",
-        "Матч",
+        "Вид",
         "Вид спорта",
+        "Матч",
+        "Иконка БК",
         "БК",
         "Коэфф.",
+        "Ставка, флет",
         "Ставка",
-        "Статус",
-        "Дата расчета",
+        "Прибыль, флеты",
+        "Результат",
         "Источник",
         "Тип доступа",
         "Матч списан",
         "ID ставки",
     ]
+    header_cols = {header: index + 1 for index, header in enumerate(headers)}
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
-    _style_range_header(ws, 1, 1, len(headers), "111827")
+    _style_range_header(ws, 1, 1, len(headers), COLOR_HEADER)
 
     for row_idx, row_data in enumerate(rows, 2):
+        month_label, day_label = _client_recent_period_values(row_data)
         values = [
+            month_label,
+            day_label,
             row_data.user_id,
             row_data.client_name,
             f"@{row_data.username}" if row_data.username else "",
@@ -882,15 +2251,22 @@ def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExpo
             row_data.client_group,
             row_data.client_tag,
             row_data.matches_remaining,
+            _client_balance_bucket(row_data),
+            _client_recommended_action(row_data),
+            _client_contact_channel(row_data),
+            row_data.ab_group or "A",
             _yes_no(row_data.guarantee_active),
             _excel_datetime(row_data.taken_at),
-            row_data.event_name,
+            SPORT_ICONS.get(row_data.sport_type, "✨"),
             row_data.sport_type,
-            row_data.bookmaker_names,
+            _truncate_cell_text(row_data.event_name, limit=80),
+            _logo_cell_text(row_data.bookmaker_logo_codes),
+            _compact_list_label(row_data.bookmaker_names),
             row_data.coefficient,
+            _client_recent_flat_stake(row_data),
             row_data.outcome,
+            _client_recent_flat_profit(row_data),
             row_data.result_label,
-            _excel_datetime(row_data.resolved_at),
             row_data.source_type,
             row_data.access_type,
             _yes_no(row_data.match_charged),
@@ -898,17 +2274,18 @@ def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExpo
         ]
         for col, value in enumerate(values, 1):
             ws.cell(row=row_idx, column=col, value=value)
-        ws.cell(row=row_idx, column=11).number_format = DATE_FORMAT
-        ws.cell(row=row_idx, column=15).number_format = COEF_FORMAT
-        ws.cell(row=row_idx, column=18).number_format = DATE_FORMAT
-        if row_data.status == "win":
-            fill = PatternFill("solid", fgColor="ECFDF5")
-        elif row_data.status == "loss":
-            fill = PatternFill("solid", fgColor="FEF2F2")
-        elif row_data.status == "pending":
-            fill = PatternFill("solid", fgColor="FFFBEB")
-        else:
-            fill = PatternFill("solid", fgColor="F8FAFC")
+        _add_bookmaker_logos(
+            ws,
+            row_idx,
+            header_cols["Иконка БК"],
+            row_data.bookmaker_logo_codes,
+            logo_context=logo_context,
+        )
+        ws.cell(row=row_idx, column=header_cols["Дата взятия"]).number_format = DATE_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Коэфф."]).number_format = COEF_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Ставка, флет"]).number_format = FLAT_FORMAT
+        ws.cell(row=row_idx, column=header_cols["Прибыль, флеты"]).number_format = FLAT_FORMAT
+        fill = _status_fill(row_data.status)
         for col in range(1, len(headers) + 1):
             ws.cell(row=row_idx, column=col).fill = fill
 
@@ -916,8 +2293,128 @@ def _write_client_recent_bets_sheet(wb: Workbook, rows: list[ClientRecentBetExpo
         _set_border(ws, 1, len(rows) + 1, 1, len(headers))
     else:
         _set_border(ws, 1, 1, 1, len(headers))
+    _set_auto_filter(ws, 1, len(rows) + 1, 1, len(headers))
+    center_cols = {
+        header_cols["Месяц"],
+        header_cols["День"],
+        header_cols["ID"],
+        header_cols["Телефон"],
+        header_cols["VK ID"],
+        header_cols["Web/VK клиент"],
+        header_cols["Группа"],
+        header_cols["Тег"],
+        header_cols["Матчей осталось"],
+        header_cols["Сегмент абона"],
+        header_cols["Рекомендованное действие"],
+        header_cols["Канал связи"],
+        header_cols["A/B"],
+        header_cols["Гарантия"],
+        header_cols["Дата взятия"],
+        header_cols["Вид"],
+        header_cols["Иконка БК"],
+        header_cols["Коэфф."],
+        header_cols["Ставка, флет"],
+        header_cols["Прибыль, флеты"],
+        header_cols["Результат"],
+        header_cols["Источник"],
+        header_cols["Тип доступа"],
+        header_cols["Матч списан"],
+    }
+    _polish_table_header(ws, 1, 1, len(headers))
+    if rows:
+        _polish_table_body(
+            ws,
+            2,
+            len(rows) + 1,
+            len(headers),
+            center_cols=center_cols,
+            wrap_cols={
+                header_cols["Клиент"],
+                header_cols["Вид спорта"],
+                header_cols["Матч"],
+                header_cols["БК"],
+                header_cols["Ставка"],
+                header_cols["ID ставки"],
+            },
+            row_height=36,
+        )
     _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 16,
+        "B": 13,
+        "C": 11,
+        "D": 24,
+        "E": 18,
+        "F": 17,
+        "G": 15,
+        "H": 13,
+        "I": 14,
+        "J": 14,
+        "K": 14,
+        "L": 16,
+        "M": 22,
+        "N": 14,
+        "O": 8,
+        "P": 12,
+        "Q": 18,
+        "R": 8,
+        "S": 15,
+        "T": 44,
+        "U": 18,
+        "V": 24,
+        "W": 11,
+        "X": 13,
+        "Y": 14,
+        "Z": 15,
+        "AA": 14,
+        "AB": 15,
+        "AC": 13,
+        "AD": 14,
+        "AE": 36,
+    })
     ws.freeze_panes = "A2"
+
+
+def build_stats_export_workbook_artifact(
+    items: Iterable[StatsExportItem],
+    *,
+    title: str,
+    period_label: str,
+    include_client: bool = False,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+    logo_mode: LogoRenderMode = "floating",
+) -> StatsWorkbookArtifact:
+    item_list = _sorted_items(items)
+    logo_context = _LogoRenderContext(mode=logo_mode)
+    wb = Workbook()
+    _setup_statistics_sheet(
+        wb,
+        title,
+        period_label,
+        item_list,
+        value_format=value_format,
+        value_label=value_label,
+        logo_context=logo_context,
+    )
+    _write_breakdown_sheet(
+        wb,
+        item_list,
+        value_format=value_format,
+        value_label=value_label,
+        logo_context=logo_context,
+    )
+    _write_detail_sheet(
+        wb,
+        item_list,
+        include_client=include_client,
+        value_format=value_format,
+        value_label=value_label,
+        logo_context=logo_context,
+    )
+    buffer = BytesIO()
+    wb.save(buffer)
+    return StatsWorkbookArtifact(xlsx=buffer.getvalue(), icon_cells=list(logo_context.icon_cells))
 
 
 def build_stats_export_workbook(
@@ -928,15 +2425,17 @@ def build_stats_export_workbook(
     include_client: bool = False,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    logo_mode: LogoRenderMode = "floating",
 ) -> bytes:
-    item_list = _sorted_items(items)
-    wb = Workbook()
-    _setup_statistics_sheet(wb, title, period_label, item_list, value_format=value_format, value_label=value_label)
-    _write_breakdown_sheet(wb, item_list, value_format=value_format, value_label=value_label)
-    _write_detail_sheet(wb, item_list, include_client=include_client, value_format=value_format, value_label=value_label)
-    buffer = BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+    return build_stats_export_workbook_artifact(
+        items,
+        title=title,
+        period_label=period_label,
+        include_client=include_client,
+        value_format=value_format,
+        value_label=value_label,
+        logo_mode=logo_mode,
+    ).xlsx
 
 
 def stats_export_period_label(period: str) -> str:
@@ -989,7 +2488,7 @@ async def load_author_export_items(
         for bet in result.scalars().all()
         if (item := export_item_from_bet(bet)) is not None
     ]
-    if source in {"feed", "private"}:
+    if source in {"feed", "private", "paid_set"}:
         items = [item for item in items if item.source_type == source]
     return items
 
@@ -1108,6 +2607,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         items = grouped_items.get(user.telegram_id, [])
         summary = summarize_items(items)
         situation = client_situation(summary)
+        bookmaker_refs = _bookmaker_refs_for_user(user)
         rows.append(ClientInfoExportRow(
             user_id=user.telegram_id,
             client_name=_display_user(user),
@@ -1115,7 +2615,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             phone=user.phone or "",
             vk_user_id=user.vk_user_id or "",
             is_web_only=bool(user.is_web_only),
-            bookmaker_names=_bookmakers_for_user(user),
+            bookmaker_names=", ".join(bookmaker["name"] for bookmaker in bookmaker_refs),
             client_group=user.client_group or "",
             client_tag=user.client_tag or "",
             created_at=user.created_at,
@@ -1141,6 +2641,8 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             situation_label=situation["label"],
             situation_tone=situation["tone"],
             situation_description=situation["description"],
+            ab_group=str(getattr(user, "ab_group", "") or ""),
+            bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmaker_refs),
         ))
 
     return sorted(rows, key=lambda row: (
@@ -1155,7 +2657,7 @@ async def load_client_recent_bet_export_rows(
     db: AsyncSession,
     period: str,
     *,
-    limit_per_client: int = 50,
+    limit_per_client: Optional[int] = 50,
 ) -> list[ClientRecentBetExportRow]:
     query = (
         select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
@@ -1175,7 +2677,7 @@ async def load_client_recent_bet_export_rows(
     rows: list[ClientRecentBetExportRow] = []
     per_user_counts: dict[int, int] = defaultdict(int)
     for user, bet, access_type, match_charged, taken_at in (await db.execute(query)).all():
-        if per_user_counts[user.telegram_id] >= limit_per_client:
+        if limit_per_client is not None and per_user_counts[user.telegram_id] >= limit_per_client:
             continue
         per_user_counts[user.telegram_id] += 1
 
@@ -1202,9 +2704,11 @@ async def load_client_recent_bet_export_rows(
             status=str(getattr(bet, "status", "") or ""),
             result_label=_status_label(str(getattr(bet, "status", "") or "")),
             resolved_at=getattr(bet, "resolved_at", None),
-            source_type="feed" if delivery_mode == "feed" else "private",
+            source_type="feed" if delivery_mode == "feed" else "paid_set" if delivery_mode == "paid_set" else "private",
             access_type=str(access_type or ""),
             match_charged=bool(match_charged),
             bet_id=str(bet.id),
+            ab_group=str(getattr(user, "ab_group", "") or ""),
+            bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmakers),
         ))
     return rows

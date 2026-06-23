@@ -4,9 +4,7 @@ Handles announcement creation with coupon file uploads,
 target audience filtering, and push notification dispatch.
 """
 import asyncio
-import base64
 import html
-import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -53,7 +51,9 @@ from src.services.forecast_delivery import (
     build_web_paid_set_signal_data,
     build_web_teaser_signal_data,
     cancel_forecast_request,
+    count_client_bet_takers,
     deliver_forecast_request,
+    enqueue_admin_group_forecast_stopped_notification,
     enqueue_forecast_auto_delivery,
     load_forecast_request,
     refreshed_client_delivery_method,
@@ -63,6 +63,14 @@ from src.services.telegram_bot import call_telegram_api
 from src.services.match_access import revoke_user_bet_access
 from src.services.signals import broadcast_personal_signals
 from src.services.coupon_uploads import store_coupon_image
+from src.services.admin_broadcast_helpers import (
+    _decode_forecast_request_cursor,
+    _encode_forecast_request_cursor,
+    _merge_bookmaker_ids,
+    _parse_bookmaker_id_values,
+    _parse_optional_fair_coefficient,
+    _web_push_report_values,
+)
 from src.services.vk_delivery import (
     _vk_broadcast_concurrency,
     build_vk_forecast_keyboard,
@@ -77,29 +85,6 @@ from src.services.vk_delivery import (
 
 router = APIRouter(tags=["Admin Broadcast"])
 
-
-def _encode_forecast_request_cursor(forecast_request: ForecastRequest) -> str:
-    payload = {
-        "created_at": forecast_request.created_at.isoformat() if forecast_request.created_at else "",
-        "id": str(forecast_request.id),
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _decode_forecast_request_cursor(cursor: Optional[str]) -> tuple[datetime, UUID] | None:
-    if not cursor:
-        return None
-    try:
-        padded = cursor + ("=" * ((4 - len(cursor) % 4) % 4))
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-        return datetime.fromisoformat(str(payload["created_at"])), UUID(str(payload["id"]))
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Некорректный cursor заявок",
-        )
-
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "coupons")
 
 class ForecastBulkSendResponse(BaseModel):
@@ -111,10 +96,19 @@ class ForecastBulkSendResponse(BaseModel):
     errors: List[str] = Field(default_factory=list)
 
 
+class ForecastTeaserDeliveryResponse(BaseModel):
+    total_audience: int
+    sent: int
+    failed: int
+    errors: List[str] = Field(default_factory=list)
+    delivery: dict = Field(default_factory=dict)
+
+
 class ForecastBroadcastFullResponse(BaseModel):
     bet: BetResponse
     auto_send_enabled: bool = False
     auto_send: Optional[ForecastBulkSendResponse] = None
+    reannounce: Optional[ForecastTeaserDeliveryResponse] = None
 
 
 def _telegram_broadcast_concurrency() -> int:
@@ -137,6 +131,20 @@ def _bookmaker_links_from_form(form_data) -> Optional[List[str]]:
         if value is not None
     )
     return values if values else None
+
+
+def _bookmaker_ids_from_form(form_data) -> Optional[List[int]]:
+    values = [
+        str(value)
+        for value in form_data.getlist("bookmaker_ids")
+        if value is not None
+    ]
+    values.extend(
+        str(value)
+        for value in form_data.getlist("bookmaker_ids[]")
+        if value is not None
+    )
+    return _parse_bookmaker_id_values(values) if values else None
 
 
 async def _send_telegram_jobs(
@@ -259,6 +267,7 @@ def _delivery_breakdown(
     web_push_sent: int = 0,
     web_push_failed: int = 0,
     web_push_missing_permission: int = 0,
+    web_push_retry_queued: int = 0,
     web_push_errors: Optional[List[str]] = None,
 ) -> dict:
     resolved_web_errors = web_errors or []
@@ -292,6 +301,7 @@ def _delivery_breakdown(
             "sent": web_push_sent,
             "failed": web_push_failed,
             "missing_permission": web_push_missing_permission,
+            "retry_queued": web_push_retry_queued,
             "errors": resolved_web_push_errors,
         },
         "sent": telegram_sent + vk_sent + web_sent,
@@ -328,40 +338,6 @@ async def _client_delivery_method(db: AsyncSession, user: User) -> str:
     return await refreshed_client_delivery_method(db, user)
 
 
-def _parse_bookmaker_id_values(values: Optional[List[str]]) -> List[int]:
-    bookmaker_ids: List[int] = []
-    for raw_value in values or []:
-        if raw_value is None:
-            continue
-        for part in str(raw_value).split(","):
-            clean = part.strip()
-            if not clean:
-                continue
-            try:
-                bookmaker_id = int(clean)
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Некорректный ID букмекера"
-                )
-            if bookmaker_id not in bookmaker_ids:
-                bookmaker_ids.append(bookmaker_id)
-    return bookmaker_ids
-
-
-def _merge_bookmaker_ids(
-    bookmaker_id: Optional[int],
-    bookmaker_ids: Optional[List[int]],
-) -> List[int]:
-    selected_ids: List[int] = []
-    if bookmaker_id:
-        selected_ids.append(bookmaker_id)
-    for selected_id in bookmaker_ids or []:
-        if selected_id and selected_id not in selected_ids:
-            selected_ids.append(selected_id)
-    return selected_ids
-
-
 def _normalized_target_value(value: Optional[object]) -> str:
     return str(value or "").strip().lower()
 
@@ -393,7 +369,12 @@ async def _store_coupon_image(coupon_image: Optional[UploadFile]) -> Optional[st
     return await store_coupon_image(coupon_image, target_dir=STATIC_DIR)
 
 
-async def _load_private_forecast_bet(db: AsyncSession, bet_id: UUID) -> Bet:
+async def _load_private_forecast_bet(
+    db: AsyncSession,
+    bet_id: UUID,
+    *,
+    allow_paid_set: bool = False,
+) -> Bet:
     result = await db.execute(
         select(Bet)
         .filter(Bet.id == bet_id)
@@ -408,7 +389,10 @@ async def _load_private_forecast_bet(db: AsyncSession, bet_id: UUID) -> Bet:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Закрытый прогноз не найден",
         )
-    if bet.delivery_mode != DELIVERY_MODE_SALES_PRIVATE:
+    allowed_delivery_modes = {DELIVERY_MODE_SALES_PRIVATE}
+    if allow_paid_set:
+        allowed_delivery_modes.add(DELIVERY_MODE_PAID_SET)
+    if bet.delivery_mode not in allowed_delivery_modes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Этот прогноз не относится к закрытой рассылке",
@@ -422,6 +406,9 @@ async def _apply_full_forecast_fields(
     event_name: Optional[str],
     outcome: Optional[str],
     coefficient: Optional[Decimal],
+    fair_coefficient: Optional[Decimal],
+    fair_coefficient_provided: bool,
+    teaser_text: Optional[str],
     sport_type: Optional[str],
     description: Optional[str],
     match_link: Optional[str],
@@ -467,16 +454,12 @@ async def _apply_full_forecast_fields(
             bookmaker_links,
             allowed_bookmaker_ids=bet.bookmaker_ids,
         )
-    if not any(
-        isinstance(item, dict) and str(item.get("url") or "").strip()
-        for item in (bet.bookmaker_links or [])
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Добавьте хотя бы одну ссылку по БК",
-        )
     if coefficient is not None:
         bet.coefficient = coefficient
+    if fair_coefficient_provided:
+        bet.fair_coefficient = fair_coefficient
+    if teaser_text is not None:
+        bet.teaser_text = teaser_text.strip() or None
     if sport_type and sport_type.strip():
         bet.sport_type = sport_type.strip()
     if category and category.strip():
@@ -499,6 +482,25 @@ async def _load_bookmakers(db: AsyncSession, bookmaker_ids: List[int]) -> List[B
             detail=f"Selected bookmaker not found: {', '.join(map(str, missing_ids))}"
         )
     return [bookmakers_by_id[bookmaker_id] for bookmaker_id in bookmaker_ids]
+
+
+async def _apply_forecast_bookmakers(
+    db: AsyncSession,
+    bet: Bet,
+    bookmaker_ids: Optional[List[int]],
+) -> List[int]:
+    if bookmaker_ids is None:
+        return bet.bookmaker_ids
+    selected_bookmaker_ids = _merge_bookmaker_ids(None, bookmaker_ids)
+    if not selected_bookmaker_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Выберите хотя бы одну БК для закрытого прогноза",
+        )
+    selected_bookmakers = await _load_bookmakers(db, selected_bookmaker_ids)
+    bet.bookmaker_id = selected_bookmaker_ids[0]
+    bet.bookmakers = selected_bookmakers
+    return selected_bookmaker_ids
 
 
 async def _get_target_users(
@@ -587,15 +589,145 @@ async def _get_smart_target_users(
     return [user for user in users if not user_is_in_quiet_hours(user, now)]
 
 
-def _web_push_report_values(report: Optional[dict]) -> dict:
-    report = report or {}
-    return {
-        "web_push_audience": int(report.get("web_push_audience") or 0),
-        "web_push_sent": int(report.get("web_push_sent") or 0),
-        "web_push_failed": int(report.get("web_push_failed") or 0),
-        "web_push_missing_permission": int(report.get("web_push_missing_permission") or 0),
-        "web_push_errors": list(report.get("web_push_errors") or []),
+async def _send_forecast_teasers(
+    db: AsyncSession,
+    *,
+    forecast_requests: List[ForecastRequest],
+    teaser_text: Optional[str],
+    template_body: Optional[str] = None,
+    log_prefix: str,
+) -> dict:
+    if not forecast_requests:
+        delivery = _delivery_breakdown(
+            telegram_total=0,
+            telegram_sent=0,
+            telegram_failed=0,
+            telegram_errors=[],
+            vk_total=0,
+            vk_sent=0,
+            vk_failed=0,
+            vk_errors=[],
+            vk_notifications_enabled=0,
+            web_total=0,
+            web_sent=0,
+            **_web_push_report_values(None),
+        )
+        return {
+            "delivery": delivery,
+            "sent": delivery["sent"],
+            "failed": delivery["failed"],
+            "errors": delivery["errors"],
+            "web_report": None,
+            "vk_ready_users": {},
+        }
+
+    teaser_template_body = template_body or await load_message_template_body(db, TEMPLATE_FORECAST_TEASER)
+    web_message_text = html_to_vk_text(
+        build_teaser_message(forecast_requests[0], teaser_text, template_body=teaser_template_body)
+    )
+    web_report = await broadcast_personal_signals(
+        db,
+        users=[forecast_request.user for forecast_request in forecast_requests],
+        text=web_message_text,
+        signal_type="forecast_teaser",
+        data_by_user_id={
+            forecast_request.user_id: build_web_teaser_signal_data(
+                forecast_request,
+                teaser_text,
+                template_body=teaser_template_body,
+            )
+            for forecast_request in forecast_requests
+        },
+        send_telegram=False,
+        send_web_push=True,
+        return_report=True,
+        commit_before_external_delivery=True,
+    )
+    web_sent = int(web_report.get("created", 0)) if isinstance(web_report, dict) else 0
+    telegram_jobs = [
+        (
+            forecast_request.user_id,
+            "sendMessage",
+            build_forecast_teaser_payload(forecast_request, teaser_text, template_body=teaser_template_body),
+        )
+        for forecast_request in forecast_requests
+        if user_can_receive_personal_telegram(forecast_request.user)
+    ]
+    vk_ready_users = {
+        user.telegram_id: user
+        for user in await _refresh_vk_audience(
+            db,
+            [forecast_request.user for forecast_request in forecast_requests],
+        )
     }
+    vk_jobs = [
+        (
+            forecast_request.user_id,
+            forecast_request.user,
+            html_to_vk_text(build_teaser_message(forecast_request, teaser_text, template_body=teaser_template_body)),
+            build_vk_forecast_keyboard(forecast_request.id),
+            None,
+        )
+        for forecast_request in forecast_requests
+        if forecast_request.user_id in vk_ready_users
+    ]
+    telegram_sent, telegram_failed, telegram_errors = await _send_telegram_jobs(
+        telegram_jobs,
+        log_prefix=log_prefix,
+    )
+    vk_sent, vk_failed, vk_errors = await _send_vk_jobs(vk_jobs, db=db, log_prefix=log_prefix)
+    delivery = _delivery_breakdown(
+        telegram_total=len(telegram_jobs),
+        telegram_sent=telegram_sent,
+        telegram_failed=telegram_failed,
+        telegram_errors=telegram_errors,
+        vk_total=len(vk_jobs),
+        vk_sent=vk_sent,
+        vk_failed=vk_failed,
+        vk_errors=vk_errors,
+        vk_notifications_enabled=sum(
+            1 for forecast_request in forecast_requests
+            if forecast_request.user_id in vk_ready_users
+            and forecast_request.user.vk_notifications_allowed
+        ),
+        web_total=len(forecast_requests),
+        web_sent=web_sent,
+        **_web_push_report_values(web_report if isinstance(web_report, dict) else None),
+    )
+    return {
+        "delivery": delivery,
+        "sent": delivery["sent"],
+        "failed": delivery["failed"],
+        "errors": delivery["errors"],
+        "web_report": web_report,
+        "vk_ready_users": vk_ready_users,
+    }
+
+
+async def _create_missing_forecast_requests_for_bet(
+    db: AsyncSession,
+    *,
+    bet: Bet,
+    users: List[User],
+) -> List[ForecastRequest]:
+    existing_result = await db.execute(
+        select(ForecastRequest.user_id).filter(ForecastRequest.bet_id == bet.id)
+    )
+    existing_user_ids = {int(user_id) for user_id in existing_result.scalars().all()}
+    new_requests: List[ForecastRequest] = []
+    for user in users:
+        if user.telegram_id in existing_user_ids:
+            continue
+        forecast_request = ForecastRequest(
+            bet=bet,
+            user=user,
+            status=FORECAST_STATUS_ANNOUNCED,
+        )
+        db.add(forecast_request)
+        new_requests.append(forecast_request)
+        existing_user_ids.add(user.telegram_id)
+    await db.flush()
+    return new_requests
 
 
 @router.post("/admin/announcements")
@@ -750,6 +882,7 @@ async def create_announcement(
         send_telegram=False,
         send_web_push=True,
         return_report=True,
+        commit_before_external_delivery=True,
     )
     web_sent = int(web_report.get("created", 0))
     telegram_sent, telegram_failed, telegram_errors = await _send_telegram_jobs(telegram_jobs, log_prefix="Broadcast")
@@ -799,6 +932,7 @@ async def create_announcement(
 async def create_forecast_broadcast(
     request: Request,
     coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
+    fair_coefficient: Optional[str] = Form(None, max_length=32),
     bookmaker_id: Optional[int] = Form(None),
     category: str = Form("prematch", max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
@@ -826,11 +960,15 @@ async def create_forecast_broadcast(
         )
 
     selected_bookmakers = await _load_bookmakers(db, selected_bookmaker_ids)
+    clean_teaser_text = (teaser_text or "").strip() or "Есть закрытый прогноз под вашу БК. Берете матч?"
+    parsed_fair_coefficient = _parse_optional_fair_coefficient(fair_coefficient)
 
     bet = Bet(
         event_name=PLACEHOLDER_EVENT_NAME,
         coefficient=coefficient,
+        fair_coefficient=parsed_fair_coefficient,
         bookmaker_id=selected_bookmaker_ids[0],
+        teaser_text=clean_teaser_text,
         category=category,
         live_ends_at=live_ends_at,
         price_stars=price_stars,
@@ -854,94 +992,20 @@ async def create_forecast_broadcast(
         min_coef=float(coefficient),
     )
 
-    requests_by_user_id: dict[int, ForecastRequest] = {}
-    for user in target_users:
-        forecast_request = ForecastRequest(
-            bet=bet,
-            user=user,
-            status=FORECAST_STATUS_ANNOUNCED,
-        )
-        db.add(forecast_request)
-        requests_by_user_id[user.telegram_id] = forecast_request
-
-    await db.flush()
-    teaser_template_body = await load_message_template_body(db, TEMPLATE_FORECAST_TEASER)
+    forecast_requests = await _create_missing_forecast_requests_for_bet(
+        db,
+        bet=bet,
+        users=target_users,
+    )
     await db.commit()
 
-    forecast_requests = list(requests_by_user_id.values())
-    web_message_text = html_to_vk_text(
-        build_teaser_message(forecast_requests[0], teaser_text, template_body=teaser_template_body)
-    ) if forecast_requests else ""
-    web_report = await broadcast_personal_signals(
+    teaser_result = await _send_forecast_teasers(
         db,
-        users=[forecast_request.user for forecast_request in forecast_requests],
-        text=web_message_text,
-        signal_type="forecast_teaser",
-        data_by_user_id={
-            forecast_request.user_id: build_web_teaser_signal_data(
-                forecast_request,
-                teaser_text,
-                template_body=teaser_template_body,
-            )
-            for forecast_request in forecast_requests
-        },
-        send_telegram=False,
-        send_web_push=True,
-        return_report=True,
-    ) if web_message_text else 0
-    web_sent = int(web_report.get("created", 0)) if isinstance(web_report, dict) else 0
-    telegram_jobs = [
-        (
-            forecast_request.user_id,
-            "sendMessage",
-            build_forecast_teaser_payload(forecast_request, teaser_text, template_body=teaser_template_body),
-        )
-        for forecast_request in forecast_requests
-        if user_can_receive_personal_telegram(forecast_request.user)
-    ]
-    vk_ready_users = {
-        user.telegram_id: user
-        for user in await _refresh_vk_audience(
-            db,
-            [forecast_request.user for forecast_request in forecast_requests],
-        )
-    }
-    vk_jobs = [
-        (
-            forecast_request.user_id,
-            forecast_request.user,
-            html_to_vk_text(build_teaser_message(forecast_request, teaser_text, template_body=teaser_template_body)),
-            build_vk_forecast_keyboard(forecast_request.id),
-            None,
-        )
-        for forecast_request in forecast_requests
-        if forecast_request.user_id in vk_ready_users
-    ]
-    telegram_sent, telegram_failed, telegram_errors = await _send_telegram_jobs(
-        telegram_jobs,
+        forecast_requests=forecast_requests,
+        teaser_text=clean_teaser_text,
         log_prefix="ForecastBroadcast",
     )
-    vk_sent, vk_failed, vk_errors = await _send_vk_jobs(vk_jobs, db=db, log_prefix="ForecastBroadcast")
-    telegram_total = len(telegram_jobs)
-    vk_total = len(vk_jobs)
-    delivery = _delivery_breakdown(
-        telegram_total=telegram_total,
-        telegram_sent=telegram_sent,
-        telegram_failed=telegram_failed,
-        telegram_errors=telegram_errors,
-        vk_total=vk_total,
-        vk_sent=vk_sent,
-        vk_failed=vk_failed,
-        vk_errors=vk_errors,
-        vk_notifications_enabled=sum(
-            1 for forecast_request in forecast_requests
-            if forecast_request.user_id in vk_ready_users
-            and forecast_request.user.vk_notifications_allowed
-        ),
-        web_total=len(forecast_requests),
-        web_sent=web_sent,
-        **_web_push_report_values(web_report if isinstance(web_report, dict) else None),
-    )
+    delivery = teaser_result["delivery"]
 
     return {
         "status": "success",
@@ -965,6 +1029,8 @@ async def create_forecast_broadcast(
 async def create_paid_set_broadcast(
     request: Request,
     title: str = Form(PAID_SET_PLACEHOLDER_EVENT_NAME, max_length=200),
+    event_name: Optional[str] = Form(None, max_length=200),
+    outcome: Optional[str] = Form(None, max_length=200),
     coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
     price_rub: int = Form(..., ge=1, le=1000000),
     bookmaker_id: Optional[int] = Form(None),
@@ -978,7 +1044,19 @@ async def create_paid_set_broadcast(
     the request goes to the sales manager for a personal dialogue.
     """
     clean_title = (title or PAID_SET_PLACEHOLDER_EVENT_NAME).strip() or PAID_SET_PLACEHOLDER_EVENT_NAME
+    clean_event_name = (event_name or "").strip()
+    clean_outcome = (outcome or "").strip()
     clean_teaser_text = (teaser_text or "").strip() or "Реальный КФ не выше 1.9!"
+    if not clean_event_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Укажите матч набора",
+        )
+    if not clean_outcome:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Укажите исход набора",
+        )
     if price_rub <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -999,12 +1077,13 @@ async def create_paid_set_broadcast(
     selected_bookmakers = await _load_bookmakers(db, selected_bookmaker_ids)
 
     bet = Bet(
-        event_name=clean_title,
+        event_name=clean_event_name,
         coefficient=coefficient,
         bookmaker_id=selected_bookmaker_ids[0],
         category="prematch",
         price_stars=price_rub,
         sport_type=sport_type,
+        outcome=clean_outcome,
         description=clean_teaser_text,
         status="pending",
         delivery_mode=DELIVERY_MODE_PAID_SET,
@@ -1068,6 +1147,7 @@ async def create_paid_set_broadcast(
         send_telegram=False,
         send_web_push=True,
         return_report=True,
+        commit_before_external_delivery=True,
     ) if web_message_text else 0
     web_sent = int(web_report.get("created", 0)) if isinstance(web_report, dict) else 0
     telegram_jobs = []
@@ -1168,12 +1248,15 @@ async def prepare_forecast_broadcast_full(
     event_name: Optional[str] = Form(None, max_length=200),
     outcome: Optional[str] = Form(None, max_length=200),
     coefficient: Optional[Decimal] = Form(None, ge=Decimal("1.0"), le=Decimal("999.99")),
+    fair_coefficient: Optional[str] = Form(None, max_length=32),
     sport_type: Optional[str] = Form(None, max_length=120),
+    teaser_text: Optional[str] = Form(None, max_length=4000),
     description: Optional[str] = Form(None, max_length=4000),
     match_link: Optional[str] = Form(None, max_length=2048),
     category: Optional[str] = Form(None, max_length=40),
     live_ends_at: Optional[datetime] = Form(None),
     auto_send_interested: bool = Form(False),
+    reannounce_new_audience: bool = Form(False),
     coupon_image: Optional[UploadFile] = File(None),
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
@@ -1184,11 +1267,25 @@ async def prepare_forecast_broadcast_full(
     """
     bet = await _load_private_forecast_bet(db, bet_id)
     form_data = await request.form()
+    fair_coefficient_provided = "fair_coefficient" in form_data or fair_coefficient is not None
+    parsed_fair_coefficient = (
+        _parse_optional_fair_coefficient(fair_coefficient)
+        if fair_coefficient_provided
+        else None
+    )
+    selected_bookmaker_ids = await _apply_forecast_bookmakers(
+        db,
+        bet,
+        _bookmaker_ids_from_form(form_data),
+    )
     await _apply_full_forecast_fields(
         bet,
         event_name=event_name,
         outcome=outcome,
         coefficient=coefficient,
+        fair_coefficient=parsed_fair_coefficient,
+        fair_coefficient_provided=fair_coefficient_provided,
+        teaser_text=teaser_text,
         sport_type=sport_type,
         description=description,
         match_link=match_link,
@@ -1198,10 +1295,45 @@ async def prepare_forecast_broadcast_full(
         coupon_image=coupon_image,
     )
     bet.author_id = bet.author_id or current_admin.telegram_id
-    bet.auto_send_on_interest = bool(auto_send_interested)
+    if "auto_send_interested" in form_data:
+        bet.auto_send_on_interest = bool(auto_send_interested)
     await db.commit()
 
     auto_send_result = None
+    reannounce_result = None
+    if reannounce_new_audience:
+        target_users = await _get_smart_target_users(
+            db,
+            sport_filter=bet.sport_type,
+            bookmaker_id=None,
+            bookmaker_ids=selected_bookmaker_ids,
+            delivery_channel="any",
+            min_coef=float(bet.coefficient),
+        )
+        new_requests = await _create_missing_forecast_requests_for_bet(
+            db,
+            bet=bet,
+            users=target_users,
+        )
+        await db.commit()
+        teaser_delivery = await _send_forecast_teasers(
+            db,
+            forecast_requests=new_requests,
+            teaser_text=bet.teaser_text,
+            log_prefix="ForecastReannounce",
+        )
+        reannounce_delivery = teaser_delivery["delivery"]
+        reannounce_result = ForecastTeaserDeliveryResponse(
+            total_audience=len(new_requests),
+            sent=reannounce_delivery["sent"],
+            failed=reannounce_delivery["failed"],
+            errors=reannounce_delivery["errors"],
+            delivery={
+                "total_audience": len(new_requests),
+                **reannounce_delivery,
+            },
+        )
+
     if auto_send_interested:
         result = await db.execute(
             select(ForecastRequest)
@@ -1250,6 +1382,7 @@ async def prepare_forecast_broadcast_full(
         bet=refreshed_bet,
         auto_send_enabled=bool(refreshed_bet.auto_send_on_interest),
         auto_send=auto_send_result,
+        reannounce=reannounce_result,
     )
 
 
@@ -1399,6 +1532,9 @@ async def send_selected_forecast_requests_from_admin(
         event_name=event_name,
         outcome=outcome,
         coefficient=coefficient,
+        fair_coefficient=None,
+        fair_coefficient_provided=False,
+        teaser_text=None,
         sport_type=sport_type,
         description=description,
         match_link=match_link,
@@ -1469,6 +1605,9 @@ async def send_forecast_request_from_admin(
         event_name=event_name,
         outcome=outcome,
         coefficient=coefficient,
+        fair_coefficient=None,
+        fair_coefficient_provided=False,
+        teaser_text=None,
         sport_type=sport_type,
         description=description,
         match_link=match_link,
@@ -1520,11 +1659,8 @@ async def stop_forecast_broadcast_from_admin(
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    bet = await _load_private_forecast_bet(db, bet_id)
-    already_stopped = bet.status == "deleted"
-    bet.status = "deleted"
-    bet.auto_send_on_interest = False
-    bet.resolved_at = bet.resolved_at or datetime.now(timezone.utc)
+    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True)
+    taker_count = await count_client_bet_takers(db, bet.id)
 
     stoppable_statuses = {
         FORECAST_STATUS_ANNOUNCED,
@@ -1535,9 +1671,23 @@ async def stop_forecast_broadcast_from_admin(
     requests_result = await db.execute(
         select(ForecastRequest).filter(ForecastRequest.bet_id == bet.id)
     )
+    forecast_requests = requests_result.scalars().all()
+    has_stoppable_requests = any(
+        forecast_request.status in stoppable_statuses
+        for forecast_request in forecast_requests
+    )
+    already_stopped = (
+        (bet.status == "deleted" and bet.resolved_at is not None)
+        or (not bet.auto_send_on_interest and not has_stoppable_requests)
+    )
+    if bet.status == "deleted" and bet.resolved_at is None:
+        bet.status = "pending"
+    if bet.status != "deleted":
+        bet.auto_send_on_interest = False
+
     stopped_requests = 0
     skipped_processing = 0
-    for forecast_request in requests_result.scalars().all():
+    for forecast_request in forecast_requests:
         if forecast_request.status == FORECAST_STATUS_PROCESSING:
             skipped_processing += 1
             continue
@@ -1546,6 +1696,11 @@ async def stop_forecast_broadcast_from_admin(
             forecast_request.handled_by = current_admin.telegram_id
             stopped_requests += 1
 
+    await enqueue_admin_group_forecast_stopped_notification(
+        db,
+        bet=bet,
+        taker_count=taker_count,
+    )
     db.add(AdminAuditLog(
         actor_id=current_admin.telegram_id,
         action="forecast_broadcast_stopped",
@@ -1555,6 +1710,7 @@ async def stop_forecast_broadcast_from_admin(
             "already_stopped": already_stopped,
             "stopped_requests": stopped_requests,
             "skipped_processing": skipped_processing,
+            "taker_count": taker_count,
         },
     ))
     await db.commit()
@@ -1564,6 +1720,7 @@ async def stop_forecast_broadcast_from_admin(
         "already_stopped": already_stopped,
         "stopped_requests": stopped_requests,
         "skipped_processing": skipped_processing,
+        "taker_count": taker_count,
     }
 
 

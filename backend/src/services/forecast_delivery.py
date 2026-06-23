@@ -9,7 +9,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import inspect as sa_inspect, update
+from sqlalchemy import func, inspect as sa_inspect, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -25,18 +25,18 @@ from src.core.message_templates import (
     load_message_template_body,
     render_message_template_body,
 )
-from src.core.roles import is_admin_role
+from src.core.roles import STAFF_ROLES, is_admin_role
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
 from src.models.database import AsyncSessionLocal
-from src.models.models import Bet, ForecastRequest, User
+from src.models.models import Bet, ForecastRequest, User, user_bets
 from src.services.delivery_outbox import (
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
     CHANNEL_TELEGRAM_MESSAGE,
     enqueue_delivery,
 )
-from src.services.match_access import UserBetAccessResult, record_user_bet_access
+from src.services.match_access import UserBetAccessResult, record_user_bet_access, user_has_full_forecast_access
 from src.services.signals import deliver_personal_signal
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_multipart
 from src.services.vk_delivery import (
@@ -66,6 +66,10 @@ PAID_SET_PLACEHOLDER_EVENT_NAME = "Платный набор"
 DELIVERY_MODE_SALES_PRIVATE = "sales_private"
 DELIVERY_MODE_PAID_SET = "paid_set"
 FULL_FORECAST_LINKS_REQUIRED_MESSAGE = "Добавьте хотя бы одну ссылку по БК"
+FORECAST_CONTACT_DRAFT_TEXT = "хочу получить ставку из анонса."
+FORECAST_CONTACT_REQUIRED_MESSAGE = (
+    f"Чтобы получить ставку, напишите Shamrai: {FORECAST_CONTACT_DRAFT_TEXT}"
+)
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_TEXT_LIMIT = 4096
 STATIC_ROOT = os.path.abspath(
@@ -102,6 +106,21 @@ def _coefficient_text(bet: Bet) -> str:
         return f"{float(bet.coefficient):.2f}"
     except Exception:
         return str(bet.coefficient)
+
+
+def _fair_coefficient_text(bet: Bet) -> Optional[str]:
+    fair_coefficient = getattr(bet, "fair_coefficient", None)
+    if fair_coefficient is None:
+        return None
+    try:
+        return f"{float(fair_coefficient):.2f}"
+    except Exception:
+        return str(fair_coefficient)
+
+
+def _fair_coefficient_line(bet: Bet) -> str:
+    fair_text = _fair_coefficient_text(bet)
+    return f"Верный: <b>{_html(fair_text)}</b>" if fair_text else ""
 
 
 def _format_rub_price(value: Optional[object]) -> str:
@@ -541,6 +560,14 @@ def user_match_balance(user: User) -> int:
     return int(user.purchased_bets_balance or user.matches_remaining or 0)
 
 
+def forecast_request_has_full_access(forecast_request: ForecastRequest) -> bool:
+    return request_is_paid_set(forecast_request) or user_has_full_forecast_access(forecast_request.user)
+
+
+def forecast_request_requires_contact(forecast_request: ForecastRequest) -> bool:
+    return not forecast_request_has_full_access(forecast_request)
+
+
 async def load_forecast_request(db: AsyncSession, request_id: UUID) -> ForecastRequest:
     result = await db.execute(
         select(ForecastRequest)
@@ -567,16 +594,20 @@ def build_teaser_message(
     template_body: Optional[str] = None,
 ) -> str:
     bet = forecast_request.bet
-    teaser = (teaser_text or "").strip() or "Есть закрытый прогноз под вашу БК. Нажмите, если хотите взять матч."
+    stored_teaser_text = getattr(bet, "teaser_text", None)
+    teaser = (
+        (teaser_text if teaser_text is not None else stored_teaser_text) or ""
+    ).strip() or "Есть закрытый прогноз под вашу БК. Нажмите, если хотите взять матч."
     return render_message_template_body(
         template_body or default_message_template_body(TEMPLATE_FORECAST_TEASER),
         {
             "bookmaker_labels": _bookmaker_labels_for_bet(bet),
             "coefficient": _coefficient_text(bet),
+            "fair_coefficient_line": _fair_coefficient_line(bet),
             "teaser_text": teaser,
             "contact_footer": append_contact_footer("").strip(),
         },
-        safe_keys={"bookmaker_labels", "contact_footer"},
+        safe_keys={"bookmaker_labels", "fair_coefficient_line", "contact_footer"},
     )
 
 
@@ -858,10 +889,11 @@ def build_web_teaser_signal_data(
     return {
         "message_html": message_html,
         "message_text": html_to_vk_text(message_html),
-        "coupon_image_url": bet.coupon_image_url,
+        "coupon_image_url": None,
         "bookmakers": _bookmaker_web_items(bet),
         "event_name": bet.event_name,
         "coefficient": _coefficient_text(bet),
+        "fair_coefficient": _fair_coefficient_text(bet),
         "sport_type": bet.sport_type,
         "forecast_request_id": str(forecast_request.id),
         "forecast_status": forecast_request.status,
@@ -889,7 +921,7 @@ def build_web_paid_set_signal_data(
     return {
         "message_html": message_html,
         "message_text": html_to_vk_text(message_html),
-        "coupon_image_url": bet.coupon_image_url,
+        "coupon_image_url": None,
         "bookmakers": _bookmaker_web_items(bet),
         "event_name": bet.event_name,
         "coefficient": _coefficient_text(bet),
@@ -1012,12 +1044,6 @@ def _ensure_full_forecast_ready(forecast_request: ForecastRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Сократите текст полного прогноза до 4096 символов",
         )
-    if not _bookmaker_link_targets(bet):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=FULL_FORECAST_LINKS_REQUIRED_MESSAGE,
-        )
-
 
 def _full_forecast_ready_error(forecast_request: ForecastRequest) -> Optional[str]:
     try:
@@ -1032,10 +1058,10 @@ def _build_take_admin_notification_content(forecast_request: ForecastRequest) ->
     bet = forecast_request.bet
     is_paid_set = request_is_paid_set(forecast_request)
     balance = user_match_balance(user)
-    no_balance_warning = balance <= 0 and not bool(user.guarantee_active)
+    delivery_blocked = forecast_request_requires_contact(forecast_request)
     warning = ""
-    if no_balance_warning and not is_paid_set:
-        warning = "\n\n⚠️ У клиента 0 матчей. Отправка разрешена, баланс уйдет в минус."
+    if delivery_blocked and not is_paid_set:
+        warning = "\n\n⚠️ У клиента 0 матчей. Отправка прогноза недоступна до оплаты."
 
     if is_paid_set:
         message = (
@@ -1065,7 +1091,7 @@ def _build_take_admin_notification_content(forecast_request: ForecastRequest) ->
 
     reply_markup = {
         "inline_keyboard": [
-            *([] if is_paid_set else [[
+            *([] if is_paid_set or delivery_blocked else [[
                 {
                     "text": "Отправить прогноз",
                     "callback_data": f"forecast:sales_send:{forecast_request.id}",
@@ -1181,6 +1207,19 @@ async def enqueue_admin_group_forecast_response_notification(
     return {"ok": True, "queued": True}
 
 
+async def count_client_bet_takers(db: AsyncSession, bet_id: UUID) -> int:
+    result = await db.execute(
+        select(func.count(func.distinct(user_bets.c.user_id)))
+        .select_from(user_bets)
+        .join(User, User.telegram_id == user_bets.c.user_id)
+        .filter(
+            user_bets.c.bet_id == bet_id,
+            or_(User.role.is_(None), ~User.role.in_(STAFF_ROLES)),
+        )
+    )
+    return max(0, int(result.scalar() or 0))
+
+
 def _forecast_result_label(status_value: str) -> str:
     return {
         "win": "Выигрыш",
@@ -1249,6 +1288,67 @@ async def enqueue_admin_group_forecast_result_notification(
     return {"ok": True, "queued": True}
 
 
+def build_admin_group_forecast_stopped_delivery(
+    *,
+    bet: Bet,
+    taker_count: int,
+) -> Optional[dict[str, object]]:
+    chat_id = _admin_group_chat_id()
+    if not chat_id:
+        return None
+
+    is_paid_set = bet_is_paid_set(bet)
+    forecast_type = "набор" if is_paid_set else "прогноз"
+    placeholder_event_name = PAID_SET_PLACEHOLDER_EVENT_NAME if is_paid_set else PLACEHOLDER_EVENT_NAME
+    forecast_text = _trim_text(getattr(bet, "description", None), 1200)
+    forecast_block = f"\n\n<b>Прогноз:</b>\n{_html(forecast_text)}" if forecast_text else ""
+    message = (
+        "<b>Раздача остановлена</b>\n\n"
+        f"Формат: <b>{forecast_type}</b>\n"
+        f"Матч: <b>{_html(getattr(bet, 'event_name', None) or placeholder_event_name)}</b>\n"
+        f"Исход: <b>{_html(getattr(bet, 'outcome', None) or 'уточняется')}</b>\n"
+        f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
+        f"БК: <b>{_html(bookmaker_names_for_bet(bet))}</b>\n"
+        f"Спорт: <b>{_html(getattr(bet, 'sport_type', None) or 'не указан')}</b>\n"
+        f"Взяли: <b>{max(0, int(taker_count or 0))}</b>\n"
+        "Результат ещё не проставлен."
+        f"{forecast_block}"
+    )
+    return {
+        "method": "sendMessage",
+        "payload": {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+    }
+
+
+async def enqueue_admin_group_forecast_stopped_notification(
+    db: AsyncSession,
+    *,
+    bet: Bet,
+    taker_count: int,
+) -> dict:
+    delivery = build_admin_group_forecast_stopped_delivery(
+        bet=bet,
+        taker_count=taker_count,
+    )
+    if not delivery:
+        return {"ok": False, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=None,
+        forecast_request_id=None,
+        dedupe_key=f"bet:{bet.id}:admin_group:stopped",
+        payload=delivery,
+    )
+    return {"ok": True, "queued": True}
+
+
 def notify_sales_manager(forecast_request: ForecastRequest) -> dict:
     delivery = build_sales_manager_notification_delivery(forecast_request)
     if not delivery:
@@ -1281,6 +1381,11 @@ async def enqueue_forecast_auto_delivery(
     *,
     delivery_method: str = "auto",
 ) -> dict:
+    if forecast_request_requires_contact(forecast_request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Отправка прогноза недоступна до оплаты",
+        )
     await enqueue_delivery(
         db,
         channel=CHANNEL_FORECAST_AUTO_DELIVERY,
@@ -1379,6 +1484,7 @@ def forecast_request_should_auto_deliver(forecast_request: ForecastRequest) -> b
     return bool(
         getattr(forecast_request.bet, "status", None) != "deleted"
         and not request_is_paid_set(forecast_request)
+        and not forecast_request_requires_contact(forecast_request)
         and getattr(forecast_request.bet, "auto_send_on_interest", False)
         and _full_forecast_ready_error(forecast_request) is None
     )
@@ -1456,6 +1562,9 @@ async def set_forecast_request_interested(
         return forecast_request, "Заявка отменена.", False
     if forecast_request.status == FORECAST_STATUS_REMOVED:
         return forecast_request, "Заявка удалена администратором.", False
+
+    if forecast_request_requires_contact(forecast_request):
+        return forecast_request, FORECAST_CONTACT_REQUIRED_MESSAGE, False
 
     responded_at = forecast_request.responded_at or _now()
     lock_result = await db.execute(
@@ -1653,26 +1762,31 @@ async def deliver_forecast_request(
                 detail="Заявка уже обрабатывается или изменила статус",
             )
 
-        balance_before = user_match_balance(forecast_request.user)
+        access_result = await record_user_bet_access(
+            db,
+            user=forecast_request.user,
+            bet=forecast_request.bet,
+            charge_match=False,
+            free_access_type="manual_paid_set",
+            note="Paid set marked as sold manually",
+        )
         forecast_request.status = FORECAST_STATUS_MANUAL_SENT
         forecast_request.delivery_method = "manual"
         forecast_request.handled_by = handled_by
         forecast_request.delivered_at = forecast_request.delivered_at or _now()
-        forecast_request.balance_before = balance_before
-        forecast_request.balance_after = balance_before
+        forecast_request.balance_before = access_result.balance_before
+        forecast_request.balance_after = access_result.balance_after
         forecast_request.no_balance_warning = False
         if commit:
             await db.commit()
         else:
             await db.flush()
-        return forecast_request, UserBetAccessResult(
-            status="manual_sale",
-            already_recorded=False,
-            access_type="manual_paid_set",
-            match_charged=False,
-            balance_before=balance_before,
-            balance_after=balance_before,
-            no_balance_warning=False,
+        return forecast_request, access_result
+
+    if forecast_request_requires_contact(forecast_request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Отправка прогноза недоступна до оплаты",
         )
 
     if send_to_client:
@@ -1727,7 +1841,7 @@ async def deliver_forecast_request(
             user=forecast_request.user,
             bet=forecast_request.bet,
             charge_match=True,
-            allow_negative_balance=True,
+            allow_negative_balance=False,
             note=f"Private forecast activated via {delivery_method}",
         )
         forecast_request.status = _status_for_delivery_method(delivery_method)

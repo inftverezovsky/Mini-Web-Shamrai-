@@ -1,3 +1,4 @@
+import inspect
 import unittest
 import uuid
 from decimal import Decimal
@@ -8,8 +9,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
 
 from src.api import bets
+from src.api.deps import get_current_admin
 from src.models.database import Base
-from src.models.models import Bet, Bookmaker, DeliveryOutbox, ForecastRequest, User, user_bets
+from src.models.models import Bet, Bookmaker, DeliveryOutbox, ForecastRequest, PersonalSignal, User, user_bets
 from src.schemas.schemas import BetOddsDropUpdate, BetResolve, BetUpdate
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE
 
@@ -68,6 +70,11 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("France - Northern Ireland", message)
         self.assertIn("Total over 3.5", message)
 
+    def test_resolve_endpoint_uses_staff_dependency(self):
+        admin_default = inspect.signature(bets.resolve_bet).parameters["admin"].default
+
+        self.assertIs(admin_default.dependency, get_current_admin)
+
     async def test_update_odds_drop_saves_value(self):
         async with self.Session() as session:
             admin = self._user(900, role="admin")
@@ -88,8 +95,8 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
         async with self.Session() as session:
             admin = self._user(900, role="admin")
             bet = self._bet()
-            fonbet = Bookmaker(id=1, name="Фонбет (Fonbet)", code="fonbet", is_active=True)
-            pari = Bookmaker(id=2, name="Пари (Pari)", code="pari", is_active=True)
+            fonbet = Bookmaker(id=1, name="Фонбет", code="fonbet", is_active=True)
+            pari = Bookmaker(id=2, name="Пари", code="pari", is_active=True)
             session.add_all([admin, bet, fonbet, pari])
             await session.commit()
 
@@ -125,6 +132,51 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
+    async def test_update_bet_allows_resolved_non_deleted_forecast(self):
+        async with self.Session() as session:
+            moderator = self._user(901, role="moderator")
+            bet = self._bet()
+            bet.status = "loss"
+            session.add_all([moderator, bet])
+            await session.commit()
+
+            response = await bets.update_bet(
+                bet.id,
+                BetUpdate(
+                    event_name="Updated match",
+                    coefficient=Decimal("2.25"),
+                    outcome="П2",
+                    sport_type="Теннис",
+                ),
+                admin=moderator,
+                db=session,
+            )
+
+            self.assertEqual(response.status, "loss")
+            self.assertEqual(response.event_name, "Updated match")
+            self.assertEqual(response.coefficient, Decimal("2.25"))
+            self.assertEqual(response.outcome, "П2")
+            self.assertEqual(response.sport_type, "Теннис")
+
+    async def test_update_bet_rejects_deleted_forecast(self):
+        async with self.Session() as session:
+            moderator = self._user(901, role="moderator")
+            bet = self._bet()
+            bet.status = "deleted"
+            session.add_all([moderator, bet])
+            await session.commit()
+
+            with self.assertRaises(HTTPException) as exc:
+                await bets.update_bet(
+                    bet.id,
+                    BetUpdate(event_name="Updated match"),
+                    admin=moderator,
+                    db=session,
+                )
+
+            self.assertEqual(exc.exception.status_code, 400)
+            self.assertIn("удаленный", str(exc.exception.detail).lower())
+
     async def test_notify_odds_drop_queues_only_users_with_access(self):
         async with self.Session() as session:
             admin = self._user(900, role="admin")
@@ -153,6 +205,13 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outbox_items[0].payload["method"], "sendMessage")
             self.assertEqual(outbox_items[0].payload["payload"]["chat_id"], taker.telegram_id)
             self.assertIn("1.50", outbox_items[0].payload["payload"]["text"])
+
+            signals = (await session.execute(select(PersonalSignal))).scalars().all()
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0].user_id, taker.telegram_id)
+            self.assertEqual(signals[0].type, "odds_drop")
+            self.assertIn("1.50", signals[0].text)
+            self.assertEqual(signals[0].data["event_type"], "odds_drop")
 
             refreshed = (await session.execute(select(Bet).filter(Bet.id == bet.id))).scalars().first()
             self.assertEqual(refreshed.odds_dropped_to, Decimal("1.50"))
@@ -184,6 +243,11 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outbox_item.user_id, vk_taker.telegram_id)
             self.assertIn("1.50", outbox_item.payload["message"])
 
+            signal = (await session.execute(select(PersonalSignal))).scalars().one()
+            self.assertEqual(signal.user_id, vk_taker.telegram_id)
+            self.assertEqual(signal.type, "odds_drop")
+            self.assertIn("1.50", signal.text)
+
     async def test_notify_odds_drop_skips_users_who_disabled_odds_drop_alerts(self):
         async with self.Session() as session:
             admin = self._user(900, role="admin")
@@ -210,6 +274,8 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.failed, 0)
             outbox_items = (await session.execute(select(DeliveryOutbox))).scalars().all()
             self.assertEqual([item.user_id for item in outbox_items], [enabled_taker.telegram_id])
+            signals = (await session.execute(select(PersonalSignal))).scalars().all()
+            self.assertEqual([signal.user_id for signal in signals], [enabled_taker.telegram_id])
 
     async def test_notify_odds_drop_requires_enabled_recipients(self):
         async with self.Session() as session:
@@ -297,3 +363,144 @@ class OddsDropNotificationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Результат прогноза", group_items[0].payload["payload"]["text"])
             self.assertIn("Выигрыш", group_items[0].payload["payload"]["text"])
             self.assertIn("Взяли: <b>2</b>", group_items[0].payload["payload"]["text"])
+
+            signals = (await session.execute(select(PersonalSignal))).scalars().all()
+            self.assertEqual(len(signals), 2)
+            self.assertEqual({signal.user_id for signal in signals}, {taker_one.telegram_id, taker_two.telegram_id})
+            self.assertEqual({signal.type for signal in signals}, {"bet_result"})
+            self.assertTrue(all(signal.data["result_status"] == "win" for signal in signals))
+
+    async def test_resolve_private_bet_stops_open_forecast_requests(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            client_announced = self._user(201)
+            client_interested = self._user(202)
+            client_sent = self._user(203)
+            bet = self._bet()
+            bet.delivery_mode = "sales_private"
+            bet.auto_send_on_interest = True
+            request_announced = ForecastRequest(
+                bet_id=bet.id,
+                user_id=client_announced.telegram_id,
+                status="announced",
+            )
+            request_interested = ForecastRequest(
+                bet_id=bet.id,
+                user_id=client_interested.telegram_id,
+                status="interested",
+            )
+            request_sent = ForecastRequest(
+                bet_id=bet.id,
+                user_id=client_sent.telegram_id,
+                status="sent",
+            )
+            session.add_all([
+                admin,
+                client_announced,
+                client_interested,
+                client_sent,
+                bet,
+                request_announced,
+                request_interested,
+                request_sent,
+            ])
+            await session.commit()
+
+            await bets.resolve_bet(
+                bet.id,
+                BetResolve(status="loss"),
+                admin=admin,
+                db=session,
+            )
+
+            refreshed_requests = (
+                await session.execute(select(ForecastRequest).filter(ForecastRequest.bet_id == bet.id))
+            ).scalars().all()
+            statuses_by_user_id = {
+                forecast_request.user_id: forecast_request.status
+                for forecast_request in refreshed_requests
+            }
+            self.assertEqual(statuses_by_user_id[client_announced.telegram_id], "removed")
+            self.assertEqual(statuses_by_user_id[client_interested.telegram_id], "removed")
+            self.assertEqual(statuses_by_user_id[client_sent.telegram_id], "sent")
+            self.assertFalse(bet.auto_send_on_interest)
+
+    async def test_resolve_legacy_stopped_unresolved_private_bet_as_first_result(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            taker = self._user(204)
+            bet = self._bet()
+            bet.status = "deleted"
+            bet.resolved_at = None
+            bet.delivery_mode = "sales_private"
+            session.add_all([admin, taker, bet])
+            await session.flush()
+            await self._add_access(session, user=taker, bet=bet)
+            await session.commit()
+
+            response = await bets.resolve_bet(
+                bet.id,
+                BetResolve(status="loss"),
+                admin=admin,
+                db=session,
+            )
+
+            self.assertEqual(response.status, "loss")
+            self.assertEqual(response.guarantee_count, 1)
+            self.assertIsNotNone(response.resolved_at)
+            self.assertEqual(taker.purchased_bets_balance, 5)
+            signals = (await session.execute(select(PersonalSignal))).scalars().all()
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0].type, "bet_result")
+
+    async def test_moderator_can_change_resolved_result_from_loss_to_win(self):
+        async with self.Session() as session:
+            moderator = self._user(901, role="moderator")
+            bet = self._bet()
+            bet.status = "loss"
+            bet.resolved_at = None
+            session.add_all([moderator, bet])
+            await session.commit()
+
+            response = await bets.resolve_bet(
+                bet.id,
+                BetResolve(status="win"),
+                admin=moderator,
+                db=session,
+            )
+
+            self.assertEqual(response.status, "win")
+            self.assertIsNotNone(response.resolved_at)
+
+    async def test_resolve_bet_queues_vk_and_web_chat_result_for_vk_only_recipient(self):
+        async with self.Session() as session:
+            admin = self._user(900, role="admin")
+            vk_taker = self._user(-101)
+            vk_taker.vk_user_id = "123456"
+            vk_taker.vk_messages_allowed = True
+            bet = self._bet()
+            session.add_all([admin, vk_taker, bet])
+            await session.flush()
+            await self._add_access(session, user=vk_taker, bet=bet)
+            await session.commit()
+
+            await bets.resolve_bet(
+                bet.id,
+                BetResolve(status="win"),
+                admin=admin,
+                db=session,
+            )
+
+            outbox_items = (await session.execute(select(DeliveryOutbox))).scalars().all()
+            vk_items = [item for item in outbox_items if item.channel == CHANNEL_VK_MESSAGE]
+            self.assertEqual(len(vk_items), 1)
+            outbox_item = vk_items[0]
+            self.assertEqual(outbox_item.channel, CHANNEL_VK_MESSAGE)
+            self.assertEqual(outbox_item.user_id, vk_taker.telegram_id)
+            self.assertIn("плюс", outbox_item.payload["message"])
+
+            signal = (await session.execute(select(PersonalSignal))).scalars().one()
+            self.assertEqual(signal.user_id, vk_taker.telegram_id)
+            self.assertEqual(signal.type, "bet_result")
+            self.assertEqual(signal.data["result_status"], "win")
+            self.assertIn("плюс", signal.text)

@@ -14,9 +14,11 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user
 from src.core.config import settings
+from src.core.roles import is_staff_role
 from src.models.database import AsyncSessionLocal, get_db
 from src.models.models import Bet, ForecastRequest, PersonalSignal, User
 from src.services.forecast_delivery import (
+    FORECAST_CONTACT_DRAFT_TEXT,
     build_web_forecast_signal_data,
     build_web_paid_set_signal_data,
     build_web_teaser_signal_data,
@@ -36,12 +38,22 @@ class PersonalSignalResponse(BaseModel):
     type: str
     data: dict[str, Any] = Field(default_factory=dict)
     created_at: str
+    direction: Optional[str] = None
+    author_label: Optional[str] = None
+    sender_user_id: Optional[int] = None
+    sender_role: Optional[str] = None
 
 
 class ForecastSignalActionResponse(BaseModel):
     status: str
     message: str
     forecast_request_id: str
+    action: str = "accepted"
+    contact: Optional[dict[str, Any]] = None
+
+
+class SupportMessageCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
 
 
 class WebPushKeys(BaseModel):
@@ -287,6 +299,28 @@ async def get_signal_history(
     return [_serialize_signal_with_forecast_data(signal, forecast_requests) for signal in signals]
 
 
+@router.post("/messages", response_model=PersonalSignalResponse)
+async def send_support_message_from_web_chat(
+    payload: SupportMessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from src.services.support_web_chat import create_client_support_message
+
+    if is_staff_role(current_user.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Сообщения в клиентский чат доступны только клиентам",
+        )
+
+    signal = await create_client_support_message(
+        db,
+        client_user=current_user,
+        text=payload.text,
+    )
+    return _serialize_signal(signal)
+
+
 @router.post("/forecast-requests/{request_id}/{action}", response_model=ForecastSignalActionResponse)
 async def answer_forecast_request_from_web_chat(
     request_id: UUID,
@@ -307,10 +341,19 @@ async def answer_forecast_request_from_web_chat(
         await db.commit()
         if should_notify_sales:
             background_tasks.add_task(notify_sales_manager_for_request, forecast_request.id)
+        contact_required = (
+            forecast_request.status == "announced"
+            and FORECAST_CONTACT_DRAFT_TEXT in message
+        )
         return ForecastSignalActionResponse(
             status=forecast_request.status,
             message=message,
             forecast_request_id=str(forecast_request.id),
+            action="contact_required" if contact_required else "accepted",
+            contact={
+                "channel": "web",
+                "draft_text": FORECAST_CONTACT_DRAFT_TEXT,
+            } if contact_required else None,
         )
 
     if action == "decline":
@@ -324,6 +367,7 @@ async def answer_forecast_request_from_web_chat(
             status=forecast_request.status,
             message=message,
             forecast_request_id=str(forecast_request.id),
+            action="accepted",
         )
 
     raise HTTPException(

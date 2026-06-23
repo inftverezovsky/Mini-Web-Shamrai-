@@ -13,12 +13,13 @@ import PwaPushGate from './components/PwaPushGate';
 import VkConsentWizard from './components/VkConsentWizard';
 import WelcomeSplash from './components/WelcomeSplash';
 import WebSignalListener from './components/WebSignalListener';
+import AdminWebChatListener from './components/AdminWebChatListener';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import LogoText from './components/LogoText';
 
 import { isStaffRole, roleLabel } from './utils/roles';
 import { buildTabPath, trackEvent, trackPageView } from './utils/analytics';
-import { isTelegramMiniApp } from './utils/telegramSdk';
+import { hasTelegramLaunchParams, isTelegramMiniApp } from './utils/telegramSdk';
 import { registerPwaServiceWorker } from './utils/webPush';
 
 import {
@@ -38,6 +39,7 @@ const loadOnboarding = () => import('./pages/user/Onboarding');
 const loadWebBotChat = () => import('./components/WebBotChat');
 const loadAdminDashboard = () => import('./pages/admin/AdminDashboard');
 const loadAdminCRM = () => import('./pages/admin/AdminCRM');
+const loadAdminWebChat = () => import('./pages/admin/AdminWebChat');
 const loadAdminSettings = () => import('./pages/admin/AdminSettings');
 const loadAdminStats = () => import('./pages/admin/AdminStats');
 const loadAdminBets = () => import('./pages/admin/AdminBets');
@@ -52,6 +54,7 @@ const Onboarding = lazy(loadOnboarding);
 const WebBotChat = lazy(loadWebBotChat);
 const AdminDashboard = lazy(loadAdminDashboard);
 const AdminCRM = lazy(loadAdminCRM);
+const AdminWebChat = lazy(loadAdminWebChat);
 const AdminSettings = lazy(loadAdminSettings);
 const AdminStats = lazy(loadAdminStats);
 
@@ -68,6 +71,7 @@ const adminTabLoaders: Partial<Record<AdminShellTabId, () => Promise<unknown>>> 
   manage_bets: loadAdminDashboard,
   stats: loadAdminStats,
   clients: loadAdminCRM,
+  chats: loadAdminWebChat,
   settings: loadAdminSettings,
   profile: loadProfile,
 };
@@ -210,12 +214,14 @@ export default function App() {
   }, [introComplete]);
 
   useEffect(() => {
-    if (!isReady || isTelegram || isTelegramMiniApp()) return;
+    if (!isReady || isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams()) return;
     void registerPwaServiceWorker();
     const params = new URLSearchParams(window.location.search);
-    if (params.get('open') === 'web-bot-chat') {
+    if (params.get('open') === 'web-bot-chat' || params.get('open') === 'web-chat') {
       setActiveUserTab('chat');
       window.setTimeout(() => document.getElementById('web-bot-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250);
+    } else if (params.get('open') === 'admin-web-chat') {
+      setActiveAdminTab('chats');
     }
   }, [isReady, isTelegram]);
 
@@ -230,7 +236,7 @@ export default function App() {
     if (!introComplete || !userProfile) return;
 
     const userIsStaff = isStaffRole(userProfile.role);
-    const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp();
+    const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
     const shouldPreloadWebChat = !runsInTelegramMiniApp && !userIsStaff && userProfile.is_onboarded !== false;
     const loaders = userIsStaff
       ? [
@@ -240,6 +246,7 @@ export default function App() {
           loadAdminBroadcast,
           loadAdminStats,
           loadAdminCRM,
+          loadAdminWebChat,
           loadAdminSettings,
           loadProfile,
         ]
@@ -271,7 +278,7 @@ export default function App() {
   const forceOnboarding = import.meta.env.DEV && new URLSearchParams(window.location.search).has('force_onboarding');
   const isAdmin = userProfile ? isStaffRole(userProfile.role) : false;
   const showAdminInterface = isAdmin && !adminPreviewMode;
-  const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp();
+  const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
   const needsOnboarding = Boolean(
     userProfile
     && (forceOnboarding || userProfile.is_onboarded === false)
@@ -425,6 +432,8 @@ export default function App() {
         <AdminStats />
       ) : activeAdminTab === 'clients' ? (
         <AdminCRM />
+      ) : activeAdminTab === 'chats' ? (
+        <AdminWebChat />
       ) : activeAdminTab === 'settings' ? (
         <AdminSettings />
       ) : (
@@ -476,6 +485,7 @@ export default function App() {
       >
         <NotificationCenter />
         <WebSignalListener enabled={showWebChatTab} />
+        <AdminWebChatListener enabled={showAdminInterface} />
         <VkConsentWizard />
       </AppErrorBoundary>
       <div className="ambient-field" aria-hidden="true">

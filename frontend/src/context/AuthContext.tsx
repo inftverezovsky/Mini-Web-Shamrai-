@@ -2,9 +2,20 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { UserResponse } from '../schemas/schemas';
 import { AUTH_EXPIRED_EVENT, apiFetch } from '../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
-import { clearStoredAuthToken, getStoredAuthToken, setStoredAuthToken } from '../utils/authStorage';
+import {
+  MOCK_DEBUG_AUTH_TOKEN,
+  clearStoredAuthToken,
+  getStoredAuthToken,
+  setStoredAuthToken,
+} from '../utils/authStorage';
 import { ensureTelegramSdk, getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
-import { consumeVkRedirectResult, isVkRedirectStartedError, loginVkProfile } from '../utils/vkId';
+import {
+  clearVkAuthCooldown,
+  consumeVkRedirectResult,
+  isVkRedirectStartedError,
+  loginVkProfile,
+  rememberVkAuthCooldownForMessage,
+} from '../utils/vkId';
 
 export interface TelegramWidgetPayload {
   id: number;
@@ -145,18 +156,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
+    clearVkAuthCooldown();
     setToken(data.access_token);
     setUser(data.user);
     setStoredAuthToken(data.access_token);
     setError(null);
   }, []);
 
-  const fetchCurrentUser = useCallback(async (candidateToken: string) => {
+  const fetchCurrentUser = useCallback(async (candidateToken?: string | null) => {
+    const headers = candidateToken ? { Authorization: `Bearer ${candidateToken}` } : undefined;
     const response = await fetch(`${API_URL}/api/users/me`, {
       credentials: 'include',
-      headers: {
-        Authorization: `Bearer ${candidateToken}`,
-      },
+      ...(headers ? { headers } : {}),
     });
 
     if (!response.ok) {
@@ -164,9 +175,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const freshUser = await response.json();
-    setToken(candidateToken);
+    setToken(candidateToken ?? null);
     setUser(freshUser);
-    setStoredAuthToken(candidateToken);
+    if (candidateToken) {
+      setStoredAuthToken(candidateToken);
+    }
     setError(null);
   }, [API_URL]);
 
@@ -193,7 +206,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(null);
 
       const storedToken = getStoredAuthToken();
-      if (allowLocalMock && storedToken === 'mock_debug_access_token') {
+      if (allowLocalMock && storedToken === MOCK_DEBUG_AUTH_TOKEN) {
         setToken(storedToken);
         setUser(createMockUser());
         return;
@@ -206,6 +219,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch {
           clearStoredAuth();
         }
+      }
+
+      try {
+        await fetchCurrentUser(null);
+        return;
+      } catch {
+        clearStoredAuthToken();
       }
 
       let initData = '';
@@ -230,7 +250,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err: any) {
       console.error('Auth context login error:', err);
       if (allowLocalMock) {
-        const mockToken = 'mock_debug_access_token';
+        const mockToken = MOCK_DEBUG_AUTH_TOKEN;
         setToken(mockToken);
         setUser(createMockUser());
         setStoredAuthToken(mockToken);
@@ -259,6 +279,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err: any) {
       if (isVkRedirectStartedError(err)) return;
       const message = authErrorMessage(err, 'Не удалось войти через VK ID');
+      rememberVkAuthCooldownForMessage(message);
       setError(message);
       throw new Error(message);
     } finally {
@@ -291,19 +312,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return true;
       }
 
-      const storedToken = getStoredAuthToken();
-      if (!storedToken) {
-        throw new Error('Telegram-сессия устарела. Войдите через Telegram и повторите привязку VK.');
-      }
-
       await apiFetch('/auth/vk/link', {
         method: 'POST',
         body: JSON.stringify(redirectResult.payload),
       });
-      await fetchCurrentUser(storedToken);
+      await fetchCurrentUser(getStoredAuthToken());
       return true;
     } catch (err: any) {
-      setError(authErrorMessage(err, 'Не удалось завершить авторизацию VK ID'));
+      const message = authErrorMessage(err, 'Не удалось завершить авторизацию VK ID');
+      rememberVkAuthCooldownForMessage(message);
+      setError(message);
       return true;
     } finally {
       setLoading(false);
@@ -403,6 +421,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [clearStoredAuth, login]);
 
   const logout = () => {
+    void fetch(`${API_URL}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+      body: '',
+    }).catch(() => undefined);
     clearStoredAuth();
   };
 

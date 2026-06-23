@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from src.api import vk_callback
 from src.core.config import settings
+from src.services import forecast_delivery
 
 
 class FakeRequest:
@@ -654,6 +655,61 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
             await vk_callback._process_plain_text_status_message(event_object)
 
         send_message.assert_not_called()
+
+    async def test_handle_forecast_button_returns_contact_required_with_vk_dialog_link(self):
+        request_id = UUID("00000000-0000-0000-0000-000000000001")
+        fake_user = SimpleNamespace(telegram_id=-1000000000123)
+        fake_forecast_request = SimpleNamespace(
+            id=request_id,
+            status=forecast_delivery.FORECAST_STATUS_ANNOUNCED,
+        )
+
+        class FakeDb:
+            commits = 0
+            rollbacks = 0
+
+            async def commit(self):
+                self.commits += 1
+
+            async def rollback(self):
+                self.rollbacks += 1
+
+        fake_db = FakeDb()
+
+        with (
+            patch.object(vk_callback, "_load_user_by_vk_id", new=AsyncMock(return_value=fake_user)),
+            patch.object(
+                vk_callback,
+                "set_forecast_request_interested",
+                new=AsyncMock(return_value=(
+                    fake_forecast_request,
+                    f"Чтобы получить ставку, напишите: {forecast_delivery.FORECAST_CONTACT_DRAFT_TEXT}",
+                    False,
+                )),
+            ),
+        ):
+            result = await vk_callback._handle_forecast_button(
+                {
+                    "message": {
+                        "from_id": 123,
+                        "peer_id": 123,
+                        "payload": json.dumps(
+                            {
+                                "type": "forecast_request",
+                                "action": "take",
+                                "request_id": str(request_id),
+                            }
+                        ),
+                    }
+                },
+                fake_db,
+            )
+
+        self.assertEqual(result["status"], "contact_required")
+        self.assertIn(forecast_delivery.FORECAST_CONTACT_DRAFT_TEXT, result["message"])
+        self.assertIn("https://vk.me/club239419819", result["message"])
+        self.assertEqual(fake_db.commits, 1)
+        self.assertEqual(fake_db.rollbacks, 0)
 
     async def test_handle_forecast_button_does_not_schedule_inline_auto_delivery_after_take(self):
         request_id = UUID("00000000-0000-0000-0000-000000000001")

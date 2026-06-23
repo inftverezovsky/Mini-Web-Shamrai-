@@ -1,10 +1,14 @@
-const CACHE_NAME = 'shamrai-pwa-v11';
+const CACHE_NAME = 'shamrai-pwa-v13';
 const APP_SHELL_URLS = ['/', '/app', '/manifest.json'];
 
 function safeNotificationPath(rawUrl) {
   try {
     const parsedUrl = new URL(rawUrl || '/app?open=web-bot-chat', self.location.origin);
     if (parsedUrl.origin !== self.location.origin) return '/app?open=web-bot-chat';
+    const openTarget = parsedUrl.searchParams.get('open');
+    if (openTarget === 'web-chat') {
+      parsedUrl.searchParams.set('open', 'web-chat');
+    }
     if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/app' || parsedUrl.pathname.startsWith('/app/')) {
       return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
     }
@@ -79,7 +83,7 @@ self.addEventListener('push', (event) => {
       image: payload.image || undefined,
       icon: '/brand/shamrai-favicon.png',
       badge: '/brand/shamrai-favicon.png',
-      vibrate: [80, 40, 80],
+      vibrate: [140, 70, 140, 90, 220],
       requireInteraction: true,
       renotify: true,
       actions: [

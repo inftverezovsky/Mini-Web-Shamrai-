@@ -50,14 +50,14 @@ const resultActions: Array<{
 }> = [
   {
     status: 'win',
-    label: 'Выигрыш',
+    label: 'Победа',
     Icon: Check,
     className:
       'border-emerald-400/35 bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500 hover:text-slate-950',
   },
   {
     status: 'loss',
-    label: 'Проигрыш',
+    label: 'Неудача',
     Icon: X,
     className:
       'border-[#ff007f]/35 bg-[#ff007f]/12 text-[#ff3d9c] hover:bg-[#ff007f] hover:text-white',

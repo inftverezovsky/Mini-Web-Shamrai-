@@ -11,7 +11,7 @@ from src.models.models import Bet
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 RESULT_STATUSES = {"win", "loss"}
-PAID_ACCESS_TYPES = {"paid_match", "single_bet_purchase"}
+PAID_ACCESS_TYPES = {"paid_match", "single_bet_purchase", "manual_paid_set"}
 EXCLUDED_CLIENT_ACCESS_TYPES = {"admin", "free_bet", "guarantee_replacement", "crowd_pool"}
 PERIOD_OPTIONS = {"week", "month", "quarter", "all"}
 PERIOD_LABELS = {
@@ -35,6 +35,20 @@ MONTH_LABELS = {
     11: "Ноябрь",
     12: "Декабрь",
 }
+
+
+def _normalise_bookmaker_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").casefold().replace("ё", "е") if ch.isalnum())
+
+
+def _prefer_fonbet_bookmakers(bookmakers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fonbet_items = [
+        bookmaker
+        for bookmaker in bookmakers
+        if _normalise_bookmaker_key(str(bookmaker.get("code", "") or "")) == "fonbet"
+        or _normalise_bookmaker_key(str(bookmaker.get("name", "") or "")) == "фонбет"
+    ]
+    return fonbet_items[:1] if fonbet_items else bookmakers
 
 
 def _round_decimal(value: Decimal, places: str = "0.01") -> float:
@@ -144,7 +158,7 @@ def _bookmaker_items_for_bet(bet: Bet) -> list[dict[str, Any]]:
             "name": fallback.name,
             "code": fallback.code,
         })
-    return bookmakers
+    return _prefer_fonbet_bookmakers(bookmakers)
 
 
 def stat_item_from_bet(
@@ -167,13 +181,20 @@ def stat_item_from_bet(
     profit = bet_profit_units(str(bet.status), coefficient)
     bookmakers = _bookmaker_items_for_bet(bet)
     delivery_mode = str(getattr(bet, "delivery_mode", None) or "feed")
-    source_type = "feed" if delivery_mode == "feed" else "private"
+    if delivery_mode == "feed":
+        source_type = "feed"
+    elif delivery_mode == "paid_set":
+        source_type = "paid_set"
+    else:
+        source_type = "private"
 
     return {
         "id": str(bet.id),
         "event_name": bet.event_name,
         "status": bet.status,
         "coefficient": _round_decimal(coefficient),
+        "bookmaker_id": getattr(bet, "bookmaker_id", None),
+        "description": getattr(bet, "description", None),
         "profit_units": _round_decimal(profit),
         "resolved_at": resolved_at_msk.isoformat(),
         "created_at": created_at_msk.isoformat() if created_at_msk else None,
@@ -182,8 +203,10 @@ def stat_item_from_bet(
         "source_type": source_type,
         "sport_type": bet.sport_type,
         "outcome": bet.outcome,
+        "match_link": getattr(bet, "match_link", None),
         "bookmakers": bookmakers,
         "bookmaker_names": [bookmaker["name"] for bookmaker in bookmakers],
+        "bookmaker_links": list(getattr(bet, "bookmaker_links", None) or []),
         "access_type": access_type,
         "match_charged": bool(match_charged) if match_charged is not None else None,
     }
@@ -321,6 +344,7 @@ def build_source_split(items: Iterable[dict[str, Any]]) -> dict[str, dict[str, A
         "all": summarize_items(item_list),
         "feed": summarize_items([item for item in item_list if item.get("source_type") == "feed"]),
         "private": summarize_items([item for item in item_list if item.get("source_type") == "private"]),
+        "paid_set": summarize_items([item for item in item_list if item.get("source_type") == "paid_set"]),
     }
 
 

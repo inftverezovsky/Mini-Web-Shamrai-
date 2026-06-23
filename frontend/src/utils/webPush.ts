@@ -74,6 +74,13 @@ export function looksLikeMobileDevice(): boolean {
   return /Macintosh/i.test(userAgent) && navigator.maxTouchPoints > 1;
 }
 
+export function looksLikeIosDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const userAgent = navigator.userAgent || '';
+  return /iPhone|iPad|iPod/i.test(userAgent)
+    || (/Macintosh/i.test(userAgent) && navigator.maxTouchPoints > 1);
+}
+
 export async function registerPwaServiceWorker(): Promise<void> {
   if (isTelegramMiniApp()) return;
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
@@ -110,7 +117,7 @@ export async function getWebPushReadiness(): Promise<WebPushReadinessState> {
   }
 
   const installed = pwaIsStandalone();
-  if (looksLikeMobileDevice() && !installed) {
+  if (looksLikeIosDevice() && !installed) {
     return {
       status: 'needs_install',
       message: 'Добавьте Shamrai на экран телефона и откройте установленную иконку.',

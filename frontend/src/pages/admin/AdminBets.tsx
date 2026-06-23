@@ -93,12 +93,6 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       notifyError('Заполните событие и коэффициент');
       return;
     }
-    const missingBookmakerLinks = selectedBookmakers.filter((bookmaker) => !bookmakerLinks[bookmaker.id]?.trim());
-    if (missingBookmakerLinks.length > 0) {
-      notifyError(`Добавьте ссылку для БК: ${missingBookmakerLinks.map((bookmaker) => bookmaker.name).join(', ')}`);
-      return;
-    }
-
     try {
       setSubmitting(true);
       setSuccessMsg('');
@@ -129,12 +123,15 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
         formData.append('price_stars', priceStars);
       }
       if (selectedBookmakers.length > 0) {
-        formData.append('bookmaker_links', JSON.stringify(
-          selectedBookmakers.map((bookmaker) => ({
+        const bookmakerLinksPayload = selectedBookmakers
+          .map((bookmaker) => ({
             bookmaker_id: bookmaker.id,
-            url: bookmakerLinks[bookmaker.id].trim(),
+            url: (bookmakerLinks[bookmaker.id] || '').trim(),
           }))
-        ));
+          .filter((link) => link.url.length > 0);
+        if (bookmakerLinksPayload.length > 0) {
+          formData.append('bookmaker_links', JSON.stringify(bookmakerLinksPayload));
+        }
       }
       formData.append('brain_score', '5');
       if (couponImage) {
@@ -237,6 +234,8 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             bookmakers={bookmakers}
             selectedIds={selectedBkIds}
             onChange={handleBookmakerSelectionChange}
+            allowAll={false}
+            selectAllLabel="Выбрать все БК"
           />
 
           {selectedBookmakers.length > 0 && (
@@ -267,8 +266,8 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                           [bookmaker.id]: nextValue,
                         }));
                       }}
-                      placeholder="https://..."
-              className="min-w-0 w-full bg-slate-800/60 border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
+                      placeholder="https://... (необязательно)"
+                      className="min-w-0 w-full bg-slate-800/60 border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
                     />
                   </div>
                 ))}

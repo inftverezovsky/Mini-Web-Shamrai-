@@ -2,11 +2,15 @@ import React from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
   Activity,
+  AlertCircle,
   BarChart3,
   CalendarDays,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Cloud,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   Loader2,
   Sparkles,
@@ -21,6 +25,7 @@ import {
   PerformanceSummary,
   PerformanceTimelineResponse,
   PeriodFilter,
+  StatsDriveExportJob,
 } from '../../schemas/schemas';
 import SmoothCollapse from '../../components/SmoothCollapse';
 
@@ -94,11 +99,31 @@ export function formatDateTime(value: string | null) {
 }
 
 function sourceLabel(source: PerformanceBetItem['source_type']) {
+  if (source === 'paid_set') return 'Набор';
   return source === 'private' ? 'Закрытая' : 'Лента';
 }
 
-function resultLabel(status: PerformanceBetItem['status']) {
-  return status === 'win' ? 'Win' : 'Loss';
+export function resultLabel(status: 'win' | 'loss') {
+  return status === 'win' ? 'Победа' : 'Неудача';
+}
+
+function pluralRu(value: number, one: string, few: string, many: string) {
+  const mod10 = value % 10;
+  const mod100 = value % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+export function resultCountLabel(status: 'win' | 'loss', count: number) {
+  return status === 'win'
+    ? `${count} ${pluralRu(count, 'победа', 'победы', 'побед')}`
+    : `${count} ${pluralRu(count, 'неудача', 'неудачи', 'неудач')}`;
+}
+
+export function streakLabel(summary: Pick<PerformanceSummary, 'current_streak' | 'current_streak_type'>) {
+  if (!summary.current_streak || !summary.current_streak_type) return 'Нет серии';
+  return `${summary.current_streak} ${resultLabel(summary.current_streak_type)}`;
 }
 
 export function buildProfitCurvePoints(data: PerformanceTimelineResponse | null) {
@@ -197,6 +222,90 @@ export function StatTile({
   );
 }
 
+function ExecutiveMetric({
+  label,
+  value,
+  hint,
+  tone = 'text-white',
+  icon,
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint?: string;
+  tone?: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="smooth-surface relative min-h-[86px] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]">
+      <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-transparent via-white/18 to-transparent" />
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.045] text-slate-300">
+          {icon}
+        </span>
+      </div>
+      <div className={`mt-2 truncate text-xl font-black leading-none tabular-nums ${tone}`}>{value}</div>
+      {hint ? <div className="mt-1 truncate text-[9px] font-bold text-slate-500">{hint}</div> : null}
+    </div>
+  );
+}
+
+export function ExecutiveScoreboard({
+  summary,
+  valueMode,
+}: {
+  summary: PerformanceSummary;
+  valueMode: StatsValueMode;
+}) {
+  const positive = summary.profit_units >= 0;
+  const volumeLabel = valueMode === 'rub'
+    ? `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(summary.bets * STATS_UNIT_STAKE_RUB)} ₽`
+    : `${summary.bets} ставок`;
+  const riskLabel = summary.current_streak_type === 'loss' && summary.current_streak >= 2
+    ? `${summary.current_streak} минуса подряд`
+    : streakLabel(summary);
+
+  return (
+    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+      <ExecutiveMetric
+        label="Прибыль"
+        value={formatStatsValue(summary.profit_units, valueMode)}
+        hint={positive ? 'плюсовая зона' : 'нужно внимание'}
+        tone={summaryTone(summary)}
+        icon={positive ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-rose-300" />}
+      />
+      <ExecutiveMetric
+        label="ROI"
+        value={pct(summary.roi)}
+        hint="эффективность среза"
+        tone={summary.roi >= 0 ? 'text-emerald-200' : 'text-rose-200'}
+        icon={<Target className="h-4 w-4 text-cyan-200" />}
+      />
+      <ExecutiveMetric
+        label="Проход"
+        value={pct(summary.winrate)}
+        hint={`${resultCountLabel('win', summary.wins)} / ${resultCountLabel('loss', summary.losses)}`}
+        tone="text-cyan-100"
+        icon={<Activity className="h-4 w-4 text-cyan-200" />}
+      />
+      <ExecutiveMetric
+        label="Объем"
+        value={volumeLabel}
+        hint={`${summary.bets} ставок`}
+        tone="text-slate-100"
+        icon={<BarChart3 className="h-4 w-4 text-slate-300" />}
+      />
+      <ExecutiveMetric
+        label="Серия"
+        value={riskLabel}
+        hint={`макс. побед ${summary.max_win_streak} / минус ${summary.max_loss_streak}`}
+        tone={summary.current_streak_type === 'loss' ? 'text-rose-200' : summary.current_streak_type === 'win' ? 'text-emerald-200' : 'text-slate-200'}
+        icon={<Sparkles className="h-4 w-4 text-amber-200" />}
+      />
+    </div>
+  );
+}
+
 export function CollapsiblePanel({
   title,
   icon,
@@ -280,8 +389,9 @@ export function MiniSummary({
   return (
     <div className={`flex flex-wrap items-center ${gapClass} text-[8.5px] font-black uppercase tracking-[0.08em]`}>
       <span className="rounded-md border border-white/10 bg-white/[0.05] px-1.5 py-0.5 text-slate-300">{summary.bets} ставок</span>
-      <span className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-1.5 py-0.5 text-emerald-100">{summary.wins}W</span>
-      <span className="rounded-md border border-rose-300/20 bg-rose-300/10 px-1.5 py-0.5 text-rose-100">{summary.losses}L</span>
+      <span className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-1.5 py-0.5 text-emerald-100">{resultCountLabel('win', summary.wins)}</span>
+      <span className="rounded-md border border-rose-300/20 bg-rose-300/10 px-1.5 py-0.5 text-rose-100">{resultCountLabel('loss', summary.losses)}</span>
+      <span className="rounded-md border border-cyan-300/20 bg-cyan-300/10 px-1.5 py-0.5 text-cyan-100">Проход {pct(summary.winrate)}</span>
       <span className={`rounded-md border border-white/10 bg-white/[0.05] px-1.5 py-0.5 ${summaryTone(summary)}`}>
         {formatStatsValue(summary.profit_units, valueMode)}
       </span>
@@ -309,14 +419,14 @@ export function MomentumStrip({
           {title}
         </div>
         <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
-          {results.length ? `${wins}W / ${losses}L` : 'Нет серии'}
+          {results.length ? `${resultCountLabel('win', wins)} / ${resultCountLabel('loss', losses)}` : 'Нет серии'}
         </div>
       </div>
       <div className="mt-1.5 flex gap-1">
         {(results.length ? results : Array.from({ length: 8 }, () => null)).slice(0, 14).map((result, index) => (
           <span
             key={`${result || 'empty'}:${index}`}
-            title={result === 'win' ? 'Win' : result === 'loss' ? 'Loss' : 'Нет результата'}
+            title={result === 'win' ? resultLabel('win') : result === 'loss' ? resultLabel('loss') : 'Нет результата'}
             className={`h-2 flex-1 rounded-full ${
               result === 'win'
                 ? 'bg-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.25)]'
@@ -343,7 +453,7 @@ export function StatsKpiGrid({
   const gridClass = showProfit ? 'grid-cols-2 gap-2 lg:grid-cols-5' : 'grid-cols-2 gap-2 lg:grid-cols-4';
   return (
     <div className={`grid ${gridClass}`}>
-      <StatTile label="Ставок" value={summary.bets} hint={`${summary.wins}W / ${summary.losses}L`} minHeightClass="min-h-[62px]" />
+      <StatTile label="Ставок" value={summary.bets} hint={`${resultCountLabel('win', summary.wins)} / ${resultCountLabel('loss', summary.losses)}`} minHeightClass="min-h-[62px]" />
       {showProfit ? (
         <StatTile label="Прибыль" value={formatStatsValue(summary.profit_units, valueMode)} tone={summaryTone(summary)} minHeightClass="min-h-[62px]" />
       ) : null}
@@ -373,9 +483,10 @@ export function StatsHero({
 }) {
   const positive = summary.profit_units >= 0;
   return (
-    <section className="relative overflow-hidden rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.16),transparent_34%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.32)]">
-      <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/35 to-transparent" />
-      <div className="grid gap-3 lg:grid-cols-[1fr_390px]">
+    <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_82%_18%,rgba(16,185,129,0.09),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
+      <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
+      <div className="pointer-events-none absolute bottom-0 right-8 h-px w-1/2 bg-gradient-to-r from-transparent via-emerald-200/20 to-transparent" />
+      <div className="grid gap-3 lg:grid-cols-[1fr_410px]">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.13em] text-cyan-100">
             <TrendingUp className="h-3.5 w-3.5" />
@@ -396,10 +507,13 @@ export function StatsHero({
         <div className="grid gap-2">
           {controls}
           <div className="grid grid-cols-[1fr_auto] gap-2">
-            <div className="rounded-xl border border-white/10 bg-slate-950/40 px-2.5 py-1.5">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Текущая серия</div>
-              <div className={`mt-0.5 text-xs font-black ${summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white'}`}>
-                {summary.current_streak ? `${summary.current_streak} ${summary.current_streak_type === 'win' ? 'W' : 'L'}` : 'Нет серии'}
+            <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Риск сейчас</div>
+              <div className={`mt-0.5 truncate text-xs font-black ${summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white'}`}>
+                {streakLabel(summary)}
+              </div>
+              <div className="mt-1 text-[8px] font-bold uppercase tracking-[0.08em] text-slate-600">
+                Макс. серии {summary.max_win_streak}/{summary.max_loss_streak}
               </div>
             </div>
             {actions}
@@ -462,6 +576,80 @@ export function ExportActions({
   );
 }
 
+function driveJobLabel(job: StatsDriveExportJob | null) {
+  if (!job) return null;
+  if (job.status === 'completed') return 'Отчет готов';
+  if (job.status === 'failed') return 'Ошибка выгрузки';
+  if (job.status === 'running') return 'Создаем отчет';
+  return 'Отчет в очереди';
+}
+
+export function ExportStatusPanel({
+  job,
+  error,
+  title = 'Google Drive',
+  compact = false,
+}: {
+  job: StatsDriveExportJob | null;
+  error: string | null;
+  title?: string;
+  compact?: boolean;
+}) {
+  if (!job && !error) return null;
+
+  const failed = Boolean(error || job?.status === 'failed');
+  const completed = job?.status === 'completed';
+  const Icon = completed ? CheckCircle2 : failed ? AlertCircle : Loader2;
+  const toneClass = failed
+    ? 'border-rose-300/20 bg-rose-400/[0.075] text-rose-100'
+    : completed
+      ? 'border-emerald-300/20 bg-emerald-300/[0.07] text-emerald-100'
+      : 'border-cyan-200/18 bg-cyan-200/[0.055] text-cyan-100';
+  const message = error || job?.error || driveJobLabel(job);
+
+  return (
+    <section className={`rounded-[22px] border ${toneClass} ${compact ? 'p-2.5' : 'p-3'} shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-white/10 bg-slate-950/38">
+            <Icon className={`h-4 w-4 ${!completed && !failed ? 'animate-spin' : ''}`} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">
+              <Cloud className="h-3 w-3 text-cyan-200" />
+              {title}
+            </div>
+            <div className="mt-0.5 truncate text-[10px] font-black uppercase tracking-[0.08em] text-current">
+              {message}
+            </div>
+          </div>
+        </div>
+        {job?.formats?.length ? (
+          <div className="hidden shrink-0 text-right text-[8px] font-black uppercase tracking-[0.1em] text-slate-500 sm:block">
+            {job.formats.join(', ')}
+          </div>
+        ) : null}
+      </div>
+      {job?.links?.length ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {job.links.slice(0, 6).map((link) => (
+            <a
+              key={`${link.format}:${link.id}`}
+              href={link.url}
+              target="_blank"
+              rel="noreferrer"
+              className="smooth-pressable inline-flex max-w-full items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-[9px] font-bold text-cyan-50 transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+            >
+              <ExternalLink className="h-3 w-3 shrink-0" />
+              <span className="truncate">{link.title}</span>
+            </a>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function ProfitCurve({
   data,
   valueMode,
@@ -504,6 +692,8 @@ export function ProfitCurve({
     : '';
   const latest = points[points.length - 1]?.value ?? 0;
   const activePoint = activeIndex === null ? null : coords[activeIndex];
+  const maxPoint = coords.length ? coords.reduce((best, point) => (point.value > best.value ? point : best), coords[0]) : null;
+  const minPoint = coords.length ? coords.reduce((weak, point) => (point.value < weak.value ? point : weak), coords[0]) : null;
   const pathMotion = reduceMotion
     ? {}
     : {
@@ -520,12 +710,32 @@ export function ProfitCurve({
             <Sparkles className="h-3.5 w-3.5 text-cyan-200" />
             {title}
           </h3>
-          <p className="mt-0.5 text-[9px] font-bold text-slate-500">Кумулятивно по дням расчета · коснитесь точки</p>
+          <p className="mt-0.5 text-[9px] font-bold text-slate-500">Кумулятивно по дням расчета, наведите на точку</p>
         </div>
         <div className={`text-right text-xs font-black tabular-nums ${profitTone(latest)}`}>{formatStatsValue(latest, valueMode)}</div>
       </div>
       {coords.length ? (
         <div className="relative" onPointerLeave={() => setActiveIndex(null)}>
+          <div className="mt-2 grid grid-cols-3 gap-1.5">
+            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Макс</div>
+              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${maxPoint ? profitTone(maxPoint.value) : 'text-slate-400'}`}>
+                {maxPoint ? formatStatsValue(maxPoint.value, valueMode) : '-'}
+              </div>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Сейчас</div>
+              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${profitTone(latest)}`}>
+                {formatStatsValue(latest, valueMode)}
+              </div>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Мин</div>
+              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${minPoint ? profitTone(minPoint.value) : 'text-slate-400'}`}>
+                {minPoint ? formatStatsValue(minPoint.value, valueMode) : '-'}
+              </div>
+            </div>
+          </div>
           <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-[150px] w-full overflow-visible">
             <defs>
               <linearGradient id={lineGradientId} x1="0" y1="0" x2="1" y2="0">
@@ -566,7 +776,7 @@ export function ProfitCurve({
                   key={`${coord.key}:${index}`}
                   cx={coord.x}
                   cy={coord.y}
-                r={active || isLast ? 4.5 : 2.6}
+                  r={active || isLast ? 4.5 : 2.6}
                   fill="#08101f"
                   stroke={coord.value >= 0 ? '#34d399' : '#fb7185'}
                   strokeWidth="2"
@@ -578,6 +788,12 @@ export function ProfitCurve({
                 />
               );
             })}
+            {maxPoint ? (
+              <circle cx={maxPoint.x} cy={maxPoint.y} r="6.6" fill="none" stroke="rgba(52,211,153,0.32)" strokeWidth="1.5" />
+            ) : null}
+            {minPoint && minPoint.value < 0 ? (
+              <circle cx={minPoint.x} cy={minPoint.y} r="6.6" fill="none" stroke="rgba(251,113,133,0.3)" strokeWidth="1.5" />
+            ) : null}
           </svg>
           {activePoint ? (
             <div
@@ -627,8 +843,8 @@ export function BreakdownBars({
       summary={visible.length ? (
         <span className="flex flex-wrap items-center gap-1.5">
           <span>{visible.length} позиций</span>
-          {best ? <span className="text-emerald-200">· лидер {best.label}</span> : null}
-          {weak && weak.summary.profit_units < 0 ? <span className="text-rose-200">· просадка {weak.label}</span> : null}
+          {best ? <span className="text-emerald-200">лидер {best.label}</span> : null}
+          {weak && weak.summary.profit_units < 0 ? <span className="text-rose-200">просадка {weak.label}</span> : null}
         </span>
       ) : 'Нет данных'}
     >
@@ -638,24 +854,24 @@ export function BreakdownBars({
             <div className="rounded-xl border border-emerald-300/15 bg-emerald-300/[0.06] p-2.5">
               <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-emerald-100">
                 <TrendingUp className="h-3 w-3" />
-                Что тянет
+                Драйвер прибыли
               </div>
               <div className="mt-1.5 truncate text-xs font-black text-white">{best?.label ?? 'Нет данных'}</div>
               <div className="mt-0.5 text-[9px] font-bold text-slate-400">
-                {best ? `${formatStatsValue(best.summary.profit_units, valueMode)} · ROI ${pct(best.summary.roi)}` : 'Пока нет выраженного лидера'}
+                {best ? `${formatStatsValue(best.summary.profit_units, valueMode)} / ROI ${pct(best.summary.roi)}` : 'Пока нет выраженного лидера'}
               </div>
             </div>
             <div className="rounded-xl border border-rose-300/15 bg-rose-300/[0.055] p-2.5">
               <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-rose-100">
                 <TrendingDown className="h-3 w-3" />
-                Что просаживает
+                Зона просадки
               </div>
               <div className="mt-1.5 truncate text-xs font-black text-white">
                 {weak && weak.summary.profit_units < 0 ? weak.label : 'Критичной зоны нет'}
               </div>
               <div className="mt-0.5 text-[9px] font-bold text-slate-400">
                 {weak && weak.summary.profit_units < 0
-                  ? `${formatStatsValue(weak.summary.profit_units, valueMode)} · ROI ${pct(weak.summary.roi)}`
+                  ? `${formatStatsValue(weak.summary.profit_units, valueMode)} / ROI ${pct(weak.summary.roi)}`
                   : 'Минусовая зона не выделяется'}
               </div>
             </div>
@@ -669,7 +885,7 @@ export function BreakdownBars({
               <div className="flex items-center justify-between gap-2 text-[11px]">
                 <span className="min-w-0 truncate font-bold text-slate-100">{item.label}</span>
                 <span className={`shrink-0 font-black tabular-nums ${summaryTone(item.summary)}`}>
-                  {formatStatsValue(item.summary.profit_units, valueMode)} · ROI {pct(item.summary.roi)}
+                  {formatStatsValue(item.summary.profit_units, valueMode)} / ROI {pct(item.summary.roi)}
                 </span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-slate-950/60">
@@ -693,19 +909,22 @@ export function BreakdownBars({
 export function SourceSplitPanel({
   feed,
   privateSummary,
+  paidSetSummary,
   valueMode,
 }: {
   feed: PerformanceSummary;
   privateSummary: PerformanceSummary;
+  paidSetSummary: PerformanceSummary;
   valueMode: StatsValueMode;
 }) {
   const rows = [
     { key: 'feed', label: 'Лента', icon: <TrendingUp className="h-4 w-4 text-emerald-300" />, summary: feed },
     { key: 'private', label: 'Закрытые', icon: <Target className="h-4 w-4 text-cyan-300" />, summary: privateSummary },
+    { key: 'paid_set', label: 'Наборы', icon: <Sparkles className="h-4 w-4 text-amber-300" />, summary: paidSetSummary },
   ];
   return (
-    <CollapsiblePanel title="Лента против закрытых" summary="2 источника">
-      <div className="grid gap-2 sm:grid-cols-2">
+    <CollapsiblePanel title="Источники" summary="3 источника">
+      <div className="grid gap-2 sm:grid-cols-3">
         {rows.map((row) => (
           <div key={row.key} className="rounded-xl border border-white/10 bg-slate-950/35 p-2.5">
             <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
@@ -756,8 +975,8 @@ export function BetResultRow({
           </div>
           <h4 className="mt-1.5 break-words text-xs font-black leading-snug text-white">{bet.event_name}</h4>
           <div className="mt-0.5 text-[9px] font-bold text-slate-500">
-            Расчет: {formatDateTime(bet.resolved_at)} · КФ {bet.coefficient.toFixed(2)}
-            {bet.outcome ? ` · ${bet.outcome}` : ''}
+            Расчет: {formatDateTime(bet.resolved_at)} / КФ {bet.coefficient.toFixed(2)}
+            {bet.outcome ? ` / ${bet.outcome}` : ''}
           </div>
           {bet.bookmaker_names.length ? (
             <div className="mt-0.5 truncate text-[9px] font-bold text-slate-600">{bet.bookmaker_names.join(', ')}</div>
@@ -778,6 +997,7 @@ export function TimelineFeed({
   onToggleMonth,
   onToggleDay,
   valueMode,
+  renderBet,
   emptyLabel = 'Нет рассчитанных ставок в этом срезе',
 }: {
   data: PerformanceTimelineResponse | null;
@@ -786,8 +1006,10 @@ export function TimelineFeed({
   onToggleMonth: (key: string) => void;
   onToggleDay: (key: string) => void;
   valueMode: StatsValueMode;
+  renderBet?: (bet: PerformanceBetItem, options: { compact: boolean; valueMode: StatsValueMode }) => React.ReactNode;
   emptyLabel?: string;
 }) {
+  const reduceMotion = useReducedMotion();
   if (!data?.timeline.length) {
     return (
       <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-5 text-center text-xs font-bold text-slate-500">
@@ -803,24 +1025,29 @@ export function TimelineFeed({
         return (
           <div
             key={month.key}
-            className="smooth-surface overflow-hidden rounded-[20px] border border-white/10 bg-white/[0.04]"
+            className="smooth-surface overflow-hidden rounded-[20px] border border-white/10 bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
           >
             <button
               type="button"
               onClick={() => onToggleMonth(month.key)}
               aria-expanded={monthOpen}
-              className="smooth-pressable flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left transition-all hover:bg-white/[0.035]"
+              className="smooth-pressable grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 text-left transition-all hover:bg-white/[0.035]"
             >
               <div className="flex min-w-0 items-center gap-2">
                 <motion.span
-                  animate={{ rotate: monthOpen ? 90 : 0 }}
+                  animate={reduceMotion ? undefined : { rotate: monthOpen ? 90 : 0 }}
                   transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                   className="grid h-4 w-4 shrink-0 place-items-center text-slate-400"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </motion.span>
-                <div>
-                  <div className="text-xs font-black text-white">{month.label}</div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="truncate text-xs font-black text-white">{month.label}</div>
+                    <span className="rounded-lg border border-white/10 bg-slate-950/35 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.08em] text-slate-400">
+                      {month.days.length} дней
+                    </span>
+                  </div>
                   <MiniSummary summary={month.summary} valueMode={valueMode} />
                 </div>
               </div>
@@ -836,32 +1063,45 @@ export function TimelineFeed({
                   return (
                     <div
                       key={day.key}
-                      className="smooth-surface rounded-xl border border-white/10 bg-black/15"
+                      className="smooth-surface overflow-hidden rounded-2xl border border-white/10 bg-black/15"
                     >
                       <button
                         type="button"
                         onClick={() => onToggleDay(day.key)}
                         aria-expanded={dayOpen}
-                        className="smooth-pressable flex w-full items-center justify-between gap-2 px-2.5 py-2 text-left transition-all hover:bg-white/[0.03]"
+                        className="smooth-pressable grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-2 text-left transition-all hover:bg-white/[0.03]"
                       >
                         <div className="flex min-w-0 items-center gap-2">
                           <motion.span
-                            animate={{ rotate: dayOpen ? 90 : 0 }}
+                            animate={reduceMotion ? undefined : { rotate: dayOpen ? 90 : 0 }}
                             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                             className="grid h-4 w-4 shrink-0 place-items-center text-slate-400"
                           >
                             <ChevronRight className="h-4 w-4" />
                           </motion.span>
-                          <div>
-                            <div className="text-[11px] font-black text-white">{day.label}</div>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="truncate text-[11px] font-black text-white">{day.label}</div>
+                              <span className="rounded-md border border-white/10 bg-white/[0.045] px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.08em] text-slate-500">
+                                {day.bets.length} ставок
+                              </span>
+                            </div>
                             <MiniSummary summary={day.summary} valueMode={valueMode} />
                           </div>
                         </div>
-                        {day.summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 shrink-0 text-emerald-300" /> : <TrendingDown className="h-4 w-4 shrink-0 text-rose-300" />}
+                        <div className={`shrink-0 text-right text-[11px] font-black tabular-nums ${summaryTone(day.summary)}`}>
+                          {formatStatsValue(day.summary.profit_units, valueMode)}
+                        </div>
                       </button>
                       <SmoothCollapse open={dayOpen} className="border-t border-white/10">
                         <div className="space-y-1.5 p-1.5">
-                          {day.bets.map((bet) => <BetResultRow key={bet.id} bet={bet} valueMode={valueMode} compact />)}
+                          {day.bets.map((bet) => (
+                            <React.Fragment key={bet.id}>
+                              {renderBet
+                                ? renderBet(bet, { compact: true, valueMode })
+                                : <BetResultRow bet={bet} valueMode={valueMode} compact />}
+                            </React.Fragment>
+                          ))}
                         </div>
                       </SmoothCollapse>
                     </div>
@@ -918,7 +1158,7 @@ export function OverviewAnalytics({
   valueMode,
 }: {
   data: PerformanceTimelineResponse | null;
-  sourceSplit?: { feed: PerformanceSummary; private: PerformanceSummary };
+  sourceSplit?: { feed: PerformanceSummary; private: PerformanceSummary; paid_set: PerformanceSummary };
   bookmakerBreakdown: PerformanceBreakdownItem[];
   sportBreakdown: PerformanceBreakdownItem[];
   valueMode: StatsValueMode;
@@ -928,7 +1168,12 @@ export function OverviewAnalytics({
       <ProfitCurve data={data} valueMode={valueMode} />
       <div className="grid gap-2.5">
         {sourceSplit ? (
-          <SourceSplitPanel feed={sourceSplit.feed} privateSummary={sourceSplit.private} valueMode={valueMode} />
+          <SourceSplitPanel
+            feed={sourceSplit.feed}
+            privateSummary={sourceSplit.private}
+            paidSetSummary={sourceSplit.paid_set}
+            valueMode={valueMode}
+          />
         ) : null}
         <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-1">
           <BreakdownBars title="Букмекеры" items={bookmakerBreakdown} valueMode={valueMode} icon={<BarChart3 className="h-4 w-4 text-emerald-300" />} limit={4} />
@@ -948,6 +1193,7 @@ export function TimelineSectionBlock({
   valueMode,
   title = 'Ставки',
   aside,
+  renderBet,
 }: {
   data: PerformanceTimelineResponse | null;
   expandedMonths: ExpandedMap;
@@ -957,6 +1203,7 @@ export function TimelineSectionBlock({
   valueMode: StatsValueMode;
   title?: string;
   aside?: React.ReactNode;
+  renderBet?: (bet: PerformanceBetItem, options: { compact: boolean; valueMode: StatsValueMode }) => React.ReactNode;
 }) {
   const betsCount = data?.summary.bets ?? 0;
   return (
@@ -977,6 +1224,7 @@ export function TimelineSectionBlock({
         onToggleMonth={onToggleMonth}
         onToggleDay={onToggleDay}
         valueMode={valueMode}
+        renderBet={renderBet}
       />
     </CollapsiblePanel>
   );

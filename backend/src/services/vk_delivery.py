@@ -21,6 +21,14 @@ logger = logging.getLogger("uvicorn")
 VK_API_BASE = "https://api.vk.com/method"
 VK_RANDOM_ID_MIN = 1
 VK_RANDOM_ID_MAX = 2_147_483_647
+VK_LOG_REDACTED_VALUE = "<redacted>"
+VK_LOG_SENSITIVE_KEYS = {
+    "access_token",
+    "authorization",
+    "request_params",
+    "secret",
+    "token",
+}
 STATIC_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static")
 )
@@ -53,6 +61,25 @@ def _mask_secret(value: Optional[str]) -> str:
     if len(token) <= 10:
         return f"{token[:2]}{'*' * max(1, len(token) - 4)}{token[-2:]}"
     return f"{token[:6]}{'*' * 10}{token[-4:]}"
+
+
+def _redact_vk_log_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, nested_value in value.items():
+            normalized_key = str(key).lower()
+            if (
+                normalized_key in VK_LOG_SENSITIVE_KEYS
+                or normalized_key.endswith("_token")
+                or "access_token" in normalized_key
+            ):
+                redacted[key] = VK_LOG_REDACTED_VALUE
+            else:
+                redacted[key] = _redact_vk_log_payload(nested_value)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_vk_log_payload(item) for item in value]
+    return value
 
 
 def log_vk_runtime_config() -> None:
@@ -228,7 +255,7 @@ def _vk_api_request(
         with _vk_urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
             if log_response:
-                logger.info("VK Response: %s", result)
+                logger.info("VK Response: %s", _redact_vk_log_payload(result))
             else:
                 logger.info(
                     "VK Response: method=%s ok=%s has_error=%s",
@@ -240,7 +267,7 @@ def _vk_api_request(
         try:
             result = json.loads(error.read().decode("utf-8"))
             if log_response:
-                logger.info("VK Response: %s", result)
+                logger.info("VK Response: %s", _redact_vk_log_payload(result))
             else:
                 logger.info(
                     "VK Response: method=%s ok=%s has_error=%s",
@@ -263,7 +290,7 @@ def _vk_api_request(
             method,
             error_info.get("error_code") or error_info.get("code"),
             description,
-            result,
+            _redact_vk_log_payload(result),
         )
         return {"ok": False, "description": description, "error": error_info}
     return {"ok": True, "response": result.get("response")}

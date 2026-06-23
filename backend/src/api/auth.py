@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import random
 import re
 import urllib.error
@@ -52,6 +53,7 @@ from src.services.telegram_auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+logger = logging.getLogger("uvicorn")
 
 REFERRAL_START_PARAM_RE = re.compile(r"^ref_(\d+)$")
 AUTH_COOKIE_NAME = "shamrai_access_token"
@@ -107,6 +109,37 @@ class VkLinkResponse(BaseModel):
 
 class VkOAuthError(Exception):
     pass
+
+
+VK_AUTH_TEMPORARY_ERROR_MESSAGE = (
+    "VK ID временно не завершил авторизацию. Подождите немного и попробуйте снова "
+    "или войдите через Telegram."
+)
+
+
+def _vk_oauth_client_error(error: VkOAuthError) -> tuple[int, str]:
+    raw_message = str(error or "").strip()
+    normalized = raw_message.lower()
+
+    if any(marker in normalized for marker in ("too many", "rate", "flood", "limit", "[9]")):
+        return (
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Слишком много попыток входа через VK ID. Подождите немного и попробуйте снова или войдите через Telegram.",
+        )
+
+    if any(marker in normalized for marker in ("invalid_grant", "code", "expired", "state mismatch")):
+        return (
+            status.HTTP_400_BAD_REQUEST,
+            "Сессия VK ID устарела. Запустите вход еще раз.",
+        )
+
+    if "not configured" in normalized:
+        return (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "VK ID временно недоступен. Попробуйте войти через Telegram.",
+        )
+
+    return (status.HTTP_502_BAD_GATEWAY, VK_AUTH_TEMPORARY_ERROR_MESSAGE)
 
 
 def _vk_urlopen(request: urllib.request.Request, *, timeout: float):
@@ -254,11 +287,27 @@ def _set_auth_cookie(response: Response, access_token: str) -> None:
     )
 
 
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(
+        AUTH_COOKIE_NAME,
+        path="/api",
+        secure=settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://"),
+        httponly=True,
+        samesite="lax",
+    )
+
+
 def _build_login_response(user: User, response: Optional[Response] = None) -> LoginResponse:
     access_token = create_access_token({"sub": str(user.telegram_id), "role": user.role})
     if response is not None:
         _set_auth_cookie(response, access_token)
     return LoginResponse(access_token=access_token, user=user)
+
+
+@router.post("/logout")
+async def logout_user(response: Response):
+    _clear_auth_cookie(response)
+    return {"status": "ok"}
 
 
 async def _resolve_referrer_id(db: AsyncSession, tg_id: int, start_param: Optional[str]) -> Optional[int]:
@@ -739,9 +788,11 @@ async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
             payload["state"],
         )
     except VkOAuthError as error:
+        status_code, detail = _vk_oauth_client_error(error)
+        logger.warning("[Auth] vk_oauth_failed status=%s reason=%s", status_code, type(error).__name__)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"VK ID authorization failed: {error}",
+            status_code=status_code,
+            detail=detail,
         )
 
 

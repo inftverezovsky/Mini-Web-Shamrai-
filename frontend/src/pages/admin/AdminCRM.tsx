@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { apiFetch } from '../../utils/api';
+import { apiFetch, downloadApiFile } from '../../utils/api';
 import { BookmakerResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
@@ -9,29 +9,35 @@ import SmoothCollapse from '../../components/SmoothCollapse';
 import { useAuth } from '../../context/AuthContext';
 import { isPrivilegedRole } from '../../utils/roles';
 import {
+  Activity,
   AlertTriangle,
   BadgeCheck,
   Calendar,
   CheckSquare,
   ChevronDown,
   Clock,
-  ExternalLink,
+  Cloud,
   Filter,
   Layers3,
   Loader2,
   Save,
   Search,
   ShieldCheck,
-  Sliders,
+  Sparkles,
   Tags,
   Trash2,
-  UploadCloud,
+  TrendingDown,
   Users,
   X,
 } from 'lucide-react';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
+import {
+  ExportActions,
+  ExportStatusPanel,
+  IconActionButton,
+  StatTile,
+} from '../../features/performance/performanceUi';
 
-type StatsDisplayMode = 'percent' | 'flat';
 type ActivityFilter = 'all' | 'active' | 'empty' | 'guarantee';
 
 interface CRMUser {
@@ -41,7 +47,6 @@ interface CRMUser {
   last_name: string | null;
   is_web_only?: boolean;
   role: string;
-  stats_display_mode: string;
   has_active_subscription: boolean;
   subscription_end_date: string | null;
   purchased_bets_balance?: number;
@@ -123,7 +128,7 @@ function getMatchStreak(results: ClientRecentMatchResult[]) {
 
   const noun = currentStatus === 'win'
     ? pluralRu(count, 'победа', 'победы', 'побед')
-    : pluralRu(count, 'поражение', 'поражения', 'поражений');
+    : pluralRu(count, 'неудача', 'неудачи', 'неудач');
 
   return {
     count,
@@ -134,10 +139,176 @@ function getMatchStreak(results: ClientRecentMatchResult[]) {
 
 function driveStatusLabel(job: StatsDriveExportJob | null) {
   if (!job) return null;
-  if (job.status === 'completed') return 'Выгрузка готова';
-  if (job.status === 'failed') return 'Ошибка выгрузки';
-  if (job.status === 'running') return 'Создаем Google Sheet';
-  return 'В очереди';
+  if (job.status === 'completed') return 'CRM-отчет готов на Google Drive';
+  if (job.status === 'failed') return 'Ошибка CRM-выгрузки';
+  if (job.status === 'running') return 'Создаем CRM-отчет';
+  return 'CRM-отчет в очереди';
+}
+
+function getClientHealth(user: CRMUser) {
+  const balance = getMatchBalance(user);
+  if (balance < 0) {
+    return {
+      label: `${balance} матч.`,
+      detail: 'Долг',
+      className: 'border-rose-300/25 bg-rose-400/10 text-rose-100',
+      Icon: TrendingDown,
+    };
+  }
+  if (user.guarantee_active) {
+    return {
+      label: 'Гарантия',
+      detail: `${balance} матч.`,
+      className: 'border-amber-300/25 bg-amber-400/10 text-amber-100',
+      Icon: Sparkles,
+    };
+  }
+  if (user.has_active_subscription || balance > 0) {
+    return {
+      label: `${balance} матч.`,
+      detail: 'Активен',
+      className: 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100',
+      Icon: ShieldCheck,
+    };
+  }
+  return {
+    label: 'Демо',
+    detail: 'Нет матчей',
+    className: 'border-white/10 bg-white/[0.05] text-slate-400',
+    Icon: Clock,
+  };
+}
+
+function getRecentSplit(results: ClientRecentMatchResult[]) {
+  const wins = results.filter((result) => result.status === 'win').length;
+  return { wins, losses: results.length - wins };
+}
+
+function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) {
+  const chronologicalResults = [...results].reverse();
+  return (
+    <div className="flex items-center gap-1">
+      {Array.from({ length: 10 }).map((_, index) => {
+        const result = chronologicalResults[index];
+        return (
+          <span
+            key={`result-${index}-${result?.bet_id || 'empty'}`}
+            className={`h-2 flex-1 rounded-full border transition-all ${
+              result?.status === 'win'
+                ? 'border-emerald-200/30 bg-emerald-300'
+                : result?.status === 'loss'
+                  ? 'border-rose-200/30 bg-rose-300'
+                  : 'border-white/10 bg-white/[0.06]'
+            }`}
+            aria-label={
+              result?.status === 'win'
+                ? 'Победа'
+                : result?.status === 'loss'
+                  ? 'Неудача'
+                  : 'Нет матча'
+            }
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function ClientIntelligenceRow({
+  user,
+  onOpen,
+}: {
+  user: CRMUser;
+  onOpen: (user: CRMUser) => void;
+}) {
+  const recentResults = user.recent_match_results || [];
+  const streak = getMatchStreak(recentResults);
+  const split = getRecentSplit(recentResults);
+  const health = getClientHealth(user);
+  const HealthIcon = health.Icon;
+  const primaryBookmakers = user.bookmakers.slice(0, 3);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(user)}
+      className="smooth-pressable group w-full overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.045] p-3 text-left text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition-all hover:border-cyan-200/28 hover:bg-white/[0.065] active:scale-[0.995]"
+    >
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(14rem,0.85fr)_auto] lg:items-center">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white/10 bg-slate-950/40 text-[11px] font-black text-cyan-100">
+              {getDisplayName(user).slice(0, 2).toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h4 className="truncate text-sm font-black leading-snug text-white">{getDisplayName(user)}</h4>
+                <span className={`inline-flex shrink-0 items-center gap-1 rounded-xl border px-2 py-1 text-[9px] font-black uppercase tracking-[0.08em] ${health.className}`}>
+                  <HealthIcon className="h-3 w-3" />
+                  {health.label}
+                </span>
+              </div>
+              <p className="mt-1 truncate text-[10px] font-bold text-slate-500">
+                {user.username ? `@${user.username}` : 'без юзернейма'} / {getClientIdLabel(user)}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="rounded-lg border border-cyan-200/16 bg-cyan-200/[0.07] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-cyan-100">
+                  {user.client_group || 'Без группы'}
+                </span>
+                <span className="rounded-lg border border-amber-200/16 bg-amber-200/[0.06] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-amber-100">
+                  {user.client_tag || 'Без метки'}
+                </span>
+                <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-400">
+                  A/B {user.ab_group || 'A'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="min-w-0 rounded-2xl border border-white/10 bg-slate-950/32 p-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className={`truncate text-[9px] font-black uppercase tracking-[0.09em] ${
+              streak?.status === 'win'
+                ? 'text-emerald-200'
+                : streak?.status === 'loss'
+                  ? 'text-rose-200'
+                  : 'text-slate-500'
+            }`}>
+              {streak ? streak.label : 'Истории матчей нет'}
+            </span>
+            <span className="shrink-0 text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
+              {split.wins}/{split.losses}
+            </span>
+          </div>
+          <div className="mt-2">
+            <ClientResultStrip results={recentResults} />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 lg:flex-col lg:items-end lg:justify-center">
+          <div className="flex min-w-0 flex-wrap justify-end gap-1">
+            {primaryBookmakers.length ? primaryBookmakers.map((bookmaker) => (
+              <span
+                key={bookmaker.id}
+                className="inline-flex max-w-[9rem] items-center gap-1 rounded-lg border border-white/10 bg-white/[0.045] px-1.5 py-1 text-[8px] font-bold text-slate-300"
+              >
+                <BookmakerLogoFrame bookmaker={bookmaker} size="tiny" />
+                <span className="truncate">{bookmaker.name}</span>
+              </span>
+            )) : (
+              <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-500">
+                БК не выбраны
+              </span>
+            )}
+          </div>
+          <span className="shrink-0 rounded-xl border border-cyan-200/18 bg-cyan-200/[0.07] px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-cyan-100 transition-all group-hover:bg-cyan-200/[0.12]">
+            Открыть
+          </span>
+        </div>
+      </div>
+    </button>
+  );
 }
 
 export default function AdminCRM() {
@@ -149,7 +320,6 @@ export default function AdminCRM() {
   const debouncedSearchTerm = useDebouncedValue(searchTerm, 250);
 
   const [selectedUser, setSelectedUser] = useState<CRMUser | null>(null);
-  const [editStatsMode, setEditStatsMode] = useState<StatsDisplayMode>('percent');
   const [editBkIds, setEditBkIds] = useState<number[]>([]);
   const [editBookmakersOpen, setEditBookmakersOpen] = useState(false);
   const [editOtherBookmakerName, setEditOtherBookmakerName] = useState('');
@@ -157,6 +327,7 @@ export default function AdminCRM() {
   const [editClientTag, setEditClientTag] = useState('');
   const [matchDelta, setMatchDelta] = useState('');
   const [saving, setSaving] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | null>(null);
   const [driveJob, setDriveJob] = useState<StatsDriveExportJob | null>(null);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
@@ -209,13 +380,13 @@ export default function AdminCRM() {
     if (!driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
     const timer = window.setInterval(async () => {
       try {
-        const freshJob = await apiFetch<StatsDriveExportJob>(`/admin/stats/drive-export/${driveJob.id}`);
+        const freshJob = await apiFetch<StatsDriveExportJob>(`/admin/users/drive-export/${driveJob.id}`);
         setDriveJob(freshJob);
         if (freshJob.status === 'completed' || freshJob.status === 'failed') {
           setDriveLoading(false);
         }
       } catch (err: any) {
-        setDriveError(err.message || 'Не удалось обновить статус Google Drive');
+        setDriveError(err.message || 'Не удалось обновить статус CRM-выгрузки');
         setDriveLoading(false);
       }
     }, 2200);
@@ -262,7 +433,10 @@ export default function AdminCRM() {
     const active = users.filter(user => user.has_active_subscription).length;
     const empty = users.filter(user => !user.guarantee_active && getMatchBalance(user) <= 0).length;
     const guarantee = users.filter(user => user.guarantee_active).length;
-    return { active, empty, guarantee };
+    const debt = users.filter(user => getMatchBalance(user) < 0).length;
+    const attention = users.filter(user => user.guarantee_active || getMatchBalance(user) < 0).length;
+    const totalBalance = users.reduce((sum, user) => sum + getMatchBalance(user), 0);
+    return { active, empty, guarantee, debt, attention, totalBalance };
   }, [users]);
 
   const otherBookmakerSelected = useMemo(() => (
@@ -276,7 +450,6 @@ export default function AdminCRM() {
 
   const openEditModal = (user: CRMUser) => {
     setSelectedUser(user);
-    setEditStatsMode(user.stats_display_mode === 'flat' ? 'flat' : 'percent');
     setEditBkIds(user.bookmakers.map(bookmaker => bookmaker.id));
     setEditBookmakersOpen(false);
     setEditOtherBookmakerName(user.other_bookmaker_name || '');
@@ -314,7 +487,6 @@ export default function AdminCRM() {
   };
 
   const buildPayload = (closeGuarantee = false) => ({
-    stats_display_mode: editStatsMode,
     bookmaker_ids: editBkIds,
     matches_delta: parseMatchDelta(),
     close_guarantee: closeGuarantee,
@@ -434,23 +606,49 @@ export default function AdminCRM() {
     }
   };
 
-  const handleDriveExport = async () => {
+  const handleClientExport = async (format: 'csv' | 'xlsx') => {
+    const params = new URLSearchParams({ format });
+    const cleanSearch = searchTerm.trim();
+    if (cleanSearch) params.set('q', cleanSearch);
+    if (activityFilter !== 'all') params.set('activity', activityFilter);
+    if (groupFilter !== 'all') params.set('group', groupFilter);
+    if (tagFilter !== 'all') params.set('tag', tagFilter);
+
+    try {
+      setExportingFormat(format);
+      await downloadApiFile(`/admin/users/export?${params.toString()}`, `shamrai_clients_crm.${format}`);
+      notifySuccess(format === 'xlsx' ? 'CRM-выгрузка XLSX скачана' : 'CRM-выгрузка CSV скачана');
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось скачать выгрузку клиентов');
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
+  const handleClientDriveExport = async () => {
+    const cleanSearch = searchTerm.trim();
     try {
       setDriveLoading(true);
       setDriveError(null);
-      const job = await apiFetch<StatsDriveExportJob>('/admin/stats/drive-export', {
+      const job = await apiFetch<StatsDriveExportJob>('/admin/users/drive-export', {
         method: 'POST',
-        body: JSON.stringify({ scope: 'clients', period: 'all', formats: ['google_sheet'] }),
+        body: JSON.stringify({
+          q: cleanSearch || null,
+          activity: activityFilter,
+          group: groupFilter !== 'all' ? groupFilter : null,
+          tag: tagFilter !== 'all' ? tagFilter : null,
+          formats: ['xlsx', 'google_sheet'],
+        }),
       });
       setDriveJob(job);
       if (job.status === 'completed' || job.status === 'failed') {
         setDriveLoading(false);
       }
       if (job.status === 'completed') {
-        notifySuccess('База клиентов выгружена в Google Drive');
+        notifySuccess('CRM-отчет выгружен на Google Drive');
       }
     } catch (err: any) {
-      setDriveError(err.message || 'Не удалось запустить выгрузку в Google Drive');
+      setDriveError(err.message || 'Не удалось запустить CRM-выгрузку на Google Drive');
       setDriveLoading(false);
     }
   };
@@ -489,121 +687,98 @@ export default function AdminCRM() {
         {tags.map(tag => <option key={tag} value={tag} />)}
       </datalist>
 
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-black text-white flex items-center uppercase tracking-wider">
-            <Users className="w-5 h-5 text-cyan-300 mr-2" />
-            Клиенты
-          </h2>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            title="Выгрузить всю базу клиентов в Google Drive"
-            onClick={() => void handleDriveExport()}
-            disabled={driveLoading}
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/25 bg-cyan-300/10 text-cyan-100 transition-all hover:bg-cyan-300/15 disabled:opacity-50"
-          >
-            {driveLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-          </button>
-          <div className="bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 text-xs px-3 py-1 rounded-full font-black">
-            {filteredUsers.length}/{paginationMeta.filteredTotal || users.length}
-          </div>
-        </div>
-      </div>
-      {(driveJob || driveError) && (
-        <div className={`rounded-2xl border px-3 py-2 text-[10px] font-bold ${
-          driveError || driveJob?.status === 'failed'
-            ? 'border-rose-500/25 bg-rose-500/10 text-rose-100'
-            : driveJob?.status === 'completed'
-              ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100'
-              : 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100'
-        }`}>
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate uppercase tracking-wider">
-              {driveError || driveJob?.error || driveStatusLabel(driveJob)}
-            </span>
-            {driveJob?.status === 'completed' && (
-              <span className="shrink-0 uppercase tracking-wider text-emerald-200">Drive</span>
-            )}
-          </div>
-          {driveJob?.links?.length ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {driveJob.links.slice(0, 4).map((link) => (
-                <a
-                  key={`${link.format}:${link.id}`}
-                  href={link.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex max-w-full items-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1 text-[9px] font-bold text-cyan-50 hover:bg-white/[0.1]"
-                >
-                  <ExternalLink className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{link.title}</span>
-                </a>
-              ))}
+      <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_18%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_86%_16%,rgba(16,185,129,0.10),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
+        <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.45fr)]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.13em] text-cyan-100">
+              <Users className="h-3.5 w-3.5" />
+              Клиентский cockpit
             </div>
-          ) : null}
+            <h2 className="mt-1.5 text-xl font-black leading-tight text-white sm:text-2xl">CRM клиентов</h2>
+            <div className="mt-3 text-3xl font-black leading-none tabular-nums text-cyan-100 sm:text-4xl">
+              {filteredUsers.length}/{paginationMeta.filteredTotal || users.length}
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
+              <span>{summary.active} активных</span>
+              <span className="text-slate-700">/</span>
+              <span>{summary.attention} требуют внимания</span>
+              <span className="text-slate-700">/</span>
+              <span>баланс {summary.totalBalance}</span>
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <ExportActions
+              exporting={exportingFormat}
+              onCsv={() => void handleClientExport('csv')}
+              onXlsx={() => void handleClientExport('xlsx')}
+            />
+            <div className="grid grid-cols-[1fr_auto] gap-2">
+              <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
+                <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Google Drive</div>
+                <div className="mt-0.5 truncate text-xs font-black text-cyan-100">
+                  {driveStatusLabel(driveJob) ?? 'Готов к выгрузке'}
+                </div>
+              </div>
+              <IconActionButton title="Выгрузить CRM-отчет на Google Drive" disabled={driveLoading} onClick={() => void handleClientDriveExport()} tone="cyan">
+                {driveLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
+              </IconActionButton>
+            </div>
+          </div>
         </div>
-      )}
+      </section>
+
+      <ExportStatusPanel job={driveJob} error={driveError} title="CRM отчет" compact />
       {paginationMeta.hasMore && (
-        <div className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-cyan-100">
+        <div className="rounded-2xl border border-slate-300/15 bg-slate-950/35 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-200">
           Показаны первые {users.length} клиентов. Уточните поиск или фильтр, чтобы сузить список.
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-2">
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
-          <div className="text-[8px] text-slate-500 font-black uppercase tracking-wider">Активные</div>
-          <div className="mt-1 text-lg font-black text-emerald-400">{summary.active}</div>
-        </div>
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
-          <div className="text-[8px] text-slate-500 font-black uppercase tracking-wider">Без матчей</div>
-          <div className="mt-1 text-lg font-black text-slate-300">{summary.empty}</div>
-        </div>
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
-          <div className="text-[8px] text-slate-500 font-black uppercase tracking-wider">Гарантия</div>
-          <div className="mt-1 text-lg font-black text-amber-300">{summary.guarantee}</div>
-        </div>
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+        <StatTile label="Активные" value={summary.active} hint="с доступом" tone="text-emerald-200" />
+        <StatTile label="Без матчей" value={summary.empty} hint="нужен контакт" tone="text-slate-200" />
+        <StatTile label="Гарантия" value={summary.guarantee} hint="открыта" tone="text-amber-200" />
+        <StatTile label="Долг" value={summary.debt} hint="минусовой баланс" tone={summary.debt ? 'text-rose-200' : 'text-slate-300'} />
+        <StatTile label="Баланс" value={summary.totalBalance} hint="матчей всего" tone={summary.totalBalance >= 0 ? 'text-cyan-100' : 'text-rose-200'} />
       </div>
 
-      <div className="relative">
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-          <Search className="w-4 h-4" />
-        </span>
-        <input
-          type="text"
-          value={searchTerm}
-          onChange={event => setSearchTerm(event.target.value)}
-          placeholder="Поиск по имени, username, ID, группе или метке..."
-          className="w-full bg-slate-900/60 border border-slate-700/60 focus:border-cyan-400/50 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none transition-all font-semibold"
-        />
-      </div>
-
-      <div className="space-y-2">
-        <div className="flex gap-1.5 overflow-x-auto pb-1">
-          {(Object.keys(filterLabels) as ActivityFilter[]).map(filter => (
-            <button
-              key={filter}
-              type="button"
-              onClick={() => setActivityFilter(filter)}
-              className={`shrink-0 border px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all ${
-                activityFilter === filter
-                  ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.26)]'
-                  : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white'
-              }`}
-            >
-              {filterLabels[filter]}
-            </button>
-          ))}
+      <section className="rounded-[24px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
+        <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
+          <label className="relative min-w-0">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={event => setSearchTerm(event.target.value)}
+              placeholder="Поиск по имени, username, ID, группе или метке"
+              className="min-h-[44px] w-full rounded-2xl border border-white/10 bg-slate-950/42 pl-9 pr-3 text-xs font-semibold text-white outline-none transition-all placeholder:text-slate-600 focus:border-cyan-300/45"
+            />
+          </label>
+          <div className="flex gap-1.5 overflow-x-auto pb-1 xl:pb-0">
+            {(Object.keys(filterLabels) as ActivityFilter[]).map(filter => (
+              <button
+                key={filter}
+                type="button"
+                onClick={() => setActivityFilter(filter)}
+                className={`smooth-pressable min-h-[38px] shrink-0 rounded-xl border px-3 text-[9px] font-black uppercase tracking-[0.08em] transition-all ${
+                  activityFilter === filter
+                    ? 'border-cyan-200/45 bg-cyan-200/18 text-cyan-50'
+                    : 'border-white/10 bg-slate-950/35 text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
+                }`}
+              >
+                {filterLabels[filter]}
+              </button>
+            ))}
+          </div>
         </div>
-
-        <div className="grid grid-cols-2 gap-2">
+        <div className="mt-2 grid grid-cols-2 gap-2">
           <label className="relative">
-            <Layers3 className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+            <Layers3 className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <select
               value={groupFilter}
               onChange={event => setGroupFilter(event.target.value)}
-              className="w-full appearance-none bg-slate-900/60 border border-slate-700/60 focus:border-cyan-400/50 rounded-xl pl-8 pr-3 py-2.5 text-[10px] text-white focus:outline-none font-bold"
+              className="min-h-[42px] w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/42 pl-8 pr-3 text-[10px] font-bold text-white outline-none focus:border-cyan-300/45"
             >
               <option value="all">Все группы</option>
               {groups.map(group => <option key={group} value={group}>{group}</option>)}
@@ -611,127 +786,34 @@ export default function AdminCRM() {
           </label>
 
           <label className="relative">
-            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+            <Filter className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <select
               value={tagFilter}
               onChange={event => setTagFilter(event.target.value)}
-              className="w-full appearance-none bg-slate-900/60 border border-slate-700/60 focus:border-cyan-400/50 rounded-xl pl-8 pr-3 py-2.5 text-[10px] text-white focus:outline-none font-bold"
+              className="min-h-[42px] w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/42 pl-8 pr-3 text-[10px] font-bold text-white outline-none focus:border-cyan-300/45"
             >
               <option value="all">Все метки</option>
               {tags.map(tag => <option key={tag} value={tag}>{tag}</option>)}
             </select>
           </label>
         </div>
-      </div>
+      </section>
 
       <div className="space-y-3">
         {filteredUsers.length === 0 ? (
-          <div className="bg-white/5 border border-white/10 backdrop-blur-lg p-6 text-center text-slate-500 text-xs rounded-2xl">
-            Клиенты не найдены.
+          <div className="rounded-[24px] border border-dashed border-white/10 bg-white/[0.04] p-8 text-center text-xs text-slate-500">
+            <Users className="mx-auto h-8 w-8 text-slate-600" />
+            <p className="mt-3 font-black text-white">Клиенты не найдены</p>
+            <p className="mt-1 font-bold">Измените поиск или фильтры.</p>
           </div>
         ) : (
-          filteredUsers.map(user => {
-            const recentResults = user.recent_match_results || [];
-            const streak = getMatchStreak(recentResults);
-            const chronologicalResults = [...recentResults].reverse();
-            const matchBalance = getMatchBalance(user);
-            const hasMatchDebt = matchBalance < 0;
-
-            return (
-              <button
-                key={user.telegram_id}
-                type="button"
-                onClick={() => openEditModal(user)}
-                className="w-full bg-white/5 border border-white/10 backdrop-blur-lg p-4 rounded-2xl shadow-lg hover:border-cyan-400/35 active:scale-[0.99] transition-all text-left text-xs"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <h4 className="font-extrabold text-white leading-snug truncate">
-                      {getDisplayName(user)}
-                    </h4>
-                    <p className="text-[10px] text-slate-400 font-bold truncate">
-                      {user.username ? `@${user.username}` : 'без юзернейма'} • {getClientIdLabel(user)}
-                    </p>
-                  </div>
-
-                  {hasMatchDebt ? (
-                    <span className="shrink-0 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
-                      <AlertTriangle className="w-3.5 h-3.5 mr-0.5" /> {matchBalance} матч.
-                    </span>
-                  ) : user.has_active_subscription ? (
-                    <span className="shrink-0 bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
-                      <ShieldCheck className="w-3.5 h-3.5 mr-0.5" /> {matchBalance} матч.
-                    </span>
-                  ) : (
-                    <span className="shrink-0 bg-slate-900 border border-slate-700/50 text-slate-500 text-[9px] font-black px-2 py-1 rounded-lg flex items-center tracking-wider uppercase">
-                      <Clock className="w-3.5 h-3.5 mr-0.5" /> Демо
-                    </span>
-                  )}
-                </div>
-
-                <div className="mt-3 bg-slate-950/35 border border-white/10 rounded-xl px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={`text-[9px] font-black uppercase tracking-wider truncate ${
-                      streak?.status === 'win'
-                        ? 'text-emerald-300'
-                        : streak?.status === 'loss'
-                          ? 'text-rose-300'
-                          : 'text-slate-500'
-                    }`}>
-                      {streak ? streak.label : 'Истории матчей нет'}
-                    </span>
-                    <span className="shrink-0 text-[8px] text-slate-600 font-black uppercase tracking-wider">
-                      10 посл.
-                    </span>
-                  </div>
-                  <div className="mt-2 flex items-center gap-1.5">
-                    {Array.from({ length: 10 }).map((_, index) => {
-                      const result = chronologicalResults[index];
-                      return (
-                        <span
-                          key={`${user.telegram_id}-result-${index}`}
-                          className={`h-2.5 w-2.5 rounded-full border transition-all ${
-                            result?.status === 'win'
-                              ? 'bg-emerald-400 border-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.45)]'
-                              : result?.status === 'loss'
-                                ? 'bg-rose-500 border-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.35)]'
-                                : 'bg-slate-800/80 border-slate-700/70'
-                          }`}
-                          aria-label={
-                            result?.status === 'win'
-                              ? 'Победа'
-                              : result?.status === 'loss'
-                                ? 'Поражение'
-                                : 'Нет матча'
-                          }
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                  <span className="bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 rounded-lg px-2 py-1 text-[8px] font-black uppercase tracking-wider">
-                    {user.client_group || 'Без группы'}
-                  </span>
-                  <span className="bg-fuchsia-500/10 border border-fuchsia-500/20 text-fuchsia-300 rounded-lg px-2 py-1 text-[8px] font-black uppercase tracking-wider">
-                    {user.client_tag || 'Без метки'}
-                  </span>
-                  <span className="bg-white/5 border border-white/10 text-slate-400 rounded-lg px-2 py-1 text-[8px] font-black uppercase tracking-wider">
-                    БК: {user.bookmakers.length}
-                  </span>
-                  {user.guarantee_active && (
-                    <span className="bg-amber-500/10 border border-amber-500/25 text-amber-300 rounded-lg px-2 py-1 text-[8px] font-black uppercase tracking-wider">
-                      Гарантия
-                    </span>
-                  )}
-                  <span className="bg-white/5 border border-white/10 text-slate-500 rounded-lg px-2 py-1 text-[8px] font-black uppercase tracking-wider">
-                    A/B: {user.ab_group || 'A'}
-                  </span>
-                </div>
-              </button>
-            );
-          })
+          filteredUsers.map(user => (
+            <ClientIntelligenceRow
+              key={user.telegram_id}
+              user={user}
+              onOpen={openEditModal}
+            />
+          ))
         )}
       </div>
 
@@ -748,254 +830,269 @@ export default function AdminCRM() {
       )}
 
       {selectedUser && (
-        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="bg-[#0C1226]/95 border border-white/10 max-w-sm w-full max-h-[88vh] overflow-y-auto p-6 rounded-3xl space-y-5 relative shadow-2xl animate-scale-up">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/72 p-3 backdrop-blur-sm animate-fade-in sm:items-center lg:justify-end lg:p-4">
+          <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[28px] border border-white/10 bg-[#0C1226]/95 p-4 shadow-2xl animate-scale-up lg:h-[calc(100dvh-2rem)] lg:max-h-none lg:max-w-xl lg:p-5">
             <button
               type="button"
               onClick={closeEditModal}
               disabled={saving}
-              className="absolute top-4 right-4 text-slate-450 hover:text-white disabled:opacity-40 transition-colors"
+              className="absolute right-4 top-4 rounded-xl border border-white/10 bg-white/[0.05] p-2 text-slate-450 transition-colors hover:text-white disabled:opacity-40"
+              aria-label="Закрыть карточку клиента"
             >
               <X className="w-5 h-5" />
             </button>
 
-            <div className="space-y-0.5 text-center pr-6">
-              <h3 className="text-white text-base font-black truncate">Карточка клиента</h3>
-              <p className="text-slate-450 text-[10px] uppercase font-bold truncate">
-                {getDisplayName(selectedUser)} • {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
+            <div className="space-y-1 pr-12">
+              <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.12em] text-cyan-100">
+                <Users className="h-3.5 w-3.5" />
+                Карточка клиента
+              </div>
+              <h3 className="truncate text-lg font-black text-white">{getDisplayName(selectedUser)}</h3>
+              <p className="truncate text-[10px] font-bold uppercase tracking-[0.08em] text-slate-450">
+                {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
               </p>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <label className="space-y-1.5">
-                <span className="text-[9px] text-slate-500 font-black uppercase tracking-wider flex items-center">
-                  <Layers3 className="w-3.5 h-3.5 text-cyan-300 mr-1.5" />
-                  Группа
-                </span>
-                <EmojiTextField
-                  type="text"
-                  list="client-group-options"
-                  value={editClientGroup}
-                  onValueChange={setEditClientGroup}
-                  placeholder="VIP, новые..."
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-cyan-400/50 text-xs font-bold"
+              <div className="grid grid-cols-3 gap-2 pt-2">
+                <StatTile
+                  label="Баланс"
+                  value={`${getMatchBalance(selectedUser)}`}
+                  hint="матчей"
+                  tone={getMatchBalance(selectedUser) < 0 ? 'text-rose-200' : getMatchBalance(selectedUser) > 0 ? 'text-emerald-200' : 'text-slate-200'}
+                  minHeightClass="min-h-[58px]"
                 />
-              </label>
-
-              <label className="space-y-1.5">
-                <span className="text-[9px] text-slate-500 font-black uppercase tracking-wider flex items-center">
-                  <Tags className="w-3.5 h-3.5 text-fuchsia-300 mr-1.5" />
-                  Метка
-                </span>
-                <EmojiTextField
-                  type="text"
-                  list="client-tag-options"
-                  value={editClientTag}
-                  onValueChange={setEditClientTag}
-                  placeholder="топ, важный..."
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-fuchsia-400/50 text-xs font-bold"
+                <StatTile
+                  label="БК"
+                  value={selectedUser.bookmakers.length}
+                  hint="выбрано"
+                  tone="text-cyan-100"
+                  minHeightClass="min-h-[58px]"
                 />
-              </label>
-            </div>
-
-            <div className="space-y-2 text-xs">
-              <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
-                <Calendar className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
-                Абонемент по матчам
-              </h4>
-              <div className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${
-                getMatchBalance(selectedUser) < 0
-                  ? 'bg-rose-500/10 border-rose-500/25 text-rose-200'
-                  : getMatchBalance(selectedUser) > 0
-                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
-                    : 'bg-slate-900/70 border-slate-700/70 text-slate-300'
-              }`}>
-                <span className="text-[9px] font-black uppercase tracking-wider">
-                  Текущий баланс
-                </span>
-                <span className="text-xs font-black">
-                  {getMatchBalance(selectedUser)} матч.
-                </span>
-              </div>
-              <div className="grid grid-cols-[1fr_auto] gap-2">
-                <input
-                  type="number"
-                  value={matchDelta}
-                  onChange={event => setMatchDelta(event.target.value)}
-                  placeholder={`Изменить баланс: сейчас ${getMatchBalance(selectedUser)}`}
-                  className="min-w-0 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
+                <StatTile
+                  label="Гарантия"
+                  value={selectedUser.guarantee_active ? 'Да' : 'Нет'}
+                  hint={selectedUser.guarantee_active ? 'активна' : 'закрыта'}
+                  tone={selectedUser.guarantee_active ? 'text-amber-200' : 'text-slate-300'}
+                  minHeightClass="min-h-[58px]"
                 />
-                <button
-                  type="button"
-                  onClick={handleRevokeSub}
-                  className="bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
-                >
-                  Обнулить
-                </button>
-              </div>
-              <div className="flex space-x-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setMatchDelta('5')}
-                  className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
-                >
-                  +5 матчей
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMatchDelta('10')}
-                  className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
-                >
-                  +10 матчей
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMatchDelta('')}
-                  className="flex-1 bg-white/5 hover:bg-white/10 text-slate-400 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
-                >
-                  Сбросить
-                </button>
-              </div>
-              {selectedUser.guarantee_active && (
-                <button
-                  type="button"
-                  onClick={handleCloseGuarantee}
-                  disabled={saving}
-                  className="w-full bg-amber-500/10 border border-amber-500/25 text-amber-400 hover:bg-amber-500 hover:text-slate-950 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all disabled:opacity-50"
-                >
-                  Закрыть гарантию победой
-                </button>
-              )}
-            </div>
-
-            <div className="space-y-2 text-xs">
-              <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
-                <Sliders className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
-                Режим отображения статистики
-              </h4>
-              <div className="flex bg-slate-900 border border-slate-700 p-0.5 rounded-xl">
-                <button
-                  type="button"
-                  onClick={() => setEditStatsMode('percent')}
-                  className={`flex-1 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
-                    editStatsMode === 'percent' ? 'bg-indigo-500 text-white shadow-neon-indigo' : 'text-slate-500'
-                  }`}
-                >
-                  Проценты (%)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditStatsMode('flat')}
-                  className={`flex-1 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
-                    editStatsMode === 'flat' ? 'bg-indigo-500 text-white shadow-neon-indigo' : 'text-slate-500'
-                  }`}
-                >
-                  Флэт
-                </button>
               </div>
             </div>
 
-            <div className="space-y-2 text-xs">
-              <button
-                type="button"
-                onClick={() => setEditBookmakersOpen((current) => !current)}
-                aria-expanded={editBookmakersOpen}
-                className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-2.5 text-left transition-all hover:border-indigo-400/45 hover:bg-slate-900"
-              >
-                <span className="min-w-0">
-                  <span className="flex items-center font-extrabold uppercase tracking-wider text-[9px] text-slate-400">
-                    <CheckSquare className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
-                    Букмекерские конторы
-                  </span>
-                  <span className="mt-1 block truncate text-[10px] font-semibold text-slate-300">
-                    {selectedEditBookmakerNames.length > 0
-                      ? selectedEditBookmakerNames.join(', ')
-                      : 'БК не выбраны'}
-                  </span>
-                </span>
-                <span className="flex shrink-0 items-center gap-2">
-                  <span className="rounded-xl border border-white/10 bg-slate-950/55 px-2.5 py-1.5 text-right">
-                    <span className="block text-[8px] uppercase font-bold tracking-wider text-slate-500">Выбрано</span>
-                    <span className="block text-[11px] font-black text-white">{editBkIds.length}</span>
-                  </span>
-                  <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-indigo-200">
-                    <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${editBookmakersOpen ? 'rotate-180' : ''}`} />
-                  </span>
-                </span>
-              </button>
-
-              <SmoothCollapse open={editBookmakersOpen}>
-                <div className="grid grid-cols-2 gap-1.5 max-h-[150px] overflow-y-auto pr-1">
-                  {bookmakers.map(bookmaker => {
-                    const isChecked = editBkIds.includes(bookmaker.id);
-                    return (
-                      <button
-                        key={bookmaker.id}
-                        type="button"
-                        onClick={() => handleToggleBk(bookmaker.id)}
-                        className={`min-w-0 p-2 border text-[9px] font-bold text-left rounded-lg flex items-center space-x-1.5 transition-all ${
-                          isChecked
-                            ? 'bg-indigo-500/10 border-indigo-500/35 text-indigo-300'
-                            : 'bg-slate-900/40 border-slate-800 text-slate-500'
-                        }`}
-                      >
-                        <span className={`w-3 h-3 rounded flex items-center justify-center text-[7px] shrink-0 ${isChecked ? 'bg-indigo-500 text-white' : 'border border-slate-700'}`}>
-                          {isChecked && <BadgeCheck className="w-2.5 h-2.5" />}
-                        </span>
-                        <BookmakerLogoFrame bookmaker={bookmaker} size="compact" active={isChecked} />
-                        <span className="truncate">{bookmaker.name}</span>
-                      </button>
-                    );
-                  })}
+            <div className="mt-5 space-y-5">
+              <section className="rounded-[22px] border border-white/10 bg-white/[0.045] p-3">
+                <div className="mb-3 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
+                  <Layers3 className="h-3.5 w-3.5 text-cyan-200" />
+                  Профиль
                 </div>
-              </SmoothCollapse>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-1.5">
+                    <span className="text-[9px] text-slate-500 font-black uppercase tracking-wider flex items-center">
+                      <Layers3 className="w-3.5 h-3.5 text-cyan-300 mr-1.5" />
+                      Группа
+                    </span>
+                    <EmojiTextField
+                      type="text"
+                      list="client-group-options"
+                      value={editClientGroup}
+                      onValueChange={setEditClientGroup}
+                      placeholder="VIP, новые..."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-cyan-400/50 text-xs font-bold"
+                    />
+                  </label>
 
-              {otherBookmakerSelected && (
-                <SmoothCollapse open={editBookmakersOpen}>
-                  <EmojiTextField
-                    type="text"
-                    value={editOtherBookmakerName}
-                    onValueChange={setEditOtherBookmakerName}
-                    placeholder="Название другой БК"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
+                  <label className="space-y-1.5">
+                    <span className="text-[9px] text-slate-500 font-black uppercase tracking-wider flex items-center">
+                      <Tags className="w-3.5 h-3.5 text-amber-300 mr-1.5" />
+                      Метка
+                    </span>
+                    <EmojiTextField
+                      type="text"
+                      list="client-tag-options"
+                      value={editClientTag}
+                      onValueChange={setEditClientTag}
+                      placeholder="топ, важный..."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-amber-300/50 text-xs font-bold"
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.045] p-3 text-xs">
+                <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
+                  <Calendar className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
+                  Доступ и баланс
+                </h4>
+                <div className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${
+                  getMatchBalance(selectedUser) < 0
+                    ? 'bg-rose-500/10 border-rose-500/25 text-rose-200'
+                    : getMatchBalance(selectedUser) > 0
+                      ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
+                      : 'bg-slate-900/70 border-slate-700/70 text-slate-300'
+                }`}>
+                  <span className="text-[9px] font-black uppercase tracking-wider">
+                    Текущий баланс
+                  </span>
+                  <span className="text-xs font-black">
+                    {getMatchBalance(selectedUser)} матч.
+                  </span>
+                </div>
+                <div className="grid grid-cols-[1fr_auto] gap-2">
+                  <input
+                    type="number"
+                    value={matchDelta}
+                    onChange={event => setMatchDelta(event.target.value)}
+                    placeholder={`Изменить баланс: сейчас ${getMatchBalance(selectedUser)}`}
+                    className="min-w-0 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
                   />
-                </SmoothCollapse>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all shadow-neon-green text-xs"
-            >
-              {saving ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <>
-                  <Save className="w-4 h-4" />
-                  <span>Сохранить изменения</span>
-                </>
-              )}
-            </button>
-
-            {canDeleteClients && (
-              <button
-                type="button"
-                onClick={handleDeleteUser}
-                disabled={saving}
-                className="w-full bg-rose-500/10 hover:bg-rose-500 border border-rose-500/25 hover:border-rose-400 active:scale-[0.98] disabled:opacity-50 text-rose-300 hover:text-white font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all text-xs"
-              >
-                {saving ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    <Trash2 className="w-4 h-4" />
-                    <span>Удалить клиента</span>
-                  </>
+                  <button
+                    type="button"
+                    onClick={handleRevokeSub}
+                    className="bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
+                  >
+                    Обнулить
+                  </button>
+                </div>
+                <div className="flex space-x-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setMatchDelta('5')}
+                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                  >
+                    +5 матчей
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchDelta('10')}
+                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                  >
+                    +10 матчей
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchDelta('')}
+                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-400 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                  >
+                    Сбросить
+                  </button>
+                </div>
+                {selectedUser.guarantee_active && (
+                  <button
+                    type="button"
+                    onClick={handleCloseGuarantee}
+                    disabled={saving}
+                    className="w-full bg-amber-500/10 border border-amber-500/25 text-amber-400 hover:bg-amber-500 hover:text-slate-950 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all disabled:opacity-50"
+                  >
+                    Закрыть гарантию победой
+                  </button>
                 )}
-              </button>
-            )}
+              </section>
+
+              <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.045] p-3 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setEditBookmakersOpen((current) => !current)}
+                  aria-expanded={editBookmakersOpen}
+                  className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-2.5 text-left transition-all hover:border-indigo-400/45 hover:bg-slate-900"
+                >
+                  <span className="min-w-0">
+                    <span className="flex items-center font-extrabold uppercase tracking-wider text-[9px] text-slate-400">
+                      <CheckSquare className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
+                      Букмекерские конторы
+                    </span>
+                    <span className="mt-1 block truncate text-[10px] font-semibold text-slate-300">
+                      {selectedEditBookmakerNames.length > 0
+                        ? selectedEditBookmakerNames.join(', ')
+                        : 'БК не выбраны'}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="rounded-xl border border-white/10 bg-slate-950/55 px-2.5 py-1.5 text-right">
+                      <span className="block text-[8px] uppercase font-bold tracking-wider text-slate-500">Выбрано</span>
+                      <span className="block text-[11px] font-black text-white">{editBkIds.length}</span>
+                    </span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-indigo-200">
+                      <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${editBookmakersOpen ? 'rotate-180' : ''}`} />
+                    </span>
+                  </span>
+                </button>
+
+                <SmoothCollapse open={editBookmakersOpen}>
+                  <div className="grid grid-cols-2 gap-1.5 max-h-[150px] overflow-y-auto pr-1">
+                    {bookmakers.map(bookmaker => {
+                      const isChecked = editBkIds.includes(bookmaker.id);
+                      return (
+                        <button
+                          key={bookmaker.id}
+                          type="button"
+                          onClick={() => handleToggleBk(bookmaker.id)}
+                          className={`min-w-0 p-2 border text-[9px] font-bold text-left rounded-lg flex items-center space-x-1.5 transition-all ${
+                            isChecked
+                              ? 'bg-indigo-500/10 border-indigo-500/35 text-indigo-300'
+                              : 'bg-slate-900/40 border-slate-800 text-slate-500'
+                          }`}
+                        >
+                          <span className={`w-3 h-3 rounded flex items-center justify-center text-[7px] shrink-0 ${isChecked ? 'bg-indigo-500 text-white' : 'border border-slate-700'}`}>
+                            {isChecked && <BadgeCheck className="w-2.5 h-2.5" />}
+                          </span>
+                          <BookmakerLogoFrame bookmaker={bookmaker} size="compact" active={isChecked} />
+                          <span className="truncate">{bookmaker.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </SmoothCollapse>
+
+                {otherBookmakerSelected && (
+                  <SmoothCollapse open={editBookmakersOpen}>
+                    <EmojiTextField
+                      type="text"
+                      value={editOtherBookmakerName}
+                      onValueChange={setEditOtherBookmakerName}
+                      placeholder="Название другой БК"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-400/50 text-xs font-bold"
+                    />
+                  </SmoothCollapse>
+                )}
+              </section>
+
+              <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.035] p-3">
+                <div className="mb-2 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
+                  <Activity className="h-3.5 w-3.5 text-emerald-200" />
+                  Действия
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="flex w-full items-center justify-center space-x-1.5 rounded-2xl bg-emerald-500 py-3 text-xs font-black text-slate-950 shadow-neon-green transition-all hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50"
+                >
+                  {saving ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Сохранить изменения</span>
+                    </>
+                  )}
+                </button>
+
+                {canDeleteClients && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteUser}
+                    disabled={saving}
+                    className="w-full bg-rose-500/10 hover:bg-rose-500 border border-rose-500/25 hover:border-rose-400 active:scale-[0.98] disabled:opacity-50 text-rose-300 hover:text-white font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all text-xs"
+                  >
+                    {saving ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <>
+                        <Trash2 className="w-4 h-4" />
+                        <span>Удалить клиента</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </section>
+            </div>
           </div>
         </div>
       )}

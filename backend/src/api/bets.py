@@ -53,11 +53,19 @@ from src.core.message_templates import (
 )
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE, enqueue_delivery
-from src.services.forecast_delivery import enqueue_admin_group_forecast_result_notification
+from src.services.forecast_delivery import (
+    FORECAST_STATUS_ANNOUNCED,
+    FORECAST_STATUS_CANCELLED,
+    FORECAST_STATUS_DECLINED,
+    FORECAST_STATUS_INTERESTED,
+    FORECAST_STATUS_REMOVED,
+    count_client_bet_takers,
+    enqueue_admin_group_forecast_result_notification,
+)
 from src.services.match_access import log_match_balance_event, record_user_bet_access
 from src.services.statistics import is_paid_client_access
 from src.services.coupon_uploads import store_coupon_image
-from src.services.signals import broadcast_live_signal
+from src.services.signals import broadcast_live_signal, deliver_personal_signal
 from src.services.vk_delivery import html_to_vk_text, user_can_receive_vk_messages
 
 router = APIRouter(prefix="/bets", tags=["Bets"])
@@ -160,6 +168,125 @@ def build_odds_drop_message(bet: Bet, *, template_body: Optional[str] = None) ->
     )
 
 
+def _has_web_push_subscription(user: User) -> bool:
+    subscription = getattr(user, "web_push_subscription", None)
+    return isinstance(subscription, dict) and bool(subscription.get("endpoint"))
+
+
+def _bet_event_signal_data(
+    bet: Bet,
+    *,
+    html_message: str,
+    plain_message: str,
+    signal_type: str,
+    push_title: str,
+    extra_data: Optional[dict] = None,
+) -> dict:
+    data = {
+        "bet_id": str(bet.id),
+        "event_name": str(bet.event_name or "").strip(),
+        "outcome": str(bet.outcome or "").strip(),
+        "coefficient": _format_decimal(bet.coefficient),
+        "sport_type": str(bet.sport_type or "").strip(),
+        "message_html": html_message,
+        "message_text": plain_message,
+        "push_title": push_title,
+        "push_body": plain_message,
+        "event_type": signal_type,
+    }
+    if extra_data:
+        data.update(extra_data)
+    return data
+
+
+async def _deliver_bet_personal_signal(
+    db: AsyncSession,
+    *,
+    user: User,
+    bet: Bet,
+    html_message: str,
+    signal_type: str,
+    push_title: str,
+    extra_data: Optional[dict] = None,
+) -> str:
+    plain_message = html_to_vk_text(html_message)
+    await deliver_personal_signal(
+        db,
+        user=user,
+        text=plain_message,
+        signal_type=signal_type,
+        data=_bet_event_signal_data(
+            bet,
+            html_message=html_message,
+            plain_message=plain_message,
+            signal_type=signal_type,
+            push_title=push_title,
+            extra_data=extra_data,
+        ),
+        send_telegram=False,
+        send_web_push=_has_web_push_subscription(user),
+    )
+    return plain_message
+
+
+def _bet_result_label(status_value: str) -> str:
+    return {
+        "win": "Победа",
+        "loss": "Неудача",
+        "refund": "Возврат",
+    }.get(str(status_value or "").strip().lower(), "Результат")
+
+
+async def _enqueue_bet_result_message(
+    db: AsyncSession,
+    *,
+    user: User,
+    bet: Bet,
+    html_message: str,
+    status_value: str,
+    dedupe_suffix: str,
+) -> None:
+    plain_message = await _deliver_bet_personal_signal(
+        db,
+        user=user,
+        bet=bet,
+        html_message=html_message,
+        signal_type="bet_result",
+        push_title=f"Результат прогноза: {_bet_result_label(status_value)}",
+        extra_data={
+            "result_status": status_value,
+            "result_label": _bet_result_label(status_value),
+        },
+    )
+
+    if is_personal_telegram_user_id(user.telegram_id):
+        await enqueue_delivery(
+            db,
+            channel=CHANNEL_TELEGRAM_MESSAGE,
+            user_id=user.telegram_id,
+            dedupe_key=f"bet_resolution:{bet.id}:{user.telegram_id}:{dedupe_suffix}",
+            payload={
+                "method": "sendMessage",
+                "payload": {
+                    "chat_id": user.telegram_id,
+                    "text": html_message,
+                    "parse_mode": "HTML",
+                },
+            },
+        )
+
+    if user_can_receive_vk_messages(user):
+        await enqueue_delivery(
+            db,
+            channel=CHANNEL_VK_MESSAGE,
+            user_id=user.telegram_id,
+            dedupe_key=f"bet_resolution:{bet.id}:{user.telegram_id}:vk:{dedupe_suffix}",
+            payload={
+                "message": plain_message,
+            },
+        )
+
+
 async def _load_bet_for_admin(db: AsyncSession, bet_id: UUID) -> Bet:
     result = await db.execute(
         select(Bet)
@@ -173,6 +300,14 @@ async def _load_bet_for_admin(db: AsyncSession, bet_id: UUID) -> Bet:
             detail="Прогноз не найден",
         )
     return bet
+
+
+def _is_legacy_stopped_unresolved_private_bet(bet: Bet) -> bool:
+    return (
+        bet.status == "deleted"
+        and bet.resolved_at is None
+        and bet.delivery_mode in {"sales_private", "paid_set"}
+    )
 
 
 async def _load_odds_drop_recipients(db: AsyncSession, bet_id: UUID) -> List[User]:
@@ -209,6 +344,15 @@ async def _load_odds_drop_recipients(db: AsyncSession, bet_id: UUID) -> List[Use
 
 async def _enqueue_odds_drop_message(db: AsyncSession, *, user: User, bet: Bet, html_message: str) -> dict:
     odds_value = _format_decimal(bet.odds_dropped_to)
+    plain_message = await _deliver_bet_personal_signal(
+        db,
+        user=user,
+        bet=bet,
+        html_message=html_message,
+        signal_type="odds_drop",
+        push_title="Коэффициент упал",
+    )
+    queued_channels = ["web_chat"]
     if is_personal_telegram_user_id(user.telegram_id):
         await enqueue_delivery(
             db,
@@ -225,7 +369,7 @@ async def _enqueue_odds_drop_message(db: AsyncSession, *, user: User, bet: Bet, 
                 },
             },
         )
-        return {"ok": True, "queued": True, "channel": "telegram"}
+        queued_channels.append("telegram")
     if user_can_receive_vk_messages(user):
         await enqueue_delivery(
             db,
@@ -233,11 +377,41 @@ async def _enqueue_odds_drop_message(db: AsyncSession, *, user: User, bet: Bet, 
             user_id=user.telegram_id,
             dedupe_key=f"odds_drop:{bet.id}:{user.telegram_id}:vk:{odds_value}",
             payload={
-                "message": html_to_vk_text(html_message),
+                "message": plain_message,
             },
         )
-        return {"ok": True, "queued": True, "channel": "vk"}
-    return {"ok": False, "description": "У клиента нет доступного канала доставки"}
+        queued_channels.append("vk")
+    return {"ok": True, "queued": True, "channel": ",".join(queued_channels)}
+
+
+async def _stop_open_forecast_requests_after_result(
+    db: AsyncSession,
+    *,
+    bet: Bet,
+    handled_by: int,
+) -> int:
+    if bet.delivery_mode not in {"sales_private", "paid_set"}:
+        return 0
+
+    bet.auto_send_on_interest = False
+    stoppable_statuses = {
+        FORECAST_STATUS_ANNOUNCED,
+        FORECAST_STATUS_INTERESTED,
+        FORECAST_STATUS_DECLINED,
+        FORECAST_STATUS_CANCELLED,
+    }
+    requests_result = await db.execute(
+        select(ForecastRequest).filter(
+            ForecastRequest.bet_id == bet.id,
+            ForecastRequest.status.in_(stoppable_statuses),
+        )
+    )
+    stopped_requests = 0
+    for forecast_request in requests_result.scalars().all():
+        forecast_request.status = FORECAST_STATUS_REMOVED
+        forecast_request.handled_by = handled_by
+        stopped_requests += 1
+    return stopped_requests
 
 
 def _parse_bookmaker_id_values(values: Optional[List[str]]) -> List[int]:
@@ -887,7 +1061,7 @@ async def update_bet(
     admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: Edit forecast details before the result is settled."""
+    """Staff-only: Edit forecast details for active and already settled forecasts."""
     result = await db.execute(
         select(Bet)
         .filter(Bet.id == bet_id)
@@ -899,10 +1073,10 @@ async def update_bet(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Прогноз не найден",
         )
-    if bet.status != "pending":
+    if bet.status == "deleted" and not _is_legacy_stopped_unresolved_private_bet(bet):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Можно редактировать только прогнозы без результата",
+            detail="Нельзя редактировать удаленный прогноз",
         )
 
     update_payload = bet_data.model_dump(exclude_unset=True)
@@ -1060,10 +1234,10 @@ async def notify_bet_odds_drop(
 async def resolve_bet(
     bet_id: UUID,
     resolution: BetResolve,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin-only: Settle bet as win, loss, or refund."""
+    """Staff-only: Settle or correct bet result as win, loss, or refund."""
     if resolution.status not in ["win", "loss", "refund"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1083,12 +1257,23 @@ async def resolve_bet(
         )
         
     previous_status = bet.status
+    previous_resolved_at = bet.resolved_at
+    is_first_resolution = previous_status == "pending" or (
+        previous_status == "deleted"
+        and previous_resolved_at is None
+        and bet.delivery_mode in {"sales_private", "paid_set"}
+    )
     bet.status = resolution.status
     bet.resolved_at = datetime.now(timezone.utc)
+    await _stop_open_forecast_requests_after_result(
+        db,
+        bet=bet,
+        handled_by=admin.telegram_id,
+    )
 
     supercompensation_count = 0
     refund_count = 0
-    if previous_status == "pending":
+    if is_first_resolution:
         result_template_body = None
         if resolution.status == "win":
             result_template_body = await load_message_template_body(db, TEMPLATE_BET_WIN)
@@ -1130,92 +1315,60 @@ async def resolve_bet(
                     delta_matches=2,
                     note="Loss supercompensation: charged stake returned and +1 bonus stake added",
                 ))
-                if is_personal_telegram_user_id(user_id):
-                    message_text = render_message_template_body(
-                        supercompensation_template_body,
-                        {"event_name": bet.event_name},
-                    )
-                    await enqueue_delivery(
-                        db,
-                        channel=CHANNEL_TELEGRAM_MESSAGE,
-                        user_id=user_id,
-                        dedupe_key=f"bet_resolution:{bet_id}:{user_id}:loss_supercompensation",
-                        payload={
-                            "method": "sendMessage",
-                            "payload": {
-                                "chat_id": user_id,
-                                "text": message_text,
-                                "parse_mode": "HTML",
-                            },
-                        },
-                    )
+                message_text = render_message_template_body(
+                    supercompensation_template_body,
+                    {"event_name": bet.event_name},
+                )
+                await _enqueue_bet_result_message(
+                    db,
+                    user=user,
+                    bet=bet,
+                    html_message=message_text,
+                    status_value="loss",
+                    dedupe_suffix="loss_supercompensation",
+                )
             elif resolution.status == "loss":
-                if is_personal_telegram_user_id(user_id):
-                    message_text = render_message_template_body(
-                        result_template_body,
-                        {"event_name": bet.event_name},
-                    )
-                    await enqueue_delivery(
-                        db,
-                        channel=CHANNEL_TELEGRAM_MESSAGE,
-                        user_id=user_id,
-                        dedupe_key=f"bet_resolution:{bet_id}:{user_id}:loss",
-                        payload={
-                            "method": "sendMessage",
-                            "payload": {
-                                "chat_id": user_id,
-                                "text": message_text,
-                                "parse_mode": "HTML",
-                            },
-                        },
-                    )
+                message_text = render_message_template_body(
+                    result_template_body,
+                    {"event_name": bet.event_name},
+                )
+                await _enqueue_bet_result_message(
+                    db,
+                    user=user,
+                    bet=bet,
+                    html_message=message_text,
+                    status_value="loss",
+                    dedupe_suffix="loss",
+                )
             elif resolution.status == "win":
-                if is_personal_telegram_user_id(user_id):
-                    message_text = render_message_template_body(
-                        result_template_body,
-                        {"event_name": bet.event_name},
-                    )
-                    await enqueue_delivery(
-                        db,
-                        channel=CHANNEL_TELEGRAM_MESSAGE,
-                        user_id=user_id,
-                        dedupe_key=f"bet_resolution:{bet_id}:{user_id}:win",
-                        payload={
-                            "method": "sendMessage",
-                            "payload": {
-                                "chat_id": user_id,
-                                "text": message_text,
-                                "parse_mode": "HTML",
-                            },
-                        },
-                    )
+                message_text = render_message_template_body(
+                    result_template_body,
+                    {"event_name": bet.event_name},
+                )
+                await _enqueue_bet_result_message(
+                    db,
+                    user=user,
+                    bet=bet,
+                    html_message=message_text,
+                    status_value="win",
+                    dedupe_suffix="win",
+                )
             elif resolution.status == "refund":
                 refund_count += 1
-                if is_personal_telegram_user_id(user_id):
-                    message_text = render_message_template_body(
-                        result_template_body,
-                        {"event_name": bet.event_name},
-                    )
-                    await enqueue_delivery(
-                        db,
-                        channel=CHANNEL_TELEGRAM_MESSAGE,
-                        user_id=user_id,
-                        dedupe_key=f"bet_resolution:{bet_id}:{user_id}:refund",
-                        payload={
-                            "method": "sendMessage",
-                            "payload": {
-                                "chat_id": user_id,
-                                "text": message_text,
-                                "parse_mode": "HTML",
-                            },
-                        },
-                    )
+                message_text = render_message_template_body(
+                    result_template_body,
+                    {"event_name": bet.event_name},
+                )
+                await _enqueue_bet_result_message(
+                    db,
+                    user=user,
+                    bet=bet,
+                    html_message=message_text,
+                    status_value="refund",
+                    dedupe_suffix="refund",
+                )
 
-        client_taker_count = sum(
-            1
-            for user_id, _match_charged, _access_type in takers
-            if (user := users_by_id.get(user_id)) is not None and not is_staff_role(user.role)
-        )
+        client_taker_count = await count_client_bet_takers(db, bet_id)
         await enqueue_admin_group_forecast_result_notification(
             db,
             bet=bet,

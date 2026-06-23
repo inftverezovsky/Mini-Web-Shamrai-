@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
 import urllib.error
 import urllib.parse
@@ -31,9 +32,14 @@ from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_deliv
 from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
+logger = logging.getLogger("uvicorn")
 
 PAYMENT_PURCHASE_CROWD_BET = "crowd_bet"
 PAYMENT_PURCHASE_BET_HINT = "bet_hint"
+YOOKASSA_VERIFICATION_ERROR = "Не удалось проверить платеж YooKassa. Попробуйте позже."
+YOOKASSA_CHECKOUT_ERROR = "Не удалось создать платеж YooKassa. Попробуйте позже."
+TEGRO_CHECKOUT_ERROR = "Не удалось создать платеж Tegro. Попробуйте позже."
+TELEGRAM_STARS_CHECKOUT_ERROR = "Не удалось создать счет Telegram Stars. Попробуйте позже."
 
 class InvoiceRequest(BaseModel):
     plan_id: Optional[int] = None
@@ -113,14 +119,16 @@ def _request_yookassa_payment(payment_id: str) -> dict:
         with _open_payment_provider_request(req, timeout=15) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        logger.warning("YooKassa payment verification HTTP error: status=%s", e.code)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"YooKassa payment verification failed: HTTP {e.code}",
+            detail=YOOKASSA_VERIFICATION_ERROR,
         )
     except Exception as e:
+        logger.warning("YooKassa payment verification failed: error_type=%s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"YooKassa payment verification failed: {e}",
+            detail=YOOKASSA_VERIFICATION_ERROR,
         )
 
 
@@ -195,22 +203,29 @@ def _create_tegro_order(payload: dict[str, Any]) -> dict[str, Any]:
         with _open_payment_provider_request(req, timeout=15) as response:
             envelope = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        response_body = e.read().decode("utf-8", errors="replace")
+        logger.warning("Tegro checkout HTTP error: status=%s", e.code)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Tegro checkout error: HTTP {e.code}: {response_body[:200]}",
+            detail=TEGRO_CHECKOUT_ERROR,
         )
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Tegro checkout error: {e}")
+        logger.warning("Tegro checkout request failed: error_type=%s", type(e).__name__)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=TEGRO_CHECKOUT_ERROR)
 
     if envelope.get("type") != "success" or not isinstance(envelope.get("data"), dict):
+        logger.warning(
+            "Tegro checkout returned unexpected envelope: type=%s has_data=%s",
+            envelope.get("type"),
+            isinstance(envelope.get("data"), dict),
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Tegro checkout error: {envelope.get('desc') or 'unexpected response'}",
+            detail=TEGRO_CHECKOUT_ERROR,
         )
     data = envelope["data"]
     if not data.get("url"):
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Tegro did not return payment URL")
+        logger.warning("Tegro checkout returned success envelope without payment URL")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=TEGRO_CHECKOUT_ERROR)
     return data
 
 
@@ -368,9 +383,14 @@ async def create_telegram_stars_invoice_link(
 
     res = await call_telegram_api_async("createInvoiceLink", tg_payload)
     if not res.get("ok"):
+        logger.warning(
+            "Telegram Stars invoice link creation failed: error_code=%s has_description=%s",
+            res.get("error_code"),
+            bool(res.get("description")),
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Telegram billing interface error: {res.get('description', 'Unknown error')}",
+            detail=TELEGRAM_STARS_CHECKOUT_ERROR,
         )
     return res["result"]
 
@@ -722,7 +742,8 @@ async def create_yookassa_payment(
         with _open_payment_provider_request(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ЮKassa checkout error: {e}")
+        logger.warning("YooKassa checkout request failed: error_type=%s", type(e).__name__)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=YOOKASSA_CHECKOUT_ERROR)
 
     attempt.provider_payment_id = data.get("id")
     await db.commit()

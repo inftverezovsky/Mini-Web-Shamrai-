@@ -41,6 +41,14 @@ def current_match_balance(user: User) -> int:
     return int(user.purchased_bets_balance or user.matches_remaining or 0)
 
 
+def user_has_full_forecast_access(user: User) -> bool:
+    return (
+        current_match_balance(user) > 0
+        or bool(user.guarantee_active)
+        or is_staff_role(getattr(user, "role", None))
+    )
+
+
 async def activate_match_package(
     db: AsyncSession,
     *,

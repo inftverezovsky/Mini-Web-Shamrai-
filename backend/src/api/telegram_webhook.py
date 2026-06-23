@@ -3,6 +3,7 @@ import html
 import json
 import time
 from typing import Optional
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -12,9 +13,10 @@ from src.core.background_tasks import create_logged_task
 from src.core.config import settings
 from src.core.message_templates import TEMPLATE_TELEGRAM_WELCOME, render_message_template
 from src.core.security import verify_telegram_webhook_secret
-from src.core.telegram_text import contact_footer, write_emoji
+from src.core.telegram_text import SHAMRAI_CONTACT_USERNAME, contact_footer, write_emoji
 from src.api.payments import process_telegram_payment_update
 from src.services.forecast_delivery import (
+    FORECAST_CONTACT_DRAFT_TEXT,
     handle_sales_callback,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
@@ -262,6 +264,35 @@ def _answer_callback_query(callback_query_id: Optional[str], text: str, show_ale
     }
 
 
+def _forecast_contact_required(message: str, forecast_status: Optional[str]) -> bool:
+    return forecast_status == "announced" and FORECAST_CONTACT_DRAFT_TEXT in str(message or "")
+
+
+def _telegram_forecast_contact_url() -> str:
+    username = SHAMRAI_CONTACT_USERNAME.strip().lstrip("@") or "Shamrai_Osnova"
+    return f"https://t.me/{username}?text={quote(FORECAST_CONTACT_DRAFT_TEXT)}"
+
+
+def _send_forecast_contact_cta(chat_id: int, message: str) -> dict:
+    return call_telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": message,
+            "reply_markup": {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Написать Shamrai",
+                            "url": _telegram_forecast_contact_url(),
+                        }
+                    ]
+                ]
+            },
+        },
+    )
+
+
 def _run_background(coro) -> None:
     create_logged_task(coro, logger=logger, failure_message="[Webhook] Background task failed")
 
@@ -398,6 +429,19 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
             return _answer_callback_query(callback_id, "Неизвестное действие", True)
 
         await db.commit()
+        contact_required = (
+            action == "take"
+            and _forecast_contact_required(message, getattr(forecast_request, "status", None))
+        )
+        if contact_required:
+            callback_message = message
+            chat_id = (
+                ((callback_query.get("message") or {}).get("chat") or {}).get("id")
+                or actor_user_id
+            )
+            await asyncio.to_thread(_send_forecast_contact_cta, int(chat_id), message)
+            return _answer_callback_query(callback_id, callback_message)
+
         if action in {"take", "decline"}:
             _run_background(asyncio.to_thread(_clear_forecast_client_message, callback_query))
         if should_notify_sales:

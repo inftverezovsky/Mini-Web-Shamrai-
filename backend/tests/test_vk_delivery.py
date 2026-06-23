@@ -175,6 +175,25 @@ class VkDeliveryTests(unittest.TestCase):
         self.assertEqual(masked, "abcdef**********7890")
         self.assertNotIn("123456", masked)
 
+    def test_redact_vk_log_payload_hides_tokens_and_request_params(self):
+        payload = {
+            "response": {
+                "access_token": "secret-token-value",
+                "request_params": [{"key": "access_token", "value": "nested-secret"}],
+                "profile": {"name": "Shamrai"},
+            },
+            "headers": {"Authorization": "Bearer secret-token-value"},
+        }
+
+        redacted = vk_delivery._redact_vk_log_payload(payload)
+
+        self.assertNotIn("secret-token-value", str(redacted))
+        self.assertNotIn("nested-secret", str(redacted))
+        self.assertEqual(redacted["response"]["access_token"], "<redacted>")
+        self.assertEqual(redacted["response"]["request_params"], "<redacted>")
+        self.assertEqual(redacted["headers"]["Authorization"], "<redacted>")
+        self.assertEqual(redacted["response"]["profile"]["name"], "Shamrai")
+
     def test_probe_vk_api_uses_group_token_safe_membership_probe(self):
         with patch.object(vk_delivery, "_vk_api_request", return_value={"ok": True, "response": 0}) as request_mock:
             self.assertTrue(vk_delivery.probe_vk_api())

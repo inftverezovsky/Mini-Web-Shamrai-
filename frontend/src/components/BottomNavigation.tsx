@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  CreditCard,
   MessageCircle,
   Newspaper,
   Settings2,
@@ -11,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export type UserTabId = 'feed' | 'chat' | 'stats' | 'my_bets' | 'profile' | 'billing';
-export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'settings' | 'profile';
+export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'chats' | 'settings' | 'profile';
 type BottomTabId = UserTabId | AdminShellTabId;
 
 interface BottomNavigationProps {
@@ -33,6 +34,7 @@ export const userTabs: TabConfig<UserTabId>[] = [
   { id: 'feed', label: 'Лента', Icon: Newspaper, tone: 'emerald' },
   { id: 'chat', label: 'Чат', Icon: MessageCircle, tone: 'cyan' },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
+  { id: 'billing', label: 'Оплата', Icon: CreditCard, tone: 'emerald' },
   { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'violet' },
 ];
 
@@ -40,6 +42,7 @@ export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'manage_bets', label: 'Панель', Icon: Settings2, tone: 'emerald' },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
   { id: 'clients', label: 'Клиенты', Icon: Users, tone: 'cyan' },
+  { id: 'chats', label: 'Чаты', Icon: MessageCircle, tone: 'cyan' },
   { id: 'settings', label: 'Настройки', Icon: SlidersHorizontal, tone: 'violet' },
   { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'rose' },
 ];

@@ -1,0 +1,72 @@
+import React, { useEffect, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+
+interface MessageListItem {
+  key: string;
+  element: React.ReactNode;
+}
+
+interface MessageListProps {
+  items: MessageListItem[];
+  loading?: boolean;
+  empty?: React.ReactNode;
+  className?: string;
+}
+
+export default function MessageList({
+  items,
+  loading = false,
+  empty,
+  className = '',
+}: MessageListProps) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 132,
+    overscan: 7,
+  });
+
+  useEffect(() => {
+    const scrollElement = parentRef.current;
+    if (!scrollElement || items.length === 0) return;
+    window.requestAnimationFrame(() => {
+      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'smooth' });
+    });
+  }, [items.length]);
+
+  return (
+    <div ref={parentRef} className={`web-bot-chat__list min-h-0 flex-1 overflow-y-auto px-4 py-4 ${className}`}>
+      {loading && (
+        <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-200" />
+          <span>Синхронизация...</span>
+        </div>
+      )}
+
+      {!loading && items.length === 0 && empty}
+
+      {items.length > 0 && (
+        <div
+          className="relative w-full"
+          style={{ height: `${virtualizer.getTotalSize()}px` }}
+        >
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const item = items[virtualItem.index];
+            return (
+              <div
+                key={item.key}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
+                className="absolute left-0 top-0 w-full pb-3"
+                style={{ transform: `translateY(${virtualItem.start}px)` }}
+              >
+                {item.element}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

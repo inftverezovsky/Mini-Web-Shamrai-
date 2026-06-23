@@ -37,6 +37,24 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
         build_opener.assert_called_once_with("proxy-handler")
         opener.open.assert_called_once_with(request, timeout=7)
 
+    def test_vk_oauth_rate_limit_error_returns_client_safe_message(self):
+        status_code, message = auth._vk_oauth_client_error(
+            auth.VkOAuthError("Too many attempts. Try later. [9]")
+        )
+
+        self.assertEqual(status_code, 429)
+        self.assertIn("Слишком много попыток", message)
+        self.assertNotIn("Too many attempts", message)
+
+    def test_vk_oauth_unknown_error_hides_internal_detail(self):
+        status_code, message = auth._vk_oauth_client_error(
+            auth.VkOAuthError("HTTP 500: upstream stack detail")
+        )
+
+        self.assertEqual(status_code, 502)
+        self.assertIn("VK ID временно", message)
+        self.assertNotIn("upstream stack detail", message)
+
     async def test_vk_login_creates_web_only_profile_without_debug_bypass(self):
         async with self.Session() as db:
             with patch.object(

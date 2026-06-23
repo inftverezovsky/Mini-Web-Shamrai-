@@ -1,15 +1,16 @@
 import { useEffect, useRef } from 'react';
 
 import { apiFetch, buildApiWebSocketUrl } from '../utils/api';
-import { getStoredAuthToken } from '../utils/authStorage';
+import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../utils/authStorage';
 import { notifyInfo } from '../utils/notify';
-import { playIncomingSignalSound, unlockIncomingSignalSound } from '../utils/signalAudio';
+import { playIncomingSignalSound, playIncomingSupportSound, unlockIncomingSignalSound } from '../utils/signalAudio';
 import { isTelegramMiniApp } from '../utils/telegramSdk';
 
 interface PersonalSignal {
   id: number;
   text: string;
   type: string;
+  created_at?: string;
   data?: {
     message_text?: string;
   };
@@ -30,11 +31,30 @@ export const WEB_SIGNAL_STATUS_EVENT = 'shamrai:signal-stream-status';
 function signalNoticeText(signal: PersonalSignal) {
   const sourceText = signal.data?.message_text || signal.text;
   const firstLine = sourceText.split('\n').map((line) => line.trim()).find(Boolean) || 'Новое сообщение в личном чате.';
-  return firstLine.length > 96 ? `${firstLine.slice(0, 93)}...` : firstLine;
+  const limit = signal.type.startsWith('support_') ? 260 : 96;
+  return firstLine.length > limit ? `${firstLine.slice(0, limit - 3)}...` : firstLine;
+}
+
+function signalNoticeTitle(signal: PersonalSignal) {
+  if (signal.type === 'support_staff_message') return 'Shamrai написал в чат';
+  return 'Личный бот Shamrai';
+}
+
+function mergeSignalsById(currentSignals: PersonalSignal[], incomingSignals: PersonalSignal[]) {
+  const signalsById = new Map<number, PersonalSignal>();
+  currentSignals.forEach((signal) => signalsById.set(signal.id, signal));
+  incomingSignals.forEach((signal) => signalsById.set(signal.id, signal));
+
+  return Array.from(signalsById.values()).sort((left, right) => {
+    const leftTime = left.created_at ? new Date(left.created_at).getTime() : 0;
+    const rightTime = right.created_at ? new Date(right.created_at).getTime() : 0;
+    return (leftTime - rightTime) || (left.id - right.id);
+  });
 }
 
 export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
   const seenSignalIdsRef = useRef<Set<number>>(new Set());
+  const bufferedSignalsRef = useRef<PersonalSignal[]>([]);
 
   useEffect(() => {
     if (!enabled || isTelegramMiniApp()) return;
@@ -65,16 +85,41 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
     if (!enabled || isTelegramMiniApp()) return;
 
     const token = getStoredAuthToken();
-    if (!token || token === 'mock_debug_access_token') return;
+    if (token === MOCK_DEBUG_AUTH_TOKEN) return;
 
     let socket: WebSocket | null = null;
     let reconnectTimer: number | undefined;
     let pingTimer: number | undefined;
     let closedByUnmount = false;
     let reconnectAttempt = 0;
+    let initialHistoryLoaded = false;
 
     const emitStatus = (state: 'connecting' | 'online' | 'offline') => {
       window.dispatchEvent(new CustomEvent(WEB_SIGNAL_STATUS_EVENT, { detail: { state } }));
+    };
+
+    const emitSignal = (signal: PersonalSignal, options: { notify: boolean }) => {
+      if (!signal?.id || seenSignalIdsRef.current.has(signal.id)) return;
+      seenSignalIdsRef.current.add(signal.id);
+      bufferedSignalsRef.current = mergeSignalsById(bufferedSignalsRef.current, [signal]).slice(-200);
+      window.dispatchEvent(new CustomEvent(WEB_SIGNAL_EVENT, { detail: signal }));
+      if (!options.notify) return;
+      notifyInfo(signalNoticeText(signal), signalNoticeTitle(signal));
+      void (signal.type.startsWith('support_') ? playIncomingSupportSound() : playIncomingSignalSound());
+    };
+
+    const catchUpMissedSignals = async (options: { notify: boolean }) => {
+      try {
+        const history = await apiFetch<PersonalSignal[]>('/signals/history?limit=200');
+        if (closedByUnmount) return;
+        const mergedSignals = mergeSignalsById(bufferedSignalsRef.current, history);
+        bufferedSignalsRef.current = mergedSignals.slice(-200);
+        const shouldNotify = options.notify && initialHistoryLoaded;
+        mergedSignals.forEach((signal) => emitSignal(signal, { notify: shouldNotify }));
+        initialHistoryLoaded = true;
+      } catch {
+        // The websocket will continue reconnecting; history catch-up is retried on the next open.
+      }
     };
 
     const scheduleReconnect = () => {
@@ -105,6 +150,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
       socket.onopen = () => {
         reconnectAttempt = 0;
         emitStatus('online');
+        void catchUpMissedSignals({ notify: true });
         if (pingTimer) window.clearInterval(pingTimer);
         pingTimer = window.setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) socket.send('ping');
@@ -115,12 +161,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
         try {
           const payload = JSON.parse(event.data);
           if (payload?.type === 'pong') return;
-          const signal = payload as PersonalSignal;
-          if (seenSignalIdsRef.current.has(signal.id)) return;
-          seenSignalIdsRef.current.add(signal.id);
-          window.dispatchEvent(new CustomEvent(WEB_SIGNAL_EVENT, { detail: signal }));
-          notifyInfo(signalNoticeText(signal), 'Личный бот Shamrai');
-          void playIncomingSignalSound();
+          emitSignal(payload as PersonalSignal, { notify: true });
         } catch {
           // Ignore malformed stream frames.
         }
@@ -138,6 +179,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
     };
 
     void connect();
+    void catchUpMissedSignals({ notify: false });
 
     return () => {
       closedByUnmount = true;

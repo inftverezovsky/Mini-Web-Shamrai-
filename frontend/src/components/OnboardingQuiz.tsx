@@ -170,9 +170,9 @@ const riskOptions: ChoiceOption<RiskTolerance>[] = [
 
 const fallbackBookmakers: BookmakerResponse[] = [
   { id: 1, name: 'Фонбет', code: 'fonbet', is_active: true },
-  { id: 2, name: 'BetBoom', code: 'betboom', is_active: true },
-  { id: 3, name: 'Winline', code: 'winline', is_active: true },
-  { id: 4, name: 'Пари (Pari)', code: 'pari', is_active: true },
+  { id: 2, name: 'БетБум', code: 'betboom', is_active: true },
+  { id: 3, name: 'Винлайн', code: 'winline', is_active: true },
+  { id: 4, name: 'Пари', code: 'pari', is_active: true },
   { id: 5, name: 'Лига Ставок', code: 'ligastavok', is_active: true },
   { id: 6, name: 'Марафонбет', code: 'marathon', is_active: true },
   { id: 7, name: 'Бетсити', code: 'betcity', is_active: true },

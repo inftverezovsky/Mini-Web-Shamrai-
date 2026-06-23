@@ -5,10 +5,10 @@ from src.models.models import Bookmaker
 
 
 STANDARD_BOOKMAKERS = [
-    {"name": "Фонбет (Fonbet)", "code": "fonbet"},
-    {"name": "BetBoom", "code": "betboom"},
-    {"name": "Винлайн (Winline)", "code": "winline"},
-    {"name": "Пари (Pari)", "code": "pari"},
+    {"name": "Фонбет", "code": "fonbet"},
+    {"name": "БетБум", "code": "betboom"},
+    {"name": "Винлайн", "code": "winline"},
+    {"name": "Пари", "code": "pari"},
     {"name": "Лига Ставок", "code": "ligastavok"},
     {"name": "Марафонбет", "code": "marathon"},
     {"name": "Бетсити", "code": "betcity"},

@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import { DEBUG_AUTH_ENABLED } from '../../config/api';
 import { SubscriptionPlanResponse } from '../../schemas/schemas';
-import { BadgeRussianRuble, CreditCard, Sparkles, Check, Loader2 } from 'lucide-react';
+import { BadgeRussianRuble, CreditCard, Sparkles, Check, Loader2, RefreshCw } from 'lucide-react';
 import ProfitSimulator from './ProfitSimulator';
 import { useAuth } from '../../context/AuthContext';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
@@ -18,36 +18,37 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [referralDiscountPercent, setReferralDiscountPercent] = useState(0);
   const [loading, setLoading] = useState(true);
-  
-  // Checkout state variables
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const [buying, setBuying] = useState<{ planId: number; provider: 'tegro' | 'yookassa' } | null>(null);
   const [successPopup, setSuccessPopup] = useState(false);
 
-  // Promo code states
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [appliedPromo, setAppliedPromo] = useState<{ code: string; discount_percent: number } | null>(null);
   const [promoError, setPromoError] = useState<string | null>(null);
   const [validatingPromo, setValidatingPromo] = useState(false);
 
-  useEffect(() => {
-    async function loadTariffs() {
-      try {
-        setLoading(true);
-        // GET /api/subscriptions/plans
-        const [tariffs, referral] = await Promise.all([
-          apiFetch('/subscriptions/plans'),
-          apiFetch('/users/me/referral'),
-        ]);
-        setPlans(tariffs);
-        setReferralDiscountPercent(referral.referral_discount_percent ?? 0);
-      } catch (err) {
-        console.error('Failed to load tariffs list:', err);
-      } finally {
-        setLoading(false);
-      }
+  const loadTariffs = useCallback(async () => {
+    try {
+      setLoading(true);
+      setLoadError(null);
+      const [tariffs, referral] = await Promise.all([
+        apiFetch<SubscriptionPlanResponse[]>('/subscriptions/plans'),
+        apiFetch<{ referral_discount_percent?: number }>('/users/me/referral'),
+      ]);
+      setPlans(tariffs);
+      setReferralDiscountPercent(referral.referral_discount_percent ?? 0);
+    } catch (err) {
+      console.error('Failed to load tariffs list:', err);
+      setLoadError('Не удалось загрузить тарифы. Проверьте подключение и попробуйте еще раз.');
+    } finally {
+      setLoading(false);
     }
-    loadTariffs();
   }, []);
+
+  useEffect(() => {
+    void loadTariffs();
+  }, [loadTariffs]);
 
   const handleApplyPromo = async () => {
     const trimmed = promoCodeInput.trim();
@@ -58,8 +59,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
       setPromoError(null);
       trackEvent('Promo Validate Started');
 
-      // GET /api/payments/promo/validate?code=...
-      const data = await apiFetch(`/payments/promo/validate?code=${encodeURIComponent(trimmed)}`);
+      const data = await apiFetch<{ code: string; discount_percent: number }>(`/payments/promo/validate?code=${encodeURIComponent(trimmed)}`);
       setAppliedPromo(data);
       trackEvent('Promo Validate Success', {
         discount_percent: data.discount_percent,
@@ -101,12 +101,12 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
         discount_percent: activeDiscountPercent,
       });
 
-      const paymentData = await apiFetch('/payments/tegro/create', {
+      const paymentData = await apiFetch<{ mock?: boolean; attempt_id?: string; confirmation_url?: string }>('/payments/tegro/create', {
         method: 'POST',
         body: JSON.stringify({
           plan_id: planId,
-          promo_code: appliedPromo ? appliedPromo.code : undefined
-        })
+          promo_code: appliedPromo ? appliedPromo.code : undefined,
+        }),
       });
 
       if (paymentData.mock) {
@@ -119,7 +119,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
             plan_id: planId,
             promo_code: appliedPromo ? appliedPromo.code : undefined,
             attempt_id: paymentData.attempt_id,
-          })
+          }),
         });
         setSuccessPopup(true);
         notifySuccess('Debug-оплата Tegro проведена, пакет матчей начислен.');
@@ -177,12 +177,12 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
         discount_percent: activeDiscountPercent,
       });
 
-      const paymentData = await apiFetch('/payments/yookassa/create', {
+      const paymentData = await apiFetch<{ mock?: boolean; attempt_id?: string; confirmation_url?: string }>('/payments/yookassa/create', {
         method: 'POST',
         body: JSON.stringify({
           plan_id: planId,
-          promo_code: appliedPromo ? appliedPromo.code : undefined
-        })
+          promo_code: appliedPromo ? appliedPromo.code : undefined,
+        }),
       });
 
       if (paymentData.mock) {
@@ -195,7 +195,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
             plan_id: planId,
             promo_code: appliedPromo ? appliedPromo.code : undefined,
             attempt_id: paymentData.attempt_id,
-          })
+          }),
         });
         setSuccessPopup(true);
         notifySuccess('Debug-оплата проведена, пакет матчей начислен.');
@@ -250,8 +250,6 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
 
   return (
     <div className="space-y-6 animate-slide-up pb-10">
-      
-      {/* Tariffs Page Title */}
       <div className="text-center space-y-1">
         <h2 className="text-xl font-black text-white flex items-center justify-center">
           <Sparkles className="w-5 h-5 text-indigo-400 mr-2" />
@@ -268,7 +266,6 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
         </div>
       )}
 
-      {/* Promo Code Input Block */}
       <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-md">
         <label className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
           У вас есть промокод?
@@ -316,29 +313,42 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
         )}
       </div>
 
-      {/* Grid List of Tariff options */}
       <div className="space-y-4">
+        {(loadError || plans.length === 0) && (
+          <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-center shadow-glass">
+            <p className="text-sm font-black text-white">
+              {loadError || 'Тарифы временно недоступны'}
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadTariffs()}
+              disabled={loading}
+              className="mx-auto mt-3 inline-flex min-h-[40px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-4 py-2.5 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98] disabled:cursor-wait disabled:opacity-55"
+            >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              <span>Повторить</span>
+            </button>
+          </div>
+        )}
+
         {plans.map((plan) => {
           const isGold = plan.match_count >= 20;
           const priceRub = Number(plan.price || 0);
-          
           const activeDiscountPercent = appliedPromo?.discount_percent ?? referralDiscountPercent;
           const hasDiscount = activeDiscountPercent > 0;
           const discountedRubPrice = hasDiscount
             ? Math.max(1, Math.round(priceRub * (100 - activeDiscountPercent) / 100))
             : priceRub;
-          
+
           return (
-            <div 
+            <div
               key={plan.id}
               className={`motion-card flex min-w-0 flex-col justify-between rounded-2xl border p-6 transition-all duration-300 hover:-translate-y-0.5 hover:scale-[1.02] ${
-                isGold 
-                  ? 'bg-white/10 backdrop-blur-md border-indigo-500/40 shadow-glass shadow-indigo-500/5' 
+                isGold
+                  ? 'bg-white/10 backdrop-blur-md border-indigo-500/40 shadow-glass shadow-indigo-500/5'
                   : 'bg-white/[0.04] border-white/10 backdrop-blur-sm shadow-glass'
               }`}
             >
-              
-              {/* Header: Plan Name and duration */}
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h4 className="text-sm font-extrabold text-white">{plan.name}</h4>
@@ -346,7 +356,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
                     {plan.match_count} матчей в пакете
                   </p>
                 </div>
-                
+
                 <div className="shrink-0 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-right text-emerald-300 shadow-neon-green">
                   {hasDiscount ? (
                     <div className="flex flex-col items-end leading-tight">
@@ -359,7 +369,6 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
                 </div>
               </div>
 
-              {/* Features List */}
               <div className="my-4 space-y-2 border-y border-white/5 py-3 text-[11px] text-slate-300">
                 <div className="flex items-start gap-2">
                   <Check className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -375,7 +384,6 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
                 </div>
               </div>
 
-              {/* Action checkout button */}
               <div>
                 <button
                   onClick={() => handleBuyTegro(plan.id)}
@@ -406,15 +414,12 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
                   )}
                 </button>
               </div>
-
             </div>
           );
         })}
       </div>
 
-      {/* Interactive Guest Profit Simulator */}
       <ProfitSimulator />
-      
     </div>
   );
 }

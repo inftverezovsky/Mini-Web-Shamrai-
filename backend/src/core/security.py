@@ -8,9 +8,8 @@ import jwt
 from fastapi import HTTPException, status
 from src.core.config import settings
 
-# JWT configuration settings
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 1
+ACCESS_TOKEN_EXPIRE_DAYS = 30
 TELEGRAM_LOGIN_WIDGET_SIGNED_FIELDS = {
     "id",
     "first_name",
@@ -22,6 +21,7 @@ TELEGRAM_LOGIN_WIDGET_SIGNED_FIELDS = {
     "auth_date",
 }
 
+
 def create_access_token(data: dict) -> str:
     """Generates a secure JWT token for authenticated requests."""
     to_encode = data.copy()
@@ -30,6 +30,7 @@ def create_access_token(data: dict) -> str:
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
 
+
 def verify_access_token(token: str) -> Optional[dict]:
     """Decodes and validates a JWT token. Returns payload or None."""
     try:
@@ -37,6 +38,7 @@ def verify_access_token(token: str) -> Optional[dict]:
         return payload
     except jwt.PyJWTError:
         return None
+
 
 def verify_telegram_webhook_secret(secret_token: Optional[str]) -> None:
     """Validate Telegram's X-Telegram-Bot-Api-Secret-Token header when configured."""
@@ -50,12 +52,12 @@ def verify_telegram_webhook_secret(secret_token: Optional[str]) -> None:
             detail="Telegram webhook secret validation failed",
         )
 
+
 def verify_telegram_init_data(init_data: str) -> dict:
     """
     Utility function to verify Telegram WebApp initData.
     Accepts raw query string and returns parsed user dict.
     """
-    # Debug bypass for local desktop browser testing
     if settings.allow_debug_auth_bypass:
         if init_data == "mock_debug_user":
             return {
@@ -105,12 +107,9 @@ def verify_telegram_init_data(init_data: str) -> dict:
         )
 
     received_hash = parsed_data.pop("hash")
-    
-    # Sort keys alphabetically and compile data check string
     sorted_items = sorted(parsed_data.items())
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted_items)
 
-    # WebAppData HMAC-SHA256 signature chain validation
     secret_key = hmac.new(
         b"WebAppData",
         settings.TELEGRAM_BOT_TOKEN.encode(),
@@ -129,7 +128,6 @@ def verify_telegram_init_data(init_data: str) -> dict:
             detail="Telegram credentials validation failed"
         )
 
-    # Verify expiration (24 hours standard window)
     try:
         auth_date = int(parsed_data.get("auth_date", 0))
     except (TypeError, ValueError):

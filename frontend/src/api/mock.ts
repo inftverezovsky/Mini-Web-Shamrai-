@@ -1,20 +1,7 @@
 import { DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
 import { getStoredAuthToken } from '../utils/authStorage';
-
-const MOCK_BOOKMAKERS = [
-  { id: 1, name: 'Фонбет (Fonbet)', code: 'fonbet', is_active: true },
-  { id: 2, name: 'BetBoom', code: 'betboom', is_active: true },
-  { id: 3, name: 'Винлайн (Winline)', code: 'winline', is_active: true },
-  { id: 4, name: 'Пари (Pari)', code: 'pari', is_active: true },
-  { id: 5, name: 'Лига Ставок', code: 'ligastavok', is_active: true },
-  { id: 6, name: 'Марафонбет', code: 'marathon', is_active: true },
-  { id: 7, name: 'Бетсити', code: 'betcity', is_active: true },
-  { id: 8, name: 'Мелбет', code: 'melbet', is_active: true },
-  { id: 9, name: 'Леон', code: 'leon', is_active: true },
-  { id: 10, name: 'Олимпбет', code: 'olimpbet', is_active: true },
-  { id: 11, name: 'Зенит', code: 'zenit', is_active: true },
-  { id: 12, name: 'Другие', code: 'other', is_active: true },
-];
+import { MOCK_BOOKMAKERS } from './mockData/bookmakers';
+import { DEFAULT_MOCK_MESSAGE_TEMPLATES } from './mockData/messageTemplates';
 
 const nowIso = () => new Date().toISOString();
 const daysAgoIso = (days: number, hour = 18) => {
@@ -25,6 +12,7 @@ const daysAgoIso = (days: number, hour = 18) => {
 };
 const MOCK_PREFS_STORAGE_KEY = 'bet_tma_mock_preferences';
 const MOCK_MESSAGE_TEMPLATES_STORAGE_KEY = 'bet_tma_mock_message_templates';
+const MOCK_SUPPORT_MESSAGES_STORAGE_KEY = 'bet_tma_mock_support_messages';
 
 const DEFAULT_MOCK_PREFERENCES = {
   alert_min_coef: 1.5,
@@ -35,126 +23,6 @@ const DEFAULT_MOCK_PREFERENCES = {
   preferred_sports: [],
   stats_display_mode: 'percent',
 };
-
-const DEFAULT_MOCK_MESSAGE_TEMPLATES = [
-  {
-    key: 'telegram_welcome',
-    title: 'Приветствие Telegram',
-    description: 'Что клиент получает в Telegram после команды /start.',
-    body: '👋 <b>Привет, {{first_name}}!</b>\n\nДобро пожаловать в <b>ШАМРАЙ | ОШИБКИ БК</b>.\n\n📊 Прогнозы, ошибки БК и умные уведомления уже внутри приложения.\n\n{{contact_footer}}\n\n👇 Нажмите кнопку ниже, чтобы открыть Shamrai.',
-    variables: [
-      { key: 'first_name', label: 'Имя клиента', example: 'Алексей' },
-      { key: 'contact_footer', label: 'Контактный блок', example: 'Если есть вопросы...' },
-    ],
-  },
-  {
-    key: 'announcement',
-    title: 'Массовый анонс',
-    description: 'Текст рассылки из раздела анонсов.',
-    body: '{{emoji}} <b>{{title}}</b>\n\n{{body}}\n\n{{bookmaker_line}}\n{{match_link_line}}\n{{coefficient_line}}\n\n{{contact_footer}}',
-    variables: [
-      { key: 'emoji', label: 'Иконка типа анонса', example: '📢' },
-      { key: 'title', label: 'Заголовок', example: 'Новый матч' },
-      { key: 'body', label: 'Текст анонса', example: 'Есть новый анонс.' },
-      { key: 'bookmaker_line', label: 'Строка БК', example: '🏦 БК: Fonbet' },
-      { key: 'match_link_line', label: 'Строка ссылки', example: '🔗 Перейти к матчу' },
-      { key: 'coefficient_line', label: 'Строка коэффициента', example: '📊 Коэффициент: 1.90' },
-      { key: 'contact_footer', label: 'Контактный блок', example: 'Если есть вопросы...' },
-    ],
-  },
-  {
-    key: 'paid_set_teaser',
-    title: 'Анонс платного набора',
-    description: 'Сообщение клиенту: платный набор, коэффициент, стоимость и кнопка заявки.',
-    body: '💰 <b>{{title}}</b> | КФ <b>{{coefficient}}</b>\n\n{{bookmaker_line}}\n\n{{body}}\n\nСтоимость: <b>{{price_text}}</b>\n\n{{contact_footer}}',
-    variables: [
-      { key: 'title', label: 'Название набора', example: 'Платный набор' },
-      { key: 'coefficient', label: 'Коэффициент набора', example: '3.90' },
-      { key: 'bookmaker_line', label: 'Строка БК', example: 'Фонбет | Пари | Bettery' },
-      { key: 'body', label: 'Описание набора', example: 'Реальный КФ не выше 1.9!' },
-      { key: 'price_text', label: 'Стоимость', example: '1 500 ₽' },
-      { key: 'contact_footer', label: 'Контактный блок', example: 'Если есть вопросы...' },
-    ],
-  },
-  {
-    key: 'forecast_teaser',
-    title: 'Закрытый анонс прогноза',
-    description: 'Первое сообщение клиенту: взять или не взять закрытый прогноз.',
-    body: '<b>Закрытый анонс прогноза</b>\n\nБК: {{bookmaker_labels}}\n\nКоэффициент: <b>{{coefficient}}</b>\n\n{{teaser_text}}\n\n{{contact_footer}}',
-    variables: [
-      { key: 'bookmaker_labels', label: 'Букмекеры', example: 'Fonbet, BetBoom' },
-      { key: 'coefficient', label: 'Коэффициент', example: '1.92' },
-      { key: 'teaser_text', label: 'Короткий текст', example: 'Есть закрытый прогноз под вашу БК.' },
-      { key: 'contact_footer', label: 'Контактный блок', example: 'Если есть вопросы...' },
-    ],
-  },
-  {
-    key: 'forecast_full',
-    title: 'Полный прогноз',
-    description: 'Сообщение с матчем, исходом, коэффициентом, описанием и купоном.',
-    body: 'Матч: <b>{{event_name}}</b>\n\nИсход: <b>{{outcome}}</b>\n\nКоэффициент: <b>{{coefficient}}</b>\n\n{{bookmaker_line}}\n\n{{description}}\n\n{{bookmaker_links_block}}\n\n{{contact_footer}}',
-    variables: [
-      { key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' },
-      { key: 'outcome', label: 'Исход', example: 'П1' },
-      { key: 'coefficient', label: 'Коэффициент', example: '1.92' },
-      { key: 'bookmaker_line', label: 'Строка БК', example: 'БК: Fonbet' },
-      { key: 'description', label: 'Описание', example: 'Короткая аналитика.' },
-      { key: 'bookmaker_links_block', label: 'Блок ссылок', example: 'Fonbet: нажмите кнопку ниже' },
-      { key: 'contact_footer', label: 'Контактный блок', example: 'Если есть вопросы...' },
-    ],
-  },
-  {
-    key: 'odds_drop',
-    title: 'Падение коэффициента',
-    description: 'Уведомление клиентам, которые уже взяли прогноз, что линия упала.',
-    body: '🔥 <b>Посмотри, как выгодно взяли наш исход.</b>\n\nМатч: <b>{{event_name}}</b>\nИсход: <b>{{outcome}}</b>\n\nМы давали кф. <b>{{coefficient}}</b>, а сейчас линия уже упала до <b>{{odds_dropped_to}}</b>.\n\nПоздравляю с выгодной ставкой, ждём заход 🤝',
-    variables: [
-      { key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' },
-      { key: 'outcome', label: 'Исход', example: 'П1' },
-      { key: 'coefficient', label: 'Коэффициент', example: '1.92' },
-      { key: 'odds_dropped_to', label: 'Новый коэффициент', example: '1.64' },
-    ],
-  },
-  {
-    key: 'bet_win',
-    title: 'Победа прогноза',
-    description: 'Сообщение клиенту, когда взятый прогноз рассчитан плюсом.',
-    body: '🔥 Прогноз Shamrai рассчитан в плюс!\n\nМатч «{{event_name}}» успешно закрыт победой. 🧠 Списание купона произведено честно, ваш банк увеличен. Работаем дальше.🤝',
-    variables: [{ key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' }],
-  },
-  {
-    key: 'bet_loss',
-    title: 'Поражение прогноза',
-    description: 'Обычное сообщение о минусе, если компенсация клиенту не начисляется.',
-    body: 'Прогноз «{{event_name}}» закрыт минусом.\n\nДержим дистанцию и работаем дальше.',
-    variables: [{ key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' }],
-  },
-  {
-    key: 'bet_loss_supercompensation',
-    title: 'Поражение с компенсацией',
-    description: 'Сообщение о минусе, когда клиенту возвращается ставка и добавляется бонус.',
-    body: '⚡ Сверхкомпенсация Shamrai активирована.\n\nПрогноз «{{event_name}}» закрыт минусом, поэтому мы вернули списанную ставку и начислили +1 бонусную ставку сверху. Баланс пакета увеличен на 2.',
-    variables: [{ key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' }],
-  },
-  {
-    key: 'bet_refund',
-    title: 'Возврат прогноза',
-    description: 'Сообщение клиенту, когда прогноз рассчитан возвратом.',
-    body: '↩️ Прогноз «{{event_name}}» рассчитан возвратом.\n\nСтавка возвращается по правилам БК.',
-    variables: [{ key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' }],
-  },
-  {
-    key: 'live_signal',
-    title: 'Live-сигнал',
-    description: 'Срочное уведомление по live-прогнозу.',
-    body: '⚡⚡⚡ SHAMRAI LIVE SIGNAL ALARM ⚡⚡⚡\n\nНовый срочный Live-прогноз от Shamrai:\n🏆 {{event_name}}\n📈 Коэффициент: {{coefficient}}\n{{brain_score_line}}\n\nБыстрее заходите в приложение Shamrai Analytics Hub!',
-    variables: [
-      { key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' },
-      { key: 'coefficient', label: 'Коэффициент', example: '1.92' },
-      { key: 'brain_score_line', label: 'Строка Brain Score', example: '🧠 Brain Score: 8/10' },
-    ],
-  },
-];
 
 function getMockPreferences() {
   try {
@@ -644,7 +512,7 @@ function mockStatItemFromBet(bet: any) {
     created_at: bet.created_at,
     taken_at: bet.taken_at || bet.created_at,
     delivery_mode: bet.delivery_mode || 'feed',
-    source_type: bet.delivery_mode && bet.delivery_mode !== 'feed' ? 'private' : 'feed',
+    source_type: bet.delivery_mode === 'paid_set' ? 'paid_set' : bet.delivery_mode && bet.delivery_mode !== 'feed' ? 'private' : 'feed',
     sport_type: bet.sport_type || null,
     outcome: bet.outcome || null,
     bookmakers,
@@ -747,6 +615,7 @@ function buildMockPerformancePayload(rawItems: any[], period: PeriodFilter = 'al
   const dayKey = `${monthKey}-${String(now.getDate()).padStart(2, '0')}`;
   const feedItems = items.filter((item: any) => item.source_type === 'feed');
   const privateItems = items.filter((item: any) => item.source_type === 'private');
+  const paidSetItems = items.filter((item: any) => item.source_type === 'paid_set');
   return {
     period,
     period_label: PERIOD_LABELS[period],
@@ -755,6 +624,7 @@ function buildMockPerformancePayload(rawItems: any[], period: PeriodFilter = 'al
       all: mockSummary(items),
       feed: mockSummary(feedItems),
       private: mockSummary(privateItems),
+      paid_set: mockSummary(paidSetItems),
     },
     timeline,
     bookmaker_breakdown: mockBreakdown(items, 'bookmaker_names', 'Без БК'),
@@ -883,6 +753,162 @@ function getMockUsers() {
 
 function saveMockUsers(users: any[]) {
   localStorage.setItem('bet_tma_mock_admin_users', JSON.stringify(users));
+}
+
+function mockSupportDisplayName(user: any) {
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
+  if (fullName) return fullName;
+  if (user.username) return `@${user.username}`;
+  return user.is_web_only ? 'Web/VK клиент' : `ID ${user.telegram_id}`;
+}
+
+function buildMockSupportMessage(
+  userId: number,
+  text: string,
+  direction: 'staff' | 'client',
+  overrides: Record<string, any> = {},
+) {
+  const user = getMockUsers().find((item: any) => item.telegram_id === userId);
+  const type = direction === 'staff' ? 'support_staff_message' : 'support_client_message';
+  return {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    user_id: userId,
+    text,
+    type,
+    direction,
+    author_label: direction === 'staff' ? 'Shamrai' : mockSupportDisplayName(user || { telegram_id: userId }),
+    sender_user_id: direction === 'staff' ? 987654321 : userId,
+    sender_role: direction === 'staff' ? 'admin' : 'user',
+    data: {
+      direction,
+      author_label: direction === 'staff' ? 'Shamrai' : mockSupportDisplayName(user || { telegram_id: userId }),
+      sender_user_id: direction === 'staff' ? 987654321 : userId,
+      sender_role: direction === 'staff' ? 'admin' : 'user',
+      event_type: 'support_web_chat',
+    },
+    created_at: nowIso(),
+    ...overrides,
+  };
+}
+
+function mockChatUserPayload(user: any) {
+  return {
+    telegram_id: user.telegram_id,
+    username: user.username ?? null,
+    first_name: user.first_name ?? null,
+    last_name: user.last_name ?? null,
+    photo_url: user.photo_url ?? null,
+    is_web_only: Boolean(user.is_web_only),
+    role: user.role || 'user',
+    display_name: mockSupportDisplayName(user),
+  };
+}
+
+function mockConversationId(userId: number) {
+  const suffix = Math.abs(userId).toString().padStart(12, '0').slice(-12);
+  return `00000000-0000-4000-8000-${suffix}`;
+}
+
+function mockSupportMessageToChatMessage(message: any) {
+  return {
+    id: message.id,
+    conversation_id: mockConversationId(message.user_id),
+    sender_user_id: message.sender_user_id ?? (message.direction === 'client' ? message.user_id : 987654321),
+    sender_role: message.sender_role ?? (message.direction === 'client' ? 'user' : 'admin'),
+    direction: message.direction,
+    author_label: message.direction === 'staff' ? 'Shamrai' : message.author_label || 'Клиент',
+    type: 'text',
+    text: message.text,
+    payload: {},
+    client_message_id: message.client_message_id || `mock-${message.id}`,
+    reply_to_id: null,
+    created_at: message.created_at,
+    edited_at: null,
+    deleted_at: null,
+  };
+}
+
+function mockConversationFromUser(user: any, latestMessage: any | null, status = 'open') {
+  const latestChatMessage = latestMessage ? mockSupportMessageToChatMessage(latestMessage) : null;
+  return {
+    id: mockConversationId(user.telegram_id),
+    kind: 'support',
+    key: 'support',
+    status,
+    owner_user: mockChatUserPayload(user),
+    assigned_staff_id: null,
+    last_message: latestChatMessage,
+    last_message_text: latestMessage?.text ?? null,
+    last_message_at: latestMessage?.created_at ?? null,
+    unread_count: latestMessage?.direction === 'client' ? 1 : 0,
+  };
+}
+
+function mockSignalConversation(user: any) {
+  return {
+    id: 'signals',
+    kind: 'signals',
+    key: 'signals',
+    status: 'open',
+    owner_user: mockChatUserPayload(user),
+    assigned_staff_id: null,
+    last_message: null,
+    last_message_text: 'Сигналы и прогнозы',
+    last_message_at: null,
+    unread_count: 0,
+  };
+}
+
+function getMockSupportMessages() {
+  const stored = localStorage.getItem(MOCK_SUPPORT_MESSAGES_STORAGE_KEY);
+  if (stored) {
+    try {
+      const messages = JSON.parse(stored);
+      if (Array.isArray(messages)) return messages;
+    } catch {
+      // Fall back to seeded support messages.
+    }
+  }
+
+  const seeded = [
+    buildMockSupportMessage(123456789, 'Добрый день, хочу уточнить по закрытому прогнозу.', 'client', {
+      id: 9001,
+      created_at: new Date(Date.now() - 34 * 60 * 1000).toISOString(),
+    }),
+    buildMockSupportMessage(123456789, 'Здравствуйте. Да, сейчас проверим линию и подскажем.', 'staff', {
+      id: 9002,
+      created_at: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+    }),
+    buildMockSupportMessage(223344557, 'Я новичок, можно начать с одного матча?', 'client', {
+      id: 9003,
+      created_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
+    }),
+  ];
+  localStorage.setItem(MOCK_SUPPORT_MESSAGES_STORAGE_KEY, JSON.stringify(seeded));
+  return seeded;
+}
+
+function saveMockSupportMessages(messages: any[]) {
+  localStorage.setItem(MOCK_SUPPORT_MESSAGES_STORAGE_KEY, JSON.stringify(messages));
+}
+
+function mockThreadFromUser(user: any, latestMessage: any | null) {
+  return {
+    user: {
+      telegram_id: user.telegram_id,
+      username: user.username ?? null,
+      first_name: user.first_name ?? null,
+      last_name: user.last_name ?? null,
+      photo_url: user.photo_url ?? null,
+      is_web_only: Boolean(user.is_web_only),
+      role: user.role || 'user',
+      display_name: mockSupportDisplayName(user),
+    },
+    last_message: latestMessage,
+    last_message_text: latestMessage?.text ?? null,
+    last_message_created_at: latestMessage?.created_at ?? null,
+    needs_reply: latestMessage?.direction === 'client',
+  };
 }
 
 const MOCK_PLANS = [
@@ -1047,7 +1073,81 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/signals/web-push/subscription') {
     return { status: options.method === 'DELETE' ? 'deleted' : 'saved', configured: false };
   }
+  if (endpoint === '/signals/messages' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    const message = buildMockSupportMessage(getMockUser().telegram_id, String(body.text || ''), 'client');
+    const messages = [...getMockSupportMessages(), message];
+    saveMockSupportMessages(messages);
+    return message;
+  }
+  if (endpoint === '/chat/conversations') {
+    const user = getMockUser();
+    const supportMessages = getMockSupportMessages().filter((message: any) => message.user_id === user.telegram_id);
+    const latestSupportMessage = [...supportMessages].sort((left: any, right: any) => (
+      new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+    ))[0] || null;
+    return {
+      items: [
+        mockSignalConversation(user),
+        mockConversationFromUser(user, latestSupportMessage),
+      ],
+      next_before: null,
+      has_more: false,
+    };
+  }
+  if (endpoint === '/chat/conversations/signals/messages') {
+    const supportTypes = new Set(['support_staff_message', 'support_client_message']);
+    const limit = Math.max(1, Number(queryParams.get('limit')) || 50);
+    const items = [
+      {
+        id: 1,
+        user_id: getMockUser().telegram_id,
+        text: '⚡ Shamrai Web Bot подключен. Здесь будут дублироваться live-сигналы вне Telegram.',
+        type: 'system',
+        data: {},
+        created_at: new Date(Date.now() - 7 * 60 * 1000).toISOString(),
+      },
+      {
+        id: 2,
+        user_id: getMockUser().telegram_id,
+        text: 'LIVE: Зенит - Спартак, коэффициент 1.92. Проверьте линию в своей БК.',
+        type: 'live_signal',
+        data: {},
+        created_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+      },
+    ].filter((signal: any) => !supportTypes.has(signal.type)).slice(-limit);
+    return { items, next_before_id: null, has_more: false };
+  }
+  if (endpoint === '/chat/conversations/signals/read' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    return { status: 'ok', last_read_signal_id: body.last_read_signal_id ?? null, last_read_message_id: null };
+  }
+  if (endpoint === '/chat/conversations/support/messages' && (!options.method || options.method === 'GET')) {
+    const userId = getMockUser().telegram_id;
+    const items = getMockSupportMessages()
+      .filter((message: any) => message.user_id === userId)
+      .sort((left: any, right: any) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+      .map(mockSupportMessageToChatMessage);
+    return { items, next_before_id: null, has_more: false };
+  }
+  if (endpoint === '/chat/conversations/support/messages' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    const message = buildMockSupportMessage(getMockUser().telegram_id, String(body.text || ''), 'client', {
+      client_message_id: body.client_message_id || `mock-${Date.now()}`,
+    });
+    const messages = [...getMockSupportMessages(), message];
+    saveMockSupportMessages(messages);
+    return mockSupportMessageToChatMessage(message);
+  }
+  if (endpoint === '/chat/conversations/support/read' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    return { status: 'ok', last_read_message_id: body.last_read_message_id ?? null, last_read_signal_id: null };
+  }
+  if (endpoint === '/chat/stream-ticket' && options.method === 'POST') {
+    return { ticket: `mock-chat-v2-ticket-${Date.now()}`, expires_in: 30 };
+  }
   if (endpoint === '/signals/history') {
+    const supportMessages = getMockSupportMessages().filter((message: any) => message.user_id === getMockUser().telegram_id);
     return [
       {
         id: 1,
@@ -1063,6 +1163,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         type: 'live_signal',
         created_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
       },
+      ...supportMessages,
     ];
   }
 
@@ -1334,6 +1435,8 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/admin/paid-set-broadcast') {
     const body = options.body instanceof FormData ? options.body : null;
     const title = String(body?.get('title') || 'ПЛАТНЫЙ НАБОР');
+    const eventName = String(body?.get('event_name') || title);
+    const outcome = String(body?.get('outcome') || '');
     const coefficient = body?.get('coefficient') || 3.9;
     const priceRub = Number(body?.get('price_rub') || 1500);
     const sportType = body?.get('sport_type') || 'Футбол';
@@ -1350,11 +1453,11 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         ? [fallbackBookmakerId]
         : getMockBookmakerIds().slice(0, 3);
     const paidSetBet = buildMockBet(`mock-paid-set-bet-${Date.now()}`, {
-      event_name: title,
+      event_name: eventName,
       coefficient,
       bookmakerIds,
       sport_type: sportType,
-      outcome: null,
+      outcome,
       description: teaserText,
       coupon_image_url: null,
       match_link: null,
@@ -1753,6 +1856,79 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       updated_at: new Date().toISOString(),
     };
   }
+  if (endpoint === '/admin/users/drive-export' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    return {
+      id: `mock-crm-drive-${Date.now()}`,
+      status: 'completed',
+      scope: 'crm',
+      period: 'all',
+      formats: body.formats || ['xlsx', 'google_sheet'],
+      filters: {
+        q: body.q || '',
+        activity: body.activity || 'all',
+        group: body.group || '',
+        tag: body.tag || '',
+      },
+      links: [
+        {
+          title: 'Shamrai Exports',
+          url: 'https://drive.google.com/',
+          id: 'mock-crm-root',
+          format: 'folder',
+        },
+        {
+          title: 'CRM',
+          url: 'https://drive.google.com/',
+          id: 'mock-crm-folder',
+          format: 'folder',
+        },
+        {
+          title: 'CRM по клиентам',
+          url: 'https://docs.google.com/spreadsheets/',
+          id: 'mock-crm-sheet',
+          format: 'google_sheet',
+        },
+      ],
+      error: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+  const crmDriveExportMatch = endpoint.match(/^\/admin\/users\/drive-export\/([^/]+)$/);
+  if (crmDriveExportMatch) {
+    return {
+      id: crmDriveExportMatch[1],
+      status: 'completed',
+      scope: 'crm',
+      period: 'all',
+      formats: ['xlsx', 'google_sheet'],
+      filters: {},
+      links: [
+        {
+          title: 'Shamrai Exports',
+          url: 'https://drive.google.com/',
+          id: 'mock-crm-root',
+          format: 'folder',
+        },
+        {
+          title: 'CRM',
+          url: 'https://drive.google.com/',
+          id: 'mock-crm-folder',
+          format: 'folder',
+        },
+        {
+          title: 'CRM по клиентам',
+          url: 'https://docs.google.com/spreadsheets/',
+          id: 'mock-crm-sheet',
+          format: 'google_sheet',
+        },
+      ],
+      error: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
   const driveExportMatch = endpoint.match(/^\/admin\/stats\/drive-export\/([^/]+)$/);
   if (driveExportMatch) {
     return {
@@ -1994,6 +2170,115 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const bets = [nextBet, ...getMockBets()];
     saveMockBets(bets);
     return nextBet;
+  }
+  if (endpoint === '/admin/web-chat/stream-ticket' && options.method === 'POST') {
+    return { ticket: `mock-chat-ticket-${Date.now()}`, expires_in: 30 };
+  }
+  if (endpoint === '/chat/admin/conversations') {
+    const status = queryParams.get('status') || 'open';
+    const limit = Math.max(1, Number(queryParams.get('limit')) || 50);
+    const messages = getMockSupportMessages();
+    const latestByUserId = new Map<number, any>();
+    [...messages]
+      .sort((left: any, right: any) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+      .forEach((message: any) => {
+        if (!latestByUserId.has(message.user_id)) latestByUserId.set(message.user_id, message);
+      });
+    const items = getMockUsers()
+      .filter((user: any) => user.role === 'user' && latestByUserId.has(user.telegram_id))
+      .map((user: any) => mockConversationFromUser(user, latestByUserId.get(user.telegram_id), status))
+      .sort((left: any, right: any) => {
+        const leftTime = left.last_message_at ? new Date(left.last_message_at).getTime() : 0;
+        const rightTime = right.last_message_at ? new Date(right.last_message_at).getTime() : 0;
+        return rightTime - leftTime;
+      })
+      .slice(0, limit);
+    return { items, next_before: null, has_more: false };
+  }
+  const chatAdminMessagesMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/messages$/);
+  if (chatAdminMessagesMatch && (!options.method || options.method === 'GET')) {
+    const conversationId = chatAdminMessagesMatch[1];
+    const user = getMockUsers().find((item: any) => mockConversationId(item.telegram_id) === conversationId);
+    const items = getMockSupportMessages()
+      .filter((message: any) => message.user_id === user?.telegram_id)
+      .sort((left: any, right: any) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+      .map(mockSupportMessageToChatMessage);
+    return { items, next_before_id: null, has_more: false };
+  }
+  if (chatAdminMessagesMatch && options.method === 'POST') {
+    const conversationId = chatAdminMessagesMatch[1];
+    const user = getMockUsers().find((item: any) => mockConversationId(item.telegram_id) === conversationId);
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    const message = buildMockSupportMessage(user?.telegram_id || 123456789, String(body.text || ''), 'staff', {
+      client_message_id: body.client_message_id || `mock-${Date.now()}`,
+    });
+    saveMockSupportMessages([...getMockSupportMessages(), message]);
+    return mockSupportMessageToChatMessage(message);
+  }
+  const chatAdminReadMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/read$/);
+  if (chatAdminReadMatch && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    return { status: 'ok', last_read_message_id: body.last_read_message_id ?? null, last_read_signal_id: null };
+  }
+  const chatAdminStatusMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/status$/);
+  if (chatAdminStatusMatch && options.method === 'POST') {
+    const conversationId = chatAdminStatusMatch[1];
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    const user = getMockUsers().find((item: any) => mockConversationId(item.telegram_id) === conversationId);
+    const latestMessage = getMockSupportMessages()
+      .filter((message: any) => message.user_id === user?.telegram_id)
+      .sort((left: any, right: any) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())[0] || null;
+    return mockConversationFromUser(user || getMockUser(), latestMessage, body.status || 'open');
+  }
+  if (endpoint === '/admin/web-chat/threads') {
+    const cleanQ = (queryParams.get('q') || '').trim().toLowerCase();
+    const limit = Math.max(1, Number(queryParams.get('limit')) || 40);
+    const messages = getMockSupportMessages();
+    const latestByUserId = new Map<number, any>();
+    [...messages]
+      .sort((left: any, right: any) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+      .forEach((message: any) => {
+        if (!latestByUserId.has(message.user_id)) latestByUserId.set(message.user_id, message);
+      });
+
+    const users = getMockUsers().filter((user: any) => {
+      if (user.role !== 'user') return false;
+      if (!cleanQ) return latestByUserId.has(user.telegram_id);
+      const searchable = [
+        user.telegram_id,
+        user.username,
+        user.first_name,
+        user.last_name,
+        user.client_group,
+        user.client_tag,
+        latestByUserId.get(user.telegram_id)?.text,
+      ].join(' ').toLowerCase();
+      return searchable.includes(cleanQ);
+    });
+    const items = users
+      .map((user: any) => mockThreadFromUser(user, latestByUserId.get(user.telegram_id) || null))
+      .sort((left: any, right: any) => {
+        const leftTime = left.last_message_created_at ? new Date(left.last_message_created_at).getTime() : 0;
+        const rightTime = right.last_message_created_at ? new Date(right.last_message_created_at).getTime() : 0;
+        return rightTime - leftTime;
+      })
+      .slice(0, limit);
+    return { items };
+  }
+  const adminWebChatMessagesMatch = endpoint.match(/^\/admin\/web-chat\/users\/(-?\d+)\/messages$/);
+  if (adminWebChatMessagesMatch && (!options.method || options.method === 'GET')) {
+    const userId = Number(adminWebChatMessagesMatch[1]);
+    return getMockSupportMessages()
+      .filter((message: any) => message.user_id === userId)
+      .sort((left: any, right: any) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+  }
+  if (adminWebChatMessagesMatch && options.method === 'POST') {
+    const userId = Number(adminWebChatMessagesMatch[1]);
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    const message = buildMockSupportMessage(userId, String(body.text || ''), 'staff');
+    const messages = [...getMockSupportMessages(), message];
+    saveMockSupportMessages(messages);
+    return message;
   }
   if (endpoint === '/admin/users') return getMockUsers().filter((user: any) => user.role === 'user');
   if (endpoint === '/admin/admins') return getMockUsers().filter((user: any) => user.role !== 'user');

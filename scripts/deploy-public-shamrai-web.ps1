@@ -690,9 +690,42 @@ set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' ps
 curl -fsS http://127.0.0.1:8082/api/health
-curl -fsS http://127.0.0.1:8082/api/health/telegram
-curl -fsS http://127.0.0.1:8082/api/health/vk
-curl -fsS http://127.0.0.1:8082/api/health/vk/deep
+docker compose -p '$ComposeProject' exec -T backend python - <<'PY'
+from src.core.config import settings
+from src.services.telegram_bot import call_telegram_api
+from src.services.vk_delivery import probe_vk_api, vk_delivery_configured, vk_group_id
+
+errors = []
+
+get_me = call_telegram_api("getMe", {}, settings.TELEGRAM_API_TIMEOUT_SECONDS, 1)
+webhook_info = call_telegram_api("getWebhookInfo", {}, settings.TELEGRAM_API_TIMEOUT_SECONDS, 1)
+if not settings.has_real_telegram_token:
+    errors.append("telegram token missing")
+if not get_me.get("ok"):
+    errors.append("telegram getMe failed")
+if not webhook_info.get("ok"):
+    errors.append("telegram getWebhookInfo failed")
+
+if settings.TELEGRAM_USE_POLLING:
+    print("telegram_delivery_probe_ok mode=polling")
+else:
+    expected = f"{settings.API_BASE_URL.rstrip('/')}/api/telegram/webhook"
+    actual = (webhook_info.get("result") or {}).get("url") or ""
+    if expected and actual != expected:
+        errors.append("telegram webhook mismatch")
+    print("telegram_delivery_probe_ok mode=webhook")
+
+if not settings.VK_ID_APP_ID.strip() or not settings.VK_ID_REDIRECT_URI.strip():
+    errors.append("vk id config missing")
+if not vk_group_id() or not vk_delivery_configured():
+    errors.append("vk delivery config missing")
+if not probe_vk_api():
+    errors.append("vk api probe failed")
+
+if errors:
+    raise SystemExit("; ".join(errors))
+print("vk_delivery_probe_ok")
+PY
 expected_vk_callback_confirmation=$expectedVkCode
 vk_callback_payload=$vkCallbackPayload
 runtime_vk_callback_confirmation="`$(python3 - <<'PY'

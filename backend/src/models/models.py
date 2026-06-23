@@ -17,6 +17,7 @@ from sqlalchemy import (
     Uuid,
     UniqueConstraint,
     Index,
+    CheckConstraint,
 )
 from sqlalchemy.orm import relationship
 from src.models.database import Base
@@ -102,6 +103,12 @@ class User(Base):
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     bets_taken = relationship("Bet", secondary=user_bets, back_populates="takers")
     personal_signals = relationship("PersonalSignal", back_populates="user", cascade="all, delete-orphan")
+    chat_conversations = relationship(
+        "ChatConversation",
+        foreign_keys="ChatConversation.owner_user_id",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def is_web_only(self) -> bool:
@@ -201,6 +208,7 @@ class PersonalSignal(Base):
     __tablename__ = "personal_signals"
     __table_args__ = (
         Index("ix_personal_signals_user_created", "user_id", "created_at"),
+        Index("ix_personal_signals_type_created", "type", "created_at"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -211,6 +219,87 @@ class PersonalSignal(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user = relationship("User", back_populates="personal_signals")
+
+
+class ChatConversation(Base):
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        UniqueConstraint("kind", "owner_user_id", name="uq_chat_conversation_kind_owner"),
+        CheckConstraint("kind IN ('support')", name="ck_chat_conversation_kind"),
+        CheckConstraint("status IN ('open', 'closed')", name="ck_chat_conversation_status"),
+        Index("ix_chat_conversations_status_last_message", "status", "last_message_at"),
+        Index("ix_chat_conversations_owner", "owner_user_id"),
+    )
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind = Column(String(32), default="support", nullable=False)
+    owner_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False)
+    assigned_staff_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(16), default="open", nullable=False)
+    title = Column(String(200), nullable=True)
+    last_message_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+    owner = relationship("User", foreign_keys=[owner_user_id], back_populates="chat_conversations")
+    assigned_staff = relationship("User", foreign_keys=[assigned_staff_id])
+    messages = relationship("ChatMessage", back_populates="conversation", cascade="all, delete-orphan")
+    read_cursors = relationship("ChatReadCursor", back_populates="conversation", cascade="all, delete-orphan")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        UniqueConstraint("sender_user_id", "client_message_id", name="uq_chat_message_sender_client"),
+        CheckConstraint("type IN ('text')", name="ck_chat_message_type"),
+        CheckConstraint("text IS NULL OR length(text) BETWEEN 1 AND 4000", name="ck_chat_message_text_length"),
+        Index("ix_chat_messages_conversation_id_id", "conversation_id", "id"),
+        Index("ix_chat_messages_conversation_created", "conversation_id", "created_at"),
+    )
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    conversation_id = Column(Uuid(as_uuid=True), ForeignKey("chat_conversations.id", ondelete="CASCADE"), nullable=False)
+    sender_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True)
+    sender_role = Column(String(32), nullable=False)
+    type = Column(String(32), default="text", nullable=False)
+    text = Column(Text, nullable=True)
+    payload = Column(JSON, default=dict, nullable=False)
+    client_message_id = Column(Uuid(as_uuid=True), nullable=False)
+    reply_to_id = Column(BigInteger, ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    edited_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    conversation = relationship("ChatConversation", back_populates="messages")
+    sender = relationship("User", foreign_keys=[sender_user_id])
+    reply_to = relationship("ChatMessage", remote_side=[id])
+
+
+class ChatReadCursor(Base):
+    __tablename__ = "chat_read_cursors"
+    __table_args__ = (
+        Index("ix_chat_read_cursors_user", "user_id"),
+    )
+
+    conversation_id = Column(Uuid(as_uuid=True), ForeignKey("chat_conversations.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True)
+    last_read_message_id = Column(BigInteger, ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    conversation = relationship("ChatConversation", back_populates="read_cursors")
+    user = relationship("User", foreign_keys=[user_id])
+    last_read_message = relationship("ChatMessage", foreign_keys=[last_read_message_id])
+
+
+class PersonalSignalReadCursor(Base):
+    __tablename__ = "personal_signal_read_cursors"
+
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True)
+    last_read_signal_id = Column(Integer, ForeignKey("personal_signals.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+    last_read_signal = relationship("PersonalSignal", foreign_keys=[last_read_signal_id])
 
 
 class DeliveryOutbox(Base):
@@ -282,8 +371,10 @@ class Bet(Base):
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_name = Column(String, nullable=False)
     coefficient = Column(Numeric(5, 2), nullable=False)
+    fair_coefficient = Column(Numeric(5, 2), nullable=True)
     bookmaker_id = Column(Integer, ForeignKey("bookmakers.id", ondelete="SET NULL"), nullable=True)
     description = Column(Text, nullable=True)
+    teaser_text = Column(Text, nullable=True)
     status = Column(String, default="pending")  # "pending" | "win" | "loss" | "refund"
     delivery_mode = Column(String, default="feed", nullable=False)  # "feed" | "sales_private"
     author_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True)

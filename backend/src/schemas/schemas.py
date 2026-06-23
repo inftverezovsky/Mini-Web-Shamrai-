@@ -210,9 +210,11 @@ class BookmakerLink(BaseModel):
 class BetBase(BaseModel):
     event_name: str = Field(min_length=1, max_length=200)
     coefficient: Decimal = Field(ge=Decimal("1.0"), le=Decimal("999.99"))
+    fair_coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
     bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
     description: Optional[str] = Field(default=None, max_length=4000)
+    teaser_text: Optional[str] = Field(default=None, max_length=4000)
     category: str = Field(default="prematch", max_length=40)
     live_ends_at: Optional[datetime] = None
     price_stars: Optional[int] = Field(default=None, ge=0, le=100000)
@@ -242,11 +244,13 @@ class BetResolve(BaseModel):
 class BetUpdate(BaseModel):
     event_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
+    fair_coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
     bookmaker_ids: Optional[List[int]] = Field(default=None, max_length=50)
     sport_type: Optional[str] = Field(default=None, max_length=120)
     outcome: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=4000)
+    teaser_text: Optional[str] = Field(default=None, max_length=4000)
     match_link: Optional[str] = Field(default=None, max_length=2048)
     bookmaker_links: Optional[List[BookmakerLink]] = Field(default=None, max_length=50)
 

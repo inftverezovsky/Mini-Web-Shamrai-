@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import LogoText from './LogoText';
-import { getVkIdConfig } from '../utils/vkId';
+import { getVkAuthCooldownStatus, getVkIdConfig } from '../utils/vkId';
 import { trackEvent, trackPageView } from '../utils/analytics';
 
 export default function BrowserAuthScreen() {
   const { error, loading, loginWithVk, loginWithTelegramBot } = useAuth();
   const [vkBusy, setVkBusy] = useState(false);
+  const [vkCooldown, setVkCooldown] = useState(() => getVkAuthCooldownStatus());
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [telegramError, setTelegramError] = useState<string | null>(null);
   const vkConfig = getVkIdConfig();
@@ -16,6 +17,7 @@ export default function BrowserAuthScreen() {
   const telegramBotUrl = `https://t.me/${cleanBotUsername}`;
   const showVkLogin = vkConfig.ready && vkConfig.originCompatible;
   const secureAppUrl = vkConfig.canonicalAppUrl || 'https://shamra1.pro/app/';
+  const vkLoginDisabled = vkBusy || loading || vkCooldown.active;
 
   React.useEffect(() => {
     trackPageView('/auth', {
@@ -24,13 +26,24 @@ export default function BrowserAuthScreen() {
     });
   }, [botUsername, showVkLogin]);
 
+  React.useEffect(() => {
+    if (!vkCooldown.active) return undefined;
+    const timer = window.setInterval(() => {
+      setVkCooldown(getVkAuthCooldownStatus());
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [vkCooldown.active]);
+
   const handleVkLogin = async () => {
-    if (!vkConfig.ready) return;
+    const cooldown = getVkAuthCooldownStatus();
+    setVkCooldown(cooldown);
+    if (!vkConfig.ready || cooldown.active) return;
     try {
       setVkBusy(true);
       trackEvent('Auth Started', { provider: 'vk' });
       await loginWithVk();
     } catch {
+      setVkCooldown(getVkAuthCooldownStatus());
       trackEvent('Auth Failed', { provider: 'vk' });
       // AuthContext exposes the message in-place; keep the screen available.
     } finally {
@@ -80,11 +93,11 @@ export default function BrowserAuthScreen() {
               <button
                 type="button"
                 onClick={handleVkLogin}
-                disabled={vkBusy || loading}
+                disabled={vkLoginDisabled}
                 className="auth-readable-action shamrai-glass-button group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 {vkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-                <span>Войти или создать через VK ID</span>
+                <span>{vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Войти или создать через VK ID'}</span>
               </button>
             ) : vkConfig.configured ? (
               <a
@@ -132,6 +145,12 @@ export default function BrowserAuthScreen() {
           {(error || telegramError) && (
             <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-3.5 py-3 text-xs font-semibold leading-relaxed text-rose-100">
               {telegramError || error}
+            </div>
+          )}
+
+          {vkCooldown.active && vkCooldown.message && !error && (
+            <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3.5 py-3 text-xs font-semibold leading-relaxed text-amber-100">
+              {vkCooldown.message}
             </div>
           )}
         </div>

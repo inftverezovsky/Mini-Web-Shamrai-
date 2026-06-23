@@ -18,7 +18,7 @@ from src.core.config import settings
 from src.core.roles import is_staff_role
 from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
-from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, go
+from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go
 from src.services.delivery_outbox import delivery_outbox_daemon
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.services.vk_delivery import (
@@ -73,6 +73,8 @@ async def run_dev_schema_migrations(conn):
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS access_type VARCHAR NOT NULL DEFAULT 'paid_match'",
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS match_charged BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR NOT NULL DEFAULT 'feed'",
+            "ALTER TABLE bets ADD COLUMN IF NOT EXISTS fair_coefficient NUMERIC(5, 2)",
+            "ALTER TABLE bets ADD COLUMN IF NOT EXISTS teaser_text TEXT",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport_type VARCHAR",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS outcome VARCHAR",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS coupon_image_url VARCHAR",
@@ -126,6 +128,7 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_id ON personal_signals (user_id)",
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_type ON personal_signals (type)",
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_created ON personal_signals (user_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_personal_signals_type_created ON personal_signals (type, created_at)",
             """
             CREATE TABLE IF NOT EXISTS delivery_outbox (
                 id UUID PRIMARY KEY,
@@ -154,6 +157,62 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_forecast_request_id ON delivery_outbox (forecast_request_id)",
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_status_next_attempt ON delivery_outbox (status, next_attempt_at)",
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)",
+            """
+            CREATE TABLE IF NOT EXISTS chat_conversations (
+                id UUID PRIMARY KEY,
+                kind VARCHAR(32) NOT NULL DEFAULT 'support',
+                owner_user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                assigned_staff_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'open',
+                title VARCHAR(200),
+                last_message_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                CONSTRAINT uq_chat_conversation_kind_owner UNIQUE (kind, owner_user_id),
+                CONSTRAINT ck_chat_conversation_kind CHECK (kind IN ('support')),
+                CONSTRAINT ck_chat_conversation_status CHECK (status IN ('open', 'closed'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chat_conversations_status_last_message ON chat_conversations (status, last_message_at)",
+            "CREATE INDEX IF NOT EXISTS ix_chat_conversations_owner ON chat_conversations (owner_user_id)",
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGSERIAL PRIMARY KEY,
+                conversation_id UUID NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                sender_user_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                sender_role VARCHAR(32) NOT NULL,
+                type VARCHAR(32) NOT NULL DEFAULT 'text',
+                text TEXT,
+                payload JSON NOT NULL DEFAULT '{}',
+                client_message_id UUID NOT NULL,
+                reply_to_id BIGINT REFERENCES chat_messages(id) ON DELETE SET NULL,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                edited_at TIMESTAMP WITH TIME ZONE,
+                deleted_at TIMESTAMP WITH TIME ZONE,
+                CONSTRAINT uq_chat_message_sender_client UNIQUE (sender_user_id, client_message_id),
+                CONSTRAINT ck_chat_message_type CHECK (type IN ('text')),
+                CONSTRAINT ck_chat_message_text_length CHECK (text IS NULL OR length(text) BETWEEN 1 AND 4000)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chat_messages_conversation_id_id ON chat_messages (conversation_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_chat_messages_conversation_created ON chat_messages (conversation_id, created_at)",
+            """
+            CREATE TABLE IF NOT EXISTS chat_read_cursors (
+                conversation_id UUID NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                last_read_message_id BIGINT REFERENCES chat_messages(id) ON DELETE SET NULL,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                PRIMARY KEY (conversation_id, user_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chat_read_cursors_user ON chat_read_cursors (user_id)",
+            """
+            CREATE TABLE IF NOT EXISTS personal_signal_read_cursors (
+                user_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+                last_read_signal_id INTEGER REFERENCES personal_signals(id) ON DELETE SET NULL,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
             """
             CREATE TABLE IF NOT EXISTS message_templates (
                 key VARCHAR PRIMARY KEY,
@@ -225,6 +284,8 @@ async def run_dev_schema_migrations(conn):
             ],
             "bets": [
                 ("delivery_mode", "VARCHAR NOT NULL DEFAULT 'feed'"),
+                ("fair_coefficient", "NUMERIC(5, 2)"),
+                ("teaser_text", "TEXT"),
                 ("sport_type", "VARCHAR"),
                 ("outcome", "VARCHAR"),
                 ("coupon_image_url", "VARCHAR"),
@@ -325,6 +386,9 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_personal_signals_user_created ON personal_signals (user_id, created_at)"
         )
         await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_personal_signals_type_created ON personal_signals (type, created_at)"
+        )
+        await conn.exec_driver_sql(
             """
             CREATE TABLE IF NOT EXISTS delivery_outbox (
                 id CHAR(32) NOT NULL,
@@ -373,6 +437,93 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_delivery_outbox_channel_status ON delivery_outbox (channel, status)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS chat_conversations (
+                id CHAR(32) NOT NULL,
+                kind VARCHAR(32) NOT NULL DEFAULT 'support',
+                owner_user_id BIGINT NOT NULL,
+                assigned_staff_id BIGINT,
+                status VARCHAR(16) NOT NULL DEFAULT 'open',
+                title VARCHAR(200),
+                last_message_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_chat_conversation_kind_owner UNIQUE (kind, owner_user_id),
+                CONSTRAINT ck_chat_conversation_kind CHECK (kind IN ('support')),
+                CONSTRAINT ck_chat_conversation_status CHECK (status IN ('open', 'closed')),
+                FOREIGN KEY (owner_user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (assigned_staff_id) REFERENCES users(telegram_id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_conversations_status_last_message ON chat_conversations (status, last_message_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_conversations_owner ON chat_conversations (owner_user_id)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER NOT NULL,
+                conversation_id CHAR(32) NOT NULL,
+                sender_user_id BIGINT,
+                sender_role VARCHAR(32) NOT NULL,
+                type VARCHAR(32) NOT NULL DEFAULT 'text',
+                text TEXT,
+                payload JSON NOT NULL DEFAULT '{}',
+                client_message_id CHAR(32) NOT NULL,
+                reply_to_id BIGINT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                edited_at DATETIME,
+                deleted_at DATETIME,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_chat_message_sender_client UNIQUE (sender_user_id, client_message_id),
+                CONSTRAINT ck_chat_message_type CHECK (type IN ('text')),
+                CONSTRAINT ck_chat_message_text_length CHECK (text IS NULL OR length(text) BETWEEN 1 AND 4000),
+                FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (sender_user_id) REFERENCES users(telegram_id) ON DELETE SET NULL,
+                FOREIGN KEY (reply_to_id) REFERENCES chat_messages(id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_messages_conversation_id_id ON chat_messages (conversation_id, id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_messages_conversation_created ON chat_messages (conversation_id, created_at)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS chat_read_cursors (
+                conversation_id CHAR(32) NOT NULL,
+                user_id BIGINT NOT NULL,
+                last_read_message_id BIGINT,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (conversation_id, user_id),
+                FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (last_read_message_id) REFERENCES chat_messages(id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_chat_read_cursors_user ON chat_read_cursors (user_id)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS personal_signal_read_cursors (
+                user_id BIGINT NOT NULL,
+                last_read_signal_id INTEGER,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id),
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (last_read_signal_id) REFERENCES personal_signals(id) ON DELETE SET NULL
+            )
+            """
         )
         await conn.exec_driver_sql(
             """
@@ -651,11 +802,64 @@ def _dispatch_polling_response(response: dict) -> bool:
     result = call_telegram_api(method, payload, timeout, retries)
     if not result.get("ok"):
         description = result.get("description", "unknown error")
+        if _is_web_app_button_type_error(method, payload, description):
+            fallback_payload = _telegram_url_button_fallback_payload(payload)
+            if fallback_payload:
+                fallback_result = call_telegram_api(method, fallback_payload, timeout, retries)
+                if fallback_result.get("ok"):
+                    print("[Daemon] Telegram web_app button fallback delivered with url button")
+                    return True
+                description = fallback_result.get("description", description)
         print(f"[Daemon] Telegram response dispatch failed: {method}: {description}")
         if method == "answerCallbackQuery":
             return True
         return False
     return True
+
+
+def _is_web_app_button_type_error(method: str, payload: dict, description: str) -> bool:
+    if method != "sendMessage":
+        return False
+    if "BUTTON_TYPE_INVALID" not in description:
+        return False
+    return bool(_telegram_url_button_fallback_payload(payload))
+
+
+def _telegram_url_button_fallback_payload(payload: dict) -> dict | None:
+    reply_markup = payload.get("reply_markup")
+    if not isinstance(reply_markup, dict):
+        return None
+    inline_keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(inline_keyboard, list):
+        return None
+
+    changed = False
+    fallback_keyboard = []
+    for row in inline_keyboard:
+        if not isinstance(row, list):
+            return None
+        fallback_row = []
+        for button in row:
+            if not isinstance(button, dict):
+                return None
+            fallback_button = dict(button)
+            web_app = fallback_button.get("web_app")
+            if isinstance(web_app, dict) and web_app.get("url"):
+                fallback_button.pop("web_app", None)
+                fallback_button["url"] = str(web_app["url"])
+                changed = True
+            fallback_row.append(fallback_button)
+        fallback_keyboard.append(fallback_row)
+
+    if not changed:
+        return None
+    return {
+        **payload,
+        "reply_markup": {
+            **reply_markup,
+            "inline_keyboard": fallback_keyboard,
+        },
+    }
 
 
 async def telegram_polling_daemon():
@@ -1006,11 +1210,13 @@ app.include_router(payments.router, prefix="/api")
 app.include_router(stats.router, prefix="/api")
 app.include_router(marketing.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(admin_web_chat.router, prefix="/api")
 app.include_router(admin_broadcast.router, prefix="/api")
 app.include_router(crowd_bets.router, prefix="/api")
 app.include_router(telegram_webhook.router, prefix="/api")
 app.include_router(vk_callback.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 app.include_router(go.router, prefix="/api")
 
 

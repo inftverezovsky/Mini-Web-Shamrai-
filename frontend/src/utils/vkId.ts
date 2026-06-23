@@ -35,9 +35,19 @@ export interface VkRedirectResult {
   };
 }
 
+export interface VkAuthCooldownStatus {
+  active: boolean;
+  retryAt: number | null;
+  remainingSeconds: number;
+  message: string | null;
+}
+
 const VK_CODE_VERIFIER_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const VK_REDIRECT_FLOW_STORAGE_KEY = 'shamrai_vk_redirect_flow';
+const VK_AUTH_COOLDOWN_STORAGE_KEY = 'shamrai_vk_auth_retry_after';
 const VK_REDIRECT_MAX_AGE_MS = 10 * 60 * 1000;
+const VK_AUTH_START_COOLDOWN_MS = 45 * 1000;
+const VK_AUTH_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 const VK_ID_AUTHORIZE_URL = 'https://id.vk.ru/authorize';
 const VK_ID_SDK_VERSION = '2.6.5';
 
@@ -100,11 +110,74 @@ export function isVkRedirectStartedError(error: unknown) {
     || (typeof error === 'object' && error !== null && (error as { name?: string }).name === 'VkRedirectStartedError');
 }
 
-function formatVkSdkError(error: unknown) {
+function safeStorageSet(storage: Storage | undefined, key: string, value: string) {
+  try {
+    storage?.setItem(key, value);
+  } catch {
+    // Browsers can disable storage in private modes; auth should still work.
+  }
+}
+
+function safeStorageGet(storage: Storage | undefined, key: string) {
+  try {
+    return storage?.getItem(key) || null;
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageRemove(storage: Storage | undefined, key: string) {
+  try {
+    storage?.removeItem(key);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readVkAuthRetryAt() {
+  const rawValue = safeStorageGet(localStorage, VK_AUTH_COOLDOWN_STORAGE_KEY);
+  const retryAt = rawValue ? Number(rawValue) : NaN;
+  return Number.isFinite(retryAt) && retryAt > 0 ? retryAt : null;
+}
+
+export function clearVkAuthCooldown() {
+  safeStorageRemove(localStorage, VK_AUTH_COOLDOWN_STORAGE_KEY);
+}
+
+export function rememberVkAuthCooldown(durationMs = VK_AUTH_RATE_LIMIT_COOLDOWN_MS) {
+  safeStorageSet(localStorage, VK_AUTH_COOLDOWN_STORAGE_KEY, String(Date.now() + durationMs));
+}
+
+export function getVkAuthCooldownStatus(now = Date.now()): VkAuthCooldownStatus {
+  const retryAt = readVkAuthRetryAt();
+  if (!retryAt || retryAt <= now) {
+    if (retryAt) clearVkAuthCooldown();
+    return {
+      active: false,
+      retryAt: null,
+      remainingSeconds: 0,
+      message: null,
+    };
+  }
+
+  const remainingSeconds = Math.max(1, Math.ceil((retryAt - now) / 1000));
+  return {
+    active: true,
+    retryAt,
+    remainingSeconds,
+    message: `VK ID временно ограничил попытки входа. Подождите ${Math.ceil(remainingSeconds / 60)} мин. или войдите через Telegram.`,
+  };
+}
+
+function isVkRateLimitMessage(message: string) {
+  return /слишком много|too many|flood|rate|limit|\[9\]/i.test(message);
+}
+
+function extractVkSdkErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error.trim()) return error.trim();
   if (typeof error === 'object' && error !== null) {
-    const candidate = error as { error?: string; error_description?: string; code?: number };
+    const candidate = error as { error?: string; error_description?: string; code?: number; error_code?: number };
     if (candidate.error_description) {
       try {
         const parsed = JSON.parse(candidate.error_description);
@@ -115,9 +188,25 @@ function formatVkSdkError(error: unknown) {
       }
     }
     if (candidate.error) return candidate.error;
+    if (candidate.code === 9 || candidate.error_code === 9) return 'too many attempts [9]';
     if (candidate.code === 102) return 'Окно VK ID было закрыто до завершения авторизации';
   }
   return 'VK ID не вернул результат авторизации';
+}
+
+export function normalizeVkAuthErrorMessage(error: unknown) {
+  const message = extractVkSdkErrorMessage(error);
+  if (isVkRateLimitMessage(message)) {
+    rememberVkAuthCooldown(VK_AUTH_RATE_LIMIT_COOLDOWN_MS);
+    return 'Слишком много попыток входа через VK ID. Подождите несколько минут или войдите через Telegram.';
+  }
+  return message;
+}
+
+export function rememberVkAuthCooldownForMessage(message: string) {
+  if (isVkRateLimitMessage(message)) {
+    rememberVkAuthCooldown(VK_AUTH_RATE_LIMIT_COOLDOWN_MS);
+  }
 }
 
 export function getVkIdConfig() {
@@ -159,6 +248,22 @@ function cleanupVkRedirectQuery(returnPath?: string) {
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
+function readVkRedirectFlow(): string | null {
+  return safeStorageGet(localStorage, VK_REDIRECT_FLOW_STORAGE_KEY)
+    || safeStorageGet(sessionStorage, VK_REDIRECT_FLOW_STORAGE_KEY);
+}
+
+function storeVkRedirectFlow(flow: VkRedirectFlow): void {
+  const serializedFlow = JSON.stringify(flow);
+  safeStorageSet(localStorage, VK_REDIRECT_FLOW_STORAGE_KEY, serializedFlow);
+  safeStorageSet(sessionStorage, VK_REDIRECT_FLOW_STORAGE_KEY, serializedFlow);
+}
+
+function clearVkRedirectFlow(): void {
+  safeStorageRemove(localStorage, VK_REDIRECT_FLOW_STORAGE_KEY);
+  safeStorageRemove(sessionStorage, VK_REDIRECT_FLOW_STORAGE_KEY);
+}
+
 export function consumeVkRedirectResult(): VkRedirectResult | null {
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
@@ -168,10 +273,10 @@ export function consumeVkRedirectResult(): VkRedirectResult | null {
 
   if (!code && !error) return null;
 
-  const rawFlow = sessionStorage.getItem(VK_REDIRECT_FLOW_STORAGE_KEY);
+  const rawFlow = readVkRedirectFlow();
   if (!rawFlow) return null;
 
-  sessionStorage.removeItem(VK_REDIRECT_FLOW_STORAGE_KEY);
+  clearVkRedirectFlow();
 
   let flow: VkRedirectFlow;
   try {
@@ -216,6 +321,10 @@ export function isVkIdReady() {
 
 export async function startVkRedirectFlow(action: VkRedirectAction): Promise<never> {
   const { appId, redirectUri, configured, originCompatible, canonicalAppUrl } = getVkIdConfig();
+  const cooldown = getVkAuthCooldownStatus();
+  if (cooldown.active && cooldown.message) {
+    throw new Error(cooldown.message);
+  }
   if (!configured) {
     throw new Error('VK ID не настроен. Обратитесь к администратору Shamrai.');
   }
@@ -232,13 +341,14 @@ export async function startVkRedirectFlow(action: VkRedirectAction): Promise<nev
   const returnPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
 
   const redirectUrl = await buildVkRedirectUrl(String(appId), redirectUri, state, codeVerifier);
-  sessionStorage.setItem(VK_REDIRECT_FLOW_STORAGE_KEY, JSON.stringify({
+  rememberVkAuthCooldown(VK_AUTH_START_COOLDOWN_MS);
+  storeVkRedirectFlow({
     action,
     state,
     codeVerifier,
     returnPath,
     createdAt: Date.now(),
-  } satisfies VkRedirectFlow));
+  });
   window.location.assign(redirectUrl);
   throw new VkRedirectStartedError();
 }
@@ -273,7 +383,7 @@ async function requestVkAuthPayload() {
     try {
       authResult = await VKID.Auth.login({ scheme: VKID.Scheme.DARK });
     } catch (error) {
-      throw new Error(formatVkSdkError(error));
+      throw new Error(normalizeVkAuthErrorMessage(error));
     }
 
     if (!isVkAuthResponse(authResult)) {

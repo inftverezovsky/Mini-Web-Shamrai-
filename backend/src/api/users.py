@@ -43,6 +43,8 @@ from src.services.vk_delivery import (
     vk_group_id,
 )
 from src.services.statistics import (
+    MONTH_LABELS,
+    as_moscow_datetime,
     build_performance_payload,
     filter_items_by_period,
     is_paid_client_access,
@@ -398,11 +400,16 @@ def _format_onboarding_report(
     client_label = " / ".join(part for part in [display_name, username] if part) or "без имени"
     selected_bookmaker_names = ", ".join(bookmaker.name for bookmaker in selected_bookmakers) or "не указано"
     pains = "; ".join(data.anti_capper_pains or []) or "не указано"
+    profile_type = "Web/VK клиент" if getattr(user, "is_web_only", False) else "Telegram клиент"
 
     lines = [
         "<b>Новая анкета приветственного опроса</b>",
         _onboarding_report_line("Клиент", client_label),
+        _onboarding_report_line("Тип профиля", profile_type),
         _onboarding_report_line("Telegram ID", user.telegram_id),
+        _onboarding_report_line("Username", username or "не указан"),
+        _onboarding_report_line("Телефон", user.phone or "не указан"),
+        _onboarding_report_line("VK ID", user.vk_user_id or data.vk_user_id or "не привязан"),
         "",
         _onboarding_report_line("Что раздражает", pains),
         _onboarding_report_line("Опыт", EXPERIENCE_LABELS.get(data.experience_level, data.experience_level)),
@@ -433,7 +440,7 @@ async def enqueue_onboarding_report(
     selected_bookmakers: List[Bookmaker],
     recommendation: dict,
 ) -> None:
-    chat_id = settings.SHAMRAI_ONBOARDING_REPORT_CHAT_ID
+    chat_id = settings.SHAMRAI_ONBOARDING_REPORT_CHAT_ID or settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
     if not chat_id:
         return
 
@@ -524,7 +531,7 @@ async def save_onboarding_profile(
 # --- BOOKMAKERS LIST ENDPOINT ---
 
 @router.get("/bookmakers", response_model=List[BookmakerResponse])
-async def list_bookmakers(db: AsyncSession = Depends(get_read_db)):
+async def list_bookmakers(db: AsyncSession = Depends(get_db)):
     """GET /api/bookmakers/ — Returns a list of all active platforms in the system."""
     return await ensure_standard_bookmakers(db)
 
@@ -729,14 +736,46 @@ async def get_my_taken_bets_timeline(
     payload["excluded_bets"] = filtered_excluded_items
     return payload
 
+def _user_export_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return as_moscow_datetime(parsed)
+
+
+def _user_export_result_label(status_value: Any) -> str:
+    status_text = str(status_value or "")
+    if status_text == "win":
+        return "Победа"
+    if status_text == "loss":
+        return "Неудача"
+    if status_text == "refund":
+        return "Возврат"
+    return status_text
+
+
+def _user_export_flat_stake(status_value: Any) -> int:
+    return 1 if str(status_value or "") in {"win", "loss"} else 0
+
+
 def _user_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for item in items:
+        resolved_at = _user_export_datetime(item.get("resolved_at"))
+        month_label = f"{MONTH_LABELS.get(resolved_at.month, resolved_at.strftime('%m'))} {resolved_at.year}" if resolved_at else ""
+        status_value = item.get("status") or ""
         rows.append({
+            "month": month_label,
             "resolved_at": item.get("resolved_at") or "",
+            "day": resolved_at.strftime("%d.%m.%Y") if resolved_at else "",
             "event_name": item.get("event_name") or "",
-            "status": item.get("status") or "",
+            "status": status_value,
+            "result": _user_export_result_label(status_value),
             "coefficient": item.get("coefficient") or 0,
+            "flat_stake": _user_export_flat_stake(status_value),
             "profit_units": item.get("profit_units") or 0,
             "roi_percent": round(float(item.get("profit_units") or 0) * 100, 2),
             "source": item.get("source_type") or "",
@@ -749,16 +788,19 @@ def _user_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _user_csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingResponse:
     fieldnames = [
-        "resolved_at",
+        "month",
+        "day",
+        "sport",
         "event_name",
-        "status",
+        "bookmakers",
         "coefficient",
+        "flat_stake",
         "profit_units",
+        "result",
         "roi_percent",
         "source",
-        "sport",
-        "bookmakers",
         "outcome",
+        "status",
     ]
     buffer = StringIO()
     buffer.write("\ufeff")
@@ -776,16 +818,19 @@ def _user_xlsx_response(rows: list[dict[str, Any]], filename: str) -> StreamingR
     from openpyxl import Workbook
 
     headers = [
-        ("resolved_at", "Дата расчета"),
+        ("month", "Месяц"),
+        ("day", "День"),
+        ("sport", "Вид спорта"),
         ("event_name", "Матч"),
-        ("status", "Результат"),
+        ("bookmakers", "БК"),
         ("coefficient", "КФ"),
+        ("flat_stake", "Ставка, флет"),
         ("profit_units", "Прибыль, флеты"),
+        ("result", "Результат"),
         ("roi_percent", "ROI ставки, %"),
         ("source", "Источник"),
-        ("sport", "Спорт"),
-        ("bookmakers", "БК"),
         ("outcome", "Исход"),
+        ("status", "Статус"),
     ]
     workbook = Workbook()
     worksheet = workbook.active
@@ -974,8 +1019,8 @@ async def generate_user_pdf_report(
     metrics_data = [
         [
             Paragraph("<b>Total Forecasts</b>", body_style),
-            Paragraph("<b>Wins</b>", body_style),
-            Paragraph("<b>Losses</b>", body_style),
+            Paragraph("<b>Победа</b>", body_style),
+            Paragraph("<b>Неудача</b>", body_style),
             Paragraph("<b>Net Profit</b>", body_style),
             Paragraph("<b>ROI</b>", body_style)
         ],

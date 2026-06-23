@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional
+from urllib.parse import urljoin
 
 from fastapi import WebSocket
 from sqlalchemy import select
@@ -34,6 +35,10 @@ WEBSOCKET_SEND_TIMEOUT_SECONDS = 1.2
 WEBSOCKET_FANOUT_CONCURRENCY = 64
 EXTERNAL_DELIVERY_CONCURRENCY = 16
 WEB_PUSH_INVALID_STATUS_CODES = {404, 410}
+SUPPORT_STAFF_MESSAGE_TYPE = "support_staff_message"
+SUPPORT_CLIENT_MESSAGE_TYPE = "support_client_message"
+SUPPORT_MESSAGE_TYPES = (SUPPORT_STAFF_MESSAGE_TYPE, SUPPORT_CLIENT_MESSAGE_TYPE)
+SUPPORT_NOTIFICATION_BODY_LIMIT = 280
 
 
 def _run_background_delivery(coro) -> None:
@@ -88,6 +93,7 @@ class SignalStreamHub:
 
 
 signal_stream_hub = SignalStreamHub()
+support_staff_stream_hub = SignalStreamHub()
 
 
 def web_push_configured() -> bool:
@@ -99,7 +105,7 @@ def web_push_configured() -> bool:
 
 
 def signal_to_payload(signal: PersonalSignal) -> dict[str, Any]:
-    return {
+    payload = {
         "id": signal.id,
         "user_id": signal.user_id,
         "text": signal.text,
@@ -107,6 +113,21 @@ def signal_to_payload(signal: PersonalSignal) -> dict[str, Any]:
         "data": signal.data or {},
         "created_at": signal.created_at.isoformat() if signal.created_at else datetime.now(timezone.utc).isoformat(),
     }
+    if signal.type in SUPPORT_MESSAGE_TYPES:
+        signal_data = signal.data or {}
+        direction = signal_data.get("direction")
+        if direction not in {"staff", "client"}:
+            direction = "staff" if signal.type == SUPPORT_STAFF_MESSAGE_TYPE else "client"
+        payload.update({
+            "direction": direction,
+            "author_label": str(
+                signal_data.get("author_label")
+                or ("Shamrai" if direction == "staff" else "Клиент")
+            ),
+            "sender_user_id": signal_data.get("sender_user_id") or (signal.user_id if direction == "client" else None),
+            "sender_role": signal_data.get("sender_role") or ("user" if direction == "client" else None),
+        })
+    return payload
 
 
 def build_live_signal_text(
@@ -166,6 +187,10 @@ def _notification_title(signal_payload: dict[str, Any]) -> str:
     explicit_title = str(signal_data.get("push_title") or signal_data.get("title") or "").strip()
     if explicit_title:
         return explicit_title
+    if signal_type == SUPPORT_STAFF_MESSAGE_TYPE:
+        return "Shamrai написал в чат"
+    if signal_type == SUPPORT_CLIENT_MESSAGE_TYPE:
+        return "Ответ клиента в чате"
     if signal_data.get("request_kind") == "paid_set":
         return "Платный набор Shamrai"
     if signal_type == "forecast_teaser":
@@ -180,6 +205,7 @@ def _notification_title(signal_payload: dict[str, Any]) -> str:
 
 
 def _notification_body(signal_payload: dict[str, Any]) -> str:
+    signal_type = str(signal_payload.get("type") or "")
     signal_data = signal_payload.get("data") or {}
     body = (
         signal_data.get("push_body")
@@ -187,7 +213,22 @@ def _notification_body(signal_payload: dict[str, Any]) -> str:
         or _first_non_empty_line(signal_payload.get("text"))
         or "Новый персональный сигнал уже в чате."
     )
-    return _trim_notification_body(str(body))
+    limit = SUPPORT_NOTIFICATION_BODY_LIMIT if signal_type in SUPPORT_MESSAGE_TYPES else 180
+    return _trim_notification_body(str(body), limit=limit)
+
+
+def _notification_target_url(signal_payload: dict[str, Any]) -> str:
+    frontend_url = settings.FRONTEND_BASE_URL.strip().rstrip("/") or "/app"
+    default_url = f"{frontend_url}?open=web-bot-chat"
+    signal_data = signal_payload.get("data") or {}
+    raw_url = str(signal_data.get("push_url") or signal_data.get("url") or "").strip()
+    if not raw_url:
+        return default_url
+    if raw_url.startswith(("http://", "https://")):
+        return raw_url
+    if raw_url.startswith("/"):
+        return urljoin(f"{frontend_url}/", raw_url)
+    return default_url
 
 
 def _web_push_exception_status(exc: Exception) -> Optional[int]:
@@ -210,8 +251,7 @@ def _web_push_exception_status(exc: Exception) -> Optional[int]:
 
 
 def _web_push_notification_payload(signal_payload: dict[str, Any]) -> str:
-    frontend_url = settings.FRONTEND_BASE_URL.strip().rstrip("/") or "/"
-    target_url = f"{frontend_url}?open=web-bot-chat"
+    target_url = _notification_target_url(signal_payload)
     signal_data = signal_payload.get("data") or {}
     coupon_image_url = _absolute_url(signal_data.get("coupon_image_url"))
     return json.dumps(
@@ -415,6 +455,7 @@ async def broadcast_personal_signals(
     send_telegram: bool = False,
     send_web_push: bool = True,
     return_report: bool = False,
+    commit_before_external_delivery: bool = False,
 ) -> Any:
     user_list = list({user.telegram_id: user for user in users}.values())
     if not user_list:
@@ -425,6 +466,7 @@ async def broadcast_personal_signals(
                 "web_push_sent": 0,
                 "web_push_failed": 0,
                 "web_push_missing_permission": 0,
+                "web_push_retry_queued": 0,
                 "web_push_errors": [],
             }
         return 0
@@ -467,12 +509,32 @@ async def broadcast_personal_signals(
 
     await dispatch_websocket_delivery_batch(websocket_deliveries)
     if return_report:
+        if commit_before_external_delivery:
+            await db.commit()
         external_results = await dispatch_signal_external_delivery_batch(external_deliveries)
         web_push_results = [
             item.get("web_push")
             for item in external_results
             if isinstance(item.get("web_push"), dict)
         ]
+        web_push_retry_deliveries: list[dict[str, Any]] = []
+        for delivery, delivery_result in zip(external_deliveries, external_results):
+            web_push_result = delivery_result.get("web_push") if isinstance(delivery_result, dict) else None
+            if (
+                delivery.get("send_web_push")
+                and isinstance(web_push_result, dict)
+                and not web_push_result.get("ok")
+                and not web_push_result.get("invalid_subscription")
+            ):
+                web_push_retry_deliveries.append({
+                    **delivery,
+                    "send_telegram": False,
+                    "send_web_push": True,
+                })
+        if web_push_retry_deliveries:
+            await enqueue_signal_external_delivery_batch(db, web_push_retry_deliveries)
+            if commit_before_external_delivery:
+                await db.commit()
         web_push_errors = [
             str(item.get("description") or "unknown error")
             for item in web_push_results
@@ -484,6 +546,7 @@ async def broadcast_personal_signals(
             "web_push_sent": sum(1 for item in web_push_results if item.get("ok")),
             "web_push_failed": sum(1 for item in web_push_results if not item.get("ok")),
             "web_push_missing_permission": web_push_missing_permission,
+            "web_push_retry_queued": len(web_push_retry_deliveries),
             "web_push_errors": list(dict.fromkeys(web_push_errors))[:5],
         }
     await enqueue_signal_external_delivery_batch(db, external_deliveries)

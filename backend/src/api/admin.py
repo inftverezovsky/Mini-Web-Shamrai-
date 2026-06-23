@@ -68,11 +68,17 @@ from src.services.statistics import (
     stat_item_from_bet,
     summarize_items,
 )
-from src.services.google_drive_export import get_drive_export_job, start_drive_export_job
+from src.services.google_drive_export import get_drive_export_job, start_crm_drive_export_job, start_drive_export_job
 from src.services.stats_export import (
-    FLAT_FORMAT,
+    ClientInfoExportRow,
+    ClientRecentBetExportRow,
+    build_client_info_export_workbook,
     build_stats_export_workbook,
+    filter_client_info_export_rows,
+    filter_client_recent_export_rows,
     load_author_export_items,
+    load_client_info_export_rows,
+    load_client_recent_bet_export_rows,
     load_clients_export_items,
     load_shamrai_export_items,
     stats_export_period_label,
@@ -119,7 +125,15 @@ class MarathonCreateOrUpdate(BaseModel):
 class AdminStatsDriveExportRequest(BaseModel):
     scope: str = "all"
     period: str = "all"
-    formats: List[str] = Field(default_factory=lambda: ["xlsx", "google_sheet"])
+    formats: List[str] = Field(default_factory=lambda: ["google_sheet"])
+
+
+class AdminCrmDriveExportRequest(BaseModel):
+    q: Optional[str] = None
+    activity: str = "all"
+    group: Optional[str] = None
+    tag: Optional[str] = None
+    formats: List[str] = Field(default_factory=lambda: ["google_sheet"])
 
 
 async def load_user_response(db: AsyncSession, telegram_id: int) -> User:
@@ -702,6 +716,98 @@ def _csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingRespons
     )
 
 
+def _yes_no_csv(value: bool) -> str:
+    return "Да" if value else "Нет"
+
+
+def _client_export_datetime(value: Optional[datetime]) -> str:
+    if not value:
+        return ""
+    return value.isoformat()
+
+
+def _client_export_streak_label(kind: Optional[str], count: int) -> str:
+    if count <= 0 or not kind:
+        return ""
+    label = "побед" if kind == "win" else "пораж."
+    return f"{count} {label}"
+
+
+def _client_info_csv_response(rows: list[ClientInfoExportRow], filename: str) -> StreamingResponse:
+    fieldnames = [
+        "ID",
+        "Клиент",
+        "Username",
+        "Телефон",
+        "VK ID",
+        "Web/VK клиент",
+        "Группа",
+        "Тег",
+        "БК клиента",
+        "Дата регистрации",
+        "Матчей осталось",
+        "Гарантия",
+        "Взял матчей всего",
+        "Рассчитано матчей",
+        "Ожидают расчета",
+        "Возвраты",
+        "Ставки",
+        "Победы",
+        "Поражения",
+        "Проход, %",
+        "ROI, %",
+        "Профит, флеты",
+        "Ср. кф",
+        "Текущая серия",
+        "Макс. побед",
+        "Макс. пораж.",
+        "Последние исходы",
+        "Ситуация",
+        "Описание",
+    ]
+    buffer = StringIO()
+    buffer.write("\ufeff")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            "ID": row.user_id,
+            "Клиент": row.client_name,
+            "Username": f"@{row.username}" if row.username else "",
+            "Телефон": row.phone,
+            "VK ID": row.vk_user_id,
+            "Web/VK клиент": _yes_no_csv(row.is_web_only),
+            "Группа": row.client_group,
+            "Тег": row.client_tag,
+            "БК клиента": row.bookmaker_names,
+            "Дата регистрации": _client_export_datetime(row.created_at),
+            "Матчей осталось": row.matches_remaining,
+            "Гарантия": _yes_no_csv(row.guarantee_active),
+            "Взял матчей всего": row.total_taken_bets,
+            "Рассчитано матчей": row.settled_bets,
+            "Ожидают расчета": row.pending_bets,
+            "Возвраты": row.refund_bets,
+            "Ставки": row.bets,
+            "Победы": row.wins,
+            "Поражения": row.losses,
+            "Проход, %": round(row.winrate, 2),
+            "ROI, %": round(row.roi, 2),
+            "Профит, флеты": round(row.profit_units, 2),
+            "Ср. кф": round(row.average_coefficient, 3),
+            "Текущая серия": _client_export_streak_label(row.current_streak_type, row.current_streak),
+            "Макс. побед": row.max_win_streak,
+            "Макс. пораж.": row.max_loss_streak,
+            "Последние исходы": " ".join(row.recent_results),
+            "Ситуация": row.situation_label,
+            "Описание": row.situation_description,
+        })
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _xlsx_bytes_response(content: bytes, filename: str) -> StreamingResponse:
     buffer = BytesIO(content)
     return StreamingResponse(
@@ -732,7 +838,7 @@ async def _author_export_items(db: AsyncSession, admin: User, period: str, sourc
         if (item := stat_item_from_bet(bet)) is not None
     ]
     items = filter_items_by_period(items, period)
-    if source in {"feed", "private"}:
+    if source in {"feed", "private", "paid_set"}:
         items = [item for item in items if item.get("source_type") == source]
     return items
 
@@ -776,7 +882,7 @@ async def export_admin_stats(
     scope: str = Query("author", pattern="^(author|clients|shamrai)$"),
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     period: str = Query("all", pattern="^(week|month|quarter|all)$"),
-    source: str = Query("all", pattern="^(all|feed|private)$"),
+    source: str = Query("all", pattern="^(all|feed|private|paid_set)$"),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> Response:
@@ -792,14 +898,16 @@ async def export_admin_stats(
                 include_client=False,
             )
         elif scope == "clients":
-            export_items = await load_clients_export_items(db, normalized_period)
-            content = build_stats_export_workbook(
-                export_items,
-                title="СТАТИСТИКА КЛИЕНТОВ SHAMRAI",
+            client_info_rows = await load_client_info_export_rows(db, normalized_period)
+            client_recent_rows = await load_client_recent_bet_export_rows(
+                db,
+                normalized_period,
+                limit_per_client=None,
+            )
+            content = build_client_info_export_workbook(
+                client_info_rows,
+                recent_rows=client_recent_rows,
                 period_label=period_label,
-                include_client=True,
-                value_format=FLAT_FORMAT,
-                value_label="флеты",
             )
         else:
             export_items = await load_author_export_items(
@@ -811,6 +919,7 @@ async def export_admin_stats(
             source_label = {
                 "feed": "ЛЕНТА",
                 "private": "ЗАКРЫТАЯ ВЫДАЧА",
+                "paid_set": "НАБОРЫ",
                 "all": "ВСЕ ПРОГНОЗЫ",
             }.get(source, "ВСЕ ПРОГНОЗЫ")
             content = build_stats_export_workbook(
@@ -819,7 +928,11 @@ async def export_admin_stats(
                 period_label=period_label,
                 include_client=False,
             )
-        filename = f"shamrai_stats_{scope}_{normalized_period}.xlsx"
+        filename = (
+            f"shamrai_clients_info_{normalized_period}.xlsx"
+            if scope == "clients"
+            else f"shamrai_stats_{scope}_{normalized_period}.xlsx"
+        )
         return _xlsx_bytes_response(content, filename)
 
     if scope == "clients":
@@ -850,7 +963,7 @@ async def create_admin_stats_drive_export(
     period = normalize_period(payload.period)
     formats = [str(item).strip().lower() for item in (payload.formats or [])]
     if not formats:
-        formats = ["xlsx", "google_sheet"]
+        formats = ["google_sheet"]
     invalid_formats = [item for item in formats if item not in {"xlsx", "google_sheet"}]
     if invalid_formats:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="formats может содержать только xlsx и google_sheet")
@@ -879,9 +992,14 @@ async def get_pending_bets(
     GET /api/admin/bets/pending
     Lists all non-calculated sports predictions.
     """
+    legacy_stopped_private_filter = (
+        (Bet.status == "deleted")
+        & Bet.resolved_at.is_(None)
+        & Bet.delivery_mode.in_(["sales_private", "paid_set"])
+    )
     query = (
         select(Bet)
-        .filter(Bet.status == "pending")
+        .filter(or_(Bet.status == "pending", legacy_stopped_private_filter))
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
         .order_by(Bet.created_at.desc())
     )
@@ -892,7 +1010,7 @@ async def get_pending_bets(
 @router.delete("/bets/{bet_id}")
 async def delete_bet_from_admin(
     bet_id: UUID,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1313,6 +1431,77 @@ async def admin_audit_log(
         }
         for log in logs
     ]
+
+
+@router.get("/users/export")
+async def export_admin_users(
+    format: str = Query("xlsx", pattern="^(csv|xlsx)$"),
+    q: Optional[str] = Query(None),
+    activity: str = Query("all", pattern="^(all|active|empty|guarantee)$"),
+    group: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> Response:
+    """Download CRM client situation export from the Clients tab."""
+    client_info_rows = await load_client_info_export_rows(db, "all")
+    filtered_info_rows = filter_client_info_export_rows(
+        client_info_rows,
+        q=q,
+        activity=activity,
+        group=group,
+        tag=tag,
+    )
+    filtered_user_ids = {row.user_id for row in filtered_info_rows}
+
+    if format == "csv":
+        return _client_info_csv_response(filtered_info_rows, "shamrai_clients_crm.csv")
+
+    recent_rows = await load_client_recent_bet_export_rows(db, "all", limit_per_client=None)
+    filtered_recent_rows = filter_client_recent_export_rows(recent_rows, filtered_user_ids)
+    content = build_client_info_export_workbook(
+        filtered_info_rows,
+        recent_rows=filtered_recent_rows,
+        period_label="CRM: клиенты",
+    )
+    return _xlsx_bytes_response(content, "shamrai_clients_crm.xlsx")
+
+
+@router.post("/users/drive-export")
+async def create_admin_users_drive_export(
+    payload: AdminCrmDriveExportRequest,
+    admin: User = Depends(get_current_admin),
+) -> dict[str, Any]:
+    activity = str(payload.activity or "all").strip().lower()
+    if activity not in {"all", "active", "empty", "guarantee"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="activity должен быть all, active, empty или guarantee")
+
+    formats = [str(item).strip().lower() for item in (payload.formats or [])]
+    if not formats:
+        formats = ["google_sheet"]
+    invalid_formats = [item for item in formats if item not in {"xlsx", "google_sheet"}]
+    if invalid_formats:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="formats может содержать только xlsx и google_sheet")
+
+    return start_crm_drive_export_job(
+        q=payload.q,
+        activity=activity,
+        group=payload.group,
+        tag=payload.tag,
+        formats=list(dict.fromkeys(formats)),
+    )
+
+
+@router.get("/users/drive-export/{job_id}")
+async def get_admin_users_drive_export(
+    job_id: str,
+    admin: User = Depends(get_current_admin_read),
+) -> dict[str, Any]:
+    job = get_drive_export_job(job_id)
+    if not job or job.get("scope") != "crm":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Задача CRM-выгрузки не найдена")
+    return job
+
 
 @router.put("/users/{user_id}", response_model=UserResponse)
 async def admin_update_user(

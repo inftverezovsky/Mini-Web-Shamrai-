@@ -2,11 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   BarChart3,
-  CheckCircle2,
-  ExternalLink,
   Loader2,
   Search,
   ShieldAlert,
+  Sparkles,
   Target,
   Trophy,
   UploadCloud,
@@ -18,7 +17,9 @@ import {
   ExpandedMap,
   BreakdownBars,
   CollapsiblePanel,
+  ExecutiveScoreboard,
   ExportActions,
+  ExportStatusPanel,
   IconActionButton,
   MomentumStrip,
   OverviewAnalytics,
@@ -33,6 +34,7 @@ import {
   pct,
   profitTone,
   recentResultCodes,
+  streakLabel,
   summaryTone,
 } from '../../features/performance/performanceUi';
 import {
@@ -40,6 +42,7 @@ import {
   AdminClientStatsItem,
   AdminClientsStatsResponse,
   AdminClientTimelineResponse,
+  BookmakerResponse,
   PerformanceBetItem,
   PerformanceSummary,
   PerformanceTimelineResponse,
@@ -48,22 +51,16 @@ import {
   StatsDriveExportScope,
 } from '../../schemas/schemas';
 import { apiFetch, downloadApiFile } from '../../utils/api';
+import AdminStatsBetRow from './AdminStatsBetRow';
 
-type StatsTab = 'all' | 'feed' | 'private' | 'clients';
+type StatsTab = 'all' | 'feed' | 'private' | 'paid_set' | 'clients';
 
 const driveScopeLabels: Record<StatsDriveExportScope, string> = {
   all: 'Все',
   shamrai: 'Шамрай',
   clients: 'Клиенты',
+  crm: 'CRM',
 };
-
-function driveStatusLabel(job: StatsDriveExportJob | null) {
-  if (!job) return null;
-  if (job.status === 'completed') return 'Готово';
-  if (job.status === 'failed') return 'Ошибка';
-  if (job.status === 'running') return 'Создается';
-  return 'В очереди';
-}
 
 function summarizeClientSide(bets: PerformanceBetItem[]): PerformanceSummary {
   if (!bets.length) return EMPTY_SUMMARY;
@@ -84,6 +81,14 @@ function summarizeClientSide(bets: PerformanceBetItem[]): PerformanceSummary {
     current_streak: 0,
     current_streak_type: null,
   };
+}
+
+async function loadAuthorTimeline(period: PeriodFilter) {
+  return apiFetch<AdminAuthorTimelineResponse>(`/admin/stats/author-timeline?period=${encodeURIComponent(period)}`);
+}
+
+async function loadClientTimeline(clientId: number, period: PeriodFilter) {
+  return apiFetch<AdminClientTimelineResponse>(`/admin/stats/clients/${clientId}?period=${encodeURIComponent(period)}`);
 }
 
 function breakdownClientSide(
@@ -196,32 +201,46 @@ function ClientLeaderboard({
     <div className="space-y-2">
       {clients.map((client, index) => {
         const active = selectedClientId === client.telegram_id;
+        const needsAttention = client.situation.tone === 'danger' || (client.summary.current_streak_type === 'loss' && client.summary.current_streak >= 2);
         return (
           <button
             key={client.telegram_id}
             type="button"
             onClick={() => onOpenClient(client)}
-            className={`w-full rounded-[24px] border p-3 text-left transition-all active:scale-[0.995] ${
+            className={`smooth-pressable w-full overflow-hidden rounded-[24px] border p-3 text-left transition-all active:scale-[0.995] ${
               active
-                ? 'border-cyan-200/35 bg-cyan-200/[0.08]'
+                ? 'border-cyan-200/35 bg-cyan-200/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
                 : 'border-white/10 bg-white/[0.04] hover:border-cyan-200/25 hover:bg-white/[0.065]'
             }`}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/45 text-xs font-black text-slate-300">
-                  {index + 1}
-                </div>
+                {client.photo_url ? (
+                  <img
+                    src={client.photo_url}
+                    alt={`Фото ${client.name}`}
+                    className="h-10 w-10 shrink-0 rounded-2xl border border-white/10 object-cover"
+                  />
+                ) : (
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/45 text-xs font-black text-slate-300">
+                    {index + 1}
+                  </div>
+                )}
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="truncate text-sm font-black text-white">{client.name}</div>
                     <ClientSituationBadge client={client} />
+                    {needsAttention ? (
+                      <span className="rounded-full border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-[9px] font-black uppercase tracking-[0.1em] text-amber-100">
+                        Внимание
+                      </span>
+                    ) : null}
                   </div>
                   <div className="mt-1 truncate text-[10px] font-bold text-slate-500">
                     ID {client.telegram_id}
-                    {client.username ? ` · @${client.username}` : ''}
-                    {client.client_group ? ` · ${client.client_group}` : ''}
-                    {client.client_tag ? ` · ${client.client_tag}` : ''}
+                    {client.username ? ` / @${client.username}` : ''}
+                    {client.client_group ? ` / ${client.client_group}` : ''}
+                    {client.client_tag ? ` / ${client.client_tag}` : ''}
                   </div>
                   <div className="mt-2"><ResultStrip results={client.recent_results} /></div>
                 </div>
@@ -231,7 +250,7 @@ function ClientLeaderboard({
                   {formatStatsValue(client.summary.profit_units, 'flats')}
                 </div>
                 <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-500">
-                  ROI {pct(client.summary.roi)} · {client.summary.bets} ставок
+                  ROI {pct(client.summary.roi)} / {client.summary.bets} ставок
                 </div>
                 <div className="mt-2 text-[9px] font-black uppercase tracking-[0.12em] text-cyan-200">
                   {loading && active ? 'Загрузка' : 'Открыть'}
@@ -277,7 +296,7 @@ function ClientPulse({ clients }: { clients: AdminClientStatsItem[] }) {
     {
       key: 'run',
       label: 'Серия минусов',
-      value: lossRunClient ? `${lossRunClient.summary.current_streak}L` : '-',
+      value: lossRunClient ? streakLabel(lossRunClient.summary) : '-',
       hint: lossRunClient ? lossRunClient.name : 'Нет активной серии',
       tone: lossRunClient ? 'text-rose-200' : 'text-slate-400',
       icon: <AlertCircle className="h-4 w-4 text-amber-300" />,
@@ -344,43 +363,7 @@ function ExportPanel({
           {driveLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
         </IconActionButton>
       </div>
-      {(driveJob || driveError) && (
-        <div className="mt-2 rounded-2xl border border-white/10 bg-slate-950/35 px-3 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              {driveJob?.status === 'completed' ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" />
-              ) : driveJob?.status === 'failed' || driveError ? (
-                <AlertCircle className="h-4 w-4 shrink-0 text-rose-300" />
-              ) : (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-cyan-200" />
-              )}
-              <span className="truncate text-[10px] font-black uppercase tracking-[0.1em] text-slate-300">
-                {driveError || driveJob?.error || driveStatusLabel(driveJob)}
-              </span>
-            </div>
-            {driveJob?.status === 'completed' && (
-              <span className="shrink-0 text-[9px] font-black uppercase tracking-[0.1em] text-emerald-200">Drive</span>
-            )}
-          </div>
-          {driveJob?.links?.length ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {driveJob.links.slice(0, 6).map((link) => (
-                <a
-                  key={`${link.format}:${link.id}`}
-                  href={link.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex max-w-full items-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1 text-[9px] font-bold text-cyan-100 hover:bg-white/[0.1]"
-                >
-                  <ExternalLink className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{link.title}</span>
-                </a>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      )}
+      <ExportStatusPanel job={driveJob} error={driveError} title="Google Drive" compact />
     </section>
   );
 }
@@ -389,6 +372,7 @@ export default function AdminStats() {
   const [authorData, setAuthorData] = useState<AdminAuthorTimelineResponse | null>(null);
   const [clientsData, setClientsData] = useState<AdminClientsStatsResponse | null>(null);
   const [selectedClient, setSelectedClient] = useState<AdminClientTimelineResponse | null>(null);
+  const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [tab, setTab] = useState<StatsTab>('all');
   const [period, setPeriod] = useState<PeriodFilter>('all');
   const [clientQuery, setClientQuery] = useState('');
@@ -410,12 +394,14 @@ export default function AdminStats() {
       setError(null);
       setSelectedClient(null);
       const periodQuery = `period=${encodeURIComponent(period)}`;
-      const [authorTimeline, clients] = await Promise.all([
-        apiFetch<AdminAuthorTimelineResponse>(`/admin/stats/author-timeline?${periodQuery}`),
+      const [authorTimeline, clients, bookmakerList] = await Promise.all([
+        loadAuthorTimeline(period),
         apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`),
+        apiFetch<BookmakerResponse[]>('/bookmakers'),
       ]);
       setAuthorData(authorTimeline);
       setClientsData(clients);
+      setBookmakers(bookmakerList);
       setExpandedMonths({});
       setExpandedDays({});
     } catch (err: any) {
@@ -454,7 +440,15 @@ export default function AdminStats() {
   const displayTitle = tab === 'clients'
     ? 'Клиентская статистика'
     : authorData?.author.name || 'Статистика Shamrai';
-  const displayEyebrow = tab === 'clients' ? 'Клиенты' : tab === 'feed' ? 'Лента' : tab === 'private' ? 'Закрытые' : 'Статистика Shamrai';
+  const displayEyebrow = tab === 'clients'
+    ? 'Клиенты'
+    : tab === 'feed'
+      ? 'Лента'
+      : tab === 'private'
+        ? 'Закрытые'
+        : tab === 'paid_set'
+          ? 'Наборы'
+          : 'Статистика Shamrai';
 
   const filteredClients = useMemo(() => {
     const query = clientQuery.trim().toLowerCase();
@@ -484,7 +478,7 @@ export default function AdminStats() {
   const openClient = async (client: AdminClientStatsItem) => {
     try {
       setClientLoading(true);
-      const data = await apiFetch<AdminClientTimelineResponse>(`/admin/stats/clients/${client.telegram_id}?period=${encodeURIComponent(period)}`);
+      const data = await loadClientTimeline(client.telegram_id, period);
       setSelectedClient(data);
       setExpandedMonths({});
       setExpandedDays({});
@@ -497,6 +491,17 @@ export default function AdminStats() {
       setClientLoading(false);
     }
   };
+
+  const refreshAuthorTimeline = useCallback(async () => {
+    const freshTimeline = await loadAuthorTimeline(period);
+    setAuthorData(freshTimeline);
+  }, [period]);
+
+  const refreshSelectedClientTimeline = useCallback(async () => {
+    if (!selectedClient) return;
+    const freshClient = await loadClientTimeline(selectedClient.user.telegram_id, period);
+    setSelectedClient(freshClient);
+  }, [period, selectedClient]);
 
   const exportStats = async (format: 'csv' | 'xlsx') => {
     try {
@@ -520,7 +525,7 @@ export default function AdminStats() {
       const scope = tab === 'clients' ? 'clients' : driveScope;
       const job = await apiFetch<StatsDriveExportJob>('/admin/stats/drive-export', {
         method: 'POST',
-        body: JSON.stringify({ scope, period, formats: ['xlsx', 'google_sheet'] }),
+        body: JSON.stringify({ scope, period, formats: ['google_sheet'] }),
       });
       setDriveJob(job);
       if (job.status === 'completed' || job.status === 'failed') {
@@ -570,11 +575,12 @@ export default function AdminStats() {
         title={tab === 'clients' ? 'Сводный импульс клиентов' : 'Последние расчеты'}
       />
 
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
         {([
           ['all', 'Обзор', Trophy],
           ['feed', 'Лента', BarChart3],
           ['private', 'Закрытые', Target],
+          ['paid_set', 'Наборы', Sparkles],
           ['clients', 'Клиенты', Users],
         ] as const).map(([value, label, Icon]) => (
           <button
@@ -593,7 +599,7 @@ export default function AdminStats() {
         ))}
       </div>
 
-      <StatsKpiGrid summary={summary} valueMode={valueMode} />
+      <ExecutiveScoreboard summary={summary} valueMode={valueMode} />
 
       {tab !== 'clients' ? (
         <>
@@ -612,6 +618,14 @@ export default function AdminStats() {
             onToggleDay={(key) => setExpandedDays((current) => ({ ...current, [key]: !(current[key] ?? false) }))}
             valueMode={valueMode}
             title="Ставки по расчету"
+            renderBet={(bet) => (
+              <AdminStatsBetRow
+                bet={bet}
+                valueMode={valueMode}
+                bookmakers={bookmakers}
+                onChanged={refreshAuthorTimeline}
+              />
+            )}
           />
         </>
       ) : (
@@ -688,6 +702,13 @@ export default function AdminStats() {
                     <>
                       <MomentumStrip results={selectedClient.recent_results} title="Импульс клиента" compact />
                       <StatsKpiGrid summary={selectedClient.summary} valueMode="flats" />
+                      <OverviewAnalytics
+                        data={selectedClient}
+                        sourceSplit={selectedClient.source_split}
+                        bookmakerBreakdown={selectedClient.bookmaker_breakdown}
+                        sportBreakdown={selectedClient.sport_breakdown}
+                        valueMode="flats"
+                      />
                       <TimelineSectionBlock
                         data={selectedClient}
                         expandedMonths={expandedMonths}
@@ -697,6 +718,14 @@ export default function AdminStats() {
                         valueMode="flats"
                         title="Ставки клиента"
                         aside={<span className={`text-xs font-black tabular-nums ${profitTone(selectedClient.summary.profit_units)}`}>{formatStatsValue(selectedClient.summary.profit_units, 'flats')}</span>}
+                        renderBet={(bet) => (
+                          <AdminStatsBetRow
+                            bet={bet}
+                            valueMode="flats"
+                            bookmakers={bookmakers}
+                            onChanged={refreshSelectedClientTimeline}
+                          />
+                        )}
                       />
                     </>
                   )}
@@ -705,7 +734,7 @@ export default function AdminStats() {
                 <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-8 text-center">
                   <Users className="mx-auto h-9 w-9 text-slate-600" />
                   <p className="mt-3 text-sm font-black text-white">Выберите клиента</p>
-                  <p className="mt-1 text-xs font-bold text-slate-500">Карточка покажет KPI, график и историю ставок.</p>
+                  <p className="mt-1 text-xs font-bold text-slate-500">Карточка покажет итог, график и историю ставок.</p>
                 </div>
               )}
             </div>

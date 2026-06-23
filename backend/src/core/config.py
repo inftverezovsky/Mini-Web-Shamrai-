@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 LOCAL_DEV_JWT_SECRET = "BET_TMA_LOCAL_DEV_SECRET_CHANGE_ME"
 
+
 class Settings(BaseSettings):
     APP_ENV: str = "local"
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/shamrai"
@@ -77,7 +78,12 @@ class Settings(BaseSettings):
     SECURITY_TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     STATS_EXPORT_UNIT_STAKE_RUB: int = 10000
     GOOGLE_DRIVE_STATS_ENABLED: bool = False
+    GOOGLE_DRIVE_AUTH_MODE: str = "auto"
     GOOGLE_DRIVE_STATS_FOLDER_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    GOOGLE_OAUTH_REFRESH_TOKEN: str = ""
+    GOOGLE_OAUTH_TOKEN_URI: str = "https://oauth2.googleapis.com/token"
     GOOGLE_SERVICE_ACCOUNT_JSON_B64: str = ""
 
     @property
@@ -86,7 +92,6 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        # Async SQLAlchemy requires async drivers for request handlers.
         if self.DATABASE_URL.startswith("postgresql://"):
             return self.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
         if self.DATABASE_URL.startswith("sqlite:///"):
@@ -179,9 +184,12 @@ class Settings(BaseSettings):
                 raise RuntimeError("VK_CALLBACK_CONFIRMATION_CODE must be set when VK callbacks are enabled in production")
             if not self.VK_CALLBACK_SECRET.strip():
                 raise RuntimeError("VK_CALLBACK_SECRET must be set when VK callbacks are enabled in production")
+            if not self.VK_GROUP_ACCESS_TOKEN.strip():
+                raise RuntimeError("VK_GROUP_ACCESS_TOKEN must be set when VK delivery is enabled in production")
 
     class Config:
         env_file = ".env"
         extra = "ignore"
+
 
 settings = Settings()

@@ -1,6 +1,6 @@
 import React, { useId, useState } from 'react';
 import { AnimatePresence, motion, type Variants } from 'framer-motion';
-import { Check, ChevronDown, Layers3, Sparkles } from 'lucide-react';
+import { Check, CheckCheck, ChevronDown, Layers3, Sparkles } from 'lucide-react';
 import { BookmakerResponse } from '../schemas/schemas';
 import { BookmakerLogoFrame } from './LogoFrame';
 import SmoothCollapse from './SmoothCollapse';
@@ -13,6 +13,7 @@ interface BookmakerMultiSelectProps {
   hint?: string;
   disabled?: boolean;
   allowAll?: boolean;
+  selectAllLabel?: string;
 }
 
 const premiumEase = [0.16, 1, 0.3, 1] as [number, number, number, number];
@@ -46,15 +47,18 @@ export default function BookmakerMultiSelect({
   label,
   disabled = false,
   allowAll = true,
+  selectAllLabel = 'Выбрать все БК',
 }: BookmakerMultiSelectProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const contentId = useId();
   const selectedSet = new Set(selectedIds);
+  const allBookmakerIds = bookmakers.map((bookmaker) => bookmaker.id);
+  const allSelected = bookmakers.length > 0 && bookmakers.every((bookmaker) => selectedSet.has(bookmaker.id));
   const selectedNames = bookmakers
     .filter((bookmaker) => selectedSet.has(bookmaker.id))
     .map((bookmaker) => bookmaker.name);
-  const selectedCountLabel = selectedIds.length === 0 ? (allowAll ? 'Все БК' : '0') : selectedIds.length.toString();
-  const selectedSummary = selectedNames.length > 0 ? selectedNames.join(', ') : allowAll ? 'Все БК' : '0 БК';
+  const selectedCountLabel = allSelected ? 'Все' : selectedIds.length === 0 ? (allowAll ? 'Все БК' : '0') : selectedIds.length.toString();
+  const selectedSummary = allSelected ? 'Все БК' : selectedNames.length > 0 ? selectedNames.join(', ') : allowAll ? 'Все БК' : '0 БК';
 
   const toggleBookmaker = (bookmakerId: number) => {
     if (disabled) return;
@@ -117,6 +121,41 @@ export default function BookmakerMultiSelect({
                 </span>
                 <AnimatePresence>
                   {selectedIds.length === 0 && (
+                    <motion.span
+                      initial={{ opacity: 0, scale: 0.6, rotate: -18 }}
+                      animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                      exit={{ opacity: 0, scale: 0.55, rotate: 18 }}
+                      transition={{ type: 'spring', stiffness: 420, damping: 24 }}
+                      className="bookmaker-card__mark"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </motion.button>
+            )}
+
+            {!allowAll && bookmakers.length > 0 && (
+              <motion.button
+                type="button"
+                onClick={() => !disabled && onChange(allBookmakerIds)}
+                disabled={disabled}
+                whileHover={disabled ? undefined : { y: -2, scale: 1.01 }}
+                whileTap={disabled ? undefined : { scale: 0.985 }}
+                className={`bookmaker-card bookmaker-card--all mb-2 flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left ${
+                  allSelected
+                    ? 'bookmaker-card--active bookmaker-card--all-active text-cyan-100'
+                    : 'text-slate-300'
+                } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                <span className="flex items-center gap-2">
+                  <CheckCheck className="w-4 h-4 text-cyan-300" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider">
+                    {allSelected ? 'Все БК выбраны' : selectAllLabel}
+                  </span>
+                </span>
+                <AnimatePresence>
+                  {allSelected && (
                     <motion.span
                       initial={{ opacity: 0, scale: 0.6, rotate: -18 }}
                       animate={{ opacity: 1, scale: 1, rotate: 0 }}

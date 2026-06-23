@@ -93,8 +93,10 @@ export interface BetResponse {
   id: string;
   event_name: string;
   coefficient: string | number;
+  fair_coefficient: string | number | null;
   bookmaker_id: number | null;
   description: string | null;
+  teaser_text: string | null;
   status: 'pending' | 'win' | 'loss' | 'refund' | 'deleted';
   author_id: number | null;
   created_at: string;
@@ -257,6 +259,126 @@ export interface MessageTemplateResponse {
   updated_at: string | null;
 }
 
+export type SupportChatDirection = 'staff' | 'client';
+
+export interface SupportChatUserResponse {
+  telegram_id: number;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  photo_url: string | null;
+  is_web_only: boolean;
+  role: string;
+  display_name: string;
+}
+
+export interface SupportChatMessageResponse {
+  id: number;
+  user_id: number;
+  text: string;
+  type: 'support_staff_message' | 'support_client_message';
+  data: Record<string, any>;
+  created_at: string;
+  direction: SupportChatDirection;
+  author_label: string;
+  sender_user_id: number | null;
+  sender_role: string | null;
+}
+
+export interface SupportChatThreadResponse {
+  user: SupportChatUserResponse;
+  last_message: SupportChatMessageResponse | null;
+  last_message_text: string | null;
+  last_message_created_at: string | null;
+  needs_reply: boolean;
+}
+
+export interface SupportChatThreadListResponse {
+  items: SupportChatThreadResponse[];
+}
+
+export type ChatSupportDirection = 'staff' | 'client';
+export type ChatConversationKind = 'signals' | 'support';
+export type ChatConversationStatus = 'open' | 'closed';
+
+export interface ChatUserResponse {
+  telegram_id: number;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  photo_url: string | null;
+  is_web_only: boolean;
+  role: string;
+  display_name: string;
+}
+
+export interface ChatMessageResponse {
+  id: number;
+  conversation_id: string;
+  sender_user_id: number | null;
+  sender_role: string;
+  direction: ChatSupportDirection;
+  author_label: string;
+  type: 'text';
+  text: string | null;
+  payload: Record<string, any>;
+  client_message_id: string;
+  reply_to_id: number | null;
+  created_at: string;
+  edited_at: string | null;
+  deleted_at: string | null;
+}
+
+export interface ChatSignalMessageResponse {
+  id: number;
+  user_id: number;
+  text: string;
+  type: string;
+  data: Record<string, any>;
+  created_at: string;
+  direction?: ChatSupportDirection | null;
+  author_label?: string | null;
+  sender_user_id?: number | null;
+  sender_role?: string | null;
+}
+
+export interface ChatConversationResponse {
+  id: string | null;
+  kind: ChatConversationKind;
+  key: string;
+  status: ChatConversationStatus;
+  owner_user: ChatUserResponse;
+  assigned_staff_id: number | null;
+  last_message: ChatMessageResponse | ChatSignalMessageResponse | null;
+  last_message_text: string | null;
+  last_message_at: string | null;
+  unread_count: number;
+}
+
+export interface ChatConversationListResponse {
+  items: ChatConversationResponse[];
+  next_before: string | null;
+  has_more: boolean;
+}
+
+export interface ChatMessagePageResponse {
+  items: ChatMessageResponse[];
+  next_before_id: number | null;
+  has_more: boolean;
+}
+
+export interface ChatSignalMessagePageResponse {
+  items: ChatSignalMessageResponse[];
+  next_before_id: number | null;
+  has_more: boolean;
+}
+
+export interface ChatReadResponse {
+  status: string;
+  last_read_message_id: number | null;
+  last_read_signal_id: number | null;
+}
+
 export type PeriodFilter = 'week' | 'month' | 'quarter' | 'all';
 
 export interface PerformanceSummary {
@@ -278,16 +400,20 @@ export interface PerformanceBetItem {
   event_name: string;
   status: 'win' | 'loss';
   coefficient: number;
+  bookmaker_id?: number | null;
+  description?: string | null;
   profit_units: number;
   resolved_at: string;
   created_at: string | null;
   taken_at: string | null;
   delivery_mode: 'feed' | 'sales_private' | 'paid_set';
-  source_type: 'feed' | 'private';
+  source_type: 'feed' | 'private' | 'paid_set';
   sport_type: string | null;
   outcome: string | null;
+  match_link?: string | null;
   bookmakers: Array<Pick<BookmakerResponse, 'id' | 'name' | 'code'>>;
   bookmaker_names: string[];
+  bookmaker_links?: BookmakerLink[];
   access_type?: string | null;
   match_charged?: boolean | null;
 }
@@ -316,6 +442,7 @@ export interface SourceSplit {
   all: PerformanceSummary;
   feed: PerformanceSummary;
   private: PerformanceSummary;
+  paid_set: PerformanceSummary;
 }
 
 export interface PerformanceTimelineResponse {
@@ -380,7 +507,7 @@ export interface AdminClientTimelineResponse extends PerformanceTimelineResponse
   recent_results: Array<'win' | 'loss'>;
 }
 
-export type StatsDriveExportScope = 'shamrai' | 'clients' | 'all';
+export type StatsDriveExportScope = 'shamrai' | 'clients' | 'all' | 'crm';
 export type StatsDriveExportFormat = 'xlsx' | 'google_sheet';
 
 export interface StatsDriveExportLink {
@@ -396,6 +523,7 @@ export interface StatsDriveExportJob {
   scope: StatsDriveExportScope;
   period: PeriodFilter;
   formats: StatsDriveExportFormat[];
+  filters?: Record<string, string>;
   links: StatsDriveExportLink[];
   error: string | null;
   created_at: string;

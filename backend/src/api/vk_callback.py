@@ -15,6 +15,7 @@ from src.core.config import settings
 from src.models.database import AsyncSessionLocal
 from src.models.models import ForecastRequest, User
 from src.services.forecast_delivery import (
+    FORECAST_CONTACT_DRAFT_TEXT,
     FORECAST_STATUS_ANNOUNCED,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
@@ -42,6 +43,17 @@ VK_PROFILE_NOT_LINKED_MESSAGE = (
     "VK получил сообщение, но профиль не привязан к Shamrai. "
     "Откройте профиль в мини-приложении и привяжите VK."
 )
+
+
+def _forecast_contact_required(message: str, forecast_status: Optional[str]) -> bool:
+    return forecast_status == FORECAST_STATUS_ANNOUNCED and FORECAST_CONTACT_DRAFT_TEXT in str(message or "")
+
+
+def _vk_forecast_contact_message(message: str) -> str:
+    group_id = vk_group_id()
+    dialog_url = f"https://vk.me/club{group_id}" if group_id else ""
+    url_line = f"\n\nНаписать Shamrai: {dialog_url}" if dialog_url else ""
+    return f"{message}{url_line}"
 
 
 def _verify_callback_group(raw_group_id: Any) -> None:
@@ -292,6 +304,12 @@ async def _handle_forecast_button(event_object: dict, db: AsyncSession) -> dict:
             return {"status": "failed", "message": "Неизвестная кнопка"}
 
         await db.commit()
+        if (
+            action == "take"
+            and forecast_request is not None
+            and _forecast_contact_required(message, getattr(forecast_request, "status", None))
+        ):
+            return {"status": "contact_required", "message": _vk_forecast_contact_message(message)}
         if should_notify_sales and forecast_request is not None:
             _run_background(notify_sales_manager_for_request(forecast_request.id))
         return {"status": "ok", "message": message}

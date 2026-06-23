@@ -1,6 +1,10 @@
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import jwt
+
+from src.core import security
 from src.core.security_limits import (
     RateLimitRule,
     SecurityRateLimiter,
@@ -11,9 +15,24 @@ from src.core.security_limits import (
 
 
 class SecurityRateLimitConfigTests(unittest.TestCase):
+    def test_access_token_lifetime_uses_bounded_browser_session_window(self):
+        token = security.create_access_token({"sub": "12345", "role": "user"})
+        payload = jwt.decode(
+            token,
+            security.settings.JWT_SECRET_KEY,
+            algorithms=[security.JWT_ALGORITHM],
+        )
+        expires_at = datetime.fromtimestamp(payload["exp"], timezone.utc)
+
+        self.assertEqual(security.ACCESS_TOKEN_EXPIRE_DAYS, 30)
+        self.assertGreaterEqual((expires_at - datetime.now(timezone.utc)).days, 29)
+        self.assertLessEqual((expires_at - datetime.now(timezone.utc)).days, 30)
+
     def test_route_classifier_assigns_high_risk_groups(self):
         cases = [
             ("/api/auth/login", "POST", "auth"),
+            ("/api/auth/telegram/bot-session", "POST", "auth"),
+            ("/api/auth/telegram/bot-session/token-123", "GET", "auth_poll"),
             ("/api/payments/yookassa/webhook", "POST", "webhook"),
             ("/api/payments/yookassa/create", "POST", "payment"),
             ("/api/admin/users-page", "GET", "admin"),
@@ -52,6 +71,19 @@ class SecurityRateLimitConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(request_subjects(request)[0], "ip:1.2.3.4")
+
+    def test_request_subjects_can_prefer_authenticated_cookie_user(self):
+        token = security.create_access_token({"sub": "12345", "role": "user"})
+        request = SimpleNamespace(
+            headers={},
+            cookies={"shamrai_access_token": token},
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+
+        self.assertEqual(
+            request_subjects(request, prefer_authenticated_user=True),
+            ("user:12345",),
+        )
 
 
 class SecurityRateLimiterTests(unittest.TestCase):

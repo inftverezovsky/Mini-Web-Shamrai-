@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import case, extract, func
 from sqlalchemy.future import select
@@ -7,8 +7,28 @@ from datetime import datetime
 
 from src.models.database import get_read_db
 from src.models.models import Bet
+from src.services.stats_export import build_bookmaker_logo_png
 
 router = APIRouter(prefix="/stats", tags=["Stats"])
+
+
+@router.get("/export/bookmaker-logo.png")
+async def get_export_bookmaker_logo(codes: str = Query(..., min_length=1)):
+    """
+    Public image endpoint for Google Sheets IMAGE() cells in stats exports.
+    Only known bookmaker logo codes are rendered.
+    """
+    logo = build_bookmaker_logo_png(code.strip() for code in codes.split(",") if code.strip())
+    if not logo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bookmaker logo not found")
+    return Response(
+        content=logo.data,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 @router.get("/global")
 async def get_global_stats(db: AsyncSession = Depends(get_read_db)):

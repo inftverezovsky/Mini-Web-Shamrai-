@@ -16,10 +16,12 @@ from src.core.config import settings
 from src.core.security import verify_access_token
 
 logger = logging.getLogger("uvicorn")
+AUTH_COOKIE_NAME = "shamrai_access_token"
 
 RATE_LIMIT_GROUPS = {
     "public_read",
     "auth",
+    "auth_poll",
     "payment",
     "webhook",
     "admin",
@@ -29,7 +31,8 @@ RATE_LIMIT_GROUPS = {
 
 DEFAULT_RATE_LIMIT_RULES = {
     "public_read": (120, 40),
-    "auth": (20, 10),
+    "auth": (40, 20),
+    "auth_poll": (90, 30),
     "payment": (30, 10),
     "webhook": (120, 60),
     "admin": (60, 20),
@@ -119,6 +122,8 @@ def classify_rate_limit_group(path: str, method: str = "GET") -> str:
         return "webhook"
 
     if clean_path.startswith("/api/auth/"):
+        if method == "GET" and clean_path.startswith("/api/auth/telegram/bot-session/"):
+            return "auth_poll"
         return "auth"
 
     if clean_path.startswith("/api/payments/"):
@@ -184,6 +189,8 @@ def _user_subject_from_authorization(request: Request) -> Optional[str]:
     authorization = request.headers.get("authorization") or ""
     token = authorization[7:] if authorization.startswith("Bearer ") else authorization
     if not token:
+        token = (getattr(request, "cookies", {}) or {}).get(AUTH_COOKIE_NAME) or ""
+    if not token:
         return None
     try:
         payload = verify_access_token(token)
@@ -194,12 +201,20 @@ def _user_subject_from_authorization(request: Request) -> Optional[str]:
     return f"user:{payload['sub']}"
 
 
-def request_subjects(request: Request) -> tuple[str, ...]:
-    subjects = [f"ip:{_client_ip(request)}"]
+def request_subjects(request: Request, *, prefer_authenticated_user: bool = False) -> tuple[str, ...]:
+    ip_subject = f"ip:{_client_ip(request)}"
     user_subject = _user_subject_from_authorization(request)
+    if prefer_authenticated_user and user_subject:
+        return (user_subject,)
+
+    subjects = [ip_subject]
     if user_subject:
         subjects.append(user_subject)
     return tuple(subjects)
+
+
+def _prefer_authenticated_rate_limit_subject(group: str) -> bool:
+    return group in {"default", "payment", "admin", "upload"}
 
 
 class SecurityRateLimiter:
@@ -383,6 +398,10 @@ def _response_headers_for_decision(decision: RateLimitDecision) -> dict[str, str
     return headers
 
 
+def _security_json_response(detail: str, status_code: int, headers: Optional[dict[str, str]] = None) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
+
+
 class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, limiter: SecurityRateLimiter) -> None:
         super().__init__(app)
@@ -397,9 +416,9 @@ class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
         group = classify_rate_limit_group(path, method)
         length = _content_length(request)
         if length == -1:
-            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            return _security_json_response("Некорректный размер запроса.", 400)
         if method in {"POST", "PUT", "PATCH"} and length is None:
-            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+            return _security_json_response("Не удалось проверить размер запроса. Повторите действие.", 411)
 
         body_limit = (
             settings.SECURITY_UPLOAD_BODY_MAX_BYTES
@@ -407,14 +426,17 @@ class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
             else settings.SECURITY_JSON_BODY_MAX_BYTES
         )
         if length is not None and length > body_limit:
-            return JSONResponse({"detail": "Request body too large"}, status_code=413)
+            return _security_json_response("Запрос слишком большой. Уменьшите файл или данные и попробуйте еще раз.", 413)
 
         if method in {"POST", "PUT", "PATCH"} and path in JSON_WEBHOOK_PATHS:
             content_type = request.headers.get("content-type") or ""
             if not _is_json_content_type(content_type):
-                return JSONResponse({"detail": "Unsupported Media Type"}, status_code=415)
+                return _security_json_response("Неподдерживаемый формат запроса.", 415)
 
-        subjects = request_subjects(request)
+        subjects = request_subjects(
+            request,
+            prefer_authenticated_user=_prefer_authenticated_rate_limit_subject(group),
+        )
         decision = self.limiter.check(group=group, subjects=subjects)
 
         if decision.exceeded:
@@ -429,9 +451,9 @@ class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
             )
 
         if decision.blocked:
-            return JSONResponse(
-                {"detail": "Too many requests"},
-                status_code=429,
+            return _security_json_response(
+                "Слишком много действий подряд. Подождите немного и повторите попытку.",
+                429,
                 headers=_response_headers_for_decision(decision),
             )
 

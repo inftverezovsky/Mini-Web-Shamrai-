@@ -128,6 +128,7 @@ path = Path(env_path)
 lines = path.read_text().splitlines() if path.exists() else []
 updates = {
     "GOOGLE_DRIVE_STATS_ENABLED": "true",
+    "GOOGLE_DRIVE_AUTH_MODE": "service_account",
     "GOOGLE_DRIVE_STATS_FOLDER_ID": drive_folder_id,
     "GOOGLE_SERVICE_ACCOUNT_JSON_B64": service_account_json_b64,
     "STATS_EXPORT_UNIT_STAKE_RUB": unit_stake_rub,
@@ -157,6 +158,7 @@ curl -fsS "http://127.0.0.1:`$CANON_PORT/api/health" >/dev/null
 docker compose -p "`$CANON_PROJECT" exec -T backend python - <<'PY'
 from src.core.config import settings
 print("drive_enabled=" + str(settings.GOOGLE_DRIVE_STATS_ENABLED))
+print("drive_auth_mode=" + settings.GOOGLE_DRIVE_AUTH_MODE)
 print("drive_folder_configured=" + str(bool(settings.GOOGLE_DRIVE_STATS_FOLDER_ID.strip())))
 print("service_account_configured=" + str(bool(settings.GOOGLE_SERVICE_ACCOUNT_JSON_B64.strip())))
 print("unit_stake_rub=" + str(settings.STATS_EXPORT_UNIT_STAKE_RUB))

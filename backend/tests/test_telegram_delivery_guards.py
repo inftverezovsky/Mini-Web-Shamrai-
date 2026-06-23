@@ -228,6 +228,25 @@ class RuntimeSecurityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "VK_CALLBACK_SECRET"):
                 main.settings.validate_runtime_security()
 
+    def test_production_vk_group_token_is_required_when_vk_group_is_enabled(self):
+        with (
+            patch.object(main.settings, "APP_ENV", "production"),
+            patch.object(main.settings, "DEBUG_MODE", False),
+            patch.object(main.settings, "TELEGRAM_BOT_TOKEN", "123456:realistic"),
+            patch.object(main.settings, "OWNER_TELEGRAM_ID", 1),
+            patch.object(main.settings, "JWT_SECRET_KEY", "x" * 32),
+            patch.object(main.settings, "TELEGRAM_WEBHOOK_SECRET_TOKEN", "telegram-secret"),
+            patch.object(main.settings, "YOOKASSA_SHOP_ID", "shop-id"),
+            patch.object(main.settings, "YOOKASSA_SECRET_KEY", "yookassa-secret"),
+            patch.object(main.settings, "YOOKASSA_RETURN_URL", "https://shamra1.pro/app"),
+            patch.object(main.settings, "VK_GROUP_ID", "239419819"),
+            patch.object(main.settings, "VK_CALLBACK_CONFIRMATION_CODE", "confirmation-code"),
+            patch.object(main.settings, "VK_CALLBACK_SECRET", "callback-secret"),
+            patch.object(main.settings, "VK_GROUP_ACCESS_TOKEN", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "VK_GROUP_ACCESS_TOKEN"):
+                main.settings.validate_runtime_security()
+
 
 if __name__ == "__main__":
     unittest.main()

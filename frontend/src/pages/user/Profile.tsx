@@ -1,8 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { API_BASE_URL } from '../../config/api';
-import { getStoredAuthToken } from '../../utils/authStorage';
 import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
 import { getVkIdConfig, isVkRedirectStartedError, linkVkProfile } from '../../utils/vkId';
 import {
@@ -29,7 +27,6 @@ import {
   Check,
   Loader2,
   Award,
-  FileText,
   Bell,
   Moon,
   Copy,
@@ -40,10 +37,10 @@ import {
   Sliders,
   Sparkles,
   ChevronDown,
+  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { isPrivilegedRole, isStaffRole, roleLabel } from '../../utils/roles';
-import { notifyInfo } from '../../utils/notify';
 
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
@@ -52,7 +49,6 @@ interface Preferences {
   is_night_mode: boolean;
   night_mode_start: string;
   night_mode_end: string;
-  stats_display_mode: 'percent' | 'flat';
 }
 
 interface ReferralInfo {
@@ -87,7 +83,7 @@ const DEFAULT_NIGHT_MODE_END = '08:00';
 const clampAlertMinCoef = (value: number) =>
   Math.min(ALERT_MIN_COEF_MAX, Math.max(ALERT_MIN_COEF_MIN, value));
 
-type CollapsibleSectionKey = 'vk' | 'achievements' | 'notifications' | 'stats' | 'bookmakers' | 'payments' | 'referral';
+type CollapsibleSectionKey = 'vk' | 'achievements' | 'notifications' | 'bookmakers' | 'payments' | 'referral';
 
 interface CollapsibleSectionProps {
   title: string;
@@ -150,6 +146,79 @@ function CollapsibleSection({
   );
 }
 
+interface AlertMinCoefSliderProps {
+  value: number;
+  onCommit: (value: number) => void;
+}
+
+const AlertMinCoefSlider = React.memo(function AlertMinCoefSlider({
+  value,
+  onCommit,
+}: AlertMinCoefSliderProps) {
+  const [draftValue, setDraftValue] = useState(() => clampAlertMinCoef(value));
+  const lastCommittedValueRef = useRef(clampAlertMinCoef(value));
+
+  useEffect(() => {
+    const nextValue = clampAlertMinCoef(value);
+    setDraftValue(nextValue);
+    lastCommittedValueRef.current = nextValue;
+  }, [value]);
+
+  const updateDraft = useCallback((rawValue: string) => {
+    const nextValue = clampAlertMinCoef(Number.parseFloat(rawValue));
+    setDraftValue(nextValue);
+  }, []);
+
+  const commitDraft = useCallback((rawValue?: string) => {
+    const nextValue = clampAlertMinCoef(
+      rawValue == null ? draftValue : Number.parseFloat(rawValue),
+    );
+    setDraftValue(nextValue);
+    if (lastCommittedValueRef.current === nextValue) return;
+    lastCommittedValueRef.current = nextValue;
+    onCommit(nextValue);
+  }, [draftValue, onCommit]);
+
+  return (
+    <div className="space-y-2">
+      <label className="flex items-center justify-between gap-3 text-xs font-semibold text-slate-300">
+        <span className="flex min-w-0 items-center space-x-1.5">
+          <Bell className="w-3.5 h-3.5 shrink-0" style={{ color: ACCENT_PINK }} />
+          <span className="min-w-0">Мин. коэффициент для алертов</span>
+        </span>
+        <span
+          className="shrink-0 text-sm font-black tabular-nums"
+          style={{ color: ACCENT_PINK }}
+        >
+          {draftValue.toFixed(2)}
+        </span>
+      </label>
+      <input
+        type="range"
+        min={ALERT_MIN_COEF_MIN.toFixed(2)}
+        max={ALERT_MIN_COEF_MAX.toFixed(2)}
+        step="0.05"
+        value={draftValue}
+        onInput={(event) => updateDraft(event.currentTarget.value)}
+        onChange={(event) => updateDraft(event.currentTarget.value)}
+        onPointerUp={(event) => commitDraft(event.currentTarget.value)}
+        onTouchEnd={(event) => commitDraft(event.currentTarget.value)}
+        onMouseUp={(event) => commitDraft(event.currentTarget.value)}
+        onKeyUp={(event) => commitDraft(event.currentTarget.value)}
+        onBlur={(event) => commitDraft(event.currentTarget.value)}
+        className="shamrai-range w-full"
+        style={{
+          '--range-progress': `${((draftValue - ALERT_MIN_COEF_MIN) / (ALERT_MIN_COEF_MAX - ALERT_MIN_COEF_MIN)) * 100}%`,
+        } as React.CSSProperties}
+      />
+      <div className="flex justify-between text-[10px] text-slate-600 font-bold">
+        <span>{ALERT_MIN_COEF_MIN.toFixed(2)}</span>
+        <span>{ALERT_MIN_COEF_MAX.toFixed(2)}</span>
+      </div>
+    </div>
+  );
+});
+
 /* ═══════════════════════ Компонент ═══════════════════════ */
 export default function Profile() {
   const { user: userProfile, setUser, loginWithTelegramBot } = useAuth();
@@ -170,9 +239,6 @@ export default function Profile() {
   /* ── Subscription ── */
   const [loadingSub, setLoadingSub] = useState(true);
 
-  /* ── Reports ── */
-  const [downloadingPersonalReport, setDownloadingPersonalReport] = useState(false);
-
   /* ── Preferences (Block 2) ── */
   const [prefs, setPrefs] = useState<Preferences>({
     alert_min_coef: 1.5,
@@ -180,7 +246,6 @@ export default function Profile() {
     is_night_mode: false,
     night_mode_start: DEFAULT_NIGHT_MODE_START,
     night_mode_end: DEFAULT_NIGHT_MODE_END,
-    stats_display_mode: 'percent',
   });
   const [loadingPrefs, setLoadingPrefs] = useState(true);
   const [savingPrefs, setSavingPrefs] = useState(false);
@@ -191,7 +256,6 @@ export default function Profile() {
     vk: false,
     achievements: false,
     notifications: false,
-    stats: false,
     bookmakers: false,
     payments: false,
     referral: false,
@@ -284,7 +348,6 @@ export default function Profile() {
       is_night_mode: dashboard.preferences.is_night_mode ?? false,
       night_mode_start: dashboard.preferences.night_mode_start ?? DEFAULT_NIGHT_MODE_START,
       night_mode_end: dashboard.preferences.night_mode_end ?? DEFAULT_NIGHT_MODE_END,
-      stats_display_mode: dashboard.preferences.stats_display_mode ?? 'percent',
     });
     setReferral(dashboard.referral);
     setPayments(dashboard.payments.transactions ?? []);
@@ -350,39 +413,6 @@ export default function Profile() {
   }, [isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk, userProfile?.vk_user_id, vkMessagesAllowed]);
 
   /* ────────────────── Handlers ────────────────── */
-  const handleDownloadShamraiReport = () => {
-    notifyInfo('Общий отчет Shamrai скоро появится');
-  };
-
-  const handleDownloadPersonalReport = async () => {
-    try {
-      setDownloadingPersonalReport(true);
-      const token = getStoredAuthToken();
-      const response = await fetch(`${API_BASE_URL}/api/users/me/report`, {
-        credentials: 'include',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!response.ok) throw new Error('Не удалось сгенерировать PDF');
-
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute(
-        'download',
-        `my_shamrai_report_${userProfile?.telegram_id}.pdf`,
-      );
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(err.message || 'Ошибка скачивания отчета');
-    } finally {
-      setDownloadingPersonalReport(false);
-    }
-  };
-
   const handleCheckboxChange = async (bkId: number) => {
     const updatedIds = selectedBkIds.includes(bkId)
       ? selectedBkIds.filter((id) => id !== bkId)
@@ -472,6 +502,13 @@ export default function Profile() {
       [section]: !prev[section],
     }));
   };
+
+  const handleAlertMinCoefCommit = useCallback((nextValue: number) => {
+    setPrefs((p) => ({
+      ...p,
+      alert_min_coef: clampAlertMinCoef(nextValue),
+    }));
+  }, []);
 
   const handleCopyReferral = async () => {
     if (!referral) return;
@@ -646,6 +683,11 @@ export default function Profile() {
     );
   };
 
+  const dashboardLoadFailed = !isAdminProfile && profileDashboardQuery.isError;
+  const retryDashboardLoad = () => {
+    void profileDashboardQuery.refetch();
+  };
+
   /* ═══════════════════ RENDER ═══════════════════ */
   return (
     <div className={`${isCompact ? 'space-y-6' : 'grid grid-cols-1 gap-5 xl:grid-cols-2'} animate-slide-up pb-10`}>
@@ -658,6 +700,22 @@ export default function Profile() {
             Профиль Shamrai
           </h3>
         </div>
+
+        {dashboardLoadFailed && (
+          <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-3 text-center">
+            <p className="text-xs font-bold leading-relaxed text-amber-50">
+              Не удалось загрузить данные профиля. Проверьте подключение и попробуйте еще раз.
+            </p>
+            <button
+              type="button"
+              onClick={retryDashboardLoad}
+              className="mx-auto mt-3 inline-flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Повторить</span>
+            </button>
+          </div>
+        )}
 
         {/* Аватар + имя */}
         <div className="flex flex-col items-center text-center space-y-3">
@@ -712,7 +770,12 @@ export default function Profile() {
             </div>
           ) : (
             <div className="w-full pt-3 border-t border-white/5 flex flex-col items-center">
-              {loadingSub ? (
+              {dashboardLoadFailed ? (
+                <div className="bg-amber-500/10 border border-amber-300/20 rounded-xl px-4 py-2 flex items-center space-x-2 text-xs font-semibold text-amber-100">
+                  <Clock className="w-4 h-4" />
+                  <span>Статус абонемента не обновлен</span>
+                </div>
+              ) : loadingSub ? (
                 <Loader2
                   className="w-4 h-4 animate-spin"
                   style={{ color: ACCENT_BLUE }}
@@ -998,41 +1061,6 @@ export default function Profile() {
           </CollapsibleSection>
         )}
 
-        {/* Report Downloads */}
-        {!isAdminProfile && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <button
-              onClick={handleDownloadShamraiReport}
-              className="min-h-[46px] px-3 py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-all text-[11px] font-extrabold text-white border border-white/5 hover:brightness-110 active:scale-[0.98]"
-              style={{
-                background: `linear-gradient(135deg, ${ACCENT_PINK}, ${ACCENT_BLUE})`,
-                boxShadow: NEON_GLOW_PINK,
-              }}
-            >
-              <FileText className="w-4 h-4 text-white shrink-0" />
-              <span className="leading-tight text-center">Скачать отчет Shamrai</span>
-            </button>
-
-            <button
-              onClick={handleDownloadPersonalReport}
-              disabled={downloadingPersonalReport}
-              className="min-h-[46px] px-3 py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-all text-[11px] font-extrabold text-white border disabled:opacity-50 hover:brightness-110 active:scale-[0.98]"
-              style={{
-                background: 'rgba(0,210,255,0.08)',
-                borderColor: 'rgba(0,210,255,0.28)',
-                color: ACCENT_BLUE,
-                boxShadow: NEON_GLOW_BLUE,
-              }}
-            >
-              {downloadingPersonalReport ? (
-                <Loader2 className="w-4 h-4 animate-spin shrink-0" style={{ color: ACCENT_BLUE }} />
-              ) : (
-                <FileText className="w-4 h-4 shrink-0" style={{ color: ACCENT_BLUE }} />
-              )}
-              <span className="leading-tight text-center">Скачать Мой отчет</span>
-            </button>
-          </div>
-        )}
       </div>
 
       {isAdminProfile && (
@@ -1106,7 +1134,7 @@ export default function Profile() {
                 color: ACCENT_BLUE,
               }}
             >
-              {loadingPrefs ? 'Загрузка' : `Кф ${prefs.alert_min_coef.toFixed(2)}`}
+              {dashboardLoadFailed ? 'Ошибка' : loadingPrefs ? 'Загрузка' : `Кф ${prefs.alert_min_coef.toFixed(2)}`}
             </span>
             <ChevronDown
               className={`w-4 h-4 transition-transform ${openSettingsSections.notifications ? 'rotate-180' : ''}`}
@@ -1116,7 +1144,19 @@ export default function Profile() {
         </button>
 
         {openSettingsSections.notifications && <div className="space-y-5 animate-slide-down">
-          {loadingPrefs ? (
+          {dashboardLoadFailed ? (
+            <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-4 text-center text-xs font-bold leading-relaxed text-amber-50">
+              Настройки уведомлений временно недоступны.
+              <button
+                type="button"
+                onClick={retryDashboardLoad}
+                className="mx-auto mt-3 flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Повторить</span>
+              </button>
+            </div>
+          ) : loadingPrefs ? (
             <div className="flex justify-center py-6">
               <Loader2
                 className="w-6 h-6 animate-spin"
@@ -1125,42 +1165,10 @@ export default function Profile() {
             </div>
           ) : (
             <>
-            {/* Минимальный коэффициент (slider) */}
-            <div className="space-y-2">
-              <label className="flex items-center justify-between text-xs font-semibold text-slate-300">
-                <span className="flex items-center space-x-1.5">
-                  <Bell className="w-3.5 h-3.5" style={{ color: ACCENT_PINK }} />
-                  <span>Мин. коэффициент для алертов</span>
-                </span>
-                <span
-                  className="text-sm font-black tabular-nums"
-                  style={{ color: ACCENT_PINK }}
-                >
-                  {prefs.alert_min_coef.toFixed(2)}
-                </span>
-              </label>
-              <input
-                type="range"
-                min={ALERT_MIN_COEF_MIN.toFixed(2)}
-                max={ALERT_MIN_COEF_MAX.toFixed(2)}
-                step="0.05"
-                value={prefs.alert_min_coef}
-                onChange={(e) =>
-                  setPrefs((p) => ({
-                    ...p,
-                    alert_min_coef: clampAlertMinCoef(parseFloat(e.target.value)),
-                  }))
-                }
-                className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-                style={{
-                  background: `linear-gradient(to right, ${ACCENT_PINK}, ${ACCENT_BLUE})`,
-                }}
-              />
-              <div className="flex justify-between text-[10px] text-slate-600 font-bold">
-                <span>{ALERT_MIN_COEF_MIN.toFixed(2)}</span>
-                <span>{ALERT_MIN_COEF_MAX.toFixed(2)}</span>
-              </div>
-            </div>
+            <AlertMinCoefSlider
+              value={prefs.alert_min_coef}
+              onCommit={handleAlertMinCoefCommit}
+            />
 
             <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3.5">
               <label className="flex items-center gap-2 text-xs font-semibold text-slate-300 min-w-0">
@@ -1181,7 +1189,8 @@ export default function Profile() {
                     odds_drop_notifications_enabled: !p.odds_drop_notifications_enabled,
                   }))
                 }
-                className={`relative h-5 w-10 rounded-full transition-all shrink-0 ${
+                aria-label="Падение кэфа"
+                className={`relative h-8 w-14 overflow-hidden rounded-full border border-white/10 transition-colors shrink-0 ${
                   prefs.odds_drop_notifications_enabled ? '' : 'bg-slate-700'
                 }`}
                 style={
@@ -1194,9 +1203,14 @@ export default function Profile() {
                 }
               >
                 <span
-                  className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                    prefs.odds_drop_notifications_enabled ? 'translate-x-5' : 'translate-x-0'
+                  className="absolute inset-[3px] rounded-full bg-white/10"
+                  aria-hidden="true"
+                />
+                <span
+                  className={`absolute left-1 top-1 h-6 w-6 rounded-full bg-white shadow-[0_4px_14px_rgba(0,0,0,0.35)] transition-transform duration-150 ${
+                    prefs.odds_drop_notifications_enabled ? 'translate-x-6' : 'translate-x-0'
                   }`}
+                  aria-hidden="true"
                 />
               </button>
             </div>
@@ -1219,7 +1233,8 @@ export default function Profile() {
                   onClick={() =>
                     setPrefs((p) => ({ ...p, is_night_mode: !p.is_night_mode }))
                   }
-                  className={`relative w-11 h-6 rounded-full transition-all shrink-0 ${
+                  aria-label="Ночной режим"
+                  className={`relative h-8 w-14 overflow-hidden rounded-full border border-white/10 transition-colors shrink-0 ${
                     prefs.is_night_mode ? '' : 'bg-slate-700'
                   }`}
                   style={
@@ -1232,9 +1247,14 @@ export default function Profile() {
                   }
                 >
                   <span
-                    className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
-                      prefs.is_night_mode ? 'translate-x-5' : 'translate-x-0'
+                    className="absolute inset-[3px] rounded-full bg-white/10"
+                    aria-hidden="true"
+                  />
+                  <span
+                    className={`absolute left-1 top-1 h-6 w-6 bg-white rounded-full shadow-[0_4px_14px_rgba(0,0,0,0.35)] transition-transform duration-150 ${
+                      prefs.is_night_mode ? 'translate-x-6' : 'translate-x-0'
                     }`}
+                    aria-hidden="true"
                   />
                 </button>
               </div>
@@ -1267,53 +1287,15 @@ export default function Profile() {
               </div>
             </div>
 
-            {/* Режим отображения статистики (percent / flat) */}
-            <CollapsibleSection
-              title="Отображение статистики"
-              badge={prefs.stats_display_mode === 'percent' ? 'Проценты' : 'Абсолютные'}
-              icon={<Sliders className="w-3.5 h-3.5" style={{ color: ACCENT_BLUE }} />}
-              accent={ACCENT_BLUE}
-              isOpen={openSettingsSections.stats}
-              onToggle={() => toggleSettingsSection('stats')}
-            >
-              <div className="flex space-x-2">
-                {(['percent', 'flat'] as const).map((mode) => {
-                  const active = prefs.stats_display_mode === mode;
-                  const label = mode === 'percent' ? 'Проценты (%)' : 'Абсолютные';
-                  return (
-                    <button
-                      key={mode}
-                      onClick={() =>
-                        setPrefs((p) => ({ ...p, stats_display_mode: mode }))
-                      }
-                      className={`flex-1 py-2 rounded-xl text-xs font-bold border transition-all ${
-                        active
-                          ? 'text-white border-[#00d2ff]/40'
-                          : 'text-slate-400 border-white/5 bg-white/5 hover:border-white/15'
-                      }`}
-                      style={
-                        active
-                          ? {
-                              background: 'rgba(0,210,255,0.12)',
-                              boxShadow: NEON_GLOW_BLUE,
-                            }
-                          : {}
-                      }
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            </CollapsibleSection>
-
             </>
           )}
 
           <CollapsibleSection
             title="Букмекерские конторы"
             badge={
-              loadingBks
+              dashboardLoadFailed
+                ? 'Ошибка'
+                : loadingBks
                 ? 'Загрузка'
                 : selectedBkIds.length > 0
                   ? `${selectedBkIds.length} выбрано`
@@ -1330,7 +1312,19 @@ export default function Profile() {
                 подбирать для вас подходящие прогнозы. Настройки сохраняются мгновенно.
               </p>
 
-              {loadingBks ? (
+              {dashboardLoadFailed ? (
+                <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-4 text-center text-xs font-bold leading-relaxed text-amber-50">
+                  Список букмекерских контор не загрузился.
+                  <button
+                    type="button"
+                    onClick={retryDashboardLoad}
+                    className="mx-auto mt-3 flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Повторить</span>
+                  </button>
+                </div>
+              ) : loadingBks ? (
                 <div className="flex justify-center py-4">
                   <Loader2
                     className="w-6 h-6 animate-spin"
@@ -1425,7 +1419,7 @@ export default function Profile() {
             </div>
           </CollapsibleSection>
 
-          {!loadingPrefs && (
+          {!dashboardLoadFailed && !loadingPrefs && (
             <button
               onClick={handleSavePrefs}
               disabled={savingPrefs}
@@ -1491,7 +1485,19 @@ export default function Profile() {
 
         {openSettingsSections.referral && (
           <div className="animate-slide-down space-y-4">
-            {loadingRef ? (
+            {dashboardLoadFailed ? (
+              <div className="bg-slate-900/40 border border-amber-300/20 p-4 rounded-xl text-center text-amber-100 text-xs font-semibold uppercase tracking-wider">
+                Реферальные данные не загрузились
+                <button
+                  type="button"
+                  onClick={retryDashboardLoad}
+                  className="mx-auto mt-3 flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Повторить</span>
+                </button>
+              </div>
+            ) : loadingRef ? (
               <div className="flex justify-center py-6">
                 <Loader2
                   className="w-6 h-6 animate-spin"
@@ -1623,7 +1629,7 @@ export default function Profile() {
                 color: ACCENT_BLUE,
               }}
             >
-              {loadingPay ? 'Загрузка' : 'В разработке'}
+              {dashboardLoadFailed ? 'Ошибка' : loadingPay ? 'Загрузка' : 'В разработке'}
             </span>
             <ChevronDown
               className={`w-4 h-4 transition-transform ${
@@ -1636,7 +1642,19 @@ export default function Profile() {
 
         {openSettingsSections.payments && (
           <div className="animate-slide-down">
-            {loadingPay ? (
+            {dashboardLoadFailed ? (
+              <div className="bg-slate-900/40 border border-amber-300/20 p-4 rounded-xl text-center text-amber-100 text-xs font-semibold uppercase tracking-wider leading-relaxed">
+                История платежей не загрузилась.
+                <button
+                  type="button"
+                  onClick={retryDashboardLoad}
+                  className="mx-auto mt-3 flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98]"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Повторить</span>
+                </button>
+              </div>
+            ) : loadingPay ? (
               <div className="flex justify-center py-6">
                 <Loader2
                   className="w-6 h-6 animate-spin"

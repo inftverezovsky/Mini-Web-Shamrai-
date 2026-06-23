@@ -25,10 +25,10 @@ BOOKMAKER_FALLBACK_EMOJIS = {
     "other": BOOKMAKER_FALLBACK_EMOJI,
 }
 BOOKMAKER_EMOJI_KEY_ALIASES = {
-    "fonbet": ("fonbet", "фонбет", "фонбет (fonbet)"),
-    "betboom": ("betboom", "бетбум", "бетбум (betboom)"),
-    "winline": ("winline", "винлайн", "винлайн (winline)"),
-    "pari": ("pari", "пари", "пари (pari)", "pari (pari)"),
+    "fonbet": ("fonbet", "фонбет"),
+    "betboom": ("betboom", "бетбум"),
+    "winline": ("winline", "винлайн"),
+    "pari": ("pari", "пари"),
     "ligastavok": ("ligastavok", "liga stavok", "лига ставок", "лига ставок (ligastavok)"),
     "marathon": ("marathon", "марафон", "марафонбет"),
     "betcity": ("betcity", "бетсити", "бетсити (betcity)"),

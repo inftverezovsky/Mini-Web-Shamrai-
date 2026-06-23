@@ -21,6 +21,7 @@ import {
   StatTile,
   TimelineSectionBlock,
   recentResultCodes,
+  streakLabel,
 } from '../../features/performance/performanceUi';
 import { PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
 import { apiFetch, downloadApiFile } from '../../utils/api';
@@ -79,6 +80,7 @@ function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimeli
       all: summary,
       feed: summary,
       private: EMPTY_SUMMARY,
+      paid_set: EMPTY_SUMMARY,
     },
     timeline: days.length ? [{
       key: 'global',
@@ -217,10 +219,10 @@ export default function MyBets() {
           <StatsKpiGrid summary={summary} valueMode="flats" showProfit={false} />
 
           <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Макс. серия W" value={summary.max_win_streak} tone="text-emerald-200" />
+            <StatTile label="Макс. серия побед" value={summary.max_win_streak} tone="text-emerald-200" />
             <StatTile
               label="Текущая серия"
-              value={summary.current_streak ? `${summary.current_streak} ${summary.current_streak_type === 'win' ? 'W' : 'L'}` : '-'}
+              value={summary.current_streak ? streakLabel(summary) : '-'}
               tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
             />
           </div>

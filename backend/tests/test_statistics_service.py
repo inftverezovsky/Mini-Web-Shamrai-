@@ -16,7 +16,7 @@ from src.services.statistics import (
 
 
 def _bet(*, status, coefficient="2.00", created_at=None, resolved_at=None, delivery_mode="feed"):
-    bookmaker = SimpleNamespace(id=1, name="Fonbet", code="fonbet")
+    bookmaker = SimpleNamespace(id=1, name="Фонбет", code="fonbet")
     return SimpleNamespace(
         id=uuid4(),
         event_name="Team A - Team B",
@@ -27,6 +27,10 @@ def _bet(*, status, coefficient="2.00", created_at=None, resolved_at=None, deliv
         delivery_mode=delivery_mode,
         sport_type="Футбол",
         outcome="П1",
+        description="Detailed forecast",
+        match_link="https://example.com/match",
+        bookmaker_id=1,
+        bookmaker_links=[{"bookmaker_id": 1, "url": "https://fonbet.example/match"}],
         bookmakers=[bookmaker],
         bookmaker=bookmaker,
     )
@@ -39,6 +43,31 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertIsNone(stat_item_from_bet(_bet(status="refund", resolved_at=resolved_at)))
         self.assertIsNone(stat_item_from_bet(_bet(status="pending", resolved_at=None)))
         self.assertIsNotNone(stat_item_from_bet(_bet(status="win", resolved_at=resolved_at)))
+
+    def test_stat_item_includes_admin_edit_fields(self):
+        item = stat_item_from_bet(_bet(
+            status="win",
+            coefficient="1.90",
+            resolved_at=datetime(2026, 6, 10, 18, tzinfo=timezone.utc),
+        ))
+
+        self.assertEqual(item["bookmaker_id"], 1)
+        self.assertEqual(item["description"], "Detailed forecast")
+        self.assertEqual(item["match_link"], "https://example.com/match")
+        self.assertEqual(item["bookmaker_links"], [{"bookmaker_id": 1, "url": "https://fonbet.example/match"}])
+
+    def test_fonbet_is_primary_bookmaker_when_present(self):
+        fonbet = SimpleNamespace(id=1, name="Фонбет", code="fonbet")
+        betboom = SimpleNamespace(id=2, name="БетБум", code="betboom")
+        winline = SimpleNamespace(id=3, name="Винлайн", code="winline")
+        bet = _bet(status="win", coefficient="1.90", resolved_at=datetime(2026, 6, 10, 18, tzinfo=timezone.utc))
+        bet.bookmakers = [betboom, fonbet, winline]
+        bet.bookmaker = betboom
+
+        item = stat_item_from_bet(bet)
+
+        self.assertEqual(item["bookmaker_names"], ["Фонбет"])
+        self.assertEqual(item["bookmakers"], [{"id": 1, "name": "Фонбет", "code": "fonbet"}])
 
     def test_summary_uses_unit_stake_roi_for_win_loss_only(self):
         resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)
@@ -61,7 +90,7 @@ class StatisticsServiceTests(unittest.TestCase):
         items = [
             stat_item_from_bet(_bet(status="win", coefficient="2.20", resolved_at=resolved_at, delivery_mode="feed")),
             stat_item_from_bet(_bet(status="loss", coefficient="1.80", resolved_at=resolved_at, delivery_mode="sales_private")),
-            stat_item_from_bet(_bet(status="win", coefficient="1.50", resolved_at=resolved_at, delivery_mode="sales_private")),
+            stat_item_from_bet(_bet(status="win", coefficient="1.50", resolved_at=resolved_at, delivery_mode="paid_set")),
         ]
         payload = build_performance_payload([item for item in items if item], period="all")
 
@@ -75,9 +104,13 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertEqual(payload["source_split"]["feed"]["bets"], 1)
         self.assertEqual(payload["source_split"]["feed"]["profit_units"], 1.2)
         self.assertEqual(payload["source_split"]["feed"]["roi"], 120.0)
-        self.assertEqual(payload["source_split"]["private"]["bets"], 2)
-        self.assertEqual(payload["source_split"]["private"]["profit_units"], -0.5)
-        self.assertEqual(payload["source_split"]["private"]["roi"], -25.0)
+        self.assertEqual(payload["source_split"]["private"]["bets"], 1)
+        self.assertEqual(payload["source_split"]["private"]["profit_units"], -1.0)
+        self.assertEqual(payload["source_split"]["private"]["roi"], -100.0)
+        self.assertEqual(payload["source_split"]["paid_set"]["bets"], 1)
+        self.assertEqual(payload["source_split"]["paid_set"]["profit_units"], 0.5)
+        self.assertEqual(payload["source_split"]["paid_set"]["roi"], 50.0)
+        self.assertEqual(items[2]["source_type"], "paid_set")
 
         month_summary = payload["timeline"][0]["summary"]
         day_summary = payload["timeline"][0]["days"][0]["summary"]

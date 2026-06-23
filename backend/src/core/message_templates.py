@@ -83,7 +83,7 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
             TemplateVariable("emoji", "Иконка типа анонса", "📢"),
             TemplateVariable("title", "Заголовок", "Новый матч"),
             TemplateVariable("body", "Текст анонса", "Есть новый анонс."),
-            TemplateVariable("bookmaker_line", "Строка БК", "🏦 БК: Fonbet"),
+            TemplateVariable("bookmaker_line", "Строка БК", "🏦 БК: Фонбет"),
             TemplateVariable("match_link_line", "Строка ссылки на матч", "🔗 Перейти к матчу"),
             TemplateVariable("coefficient_line", "Строка коэффициента", "📊 Коэффициент: 1.90"),
             COMMON_CONTACT_VARIABLE,
@@ -117,12 +117,14 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
             "<b>Закрытый анонс прогноза</b>\n\n"
             "БК: {{bookmaker_labels}}\n\n"
             "Коэффициент: <b>{{coefficient}}</b>\n\n"
+            "{{fair_coefficient_line}}\n\n"
             "{{teaser_text}}\n\n"
             "{{contact_footer}}"
         ),
         variables=(
-            TemplateVariable("bookmaker_labels", "Букмекеры", "Fonbet, BetBoom"),
+            TemplateVariable("bookmaker_labels", "Букмекеры", "Фонбет, БетБум"),
             TemplateVariable("coefficient", "Коэффициент", "1.92"),
+            TemplateVariable("fair_coefficient_line", "Строка верного коэффициента", "Верный: 1.74"),
             TemplateVariable("teaser_text", "Короткий текст из формы", "Есть закрытый прогноз под вашу БК."),
             COMMON_CONTACT_VARIABLE,
         ),
@@ -142,9 +144,9 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
         ),
         variables=(
             *COMMON_EVENT_VARIABLES,
-            TemplateVariable("bookmaker_line", "Строка БК", "БК: Fonbet"),
+            TemplateVariable("bookmaker_line", "Строка БК", "БК: Фонбет"),
             TemplateVariable("description", "Описание прогноза", "Короткая аналитика."),
-            TemplateVariable("bookmaker_links_block", "Блок ссылок БК", "Fonbet: нажмите кнопку ниже"),
+            TemplateVariable("bookmaker_links_block", "Блок ссылок БК", "Фонбет: нажмите кнопку ниже"),
             COMMON_CONTACT_VARIABLE,
         ),
     ),
@@ -177,7 +179,7 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
     ),
     TemplateDefinition(
         key=TEMPLATE_BET_LOSS,
-        title="Поражение прогноза",
+        title="Неудача прогноза",
         description="Обычное сообщение о минусе, если компенсация клиенту не начисляется.",
         body=(
             "Прогноз «{{event_name}}» закрыт минусом.\n\n"
@@ -187,7 +189,7 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
     ),
     TemplateDefinition(
         key=TEMPLATE_BET_LOSS_SUPERCOMPENSATION,
-        title="Поражение с компенсацией",
+        title="Неудача с компенсацией",
         description="Сообщение о минусе, когда клиенту возвращается ставка и добавляется бонус.",
         body=(
             "⚡ Сверхкомпенсация Shamrai активирована.\n\n"

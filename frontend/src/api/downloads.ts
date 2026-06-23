@@ -1,5 +1,5 @@
 import { API_BASE_URL, AUTH_EXPIRED_EVENT } from '../config/api';
-import { formatApiErrorDetail } from './errors';
+import { formatApiErrorMessage } from './errors';
 import { clearStoredAuthToken, getStoredAuthToken } from '../utils/authStorage';
 
 function filenameFromDisposition(disposition: string | null, fallback: string) {
@@ -22,7 +22,7 @@ export async function downloadApiFile(endpoint: string, fallbackFilename: string
     const errorData = contentType.includes('application/json')
       ? await response.json().catch(() => ({}))
       : {};
-    const message = formatApiErrorDetail((errorData as any).detail) || `HTTP error! Status: ${response.status}`;
+    const message = formatApiErrorMessage(response.status, (errorData as any).detail);
 
     if (response.status === 401) {
       clearStoredAuthToken();

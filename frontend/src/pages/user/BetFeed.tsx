@@ -51,8 +51,10 @@ function useVisibleNowTick(intervalMs = 1000) {
   return now;
 }
 
-// Shared ticking countdown timer for Live forecasts.
-function LiveTimer({ endsAt, now }: { endsAt: string; now: number }) {
+// Shared ticking countdown timer for Live forecasts. The tick stays inside this
+// tiny leaf so the whole feed does not re-render every second.
+function LiveTimer({ endsAt }: { endsAt: string }) {
+  const now = useVisibleNowTick();
   const difference = +new Date(endsAt) - now;
   const minutes = Math.max(0, Math.floor((difference / 1000 / 60) % 60));
   const seconds = Math.max(0, Math.floor((difference / 1000) % 60));
@@ -80,7 +82,6 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   
   const [takenBetIds, setTakenBetIds] = useState<string[]>([]);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
-  const nowTick = useVisibleNowTick();
 
   const feedQuery = useInfiniteQuery<PaginatedResponse<BetResponse>, Error>({
     queryKey: ['bets-feed-page'],
@@ -352,7 +353,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
                     </span>
                   )}
                   {isLive && bet.live_ends_at ? (
-                    <LiveTimer endsAt={bet.live_ends_at} now={nowTick} />
+                    <LiveTimer endsAt={bet.live_ends_at} />
                   ) : (
                     <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
                       Ожидает

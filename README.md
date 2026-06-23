@@ -7,6 +7,7 @@ Telegram Mini App для спортивной аналитики: премиум
 - `backend/` - FastAPI, SQLAlchemy, Alembic, Telegram/YooKassa/Tegro webhooks.
 - `frontend/` - React + Vite, Telegram WebApp UI, nginx production build.
 - `docker-compose.yml` - production-ready VPS контур: Postgres, backend, frontend/nginx.
+- [`docs/process-flows.md`](docs/process-flows.md) - Mermaid-схемы основных процессов: auth, payments, delivery, forecast, chat, deploy/verification.
 
 ## Локальный запуск
 
