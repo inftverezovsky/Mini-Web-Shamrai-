@@ -560,7 +560,7 @@ export default function App() {
   return (
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
-        className={`app-shell compact-ui relative isolate min-h-[100dvh] transform-gpu overflow-x-hidden selection:bg-pink-500/30 will-change-transform ${
+        className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
           isCompact
             ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
             : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
