@@ -1,4 +1,5 @@
 import unittest
+import urllib.parse
 import uuid
 from decimal import Decimal
 from types import SimpleNamespace
@@ -72,6 +73,138 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 502)
         self.assertIn("VK ID временно", message)
         self.assertNotIn("upstream stack detail", message)
+
+    async def test_vk_start_sets_http_only_flow_cookie_and_authorize_url(self):
+        response = Response()
+
+        with (
+            patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+            patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+        ):
+            result = await auth.vk_id_start(
+                auth.VkAuthStartRequest(action="login"),
+                response=response,
+            )
+
+        parsed_url = urllib.parse.urlparse(result.authorize_url)
+        query = urllib.parse.parse_qs(parsed_url.query)
+        self.assertEqual(parsed_url.scheme, "https")
+        self.assertEqual(parsed_url.netloc, "id.vk.ru")
+        self.assertEqual(parsed_url.path, "/authorize")
+        self.assertEqual(query["response_type"], ["code"])
+        self.assertEqual(query["client_id"], ["54626979"])
+        self.assertEqual(query["redirect_uri"], ["https://shamra1.pro"])
+        self.assertEqual(query["scope"], ["vkid.personal_info"])
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        self.assertEqual(query["scheme"], ["dark"])
+        self.assertIn("code_challenge", query)
+        self.assertEqual(query["state"], [result.state])
+        self.assertNotIn("prompt", query)
+        self.assertNotIn("code_verifier", query)
+
+        set_cookie = response.headers.get("set-cookie", "")
+        self.assertIn(auth.VK_FLOW_COOKIE_NAME, set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=lax", set_cookie)
+
+    async def test_vk_complete_rejects_missing_flow_cookie(self):
+        async with self.Session() as db:
+            with self.assertRaises(HTTPException) as exc:
+                await auth.vk_id_complete(
+                    auth.VkAuthCompleteRequest(
+                        code="code",
+                        device_id="device",
+                        state="state",
+                    ),
+                    request=SimpleNamespace(cookies={}),
+                    response=Response(),
+                    db=db,
+                )
+
+            self.assertEqual(exc.exception.status_code, 400)
+            self.assertIn("Сессия VK ID", exc.exception.detail)
+
+    async def test_vk_complete_login_creates_web_only_profile_and_clears_flow_cookie(self):
+        start_response = Response()
+        with (
+            patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+            patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+        ):
+            start = await auth.vk_id_start(
+                auth.VkAuthStartRequest(action="login"),
+                response=start_response,
+            )
+        cookie_value = start_response.headers["set-cookie"].split("=", 1)[1].split(";", 1)[0]
+
+        async with self.Session() as db:
+            complete_response = Response()
+            with patch.object(
+                auth,
+                "_exchange_vk_or_502",
+                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            ):
+                result = await auth.vk_id_complete(
+                    auth.VkAuthCompleteRequest(
+                        code="code",
+                        device_id="device",
+                        state=start.state,
+                    ),
+                    request=SimpleNamespace(cookies={auth.VK_FLOW_COOKIE_NAME: cookie_value}),
+                    response=complete_response,
+                    db=db,
+                )
+
+            self.assertLess(result.user.telegram_id, 0)
+            self.assertTrue(result.user.is_web_only)
+            self.assertEqual(result.user.vk_user_id, "741852963")
+            set_cookie = complete_response.headers.get("set-cookie", "")
+            self.assertIn(auth.VK_FLOW_COOKIE_NAME, set_cookie)
+            self.assertIn("Max-Age=0", set_cookie)
+            self.assertIn(auth.AUTH_COOKIE_NAME, set_cookie)
+
+    async def test_vk_complete_link_attaches_vk_to_current_telegram_profile(self):
+        start_response = Response()
+        with (
+            patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+            patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+        ):
+            start = await auth.vk_id_start(
+                auth.VkAuthStartRequest(action="link"),
+                response=start_response,
+            )
+        cookie_value = start_response.headers["set-cookie"].split("=", 1)[1].split(";", 1)[0]
+
+        async with self.Session() as db:
+            telegram_user = User(
+                telegram_id=123456789,
+                first_name="Telegram",
+                role="user",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            db.add(telegram_user)
+            await db.commit()
+
+            with patch.object(
+                auth,
+                "_exchange_vk_or_502",
+                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+            ):
+                result = await auth.vk_id_complete(
+                    auth.VkAuthCompleteRequest(
+                        code="code",
+                        device_id="device",
+                        state=start.state,
+                    ),
+                    request=SimpleNamespace(cookies={auth.VK_FLOW_COOKIE_NAME: cookie_value}),
+                    response=Response(),
+                    current_user=telegram_user,
+                    db=db,
+                )
+
+            self.assertEqual(result.status, "success")
+            refreshed = await db.get(User, telegram_user.telegram_id)
+            self.assertEqual(refreshed.vk_user_id, "741852963")
 
     async def test_vk_login_creates_web_only_profile_without_debug_bypass(self):
         async with self.Session() as db:

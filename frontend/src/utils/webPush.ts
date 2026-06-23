@@ -1,4 +1,5 @@
 import { apiFetch } from './api';
+import { getIncomingSignalSoundState } from './signalAudio';
 import { isTelegramMiniApp } from './telegramSdk';
 
 export type WebPushStatus =
@@ -18,11 +19,36 @@ export interface WebPushSubscriptionState {
   message: string;
 }
 
+export type WebPushSubscriptionStatus = 'missing' | 'saved';
+export type WebPushSoundStatus = 'locked' | 'unlocked' | 'unsupported';
+export type WebPushPlatformHint =
+  | 'telegram_native'
+  | 'ios_install_required'
+  | 'unsupported_browser'
+  | 'desktop_web_push'
+  | 'mobile_web_push'
+  | 'missing_vapid'
+  | 'permission_denied'
+  | 'permission_required'
+  | 'subscription_required'
+  | 'ready'
+  | 'failed';
+
 export interface WebPushReadinessState extends WebPushSubscriptionState {
   canRequest: boolean;
   installed: boolean;
   permission: NotificationPermission | 'unsupported';
+  subscription: WebPushSubscriptionStatus;
+  sound: WebPushSoundStatus;
+  fallbackRecommended: boolean;
+  platformHint: WebPushPlatformHint;
 }
+
+type WebPushNotificationOptions = NotificationOptions & {
+  renotify?: boolean;
+  requireInteraction?: boolean;
+  vibrate?: number[];
+};
 
 function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -46,9 +72,15 @@ async function loadVapidPublicKey(): Promise<string> {
   return response.public_key || '';
 }
 
+function currentNotificationPermission(): NotificationPermission | 'unsupported' {
+  if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+  return Notification.permission;
+}
+
 export function webPushIsSupported(): boolean {
   return (
     typeof window !== 'undefined'
+    && typeof navigator !== 'undefined'
     && 'serviceWorker' in navigator
     && 'PushManager' in window
     && 'Notification' in window
@@ -105,98 +137,134 @@ async function saveSubscription(subscription: PushSubscription): Promise<void> {
   });
 }
 
+function baseReadinessState(
+  state: WebPushSubscriptionState & {
+    canRequest: boolean;
+    installed?: boolean;
+    permission?: NotificationPermission | 'unsupported';
+    subscription?: WebPushSubscriptionStatus;
+    fallbackRecommended?: boolean;
+    platformHint: WebPushPlatformHint;
+  },
+): WebPushReadinessState {
+  return {
+    installed: state.installed ?? pwaIsStandalone(),
+    permission: state.permission ?? currentNotificationPermission(),
+    subscription: state.subscription ?? 'missing',
+    sound: getIncomingSignalSoundState(),
+    fallbackRecommended: state.fallbackRecommended ?? false,
+    ...state,
+  };
+}
+
 export async function getWebPushReadiness(): Promise<WebPushReadinessState> {
   if (isTelegramMiniApp()) {
-    return {
+    return baseReadinessState({
       status: 'skipped_tma',
       message: 'Telegram Mini App получает сигналы через нативный бот.',
       canRequest: false,
       installed: true,
       permission: 'unsupported',
-    };
+      fallbackRecommended: false,
+      platformHint: 'telegram_native',
+    });
   }
 
   const installed = pwaIsStandalone();
   if (looksLikeIosDevice() && !installed) {
-    return {
+    return baseReadinessState({
       status: 'needs_install',
       message: 'Добавьте Shamrai на экран телефона и откройте установленную иконку.',
       canRequest: false,
       installed,
-      permission: 'Notification' in window ? Notification.permission : 'unsupported',
-    };
+      permission: currentNotificationPermission(),
+      fallbackRecommended: true,
+      platformHint: 'ios_install_required',
+    });
   }
 
   if (!webPushIsSupported()) {
-    return {
+    return baseReadinessState({
       status: 'unsupported',
       message: 'Этот браузер не поддерживает Web Push для установленного веб-приложения.',
       canRequest: false,
       installed,
-      permission: 'Notification' in window ? Notification.permission : 'unsupported',
-    };
+      permission: currentNotificationPermission(),
+      fallbackRecommended: true,
+      platformHint: 'unsupported_browser',
+    });
   }
 
   const publicKey = await loadVapidPublicKey();
   if (!publicKey) {
-    return {
+    return baseReadinessState({
       status: 'missing_key',
       message: 'VAPID public key не настроен.',
       canRequest: false,
       installed,
       permission: Notification.permission,
-    };
+      fallbackRecommended: true,
+      platformHint: 'missing_vapid',
+    });
   }
 
   if (Notification.permission === 'denied') {
-    return {
+    return baseReadinessState({
       status: 'denied',
       message: 'Системные уведомления для Shamrai запрещены в настройках браузера или телефона.',
       canRequest: false,
       installed,
       permission: Notification.permission,
-    };
+      fallbackRecommended: true,
+      platformHint: 'permission_denied',
+    });
   }
 
   if (Notification.permission !== 'granted') {
-    return {
+    return baseReadinessState({
       status: 'permission_required',
       message: 'Разрешите уведомления, чтобы получать сигналы в шторку телефона.',
       canRequest: true,
       installed,
       permission: Notification.permission,
-    };
+      platformHint: looksLikeMobileDevice() ? 'mobile_web_push' : 'desktop_web_push',
+    });
   }
 
   try {
     const registration = await getServiceWorkerRegistration();
     const subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
-      return {
+      return baseReadinessState({
         status: 'subscription_required',
         message: 'Подключите push-канал Shamrai для этого устройства.',
         canRequest: true,
         installed,
         permission: Notification.permission,
-      };
+        platformHint: 'subscription_required',
+      });
     }
 
     await saveSubscription(subscription);
-    return {
+    return baseReadinessState({
       status: 'subscribed',
       message: 'Web Push подключен.',
       canRequest: false,
       installed,
       permission: Notification.permission,
-    };
+      subscription: 'saved',
+      platformHint: 'ready',
+    });
   } catch (error: any) {
-    return {
+    return baseReadinessState({
       status: 'failed',
       message: error?.message || 'Не удалось проверить Web Push.',
       canRequest: true,
       installed,
       permission: Notification.permission,
-    };
+      fallbackRecommended: true,
+      platformHint: 'failed',
+    });
   }
 }
 
@@ -240,5 +308,32 @@ export async function registerWebPushSubscription(): Promise<WebPushSubscription
     return { status: 'subscribed', message: 'Web Push подключен.' };
   } catch (error: any) {
     return { status: 'failed', message: error?.message || 'Не удалось подключить Web Push.' };
+  }
+}
+
+export async function showWebPushTestNotification(): Promise<WebPushSubscriptionState> {
+  if (!webPushIsSupported()) {
+    return { status: 'unsupported', message: 'Тестовое push-уведомление недоступно в этом браузере.' };
+  }
+  if (Notification.permission !== 'granted') {
+    return { status: 'permission_required', message: 'Сначала разрешите уведомления для Shamrai.' };
+  }
+
+  try {
+    const registration = await getServiceWorkerRegistration();
+    const options: WebPushNotificationOptions = {
+      body: 'Тестовый сигнал: звук мягкий, push-канал активен.',
+      tag: 'shamrai-test-notification',
+      data: { url: '/app?open=web-bot-chat', type: 'test_notification' },
+      icon: '/brand/shamrai-favicon.png',
+      badge: '/brand/shamrai-favicon.png',
+      vibrate: [50],
+      renotify: true,
+      requireInteraction: false,
+    };
+    await registration.showNotification('Shamrai уведомления готовы', options);
+    return { status: 'subscribed', message: 'Тестовое уведомление отправлено.' };
+  } catch (error: any) {
+    return { status: 'failed', message: error?.message || 'Не удалось показать тестовое уведомление.' };
   }
 }

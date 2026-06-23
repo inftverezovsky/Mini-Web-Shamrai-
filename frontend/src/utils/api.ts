@@ -6,7 +6,7 @@ import {
   buildApiUrl,
   buildApiWebSocketUrl,
 } from '../config/api';
-import { requestApi } from '../api/client';
+import { ApiRequestError, requestApi } from '../api/client';
 import { downloadApiFile } from '../api/downloads';
 
 export {
@@ -16,6 +16,7 @@ export {
   buildApiUrl,
   buildApiWebSocketUrl,
   downloadApiFile,
+  ApiRequestError,
 };
 
 export async function apiFetch<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {

@@ -1,9 +1,13 @@
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import random
 import re
+import secrets
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,7 +22,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user, get_optional_user
-from src.core.config import settings
+from src.core.config import LOCAL_DEV_JWT_SECRET, settings
 from src.core.roles import is_staff_role, is_valid_role, normalize_role
 from src.core.security import (
     ACCESS_TOKEN_EXPIRE_DAYS,
@@ -65,8 +69,15 @@ logger = logging.getLogger("uvicorn")
 
 REFERRAL_START_PARAM_RE = re.compile(r"^ref_(\d+)$")
 AUTH_COOKIE_NAME = "shamrai_access_token"
+VK_FLOW_COOKIE_NAME = "shamrai_vk_auth_flow"
+VK_FLOW_COOKIE_PATH = "/api/auth/vk"
+VK_FLOW_TTL_SECONDS = 10 * 60
 IDENTITY_DEVICE_HEADER = "X-Shamrai-Device-Id"
 IDENTITY_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
+VK_CODE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+VK_AUTH_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,160}$")
+VK_AUTH_ACTIONS = {"login", "link"}
+VK_ID_AUTHORIZE_URL = "https://id.vk.ru/authorize"
 
 
 class LoginRequest(BaseModel):
@@ -105,6 +116,22 @@ class VkOAuthCodeRequest(BaseModel):
     state: str
 
 
+class VkAuthStartRequest(BaseModel):
+    action: str
+
+
+class VkAuthStartResponse(BaseModel):
+    authorize_url: str
+    state: str
+    expires_in: int
+
+
+class VkAuthCompleteRequest(BaseModel):
+    code: str
+    device_id: str
+    state: str
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -125,6 +152,175 @@ VK_AUTH_TEMPORARY_ERROR_MESSAGE = (
     "VK ID временно не завершил авторизацию. Подождите немного и попробуйте снова "
     "или войдите через Telegram."
 )
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padded = value + ("=" * (-len(value) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _vk_flow_cookie_secret() -> bytes:
+    return (settings.JWT_SECRET_KEY or LOCAL_DEV_JWT_SECRET).encode("utf-8")
+
+
+def _sign_vk_flow_payload(encoded_payload: str) -> str:
+    digest = hmac.new(
+        _vk_flow_cookie_secret(),
+        encoded_payload.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return _base64url_encode(digest)
+
+
+def _encode_vk_flow_cookie(payload: dict[str, Any]) -> str:
+    encoded_payload = _base64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    return f"{encoded_payload}.{_sign_vk_flow_payload(encoded_payload)}"
+
+
+def _decode_vk_flow_cookie(raw_value: str) -> dict[str, Any]:
+    try:
+        encoded_payload, signature = raw_value.split(".", 1)
+    except ValueError:
+        raise ValueError("invalid VK flow cookie shape")
+
+    expected_signature = _sign_vk_flow_payload(encoded_payload)
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("invalid VK flow cookie signature")
+
+    try:
+        payload = json.loads(_base64url_decode(encoded_payload).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("invalid VK flow cookie payload") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("invalid VK flow cookie payload")
+    return payload
+
+
+def _auth_cookie_secure() -> bool:
+    return settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://")
+
+
+def _set_vk_flow_cookie(response: Response, payload: dict[str, Any]) -> None:
+    response.set_cookie(
+        VK_FLOW_COOKIE_NAME,
+        _encode_vk_flow_cookie(payload),
+        max_age=VK_FLOW_TTL_SECONDS,
+        httponly=True,
+        secure=_auth_cookie_secure(),
+        samesite="lax",
+        path=VK_FLOW_COOKIE_PATH,
+    )
+
+
+def _clear_vk_flow_cookie(response: Response) -> None:
+    response.delete_cookie(
+        VK_FLOW_COOKIE_NAME,
+        path=VK_FLOW_COOKIE_PATH,
+        secure=_auth_cookie_secure(),
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _generate_vk_code_verifier() -> str:
+    verifier = secrets.token_urlsafe(64)
+    return verifier[:128]
+
+
+def _generate_vk_state(action: str) -> str:
+    return f"shamrai_vk_{action}_{secrets.token_urlsafe(32)}"
+
+
+def _vk_code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return _base64url_encode(digest)
+
+
+def _validate_vk_auth_action(action: str) -> str:
+    clean_action = str(action or "").strip().lower()
+    if clean_action not in VK_AUTH_ACTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VK auth action must be login or link",
+        )
+    return clean_action
+
+
+def _vk_redirect_uri() -> str:
+    return settings.VK_ID_REDIRECT_URI.strip()
+
+
+def _vk_app_id() -> str:
+    return settings.VK_ID_APP_ID.strip()
+
+
+def _build_vk_authorize_url(*, state: str, code_verifier: str) -> str:
+    vk_app_id = _vk_app_id()
+    redirect_uri = _vk_redirect_uri()
+    if not vk_app_id or not redirect_uri:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VK ID временно недоступен. Попробуйте войти через Telegram.",
+        )
+
+    query = urllib.parse.urlencode(
+        {
+            "response_type": "code",
+            "client_id": vk_app_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "scope": "vkid.personal_info",
+            "code_challenge": _vk_code_challenge(code_verifier),
+            "code_challenge_method": "S256",
+            "scheme": "dark",
+        }
+    )
+    return f"{VK_ID_AUTHORIZE_URL}?{query}"
+
+
+def _read_vk_flow_from_request(request: Request, response: Response) -> dict[str, Any]:
+    raw_cookie = (getattr(request, "cookies", {}) or {}).get(VK_FLOW_COOKIE_NAME)
+    if not raw_cookie:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сессия VK ID устарела. Запустите вход еще раз.",
+        )
+
+    try:
+        flow = _decode_vk_flow_cookie(raw_cookie)
+    except ValueError:
+        _clear_vk_flow_cookie(response)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сессия VK ID устарела. Запустите вход еще раз.",
+        )
+
+    expires_at = float(flow.get("expires_at") or 0)
+    action = str(flow.get("action") or "")
+    state_value = str(flow.get("state") or "")
+    code_verifier = str(flow.get("code_verifier") or "")
+    redirect_uri = str(flow.get("redirect_uri") or "")
+    if (
+        expires_at < time.time()
+        or action not in VK_AUTH_ACTIONS
+        or not VK_AUTH_STATE_RE.fullmatch(state_value)
+        or not VK_CODE_VERIFIER_RE.fullmatch(code_verifier)
+        or redirect_uri != _vk_redirect_uri()
+    ):
+        _clear_vk_flow_cookie(response)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сессия VK ID устарела. Запустите вход еще раз.",
+        )
+
+    return flow
 
 
 def _vk_oauth_client_error(error: VkOAuthError) -> tuple[int, str]:
@@ -192,16 +388,20 @@ def _exchange_vk_code(code: str, device_id: str, code_verifier: str, state: str)
     if not vk_app_id or not settings.VK_ID_REDIRECT_URI.strip():
         raise VkOAuthError("VK ID is not configured")
 
+    token_query = {
+        "grant_type": "authorization_code",
+        "redirect_uri": settings.VK_ID_REDIRECT_URI.strip(),
+        "client_id": vk_app_id,
+        "code_verifier": code_verifier,
+        "state": state,
+        "device_id": device_id,
+    }
+    if settings.VK_ID_CLIENT_SECRET.strip():
+        token_query["client_secret"] = settings.VK_ID_CLIENT_SECRET.strip()
+
     token_payload = _vk_oauth_request(
         "auth",
-        {
-            "grant_type": "authorization_code",
-            "redirect_uri": settings.VK_ID_REDIRECT_URI.strip(),
-            "client_id": vk_app_id,
-            "code_verifier": code_verifier,
-            "state": state,
-            "device_id": device_id,
-        },
+        token_query,
         {"code": code},
     )
 
@@ -1052,6 +1252,79 @@ async def _resolve_vk_login_user(
     return await _create_vk_only_user(db, vk_user_id, vk_profile.get("vk_display_name"))
 
 
+async def _finish_vk_login(
+    db: AsyncSession,
+    vk_profile: dict,
+    *,
+    response: Response,
+    identity_device_id: Any,
+    current_user: Optional[User],
+) -> LoginResponse:
+    source_user = _current_user_or_none(current_user)
+    user = await _resolve_vk_login_user(
+        db,
+        vk_profile,
+        current_user=source_user,
+        identity_device_id=identity_device_id,
+    )
+    await _bind_identity_device(db, identity_device_id, user)
+    telegram_id = user.telegram_id
+    await db.commit()
+    user = await _load_user_with_profile(db, telegram_id)
+
+    return _build_login_response(user, response)
+
+
+async def _finish_vk_link(
+    db: AsyncSession,
+    vk_profile: dict,
+    *,
+    current_user: User,
+    identity_device_id: Any,
+) -> VkLinkResponse:
+    vk_user_id = vk_profile["vk_user_id"]
+    current_profile = _current_user_or_none(current_user)
+    if not current_profile:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+        )
+
+    if current_profile.vk_user_id and current_profile.vk_user_id != vk_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This Telegram profile is already linked to another VK profile",
+        )
+
+    existing_result = await db.execute(
+        select(User)
+        .filter(
+            User.vk_user_id == vk_user_id,
+            User.telegram_id != current_profile.telegram_id,
+        )
+    )
+    existing_user = existing_result.scalars().first()
+
+    if existing_user:
+        if not _is_web_only_user(existing_user):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Этот VK ID уже привязан к другому Telegram-профилю",
+            )
+        await _merge_web_only_user_into_telegram(db, existing_user, current_profile)
+    else:
+        current_profile.vk_user_id = vk_user_id
+
+    await _bind_identity_device(db, identity_device_id, current_profile)
+    await db.commit()
+
+    return VkLinkResponse(
+        status="success",
+        vk_user_id=vk_user_id,
+        vk_display_name=vk_profile.get("vk_display_name"),
+    )
+
+
 async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
     try:
         return await asyncio.to_thread(
@@ -1216,6 +1489,95 @@ async def poll_telegram_bot_auth_session(
     )
 
 
+@router.post("/vk/start", response_model=VkAuthStartResponse)
+async def vk_id_start(
+    request_data: VkAuthStartRequest,
+    response: Response,
+):
+    """
+    Starts a VK ID OAuth flow with server-owned PKCE state.
+    The verifier is stored only in a short-lived signed HttpOnly cookie.
+    """
+    action = _validate_vk_auth_action(request_data.action)
+    code_verifier = _generate_vk_code_verifier()
+    state_value = _generate_vk_state(action)
+    authorize_url = _build_vk_authorize_url(
+        state=state_value,
+        code_verifier=code_verifier,
+    )
+    _set_vk_flow_cookie(
+        response,
+        {
+            "action": action,
+            "state": state_value,
+            "code_verifier": code_verifier,
+            "redirect_uri": _vk_redirect_uri(),
+            "expires_at": int(time.time() + VK_FLOW_TTL_SECONDS),
+        },
+    )
+    return VkAuthStartResponse(
+        authorize_url=authorize_url,
+        state=state_value,
+        expires_in=VK_FLOW_TTL_SECONDS,
+    )
+
+
+@router.post("/vk/complete")
+async def vk_id_complete(
+    request_data: VkAuthCompleteRequest,
+    request: Request,
+    response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Completes a server-owned VK ID flow. The action and PKCE verifier are
+    recovered from the signed flow cookie instead of browser storage.
+    """
+    flow = _read_vk_flow_from_request(request, response)
+    requested_state = str(request_data.state or "").strip()
+    if requested_state != flow["state"]:
+        _clear_vk_flow_cookie(response)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Сессия VK ID устарела. Запустите вход еще раз.",
+        )
+
+    _clear_vk_flow_cookie(response)
+    payload = _normalize_vk_code_payload(
+        {
+            "code": request_data.code,
+            "device_id": request_data.device_id,
+            "code_verifier": flow["code_verifier"],
+            "state": requested_state,
+        }
+    )
+    vk_profile = await _exchange_vk_or_502(payload)
+
+    if flow["action"] == "login":
+        return await _finish_vk_login(
+            db,
+            vk_profile,
+            response=response,
+            identity_device_id=identity_device_id,
+            current_user=current_user,
+        )
+
+    current_profile = _current_user_or_none(current_user)
+    if not current_profile:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+        )
+    return await _finish_vk_link(
+        db,
+        vk_profile,
+        current_user=current_profile,
+        identity_device_id=identity_device_id,
+    )
+
+
 @router.post("/vk/login", response_model=LoginResponse)
 async def vk_id_login(
     request_data: VkOAuthCodeRequest,
@@ -1230,19 +1592,13 @@ async def vk_id_login(
     """
     payload = _normalize_vk_code_payload(request_data)
     vk_profile = await _exchange_vk_or_502(payload)
-    source_user = _current_user_or_none(current_user)
-    user = await _resolve_vk_login_user(
+    return await _finish_vk_login(
         db,
         vk_profile,
-        current_user=source_user,
+        response=response,
         identity_device_id=identity_device_id,
+        current_user=current_user,
     )
-    await _bind_identity_device(db, identity_device_id, user)
-    telegram_id = user.telegram_id
-    await db.commit()
-    user = await _load_user_with_profile(db, telegram_id)
-
-    return _build_login_response(user, response)
 
 
 @router.post("/vk/link", response_model=VkLinkResponse)
@@ -1258,44 +1614,9 @@ async def vk_id_link(
     """
     payload = _normalize_vk_code_payload(request_data)
     vk_profile = await _exchange_vk_or_502(payload)
-    vk_user_id = vk_profile["vk_user_id"]
-    current_profile = _current_user_or_none(current_user)
-    if not current_profile:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header missing",
-        )
-
-    if current_profile.vk_user_id and current_profile.vk_user_id != vk_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This Telegram profile is already linked to another VK profile",
-        )
-
-    existing_result = await db.execute(
-        select(User)
-        .filter(
-            User.vk_user_id == vk_user_id,
-            User.telegram_id != current_profile.telegram_id,
-        )
-    )
-    existing_user = existing_result.scalars().first()
-
-    if existing_user:
-        if not _is_web_only_user(existing_user):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Этот VK ID уже привязан к другому Telegram-профилю",
-            )
-        await _merge_web_only_user_into_telegram(db, existing_user, current_profile)
-    else:
-        current_profile.vk_user_id = vk_user_id
-
-    await _bind_identity_device(db, identity_device_id, current_profile)
-    await db.commit()
-
-    return VkLinkResponse(
-        status="success",
-        vk_user_id=vk_user_id,
-        vk_display_name=vk_profile.get("vk_display_name"),
+    return await _finish_vk_link(
+        db,
+        vk_profile,
+        current_user=current_user,
+        identity_device_id=identity_device_id,
     )

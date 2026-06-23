@@ -5,6 +5,11 @@ import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../utils/authStorage'
 import { notifyInfo } from '../utils/notify';
 import { playIncomingSignalSound, playIncomingSupportSound, unlockIncomingSignalSound } from '../utils/signalAudio';
 import { isTelegramMiniApp } from '../utils/telegramSdk';
+import {
+  isServiceWorkerNotificationMessage,
+  rememberWebNotificationEvent,
+  type WebNotificationEvent,
+} from '../utils/webNotificationEvents';
 
 interface PersonalSignal {
   id: number;
@@ -13,6 +18,8 @@ interface PersonalSignal {
   created_at?: string;
   data?: {
     message_text?: string;
+    push_url?: string;
+    url?: string;
   };
 }
 
@@ -38,6 +45,17 @@ function signalNoticeText(signal: PersonalSignal) {
 function signalNoticeTitle(signal: PersonalSignal) {
   if (signal.type === 'support_staff_message') return 'Shamrai написал в чат';
   return 'Личный бот Shamrai';
+}
+
+function signalToNotificationEvent(signal: PersonalSignal, source: WebNotificationEvent['source']): WebNotificationEvent {
+  return {
+    id: String(signal.id),
+    title: signalNoticeTitle(signal),
+    body: signalNoticeText(signal),
+    type: signal.type,
+    url: signal.data?.push_url || signal.data?.url || '/app?open=web-bot-chat',
+    source,
+  };
 }
 
 function mergeSignalsById(currentSignals: PersonalSignal[], incomingSignals: PersonalSignal[]) {
@@ -104,6 +122,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
       bufferedSignalsRef.current = mergeSignalsById(bufferedSignalsRef.current, [signal]).slice(-200);
       window.dispatchEvent(new CustomEvent(WEB_SIGNAL_EVENT, { detail: signal }));
       if (!options.notify) return;
+      if (!rememberWebNotificationEvent(signalToNotificationEvent(signal, 'websocket'))) return;
       notifyInfo(signalNoticeText(signal), signalNoticeTitle(signal));
       void (signal.type.startsWith('support_') ? playIncomingSupportSound() : playIncomingSignalSound());
     };
@@ -186,6 +205,23 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (pingTimer) window.clearInterval(pingTimer);
       socket?.close();
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || isTelegramMiniApp() || !('serviceWorker' in navigator)) return;
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      if (!isServiceWorkerNotificationMessage(event.data)) return;
+      const payload = event.data.payload;
+      if (!rememberWebNotificationEvent(payload)) return;
+      notifyInfo(payload.body, payload.title);
+      void (payload.type.startsWith('support_') ? playIncomingSupportSound() : playIncomingSignalSound());
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
     };
   }, [enabled]);
 

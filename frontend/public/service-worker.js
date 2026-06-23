@@ -74,25 +74,43 @@ self.addEventListener('push', (event) => {
     ...(payload.data || {}),
     url: safeNotificationPath(payload.url || payload.data?.url),
   };
+  const clientPayload = {
+    id: String(payload.signal_id || payload.data?.signal_id || payload.tag || Date.now()),
+    title: String(payload.title || 'Shamrai Analytics'),
+    body: String(payload.body || 'Новый персональный сигнал.'),
+    type: String(payload.type || payload.data?.type || 'notification'),
+    url: notificationData.url,
+    source: 'service-worker',
+  };
 
   event.waitUntil(
-    self.registration.showNotification(payload.title || 'Shamrai Analytics', {
-      body: payload.body || 'Новый персональный сигнал.',
-      tag: payload.tag || `shamrai-signal-${Date.now()}`,
-      data: notificationData,
-      image: payload.image || undefined,
-      icon: '/brand/shamrai-favicon.png',
-      badge: '/brand/shamrai-favicon.png',
-      vibrate: [140, 70, 140, 90, 220],
-      requireInteraction: true,
-      renotify: true,
-      actions: [
-        {
-          action: 'open',
-          title: 'Открыть',
-        },
-      ],
-    })
+    Promise.all([
+      self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+        clients.forEach((client) => {
+          client.postMessage({
+            type: 'SHAMRAI_PUSH_RECEIVED',
+            payload: clientPayload,
+          });
+        });
+      }),
+      self.registration.showNotification(payload.title || 'Shamrai Analytics', {
+        body: payload.body || 'Новый персональный сигнал.',
+        tag: payload.tag || `shamrai-signal-${Date.now()}`,
+        data: notificationData,
+        image: payload.image || undefined,
+        icon: '/brand/shamrai-favicon.png',
+        badge: '/brand/shamrai-favicon.png',
+        vibrate: [80, 40, 80],
+        requireInteraction: true,
+        renotify: true,
+        actions: [
+          {
+            action: 'open',
+            title: 'Открыть',
+          },
+        ],
+      }),
+    ])
   );
 });
 

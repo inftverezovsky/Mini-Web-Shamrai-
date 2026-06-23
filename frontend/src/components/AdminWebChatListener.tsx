@@ -6,6 +6,10 @@ import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../utils/authStorage'
 import { notifyInfo } from '../utils/notify';
 import { playIncomingSupportSound, unlockIncomingSignalSound } from '../utils/signalAudio';
 import { hasTelegramLaunchParams, isTelegramMiniApp } from '../utils/telegramSdk';
+import {
+  isServiceWorkerNotificationMessage,
+  rememberWebNotificationEvent,
+} from '../utils/webNotificationEvents';
 
 interface AdminWebChatListenerProps {
   enabled: boolean;
@@ -84,7 +88,17 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
       seenMessageIdsRef.current.add(payload.message.id);
       window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_MESSAGE_EVENT, { detail: payload }));
       if (payload.message.direction !== 'client') return;
-      notifyInfo(supportNoticeText(payload.message), payload.conversation?.owner_user?.display_name || 'Клиент Shamrai');
+      const title = payload.conversation?.owner_user?.display_name || 'Клиент Shamrai';
+      const body = supportNoticeText(payload.message);
+      if (!rememberWebNotificationEvent({
+        id: String(payload.message.id),
+        title,
+        body,
+        type: 'support_client_message',
+        url: `/app?open=admin-web-chat&conversation_id=${payload.conversation?.id || ''}`,
+        source: 'websocket',
+      })) return;
+      notifyInfo(body, title);
       void playIncomingSupportSound();
     };
 
@@ -153,6 +167,23 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (pingTimer) window.clearInterval(pingTimer);
       socket?.close();
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || isTelegramMiniApp() || hasTelegramLaunchParams() || !('serviceWorker' in navigator)) return;
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      if (!isServiceWorkerNotificationMessage(event.data)) return;
+      const payload = event.data.payload;
+      if (!rememberWebNotificationEvent(payload)) return;
+      notifyInfo(payload.body, payload.title);
+      void playIncomingSupportSound();
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
     };
   }, [enabled]);
 

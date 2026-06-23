@@ -16,6 +16,7 @@ import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import SmoothCollapse from '../../components/SmoothCollapse';
+import WebPushSettingsCard from '../../components/WebPushSettingsCard';
 import AdminPlans from '../admin/AdminPlans';
 import AdminAccess from '../admin/AdminAccess';
 import AdminMarketing from '../admin/AdminMarketing';
@@ -853,6 +854,8 @@ export default function Profile() {
             )}
           </div>
         )}
+
+        {!isAdminProfile && <WebPushSettingsCard />}
 
         <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
           <button

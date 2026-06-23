@@ -3,6 +3,18 @@ import { formatApiErrorMessage } from './errors';
 import { clearStoredAuthToken, getStoredAuthToken } from '../utils/authStorage';
 import { identityDeviceHeader } from '../utils/identityDevice';
 
+export class ApiRequestError extends Error {
+  status: number;
+  retryAfterSeconds: number | null;
+
+  constructor(message: string, status: number, retryAfterSeconds: number | null) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 export async function requestApi<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = getStoredAuthToken();
   const isFormData = options.body instanceof FormData;
@@ -28,13 +40,19 @@ export async function requestApi<T = any>(endpoint: string, options: RequestInit
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     const message = formatApiErrorMessage(response.status, errorData.detail);
+    const retryAfterHeader = response.headers.get('Retry-After');
+    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
 
     if (response.status === 401) {
       clearStoredAuthToken();
       window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { endpoint, message } }));
     }
 
-    throw new Error(message);
+    throw new ApiRequestError(
+      message,
+      response.status,
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : null,
+    );
   }
 
   if (response.status === 204) {

@@ -124,6 +124,51 @@ class SignalDeliveryTests(unittest.TestCase):
         self.assertEqual(payload["forecast_request_id"], "request-77")
         self.assertEqual(payload["data"]["forecast_request_id"], "request-77")
 
+    def test_web_push_payload_keeps_support_chat_target_and_body(self):
+        signal_payload = {
+            "id": 88,
+            "type": "support_staff_message",
+            "text": "Ответили в поддержке",
+            "data": {
+                "push_title": "Shamrai написал в чат",
+                "push_body": "Ответили в поддержке",
+                "push_url": "https://shamra1.pro/app?open=web-chat&conversation=support",
+            },
+        }
+
+        payload = json.loads(signals._web_push_notification_payload(signal_payload))
+
+        self.assertEqual(payload["title"], "Shamrai написал в чат")
+        self.assertEqual(payload["body"], "Ответили в поддержке")
+        self.assertEqual(payload["url"], "https://shamra1.pro/app?open=web-chat&conversation=support")
+        self.assertEqual(payload["type"], "support_staff_message")
+        self.assertEqual(payload["data"]["url"], "https://shamra1.pro/app?open=web-chat&conversation=support")
+
+    def test_web_push_invalid_endpoint_result_is_marked_for_cleanup(self):
+        class FakeResponse:
+            status_code = 410
+
+        class FakePushError(Exception):
+            response = FakeResponse()
+
+        def fake_webpush(**_kwargs):
+            raise FakePushError("expired endpoint")
+
+        with (
+            patch.object(signals, "webpush", fake_webpush),
+            patch.object(signals, "WebPushException", Exception),
+            patch.object(signals.settings, "WEB_PUSH_VAPID_PUBLIC_KEY", "public"),
+            patch.object(signals.settings, "WEB_PUSH_VAPID_PRIVATE_KEY", "private"),
+        ):
+            result = signals._send_web_push(
+                {"endpoint": "https://push.example/expired", "keys": {"p256dh": "x", "auth": "y"}},
+                {"id": 77, "type": "forecast_full", "text": "Прогноз", "data": {}},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 410)
+        self.assertTrue(result["invalid_subscription"])
+
     def test_report_mode_can_commit_web_signals_before_external_push(self):
         db = FakeDb()
         dispatch_events = []

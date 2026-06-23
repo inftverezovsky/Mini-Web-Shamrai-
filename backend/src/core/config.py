@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     VK_CALLBACK_CONFIRMATION_CODE: str = ""
     VK_CALLBACK_SECRET: str = ""
     VK_API_VERSION: str = "5.199"
+    VK_ID_CLIENT_SECRET: str = ""
     VK_BROADCAST_CONCURRENCY: int = 8
     VK_DIALOG_POLLING_ENABLED: bool = False
     VK_DIALOG_POLLING_INTERVAL_SECONDS: float = 4.0

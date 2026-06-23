@@ -1,6 +1,8 @@
 let sharedSignalAudioContext: AudioContext | null = null;
 let signalAudioUnlocked = false;
 
+export type IncomingSignalSoundState = 'locked' | 'unlocked' | 'unsupported';
+
 function getSignalAudioContext() {
   if (typeof window === 'undefined') return null;
   if (sharedSignalAudioContext?.state === 'closed') {
@@ -38,16 +40,16 @@ function createNotificationMaster(audioContext: AudioContext, startTime: number,
   const compressor = audioContext.createDynamicsCompressor();
 
   master.gain.setValueAtTime(0.0001, startTime);
-  master.gain.exponentialRampToValueAtTime(volume, startTime + 0.028);
-  master.gain.setTargetAtTime(0.0001, startTime + 0.68, 0.16);
+  master.gain.exponentialRampToValueAtTime(volume, startTime + 0.025);
+  master.gain.setTargetAtTime(0.0001, startTime + 0.42, 0.12);
 
   filter.type = 'lowpass';
-  filter.frequency.setValueAtTime(4200, startTime);
-  filter.Q.setValueAtTime(0.65, startTime);
+  filter.frequency.setValueAtTime(3200, startTime);
+  filter.Q.setValueAtTime(0.55, startTime);
 
-  compressor.threshold.setValueAtTime(-22, startTime);
-  compressor.knee.setValueAtTime(18, startTime);
-  compressor.ratio.setValueAtTime(9, startTime);
+  compressor.threshold.setValueAtTime(-24, startTime);
+  compressor.knee.setValueAtTime(20, startTime);
+  compressor.ratio.setValueAtTime(6, startTime);
   compressor.attack.setValueAtTime(0.004, startTime);
   compressor.release.setValueAtTime(0.22, startTime);
 
@@ -59,7 +61,7 @@ function createNotificationMaster(audioContext: AudioContext, startTime: number,
     master.disconnect();
     filter.disconnect();
     compressor.disconnect();
-  }, 1500);
+  }, 1000);
 
   return master;
 }
@@ -102,10 +104,9 @@ function scheduleWarmBell(audioContext: AudioContext, volume: number, delay = 0)
   const startTime = audioContext.currentTime + 0.018 + delay;
   const master = createNotificationMaster(audioContext, startTime, volume);
 
-  scheduleTone(audioContext, master, startTime, 0, 0.34, 440, 587.33, 0.34, 'triangle');
-  scheduleTone(audioContext, master, startTime, 0.055, 0.38, 659.25, 880, 0.22, 'sine');
-  scheduleTone(audioContext, master, startTime, 0.16, 0.42, 783.99, 1046.5, 0.18, 'sine');
-  scheduleTone(audioContext, master, startTime, 0, 0.62, 196, 146.83, 0.11, 'triangle');
+  scheduleTone(audioContext, master, startTime, 0, 0.24, 392, 523.25, 0.22, 'triangle');
+  scheduleTone(audioContext, master, startTime, 0.065, 0.28, 587.33, 698.46, 0.12, 'sine');
+  scheduleTone(audioContext, master, startTime, 0, 0.38, 196, 164.81, 0.055, 'triangle');
 }
 
 async function playWarmNotificationSound({
@@ -154,13 +155,21 @@ export async function unlockIncomingSignalSound() {
   }
 }
 
+export function getIncomingSignalSoundState(): IncomingSignalSoundState {
+  if (typeof window === 'undefined') return 'unsupported';
+  const windowWithAudio = window as typeof window & { webkitAudioContext?: typeof AudioContext };
+  const AudioContextClass = window.AudioContext || windowWithAudio.webkitAudioContext;
+  if (!AudioContextClass) return 'unsupported';
+  return signalAudioUnlocked ? 'unlocked' : 'locked';
+}
+
 export async function playIncomingSignalSound() {
-  await playWarmNotificationSound({ volume: 1.08 });
+  await playWarmNotificationSound({ volume: 0.46 });
 }
 
 export async function playIncomingSupportSound() {
   if (signalAudioUnlocked && typeof navigator !== 'undefined') {
-    navigator.vibrate?.([90, 55, 90]);
+    navigator.vibrate?.([45]);
   }
-  await playWarmNotificationSound({ volume: 1.28, repeatDelay: 0.44 });
+  await playWarmNotificationSound({ volume: 0.54 });
 }

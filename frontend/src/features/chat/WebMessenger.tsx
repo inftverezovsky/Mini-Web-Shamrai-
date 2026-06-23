@@ -23,6 +23,7 @@ import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../../utils/authStora
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
+import { rememberWebNotificationEvent } from '../../utils/webNotificationEvents';
 import MessageComposer, { ChatComposerAttachment } from './MessageComposer';
 import MessageList from './MessageList';
 import SignalMessageCard, { signalActionNotice } from './SignalMessageCard';
@@ -351,8 +352,18 @@ export default function WebMessenger() {
         void loadConversations().catch(() => undefined);
       }
       if (payload.message.direction === 'staff') {
-        notifyInfo(supportMessagePreview(payload.message).slice(0, 260), 'Shamrai написал в чат');
-        void playIncomingSupportSound();
+        const body = supportMessagePreview(payload.message).slice(0, 260);
+        if (rememberWebNotificationEvent({
+          id: String(payload.message.id),
+          title: 'Shamrai написал в чат',
+          body,
+          type: 'support_staff_message',
+          url: '/app?open=web-chat&conversation=support',
+          source: 'websocket',
+        })) {
+          notifyInfo(body, 'Shamrai написал в чат');
+          void playIncomingSupportSound();
+        }
       }
     };
 
@@ -670,7 +681,7 @@ export default function WebMessenger() {
 
           <div className="flex min-h-[34px] max-w-full shrink-0 items-center gap-2 rounded-2xl border border-emerald-300/15 bg-emerald-300/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-100">
             <ShieldCheck className="h-3.5 w-3.5" />
-            <span className="whitespace-nowrap">Push on</span>
+            <span className="whitespace-nowrap">Web канал</span>
           </div>
         </div>
 
