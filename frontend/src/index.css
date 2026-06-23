@@ -54,6 +54,7 @@
     font-size: 15px;
     width: 100%;
     min-width: 320px;
+    overflow-x: clip;
   }
 
   *,
@@ -155,6 +156,8 @@
   width: 100%;
   min-height: 100dvh;
   min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 .app-shell,
@@ -169,6 +172,15 @@
 }
 
 .app-shell :is(h1, h2, h3, h4, h5, h6, p, li, a, button, span) {
+  overflow-wrap: anywhere;
+}
+
+.app-shell :is(.grid, .flex) > *,
+.app-shell :is(button, [role="button"], [role="tab"], a[class*="rounded"]) {
+  min-width: 0;
+}
+
+.app-shell :is(button, [role="button"], [role="tab"], a[class*="rounded"], input, textarea, select) {
   overflow-wrap: anywhere;
 }
 
@@ -4308,6 +4320,84 @@
   contain-intrinsic-size: auto 280px;
 }
 
+:root[data-shamrai-app-visible="false"] #root *,
+:root[data-shamrai-app-visible="false"] #root *::before,
+:root[data-shamrai-app-visible="false"] #root *::after {
+  animation-play-state: paused !important;
+  transition-duration: 0.01ms !important;
+}
+
+:root[data-performance-profile="lowPower"] #root .app-shell::before,
+:root[data-performance-profile="lowPower"] #root .app-shell::after,
+:root[data-performance-profile="lowPower"] #root .ambient-field::before,
+:root[data-performance-profile="lowPower"] #root .ambient-field::after,
+:root[data-performance-profile="lowPower"] #root .ambient-field__grid,
+:root[data-performance-profile="lowPower"] #root .ambient-field__sweep,
+:root[data-performance-profile="lowPower"] #root .ambient-field__rings,
+:root[data-performance-profile="lowPower"] #root .ambient-field__rings::before,
+:root[data-performance-profile="lowPower"] #root .ambient-field__rings::after,
+:root[data-performance-profile="lowPower"] #root .shimmer-border::before,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-panel,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-card,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-panel::after,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-card::after,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-button,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-button::before,
+:root[data-performance-profile="lowPower"] #root .shamrai-glass-button::after,
+:root[data-performance-profile="lowPower"] #root .shamrai-electric-button::before,
+:root[data-performance-profile="lowPower"] #root .shamrai-electric-button::after,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora::after,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora__item,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora__item::before,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora__item::after,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora__item--active,
+:root[data-performance-profile="lowPower"] #root .bottom-nav-aurora__item--active::before,
+:root[data-performance-profile="lowPower"] #root .nav-glow-dot,
+:root[data-performance-profile="lowPower"] #root .promo-status-panel,
+:root[data-performance-profile="lowPower"] #root .spark-field::before,
+:root[data-performance-profile="lowPower"] #root .spark-field::after,
+:root[data-performance-profile="lowPower"] #root .iridescent-icon,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__aura,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__stars,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__gate,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__gate span,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__scan,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__floor,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__logo-shell,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__video,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__caption,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__loader span {
+  animation: none !important;
+}
+
+:root[data-performance-profile="lowPower"] #root .ambient-field__grid,
+:root[data-performance-profile="lowPower"] #root .ambient-field::before,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__aura,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__logo-shell,
+:root[data-performance-profile="lowPower"] #root .welcome-splash__video,
+:root[data-performance-profile="lowPower"] #root .iridescent-icon {
+  filter: none !important;
+}
+
+:root[data-performance-profile="lowPower"] #root .ambient-field,
+:root[data-performance-profile="lowPower"] #root .app-shell::before,
+:root[data-performance-profile="lowPower"] #root .app-shell::after {
+  opacity: 0.42;
+}
+
+:root[data-performance-profile="lowPower"] #root :is(
+  .shamrai-glass-card,
+  .glass-card,
+  .motion-card,
+  .bet-feed-card,
+  .smooth-surface
+) {
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 280px;
+}
+
 .shamrai-range {
   height: 1.9rem;
   cursor: pointer;
@@ -4393,5 +4483,72 @@
   #root .app-shell .web-bot-chat__list {
     padding-left: 0.85rem;
     padding-right: 0.85rem;
+  }
+}
+
+#root .app-shell .bottom-nav-aurora--admin {
+  display: grid !important;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.22rem !important;
+  padding-left: 0.35rem !important;
+  padding-right: 0.35rem !important;
+}
+
+#root .app-shell .bottom-nav-aurora--admin .bottom-nav-aurora__item {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+  padding-left: 0.12rem !important;
+  padding-right: 0.12rem !important;
+}
+
+#root .app-shell .bottom-nav-aurora--admin .bottom-nav-aurora__item svg {
+  width: 1rem !important;
+  height: 1rem !important;
+  flex-shrink: 0;
+}
+
+#root .app-shell .bottom-nav-aurora--admin :is(.bottom-nav-aurora__label, button .bottom-nav-aurora__label) {
+  display: block;
+  width: 100%;
+  max-width: 100% !important;
+  font-size: clamp(0.54rem, 2vw, 0.62rem) !important;
+  font-weight: 780 !important;
+  line-height: 1.05 !important;
+  letter-spacing: 0 !important;
+  text-align: center;
+  text-overflow: clip;
+}
+
+@media (max-width: 359px) {
+  #root .app-shell .bottom-nav-aurora--admin {
+    gap: 0.16rem !important;
+    padding-left: 0.25rem !important;
+    padding-right: 0.25rem !important;
+  }
+
+  #root .app-shell .bottom-nav-aurora--admin :is(.bottom-nav-aurora__label, button .bottom-nav-aurora__label) {
+    font-size: 0.5rem !important;
+  }
+}
+
+@media (max-width: 420px) {
+  #root .app-shell {
+    font-size: 0.94rem;
+  }
+
+  #root .app-shell :is(.bottom-nav-aurora__label, button .bottom-nav-aurora__label) {
+    max-width: 100%;
+    font-size: clamp(0.58rem, 2.7vw, 0.72rem) !important;
+  }
+
+  #root .app-shell :is(button, [role="button"], [role="tab"]) {
+    line-height: 1.15 !important;
+  }
+}
+
+@media (max-width: 359px) {
+  #root .app-shell :is(.bottom-nav-aurora__label, button .bottom-nav-aurora__label) {
+    font-size: 0.56rem !important;
   }
 }

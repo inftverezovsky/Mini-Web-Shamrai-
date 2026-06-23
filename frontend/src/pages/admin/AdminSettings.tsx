@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api';
 import type { MessageTemplateResponse } from '../../schemas/schemas';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 
 type ChannelGroupId = 'telegram' | 'vk' | 'site';
+type SettingsSectionId = 'message_texts';
 
 interface ChannelGroupConfig {
   id: ChannelGroupId;
@@ -32,10 +33,28 @@ interface ChannelGroupConfig {
   templateKeys: string[];
 }
 
+interface SettingsSectionConfig {
+  id: SettingsSectionId;
+  title: string;
+  subtitle: string;
+  badge: string;
+  Icon: LucideIcon;
+}
+
 type TemplateEditorToken =
   | { type: 'text'; value: string }
   | { type: 'variable'; raw: string; key: string; label: string; example: string }
   | { type: 'markup'; raw: string };
+
+const SETTINGS_SECTIONS: SettingsSectionConfig[] = [
+  {
+    id: 'message_texts',
+    title: 'Тексты сообщений',
+    subtitle: 'Telegram, VK, сайт',
+    badge: 'тексты',
+    Icon: MessageCircle,
+  },
+];
 
 const CHANNEL_GROUPS: ChannelGroupConfig[] = [
   {
@@ -214,12 +233,14 @@ export default function AdminSettings() {
   const [templates, setTemplates] = useState<MessageTemplateResponse[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [activeKey, setActiveKey] = useState<string>('');
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('message_texts');
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Record<ChannelGroupId, boolean>>({
     telegram: false,
     vk: false,
     site: false,
   });
+  const editorPanelRef = useRef<HTMLElement | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -277,6 +298,12 @@ export default function AdminSettings() {
   const activeTemplate = useMemo(() => (
     templates.find(template => template.key === activeKey) || templates[0] || null
   ), [activeKey, templates]);
+  const customTemplateCount = useMemo(() => (
+    templates.filter(template => template.is_custom).length
+  ), [templates]);
+  const dirtyTemplateCount = useMemo(() => (
+    templates.filter(template => (drafts[template.key] ?? template.body) !== template.body).length
+  ), [drafts, templates]);
   const activeBody = activeTemplate ? drafts[activeTemplate.key] ?? activeTemplate.body : '';
   const activePreview = useMemo(() => buildPreview(activeTemplate, activeBody), [activeBody, activeTemplate]);
   const editorTokens = useMemo(
@@ -293,6 +320,18 @@ export default function AdminSettings() {
 
   const toggleGroup = (groupId: ChannelGroupId) => {
     setExpandedGroups(current => ({ ...current, [groupId]: !current[groupId] }));
+  };
+
+  const handleSelectTemplate = (templateKey: string) => {
+    setActiveKey(templateKey);
+    if (typeof window === 'undefined' || !window.matchMedia('(max-width: 1023px)').matches) return;
+
+    window.requestAnimationFrame(() => {
+      editorPanelRef.current?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'start',
+      });
+    });
   };
 
   const handleTextTokenChange = (tokenIndex: number, value: string) => {
@@ -330,6 +369,32 @@ export default function AdminSettings() {
       setSavingKey(null);
     }
   };
+
+  const renderTemplateActions = (
+    template: MessageTemplateResponse,
+    className: string,
+  ) => (
+    <div className={className}>
+      <button
+        type="button"
+        onClick={handleReset}
+        disabled={busy}
+        className="flex min-h-[42px] items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-all hover:border-amber-300/35 hover:text-amber-100 active:scale-[0.99] disabled:opacity-50"
+      >
+        {resettingKey === template.key ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+        <span>Сброс</span>
+      </button>
+      <button
+        type="button"
+        onClick={handleSave}
+        disabled={busy || !isDirty}
+        className="flex min-h-[42px] items-center justify-center gap-2 rounded-2xl border border-emerald-300/25 bg-emerald-400/15 px-3 text-[10px] font-black uppercase tracking-wider text-emerald-100 transition-all hover:bg-emerald-400/20 active:scale-[0.99] disabled:opacity-50"
+      >
+        {savingKey === template.key ? <Loader2 className="h-4 w-4 animate-spin" /> : isDirty ? <Save className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+        <span>{isDirty ? 'Сохранить' : 'Сохранено'}</span>
+      </button>
+    </div>
+  );
 
   const handleReset = async () => {
     if (!activeTemplate) return;
@@ -380,36 +445,106 @@ export default function AdminSettings() {
   }
 
   return (
-    <div className="space-y-4 pb-10 animate-slide-up">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="flex items-center text-lg font-black uppercase tracking-wider text-white">
+    <div className="min-w-0 space-y-4 pb-10 animate-slide-up sm:space-y-5">
+      <div className="rounded-3xl border border-white/10 bg-slate-950/42 p-3 shadow-glass backdrop-blur-xl sm:p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 className="flex items-center text-lg font-black uppercase tracking-wider text-white">
             <Settings2 className="mr-2 h-5 w-5 text-cyan-300" />
             Настройки
-          </h2>
-          <p className="mt-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">
-            Тексты сообщений
-          </p>
+            </h2>
+            <p className="mt-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Разделы панели
+            </p>
+          </div>
+          <div className="flex items-center gap-2 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-cyan-100">
+            <Sparkles className="h-4 w-4 text-cyan-200" />
+            <span>{customTemplateCount}/{templates.length} изменено</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-cyan-100">
-          <Sparkles className="h-4 w-4 text-cyan-200" />
-          <span>{templates.filter(template => template.is_custom).length}/{templates.length} изменено</span>
+
+        <div
+          role="tablist"
+          aria-label="Подвкладки настроек"
+          className="mt-4 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {SETTINGS_SECTIONS.map(section => {
+            const SectionIcon = section.Icon;
+            const active = activeSettingsSection === section.id;
+            const statusText = dirtyTemplateCount > 0
+              ? `${dirtyTemplateCount} черновик`
+              : `${customTemplateCount}/${templates.length}`;
+
+            return (
+              <button
+                key={section.id}
+                id={`settings-tab-${section.id}`}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                aria-controls={`settings-panel-${section.id}`}
+                onClick={() => setActiveSettingsSection(section.id)}
+                className={`smooth-pressable flex min-h-[52px] min-w-[210px] shrink-0 items-center gap-3 rounded-2xl border px-3 py-2 text-left transition-all sm:min-w-[240px] ${
+                  active
+                    ? 'border-cyan-300/35 bg-cyan-300/[0.13] text-white shadow-neon-cyan'
+                    : 'border-white/10 bg-white/[0.035] text-slate-300 hover:border-white/20 hover:bg-white/[0.06]'
+                }`}
+              >
+                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${
+                  active
+                    ? 'border-cyan-300/35 bg-cyan-300/15 text-cyan-100'
+                    : 'border-white/10 bg-black/20 text-slate-400'
+                }`}>
+                  <SectionIcon className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[11px] font-black uppercase tracking-wider">
+                    {section.title}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[10px] font-bold text-slate-400">
+                    {section.subtitle}
+                  </span>
+                </span>
+                <span className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-cyan-100">
+                  {statusText}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
-        <aside className="space-y-3 rounded-3xl border border-white/10 bg-[#050b16]/88 p-3 shadow-glass backdrop-blur-xl">
+      {activeSettingsSection === 'message_texts' && (
+      <div
+        id="settings-panel-message_texts"
+        role="tabpanel"
+        aria-labelledby="settings-tab-message_texts"
+        className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]"
+      >
+        <aside className="space-y-3 rounded-3xl border border-white/10 bg-[#050b16]/88 p-3 shadow-glass backdrop-blur-xl sm:p-4 xl:sticky xl:top-4 xl:self-start">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-black uppercase tracking-wider text-white">Шаблоны</p>
+              <p className="mt-0.5 truncate text-[10px] font-bold text-slate-500">
+                Выберите текст и редактируйте ниже
+              </p>
+            </div>
+            <span className="shrink-0 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider text-slate-300">
+              {templates.length}
+            </span>
+          </div>
+
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
             <input
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder="Найти шаблон"
-              className="w-full rounded-2xl border border-white/10 bg-slate-900/70 py-2.5 pl-9 pr-3 text-xs font-bold text-white placeholder-slate-600 outline-none transition-all focus:border-cyan-300/45"
+              className="w-full rounded-2xl border border-white/10 bg-slate-900/70 py-2.5 pl-9 pr-3 text-[16px] font-bold text-white placeholder-slate-600 outline-none transition-all focus:border-cyan-300/45 sm:text-xs"
             />
           </div>
 
-          <div className="space-y-2.5">
+          <div className="max-h-[34dvh] space-y-2.5 overflow-y-auto pr-1 overscroll-contain lg:max-h-none lg:overflow-visible lg:pr-0 xl:max-h-[calc(100dvh-220px)] xl:overflow-y-auto xl:pr-1">
             {groupedTemplates.map(group => {
               const tone = GROUP_TONE[group.id];
               const hasSearch = Boolean(searchTerm.trim());
@@ -470,7 +605,7 @@ export default function AdminSettings() {
                           <button
                             key={`${group.id}-${template.key}`}
                             type="button"
-                            onClick={() => setActiveKey(template.key)}
+                            onClick={() => handleSelectTemplate(template.key)}
                             className={`w-full rounded-xl border p-3 text-left transition-all active:scale-[0.99] ${
                               active
                                 ? tone.activeCard
@@ -506,11 +641,11 @@ export default function AdminSettings() {
         </aside>
 
         {activeTemplate && (
-          <section className="grid min-w-0 grid-cols-1 gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
-            <div className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/38 p-4 shadow-glass backdrop-blur-xl">
+          <section ref={editorPanelRef} className="scroll-mt-4 grid min-w-0 grid-cols-1 gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/38 p-3 shadow-glass backdrop-blur-xl sm:p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
-                  <h3 className="truncate text-base font-black text-white">{activeTemplate.title}</h3>
+                  <h3 className="text-base font-black leading-snug text-white sm:truncate">{activeTemplate.title}</h3>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
                     <span className="flex items-center gap-1">
                       <Clock3 className="h-3.5 w-3.5" />
@@ -520,26 +655,7 @@ export default function AdminSettings() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 sm:flex">
-                  <button
-                    type="button"
-                    onClick={handleReset}
-                    disabled={busy}
-                    className="flex min-h-[40px] items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-all hover:border-amber-300/35 hover:text-amber-100 disabled:opacity-50"
-                  >
-                    {resettingKey === activeTemplate.key ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-                    <span>Сброс</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSave}
-                    disabled={busy || !isDirty}
-                    className="flex min-h-[40px] items-center justify-center gap-2 rounded-2xl border border-emerald-300/25 bg-emerald-400/15 px-3 text-[10px] font-black uppercase tracking-wider text-emerald-100 transition-all hover:bg-emerald-400/20 disabled:opacity-50"
-                  >
-                    {savingKey === activeTemplate.key ? <Loader2 className="h-4 w-4 animate-spin" /> : isDirty ? <Save className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-                    <span>{isDirty ? 'Сохранить' : 'Сохранено'}</span>
-                  </button>
-                </div>
+                {renderTemplateActions(activeTemplate, 'grid grid-cols-2 gap-2 sm:flex')}
               </div>
 
               <div className="space-y-2">
@@ -578,8 +694,8 @@ export default function AdminSettings() {
                           onChange={(event) => handleTextTokenChange(index, event.target.value)}
                           spellCheck={false}
                           aria-label={`Редактируемый текст ${index + 1}`}
-                          style={{ width: `${Math.max(4, Math.min(22, token.value.length + 2))}ch` }}
-                          className="min-h-[38px] max-w-full rounded-xl border border-slate-600/70 bg-[#0b1728] px-3 text-[13px] font-semibold text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15"
+                          style={{ '--editor-token-width': `${Math.max(4, Math.min(22, token.value.length + 2))}ch` } as React.CSSProperties}
+                          className="min-h-[42px] w-full max-w-full rounded-xl border border-slate-600/70 bg-[#0b1728] px-3 text-[16px] font-semibold text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:w-[var(--editor-token-width)] sm:text-[13px]"
                         />
                       );
                     }
@@ -591,7 +707,7 @@ export default function AdminSettings() {
                         rows={rowsForEditableText(token.value)}
                         spellCheck={false}
                         aria-label={`Редактируемый текст ${index + 1}`}
-                        className="w-full basis-full resize-y rounded-xl border border-slate-600/70 bg-[#0b1728] px-3.5 py-3 text-[13px] font-semibold leading-relaxed text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 placeholder:text-slate-500 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15"
+                        className="w-full basis-full resize-y rounded-xl border border-slate-600/70 bg-[#0b1728] px-3.5 py-3 text-[16px] font-semibold leading-relaxed text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 placeholder:text-slate-500 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:text-[13px]"
                       />
                     );
                   })}
@@ -617,17 +733,19 @@ export default function AdminSettings() {
                   ))}
                 </div>
               </div>
+
+              {renderTemplateActions(activeTemplate, 'grid grid-cols-2 gap-2 border-t border-white/10 pt-3 sm:hidden')}
             </div>
 
             <div className="space-y-4">
-              <div className="rounded-3xl border border-white/10 bg-slate-950/45 p-4 shadow-glass backdrop-blur-xl">
+              <div className="rounded-3xl border border-white/10 bg-slate-950/45 p-3 shadow-glass backdrop-blur-xl sm:p-4">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Предпросмотр</p>
                   <span className="rounded-lg bg-slate-800 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-slate-400">
                     итог
                   </span>
                 </div>
-                <pre className="max-h-[520px] whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-[#07111f] p-4 text-[12px] font-semibold leading-relaxed text-slate-100">
+                <pre className="max-h-[42dvh] whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-[#07111f] p-3 text-[12px] font-semibold leading-relaxed text-slate-100 sm:max-h-[520px] sm:p-4">
                   {activePreview || 'Пустой предпросмотр'}
                 </pre>
               </div>
@@ -635,6 +753,7 @@ export default function AdminSettings() {
           </section>
         )}
       </div>
+      )}
     </div>
   );
 }

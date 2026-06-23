@@ -855,7 +855,9 @@ async def telegram_callback(
 
 
 @router.post("/telegram/bot-session", response_model=TelegramBotAuthStartResponse)
-async def start_telegram_bot_auth_session():
+async def start_telegram_bot_auth_session(
+    current_user: Optional[User] = Depends(get_optional_user),
+):
     clean_bot_username = settings.TELEGRAM_BOT_USERNAME.strip().lstrip("@")
     if not clean_bot_username:
         raise HTTPException(
@@ -863,7 +865,9 @@ async def start_telegram_bot_auth_session():
             detail="Telegram bot username is not configured",
         )
 
-    session = await create_telegram_bot_auth_session()
+    session = await create_telegram_bot_auth_session(
+        source_user_id=current_user.telegram_id if current_user else None,
+    )
     start_param = telegram_auth_start_param(session.auth_token)
     return TelegramBotAuthStartResponse(
         auth_token=session.auth_token,
@@ -885,7 +889,11 @@ async def poll_telegram_bot_auth_session(
     if session.status != "confirmed" or not session.telegram_user:
         return TelegramBotAuthStatusResponse(status=session.status)
 
-    user = await _upsert_telegram_user_with_optional_web_profile(db, session.telegram_user, current_user)
+    source_user = current_user
+    if not source_user and session.source_user_id is not None:
+        source_user = await _load_user_with_profile(db, session.source_user_id)
+
+    user = await _upsert_telegram_user_with_optional_web_profile(db, session.telegram_user, source_user)
     telegram_id = user.telegram_id
     await db.commit()
     await consume_telegram_bot_auth_session(auth_token)

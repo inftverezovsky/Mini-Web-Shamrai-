@@ -233,7 +233,7 @@ export default function AdminAccess() {
         </div>
 
         <div className="space-y-2">
-          <div className="grid grid-cols-[1fr_auto] gap-2">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
             <input
               type="number"
               value={telegramId}

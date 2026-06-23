@@ -36,15 +36,19 @@ export default function MessageList({
   }, [items.length]);
 
   return (
-    <div ref={parentRef} className={`web-bot-chat__list min-h-0 flex-1 overflow-y-auto px-4 py-4 ${className}`}>
+    <div ref={parentRef} className={`web-bot-chat__list min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 ${className}`}>
       {loading && (
-        <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
+        <div className="flex min-h-[118px] w-full items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-200" />
           <span>Синхронизация...</span>
         </div>
       )}
 
-      {!loading && items.length === 0 && empty}
+      {!loading && items.length === 0 && empty ? (
+        <div className="grid min-h-[118px] w-full place-items-center">
+          {empty}
+        </div>
+      ) : null}
 
       {items.length > 0 && (
         <div

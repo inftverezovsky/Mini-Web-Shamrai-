@@ -1,5 +1,3 @@
-import * as VKID from '@vkid/sdk';
-import type { AuthResponse } from '@vkid/sdk';
 import { DEBUG_AUTH_ENABLED } from '../config/api';
 import { apiFetch } from './api';
 
@@ -90,6 +88,7 @@ async function buildVkRedirectUrl(appId: string, redirectUri: string, state: str
   url.searchParams.set('code_challenge_method', 's256');
   url.searchParams.set('client_id', appId);
   url.searchParams.set('response_type', 'code');
+  url.searchParams.set('response_mode', 'redirect');
   url.searchParams.set('state', state);
   url.searchParams.set('prompt', '');
   url.searchParams.set('v', VK_ID_SDK_VERSION);
@@ -97,12 +96,6 @@ async function buildVkRedirectUrl(appId: string, redirectUri: string, state: str
   url.searchParams.set('app_id', appId);
   url.searchParams.set('redirect_uri', redirectUri);
   return url.toString();
-}
-
-function isVkAuthResponse(value: unknown): value is AuthResponse {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<AuthResponse>;
-  return Boolean(candidate.code && candidate.device_id && candidate.state);
 }
 
 export function isVkRedirectStartedError(error: unknown) {
@@ -171,36 +164,6 @@ export function getVkAuthCooldownStatus(now = Date.now()): VkAuthCooldownStatus 
 
 function isVkRateLimitMessage(message: string) {
   return /слишком много|too many|flood|rate|limit|\[9\]/i.test(message);
-}
-
-function extractVkSdkErrorMessage(error: unknown) {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'string' && error.trim()) return error.trim();
-  if (typeof error === 'object' && error !== null) {
-    const candidate = error as { error?: string; error_description?: string; code?: number; error_code?: number };
-    if (candidate.error_description) {
-      try {
-        const parsed = JSON.parse(candidate.error_description);
-        if (parsed?.error_description) return String(parsed.error_description);
-        if (parsed?.error) return String(parsed.error);
-      } catch {
-        return candidate.error_description;
-      }
-    }
-    if (candidate.error) return candidate.error;
-    if (candidate.code === 9 || candidate.error_code === 9) return 'too many attempts [9]';
-    if (candidate.code === 102) return 'Окно VK ID было закрыто до завершения авторизации';
-  }
-  return 'VK ID не вернул результат авторизации';
-}
-
-export function normalizeVkAuthErrorMessage(error: unknown) {
-  const message = extractVkSdkErrorMessage(error);
-  if (isVkRateLimitMessage(message)) {
-    rememberVkAuthCooldown(VK_AUTH_RATE_LIMIT_COOLDOWN_MS);
-    return 'Слишком много попыток входа через VK ID. Подождите несколько минут или войдите через Telegram.';
-  }
-  return message;
 }
 
 export function rememberVkAuthCooldownForMessage(message: string) {
@@ -353,52 +316,9 @@ export async function startVkRedirectFlow(action: VkRedirectAction): Promise<nev
   throw new VkRedirectStartedError();
 }
 
-async function requestVkAuthPayload() {
-  const { appId, redirectUri, configured, ready, originCompatible, canonicalAppUrl } = getVkIdConfig();
-  if (!ready) {
-    if (configured && !originCompatible) {
-      throw new Error(
-        canonicalAppUrl
-          ? `VK ID доступен только в защищенной версии: ${canonicalAppUrl}`
-          : 'VK ID доступен только в защищенной версии приложения.'
-      );
-    }
+function getDebugVkAuthPayload() {
+  if (!DEBUG_AUTH_ENABLED) {
     throw new Error('VK ID не настроен. Обратитесь к администратору Shamrai.');
-  }
-
-  if (configured) {
-    const codeVerifier = generateVkOAuthToken();
-    const state = `shamrai_vk_${Date.now()}_${generateVkOAuthToken(24)}`;
-
-    VKID.Config.init({
-      app: Number(appId),
-      redirectUrl: redirectUri,
-      state,
-      codeVerifier,
-      mode: VKID.ConfigAuthMode.InNewWindow,
-      responseMode: VKID.ConfigResponseMode.Callback,
-    });
-
-    let authResult: unknown;
-    try {
-      authResult = await VKID.Auth.login({ scheme: VKID.Scheme.DARK });
-    } catch (error) {
-      throw new Error(normalizeVkAuthErrorMessage(error));
-    }
-
-    if (!isVkAuthResponse(authResult)) {
-      throw new Error('VK ID не вернул код авторизации');
-    }
-    if (authResult.state !== state) {
-      throw new Error('VK ID вернул некорректный state');
-    }
-
-    return {
-      code: authResult.code,
-      device_id: authResult.device_id,
-      code_verifier: codeVerifier,
-      state: authResult.state,
-    };
   }
 
   return {
@@ -415,7 +335,7 @@ export async function linkVkProfile(): Promise<VkLinkResponse> {
     await startVkRedirectFlow('link');
   }
 
-  const authPayload = await requestVkAuthPayload();
+  const authPayload = getDebugVkAuthPayload();
   return apiFetch<VkLinkResponse>('/auth/vk/link', {
     method: 'POST',
     body: JSON.stringify(authPayload),
@@ -428,7 +348,7 @@ export async function loginVkProfile(): Promise<VkLoginResponse> {
     await startVkRedirectFlow('login');
   }
 
-  const authPayload = await requestVkAuthPayload();
+  const authPayload = getDebugVkAuthPayload();
   return apiFetch<VkLoginResponse>('/auth/vk/login', {
     method: 'POST',
     body: JSON.stringify(authPayload),

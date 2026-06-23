@@ -9,6 +9,7 @@ interface LayoutModeContextType {
 }
 
 const LEGACY_STORAGE_KEY = 'shamrai_layout_mode';
+const DESKTOP_LAYOUT_MIN_WIDTH = 1024;
 const LayoutModeContext = createContext<LayoutModeContextType | undefined>(undefined);
 
 export function LayoutModeProvider({ children }: { children: React.ReactNode }) {
@@ -30,7 +31,7 @@ export function LayoutModeProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const isTelegram = Boolean(getTelegramWebApp<{ initData?: string }>()?.initData);
-  const effectiveMode: EffectiveLayoutMode = isTelegram || viewportWidth < 960 ? 'compact' : 'full';
+  const effectiveMode: EffectiveLayoutMode = isTelegram || viewportWidth < DESKTOP_LAYOUT_MIN_WIDTH ? 'compact' : 'full';
 
   useEffect(() => {
     document.documentElement.dataset.shamraiLayout = effectiveMode;

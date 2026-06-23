@@ -319,7 +319,7 @@ export interface ChatMessageResponse {
   sender_role: string;
   direction: ChatSupportDirection;
   author_label: string;
-  type: 'text';
+  type: 'text' | 'image' | 'voice';
   text: string | null;
   payload: Record<string, any>;
   client_message_id: string;

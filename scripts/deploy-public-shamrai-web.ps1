@@ -9,6 +9,7 @@ param(
   [string]$ExpectedVkCallbackConfirmationCode = $env:SHAMRAI_EXPECTED_VK_CALLBACK_CONFIRMATION_CODE,
   [switch]$SkipLocalChecks,
   [switch]$RepairShamraiConflicts,
+  [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
   [switch]$PromptPassword
 )
 
@@ -247,19 +248,76 @@ if (-not (Test-Path $Workspace)) {
   throw "Workspace not found: $Workspace"
 }
 
-$plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
-$pscp = Find-Tool @("C:\Program Files\PuTTY\pscp.exe", "pscp.exe")
-if (-not $plink -or -not $pscp) {
-  throw "PuTTY plink/pscp not found. Install PuTTY or adjust the script."
+$defaultSshKeyPath = Join-Path $env:USERPROFILE ".ssh\codex_deploy_ed25519"
+if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and (Test-Path -LiteralPath $defaultSshKeyPath)) {
+  $SshKeyPath = $defaultSshKeyPath
 }
 
-$password = Get-ShamraiSshPassword -ForcePrompt:$PromptPassword
+$ssh = Find-Tool @("ssh.exe", "ssh")
+$scp = Find-Tool @("scp.exe", "scp")
+$useSshKey = (-not $PromptPassword) -and
+  (-not [string]::IsNullOrWhiteSpace($SshKeyPath)) -and
+  (Test-Path -LiteralPath $SshKeyPath)
+$plink = $null
+$pscp = $null
+$password = $null
+
+if ($useSshKey) {
+  if (-not $ssh -or -not $scp) {
+    throw "OpenSSH ssh/scp not found. Install OpenSSH Client or use -PromptPassword."
+  }
+} else {
+  $plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
+  $pscp = Find-Tool @("C:\Program Files\PuTTY\pscp.exe", "pscp.exe")
+  if (-not $plink -or -not $pscp) {
+    throw "PuTTY plink/pscp not found. Install PuTTY/OpenSSH or provide a valid SshKeyPath."
+  }
+  $password = Get-ShamraiSshPassword -ForcePrompt:$PromptPassword
+}
+
+function Invoke-RemoteChecked {
+  param([Parameter(Mandatory = $true)][string]$Command)
+
+  if ($useSshKey) {
+    Invoke-NativeChecked $ssh `
+      "-i" $SshKeyPath `
+      "-o" "BatchMode=yes" `
+      "-o" "IdentitiesOnly=yes" `
+      "-o" "StrictHostKeyChecking=accept-new" `
+      $Server `
+      $Command
+    return
+  }
+
+  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $Command
+}
+
+function Copy-ToRemoteChecked {
+  param(
+    [Parameter(Mandatory = $true)][string]$LocalPath,
+    [Parameter(Mandatory = $true)][string]$RemotePath
+  )
+
+  $target = "${Server}:$RemotePath"
+  if ($useSshKey) {
+    Invoke-NativeChecked $scp `
+      "-i" $SshKeyPath `
+      "-o" "BatchMode=yes" `
+      "-o" "IdentitiesOnly=yes" `
+      "-o" "StrictHostKeyChecking=accept-new" `
+      $LocalPath `
+      $target
+    return
+  }
+
+  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $LocalPath $target
+}
 
 $deployDir = Join-Path $Workspace ".deploy"
 $repoArchive = Join-Path $deployDir "shamrai-public-repo.tar.gz"
 $webArchive = Join-Path $deployDir "shamrai-web-dist.tar.gz"
 $frontendDistPath = Join-Path $Workspace "frontend\dist"
-$frontendPublicAssets = @()
+$script:frontendPublicAssets = @()
 $nginxConfig = Join-Path $Workspace "deploy\nginx\shamrai.conf"
 $remoteGuardScript = Join-Path $deployDir "shamrai-public-guard.sh"
 $remoteDeployScript = Join-Path $deployDir "shamrai-public-remote-deploy.sh"
@@ -347,7 +405,7 @@ Invoke-Step "Create deployment archives" {
     Pop-Location
   }
 
-  $frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
+  $script:frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
   Push-Location $frontendDistPath
   try {
     Invoke-NativeChecked "tar" "-czf" $webArchive "."
@@ -650,29 +708,29 @@ curl -fsS http://127.0.0.1:8082/api/health
 }
 
 Invoke-Step "Upload server guard" {
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remoteGuardScript "${Server}:/tmp/shamrai-public-guard.sh"
+  Copy-ToRemoteChecked $remoteGuardScript "/tmp/shamrai-public-guard.sh"
 }
 
 Invoke-Step "Server port/project guard" {
-  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-guard.sh"
+  Invoke-RemoteChecked "bash /tmp/shamrai-public-guard.sh"
 }
 
 Invoke-Step "Upload archives and nginx config" {
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $repoArchive "${Server}:/tmp/shamrai-public-repo.tar.gz"
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $webArchive "${Server}:/tmp/shamrai-web-dist.tar.gz"
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $nginxConfig "${Server}:/tmp/shamrai.conf"
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remoteDeployScript "${Server}:/tmp/shamrai-public-remote-deploy.sh"
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remotePublishScript "${Server}:/tmp/shamrai-public-remote-publish.sh"
-  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $remoteRollbackScript "${Server}:/tmp/shamrai-public-remote-rollback.sh"
+  Copy-ToRemoteChecked $repoArchive "/tmp/shamrai-public-repo.tar.gz"
+  Copy-ToRemoteChecked $webArchive "/tmp/shamrai-web-dist.tar.gz"
+  Copy-ToRemoteChecked $nginxConfig "/tmp/shamrai.conf"
+  Copy-ToRemoteChecked $remoteDeployScript "/tmp/shamrai-public-remote-deploy.sh"
+  Copy-ToRemoteChecked $remotePublishScript "/tmp/shamrai-public-remote-publish.sh"
+  Copy-ToRemoteChecked $remoteRollbackScript "/tmp/shamrai-public-remote-rollback.sh"
 }
 
 try {
   Invoke-Step "Deploy code through staging snapshot" {
-    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-deploy.sh"
+    Invoke-RemoteChecked "bash /tmp/shamrai-public-remote-deploy.sh"
   }
 
   Invoke-Step "Publish host static web with rollback snapshot" {
-    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-publish.sh"
+    Invoke-RemoteChecked "bash /tmp/shamrai-public-remote-publish.sh"
   }
 
   Invoke-Step "Health verification" {
@@ -680,7 +738,7 @@ try {
     if ($VkGroupId -notmatch "^\d+$") {
       throw "VK group id must be numeric for deploy verification."
     }
-    $expectedAssetArgs = ($frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
+    $expectedAssetArgs = ($script:frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
     if ([string]::IsNullOrWhiteSpace($expectedAssetArgs)) {
       throw "No expected public frontend assets were captured from local dist."
     }
@@ -774,12 +832,12 @@ echo 'public_frontend_assets_match_dist'
     $normalizedRemote = ((($remote -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
     $encodedRemote = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedRemote))
     $remoteCommand = "printf '%s' '$encodedRemote' | base64 -d | bash"
-    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
+    Invoke-RemoteChecked $remoteCommand
   }
 } catch {
   Write-Warning "Deploy verification failed; attempting remote rollback."
   try {
-    Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey "bash /tmp/shamrai-public-remote-rollback.sh"
+    Invoke-RemoteChecked "bash /tmp/shamrai-public-remote-rollback.sh"
   } catch {
     Write-Warning "Remote rollback command also failed. Manual server inspection is required."
   }

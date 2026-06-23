@@ -181,7 +181,7 @@ export function PeriodSelector({
     : 'bg-emerald-300/15 text-emerald-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]';
 
   return (
-    <div className="grid grid-cols-4 overflow-hidden rounded-xl border border-white/10 bg-slate-950/35 p-1">
+    <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-white/10 bg-slate-950/35 p-1 sm:grid-cols-4">
       {PERIOD_OPTIONS.map((option) => (
         <button
           key={option.value}
@@ -214,10 +214,10 @@ export function StatTile({
   minHeightClass?: string;
 }) {
   return (
-    <div className={`${minHeightClass} rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]`}>
-      <div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
-      <div className={`mt-0.5 text-base font-black tabular-nums ${tone}`}>{value}</div>
-      {hint && <div className="mt-0.5 text-[8px] font-bold uppercase tracking-[0.06em] text-slate-600">{hint}</div>}
+    <div className={`${minHeightClass} min-w-0 rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]`}>
+      <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
+      <div className={`mt-0.5 min-w-0 break-words text-base font-black tabular-nums ${tone}`}>{value}</div>
+      {hint && <div className="mt-0.5 min-w-0 break-words text-[8px] font-bold uppercase tracking-[0.06em] text-slate-600">{hint}</div>}
     </div>
   );
 }
@@ -236,16 +236,16 @@ function ExecutiveMetric({
   icon: React.ReactNode;
 }) {
   return (
-    <div className="smooth-surface relative min-h-[86px] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]">
+    <div className="smooth-surface relative min-h-[86px] min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.055)]">
       <div className="pointer-events-none absolute inset-x-3 top-0 h-px bg-gradient-to-r from-transparent via-white/18 to-transparent" />
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
+        <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
         <span className="grid h-7 w-7 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.045] text-slate-300">
           {icon}
         </span>
       </div>
-      <div className={`mt-2 truncate text-xl font-black leading-none tabular-nums ${tone}`}>{value}</div>
-      {hint ? <div className="mt-1 truncate text-[9px] font-bold text-slate-500">{hint}</div> : null}
+      <div className={`mt-2 min-w-0 break-words text-xl font-black leading-none tabular-nums ${tone}`}>{value}</div>
+      {hint ? <div className="mt-1 min-w-0 break-words text-[9px] font-bold text-slate-500">{hint}</div> : null}
     </div>
   );
 }
@@ -413,12 +413,12 @@ export function MomentumStrip({
   const losses = results.length - wins;
   return (
     <div className={`rounded-xl border border-white/10 bg-slate-950/35 ${compact ? 'px-2.5 py-1.5' : 'p-2.5'}`}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">
           <Activity className="h-3 w-3 text-cyan-300" />
           {title}
         </div>
-        <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
+        <div className="min-w-0 text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
           {results.length ? `${resultCountLabel('win', wins)} / ${resultCountLabel('loss', losses)}` : 'Нет серии'}
         </div>
       </div>
@@ -486,14 +486,14 @@ export function StatsHero({
     <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_82%_18%,rgba(16,185,129,0.09),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
       <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
       <div className="pointer-events-none absolute bottom-0 right-8 h-px w-1/2 bg-gradient-to-r from-transparent via-emerald-200/20 to-transparent" />
-      <div className="grid gap-3 lg:grid-cols-[1fr_410px]">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,32rem)]">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.13em] text-cyan-100">
             <TrendingUp className="h-3.5 w-3.5" />
             {eyebrow}
           </div>
-          <h2 className="mt-1.5 text-xl font-black leading-tight text-white sm:text-2xl">{title}</h2>
-          <div className={`mt-3 text-3xl font-black leading-none tabular-nums sm:text-4xl ${positive ? 'text-emerald-200' : 'text-rose-200'}`}>
+          <h2 className="mt-1.5 min-w-0 break-words text-xl font-black leading-tight text-white sm:text-2xl">{title}</h2>
+          <div className={`mt-3 min-w-0 break-words text-2xl font-black leading-none tabular-nums sm:text-4xl ${positive ? 'text-emerald-200' : 'text-rose-200'}`}>
             {formatStatsValue(summary.profit_units, valueMode)}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
@@ -504,10 +504,10 @@ export function StatsHero({
             <span>{summary.bets} ставок</span>
           </div>
         </div>
-        <div className="grid gap-2">
-          {controls}
-          <div className="grid grid-cols-[1fr_auto] gap-2">
-            <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
+        <div className="grid min-w-0 content-start gap-2">
+          <div className="min-w-0">{controls}</div>
+          <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,0.38fr)] lg:grid-cols-[minmax(0,1fr)_minmax(8rem,0.36fr)]">
+            <div className="min-h-[70px] rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
               <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Риск сейчас</div>
               <div className={`mt-0.5 truncate text-xs font-black ${summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white'}`}>
                 {streakLabel(summary)}
@@ -516,7 +516,7 @@ export function StatsHero({
                 Макс. серии {summary.max_win_streak}/{summary.max_loss_streak}
               </div>
             </div>
-            {actions}
+            <div className="min-w-0">{actions}</div>
           </div>
         </div>
       </div>
@@ -548,7 +548,7 @@ export function IconActionButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`inline-flex min-h-[38px] min-w-[44px] items-center justify-center rounded-xl border transition-all active:scale-[0.98] disabled:opacity-50 ${toneClass}`}
+      className={`flex min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border transition-all active:scale-[0.98] disabled:opacity-50 ${toneClass}`}
     >
       {children}
     </button>
@@ -565,7 +565,7 @@ export function ExportActions({
   onXlsx: () => void;
 }) {
   return (
-    <div className="grid grid-cols-2 gap-2">
+    <div className="grid h-full min-w-0 grid-cols-2 gap-2">
       <IconActionButton title="Скачать CSV" disabled={exporting !== null} onClick={onCsv}>
         {exporting === 'csv' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
       </IconActionButton>
@@ -704,19 +704,19 @@ export function ProfitCurve({
 
   return (
     <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-      <div className="flex items-start justify-between gap-2">
-        <div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <h3 className="flex items-center gap-1.5 text-xs font-black text-white">
             <Sparkles className="h-3.5 w-3.5 text-cyan-200" />
             {title}
           </h3>
           <p className="mt-0.5 text-[9px] font-bold text-slate-500">Кумулятивно по дням расчета, наведите на точку</p>
         </div>
-        <div className={`text-right text-xs font-black tabular-nums ${profitTone(latest)}`}>{formatStatsValue(latest, valueMode)}</div>
+        <div className={`min-w-0 text-left text-xs font-black tabular-nums sm:text-right ${profitTone(latest)}`}>{formatStatsValue(latest, valueMode)}</div>
       </div>
       {coords.length ? (
         <div className="relative" onPointerLeave={() => setActiveIndex(null)}>
-          <div className="mt-2 grid grid-cols-3 gap-1.5">
+          <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-3">
             <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
               <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Макс</div>
               <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${maxPoint ? profitTone(maxPoint.value) : 'text-slate-400'}`}>
@@ -882,9 +882,9 @@ export function BreakdownBars({
           const positive = item.summary.profit_units >= 0;
           return (
             <div key={item.key} className="space-y-1">
-              <div className="flex items-center justify-between gap-2 text-[11px]">
+              <div className="flex flex-col gap-1 text-[11px] sm:flex-row sm:items-center sm:justify-between sm:gap-2">
                 <span className="min-w-0 truncate font-bold text-slate-100">{item.label}</span>
-                <span className={`shrink-0 font-black tabular-nums ${summaryTone(item.summary)}`}>
+                <span className={`min-w-0 break-words font-black tabular-nums sm:shrink-0 sm:text-right ${summaryTone(item.summary)}`}>
                   {formatStatsValue(item.summary.profit_units, valueMode)} / ROI {pct(item.summary.roi)}
                 </span>
               </div>
@@ -954,7 +954,7 @@ export function BetResultRow({
   const positive = bet.profit_units >= 0;
   return (
     <div className={`rounded-xl border border-white/10 bg-slate-950/35 ${compact ? 'p-2.5' : 'p-3'}`}>
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className={`rounded-full border px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.08em] ${
@@ -982,7 +982,7 @@ export function BetResultRow({
             <div className="mt-0.5 truncate text-[9px] font-bold text-slate-600">{bet.bookmaker_names.join(', ')}</div>
           ) : null}
         </div>
-        <div className={`shrink-0 text-right text-sm font-black tabular-nums ${positive ? 'text-emerald-300' : 'text-rose-300'}`}>
+        <div className={`min-w-0 break-words text-left text-sm font-black tabular-nums sm:shrink-0 sm:text-right ${positive ? 'text-emerald-300' : 'text-rose-300'}`}>
           {formatStatsValue(bet.profit_units, valueMode)}
         </div>
       </div>

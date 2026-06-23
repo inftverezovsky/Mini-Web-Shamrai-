@@ -1,12 +1,10 @@
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   Headphones,
-  Loader2,
   MessageCircle,
   Radio,
   RefreshCw,
-  Send,
   ShieldCheck,
   WifiOff,
 } from 'lucide-react';
@@ -25,6 +23,7 @@ import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../../utils/authStora
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
+import MessageComposer, { ChatComposerAttachment } from './MessageComposer';
 import MessageList from './MessageList';
 import SignalMessageCard, { signalActionNotice } from './SignalMessageCard';
 import SupportMessageBubble, { SupportMessageView } from './SupportMessageBubble';
@@ -111,7 +110,28 @@ function lastMessagePreview(conversation?: ChatConversationResponse | null, key?
   return conversation.last_message_text;
 }
 
-function makeOptimisticMessage(text: string, clientMessageId: string): SupportMessageView {
+function supportMessagePreview(message: ChatMessageResponse) {
+  if (message.text?.trim()) return message.text;
+  if (message.type === 'image') return 'Скриншот';
+  if (message.type === 'voice') return 'Голосовое сообщение';
+  return 'Новое сообщение';
+}
+
+function attachmentPayload(attachment: ChatComposerAttachment) {
+  return {
+    url: attachment.previewUrl,
+    mime_type: attachment.file.type,
+    size_bytes: attachment.file.size,
+    original_filename: attachment.file.name,
+    ...(attachment.durationMs ? { duration_ms: attachment.durationMs } : {}),
+  };
+}
+
+function makeOptimisticMessage(
+  text: string,
+  clientMessageId: string,
+  attachment?: ChatComposerAttachment,
+): SupportMessageView {
   const now = new Date().toISOString();
   return {
     id: -Date.now(),
@@ -120,15 +140,16 @@ function makeOptimisticMessage(text: string, clientMessageId: string): SupportMe
     sender_role: 'user',
     direction: 'client',
     author_label: 'Вы',
-    type: 'text',
+    type: attachment?.messageType || 'text',
     text,
-    payload: {},
+    payload: attachment ? attachmentPayload(attachment) : {},
     client_message_id: clientMessageId,
     reply_to_id: null,
     created_at: now,
     edited_at: null,
     deleted_at: null,
     delivery_state: 'sending',
+    retry_attachment: attachment,
   };
 }
 
@@ -175,7 +196,6 @@ export default function WebMessenger() {
   const [sendingClientIds, setSendingClientIds] = useState<Set<string>>(new Set());
   const seenSignalIdsRef = useRef<Set<number>>(new Set());
   const seenSupportMessageIdsRef = useRef<Set<number>>(new Set());
-  const supportComposerRef = useRef<HTMLTextAreaElement>(null);
 
   const isTma = isTelegramMiniApp();
 
@@ -331,7 +351,7 @@ export default function WebMessenger() {
         void loadConversations().catch(() => undefined);
       }
       if (payload.message.direction === 'staff') {
-        notifyInfo((payload.message.text || '').slice(0, 260), 'Shamrai написал в чат');
+        notifyInfo(supportMessagePreview(payload.message).slice(0, 260), 'Shamrai написал в чат');
         void playIncomingSupportSound();
       }
     };
@@ -419,7 +439,6 @@ export default function WebMessenger() {
     setDraft(draftText);
     window.setTimeout(() => {
       document.getElementById('web-bot-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      supportComposerRef.current?.focus();
     }, 80);
   }, []);
 
@@ -458,7 +477,7 @@ export default function WebMessenger() {
     const cleanText = text.trim();
     if (!cleanText) {
       notifyError('Введите сообщение для Shamrai');
-      return;
+      return false;
     }
 
     const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId);
@@ -478,6 +497,7 @@ export default function WebMessenger() {
       ));
       setDraft('');
       void loadConversations().catch(() => undefined);
+      return true;
     } catch (error: any) {
       setSupportMessages((current) => current.map((message) => (
         message.client_message_id === clientMessageId
@@ -485,6 +505,7 @@ export default function WebMessenger() {
           : message
       )));
       notifyError(error?.message || 'Не удалось отправить сообщение');
+      return false;
     } finally {
       setSendingClientIds((current) => {
         const next = new Set(current);
@@ -494,21 +515,70 @@ export default function WebMessenger() {
     }
   }, [loadConversations]);
 
-  const handleSupportSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void sendSupportText(draft);
-  };
+  const sendSupportAttachment = useCallback(async (
+    attachment: ChatComposerAttachment,
+    text: string,
+    clientMessageId: string = crypto.randomUUID(),
+  ) => {
+    const cleanText = text.trim();
+    const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId, attachment);
+    setSendingClientIds((current) => new Set(current).add(clientMessageId));
+    setSupportMessages((current) => mergeSupportMessages(current, [optimisticMessage]));
+    void unlockIncomingSignalSound();
 
-  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey) return;
-    event.preventDefault();
-    if (!draft.trim()) return;
-    void sendSupportText(draft);
-  };
+    const formData = new FormData();
+    formData.append('client_message_id', clientMessageId);
+    formData.append('message_type', attachment.messageType);
+    formData.append('file', attachment.file);
+    if (cleanText) formData.append('text', cleanText);
+    if (attachment.durationMs) formData.append('duration_ms', String(Math.round(attachment.durationMs)));
+
+    try {
+      const response = await apiFetch<ChatMessageResponse>('/chat/conversations/support/attachments', {
+        method: 'POST',
+        body: formData,
+      });
+      seenSupportMessageIdsRef.current.add(response.id);
+      setSupportMessages((current) => mergeSupportMessages(
+        current.filter((message) => message.client_message_id !== clientMessageId || message.id > 0),
+        [{ ...response, delivery_state: 'sent' }],
+      ));
+      URL.revokeObjectURL(attachment.previewUrl);
+      void loadConversations().catch(() => undefined);
+      return true;
+    } catch (error: any) {
+      const retryAttachment = {
+        ...attachment,
+        previewUrl: URL.createObjectURL(attachment.file),
+      };
+      setSupportMessages((current) => current.map((message) => (
+        message.client_message_id === clientMessageId
+          ? {
+            ...message,
+            payload: attachmentPayload(retryAttachment),
+            delivery_state: 'failed',
+            retry_attachment: retryAttachment,
+          }
+          : message
+      )));
+      notifyError(error?.message || 'Не удалось отправить вложение');
+      return true;
+    } finally {
+      setSendingClientIds((current) => {
+        const next = new Set(current);
+        next.delete(clientMessageId);
+        return next;
+      });
+    }
+  }, [loadConversations]);
 
   const handleRetry = (message: SupportMessageView) => {
-    if (!message.text || sendingClientIds.has(message.client_message_id)) return;
-    void sendSupportText(message.text, message.client_message_id);
+    if (sendingClientIds.has(message.client_message_id)) return;
+    if (message.retry_attachment) {
+      void sendSupportAttachment(message.retry_attachment, message.text || '', message.client_message_id);
+      return;
+    }
+    if (message.text) void sendSupportText(message.text, message.client_message_id);
   };
 
   const markActiveRead = useCallback(() => {
@@ -573,11 +643,11 @@ export default function WebMessenger() {
   return (
     <section
       id="web-bot-chat"
-      className="web-bot-chat mb-0 flex overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
+      className="web-bot-chat mb-0 flex min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
     >
       <div className="border-b border-white/10 bg-slate-950/35 px-3 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-200">
               {activeConversation === 'signals' ? <Bot className="h-5 w-5" /> : <Headphones className="h-5 w-5" />}
             </div>
@@ -590,13 +660,13 @@ export default function WebMessenger() {
             </div>
           </div>
 
-          <div className="flex min-h-[34px] shrink-0 items-center gap-2 rounded-2xl border border-emerald-300/15 bg-emerald-300/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-100">
+          <div className="flex min-h-[34px] max-w-full shrink-0 items-center gap-2 rounded-2xl border border-emerald-300/15 bg-emerald-300/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-100">
             <ShieldCheck className="h-3.5 w-3.5" />
-            <span>Push on</span>
+            <span className="whitespace-nowrap">Push on</span>
           </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
           {(['signals', 'support'] as const).map((key) => {
             const conversation = key === 'signals' ? signalsConversation : supportConversation;
             const active = activeConversation === key;
@@ -633,14 +703,14 @@ export default function WebMessenger() {
           items={signalItems}
           loading={loadingSignals}
           empty={(
-            <div className="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
+            <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {signalsError ? (
                 <ErrorRetryCard message={signalsError} onRetry={() => void loadSignalMessages()} />
               ) : (
-                <>
+                <div className="grid place-items-center">
                   <ShieldCheck className="mx-auto h-6 w-6 text-emerald-300" />
                   <p className="mt-2 text-sm font-black text-white">Канал готов</p>
-                </>
+                </div>
               )}
             </div>
           )}
@@ -650,14 +720,14 @@ export default function WebMessenger() {
           items={supportItems}
           loading={loadingSupport}
           empty={(
-            <div className="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
+            <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {supportError || conversationError ? (
                 <ErrorRetryCard message={supportError || conversationError || ''} onRetry={() => void refreshAll()} />
               ) : (
-                <>
+                <div className="grid place-items-center">
                   <MessageCircle className="mx-auto h-6 w-6 text-cyan-200" />
                   <p className="mt-2 text-sm font-black text-white">История поддержки пуста</p>
-                </>
+                </div>
               )}
             </div>
           )}
@@ -665,40 +735,29 @@ export default function WebMessenger() {
       )}
 
       {activeConversation === 'support' && (
-        <form onSubmit={handleSupportSubmit} className="border-t border-white/10 bg-slate-950/45 px-3 py-3">
+        <>
           {supportClosed && (
-            <p className="mb-2 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-[11px] font-bold text-amber-100">
-              Диалог закрыт. Новое сообщение можно отправить после переоткрытия Shamrai.
+            <p className="mx-3 mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-[11px] font-bold text-amber-100">
+              Диалог закрыт. Новое сообщение снова откроет обращение.
             </p>
           )}
-          <div className="grid grid-cols-[1fr_auto] items-end gap-2">
-            <textarea
-              ref={supportComposerRef}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              disabled={supportClosed}
-              maxLength={4000}
-              rows={2}
-              placeholder={supportClosed ? 'Диалог закрыт' : 'Написать Shamrai...'}
-              className="min-h-[46px] max-h-28 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/70 px-3 py-2.5 text-sm font-semibold text-white placeholder:text-slate-500 focus:border-cyan-300/45 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={supportClosed || !draft.trim() || sendingClientIds.size > 0}
-              title="Отправить сообщение Shamrai"
-              className="flex h-[46px] w-[46px] items-center justify-center rounded-2xl border border-cyan-300/25 bg-cyan-300/15 text-cyan-50 transition-all hover:bg-cyan-300/25 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              {sendingClientIds.size > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </button>
-          </div>
-        </form>
+          <MessageComposer
+            draft={draft}
+            onDraftChange={setDraft}
+            sending={sendingClientIds.size > 0}
+            placeholder="Написать Shamrai..."
+            submitTitle="Отправить сообщение Shamrai"
+            onSendText={sendSupportText}
+            onSendAttachment={sendSupportAttachment}
+            onError={notifyError}
+          />
+        </>
       )}
 
       {(activeConversation === 'signals' ? streamState : supportStreamState) === 'offline' && (
         <div className="flex items-center gap-2 border-t border-white/10 bg-slate-950/45 px-4 py-2 text-[11px] font-bold text-slate-400">
           <WifiOff className="h-3.5 w-3.5 text-rose-300" />
-          <span>Переподключение...</span>
+          <span className="min-w-0">Переподключение...</span>
         </div>
       )}
     </section>

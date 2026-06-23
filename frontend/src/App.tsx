@@ -1,8 +1,9 @@
 import React, { Suspense, lazy, useEffect, useState, useTransition } from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
+import { motion, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
 import { useAuth } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
+import { usePerformanceProfile } from './hooks/usePerformanceProfile';
 
 import BottomNavigation from './components/BottomNavigation';
 import type { AdminShellTabId, UserTabId } from './components/BottomNavigation';
@@ -77,16 +78,21 @@ const adminTabLoaders: Partial<Record<AdminShellTabId, () => Promise<unknown>>> 
 };
 
 
-function runWhenIdle(callback: () => void) {
+function runWhenIdle(
+  callback: () => void,
+  options: { timeout?: number; fallbackDelay?: number } = {},
+) {
+  const timeout = options.timeout ?? 1400;
+  const fallbackDelay = options.fallbackDelay ?? 120;
   const requestIdleCallback = (window as any).requestIdleCallback as
     | ((cb: () => void, options?: { timeout?: number }) => number)
     | undefined;
   const cancelIdleCallback = (window as any).cancelIdleCallback as ((handle: number) => void) | undefined;
   if (typeof requestIdleCallback === 'function') {
-    const handle = requestIdleCallback(callback, { timeout: 1400 });
+    const handle = requestIdleCallback(callback, { timeout });
     return () => cancelIdleCallback?.(handle);
   }
-  const handle = window.setTimeout(callback, 120);
+  const handle = window.setTimeout(callback, fallbackDelay);
   return () => window.clearTimeout(handle);
 }
 
@@ -193,7 +199,10 @@ export default function App() {
     loginWithTelegramBot,
   } = useAuth();
   const { isCompact } = useLayoutMode();
+  const performanceProfile = usePerformanceProfile();
   const reduceMotion = useReducedMotion();
+  const reducePageMotion = reduceMotion || performanceProfile.shouldReduceMotion;
+  const motionReducedMode = performanceProfile.shouldReduceMotion ? 'always' : 'user';
   const [, startTabTransition] = useTransition();
 
   const [activeUserTab, setActiveUserTab] = useState<UserTabId>('feed');
@@ -233,12 +242,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!introComplete || !userProfile) return;
+    if (!introComplete || !userProfile || !performanceProfile.isAppVisible) return;
 
     const userIsStaff = isStaffRole(userProfile.role);
     const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
     const shouldPreloadWebChat = !runsInTelegramMiniApp && !userIsStaff && userProfile.is_onboarded !== false;
-    const loaders = userIsStaff
+    const fullLoaders = userIsStaff
       ? [
           loadAdminDashboard,
           loadAdminBets,
@@ -258,22 +267,40 @@ export default function App() {
           ...(shouldPreloadWebChat ? [loadWebBotChat] : []),
           ...(userProfile.is_onboarded === false ? [loadOnboarding] : []),
         ];
+    const lightLoaders = userIsStaff
+      ? [loadAdminStats]
+      : userProfile.is_onboarded === false
+        ? [loadOnboarding]
+        : [loadMyBets];
+    const loaders = performanceProfile.canBulkPreload ? fullLoaders : lightLoaders;
+    const staggerMs = performanceProfile.canBulkPreload ? 70 : performanceProfile.isBalanced ? 220 : 420;
+    const idleOptions = performanceProfile.canBulkPreload
+      ? { timeout: 1400, fallbackDelay: 120 }
+      : { timeout: 2600, fallbackDelay: 900 };
 
     const queuedTimers: number[] = [];
     const cancelIdle = runWhenIdle(() => {
       loaders.forEach((loader, index) => {
         const timer = window.setTimeout(() => {
+          if (document.visibilityState === 'hidden') return;
           void loader().catch(() => undefined);
-        }, index * 70);
+        }, index * staggerMs);
         queuedTimers.push(timer);
       });
-    });
+    }, idleOptions);
 
     return () => {
       cancelIdle();
       queuedTimers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [introComplete, isTelegram, userProfile]);
+  }, [
+    introComplete,
+    isTelegram,
+    performanceProfile.canBulkPreload,
+    performanceProfile.isAppVisible,
+    performanceProfile.isBalanced,
+    userProfile,
+  ]);
 
   const forceOnboarding = import.meta.env.DEV && new URLSearchParams(window.location.search).has('force_onboarding');
   const isAdmin = userProfile ? isStaffRole(userProfile.role) : false;
@@ -325,43 +352,55 @@ export default function App() {
 
   if (!introComplete) {
     return (
-      <WelcomeSplash
-        appReady={appReady}
-        leaving={splashLeaving}
-        onIntroComplete={handleIntroComplete}
-      />
+      <MotionConfig reducedMotion={motionReducedMode}>
+        <WelcomeSplash
+          appReady={appReady}
+          leaving={splashLeaving}
+          allowVideo={performanceProfile.canPlayIntroVideo}
+          onIntroComplete={handleIntroComplete}
+        />
+      </MotionConfig>
     );
   }
 
   if (loading && !userProfile) {
     return (
-      <div className="app-shell compact-ui min-h-[100dvh] px-4 py-8 text-slate-50">
-        <PageLoader />
-      </div>
+      <MotionConfig reducedMotion={motionReducedMode}>
+        <div className="app-shell compact-ui min-h-[100dvh] px-4 py-8 text-slate-50">
+          <PageLoader />
+        </div>
+      </MotionConfig>
     );
   }
 
   if (!userProfile) {
-    return <BrowserAuthScreen />;
+    return (
+      <MotionConfig reducedMotion={motionReducedMode}>
+        <BrowserAuthScreen />
+      </MotionConfig>
+    );
   }
 
   if (error) {
     return (
-      <div className="app-shell compact-ui flex min-h-[100dvh] flex-col items-center justify-center space-y-4 px-6 text-center text-slate-50">
-        <AlertTriangle className="h-16 w-16 text-rose-500" />
-        <h1 className="text-lg font-bold text-white">Ошибка подключения</h1>
-        <p className="max-w-xs text-xs text-slate-400">{error}</p>
-        <button
-          onClick={fetchUserProfile}
-          className="shamrai-glass-button rounded-xl px-5 py-2.5 text-xs font-bold text-white transition-all active:scale-95"
-        >
-          Повторить попытку
-        </button>
-      </div>
+      <MotionConfig reducedMotion={motionReducedMode}>
+        <div className="app-shell compact-ui flex min-h-[100dvh] flex-col items-center justify-center space-y-4 px-6 text-center text-slate-50">
+          <AlertTriangle className="h-16 w-16 text-rose-500" />
+          <h1 className="text-lg font-bold text-white">Ошибка подключения</h1>
+          <p className="max-w-xs text-xs text-slate-400">{error}</p>
+          <button
+            onClick={fetchUserProfile}
+            className="shamrai-glass-button rounded-xl px-5 py-2.5 text-xs font-bold text-white transition-all active:scale-95"
+          >
+            Повторить попытку
+          </button>
+        </div>
+      </MotionConfig>
     );
   }
 
   const preloadTab = (tab: UserTabId | AdminShellTabId) => {
+    if (!performanceProfile.isAppVisible || !performanceProfile.canPreloadOnIntent) return;
     const loader = showAdminInterface
       ? adminTabLoaders[tab as AdminShellTabId]
       : userTabLoaders[tab as UserTabId];
@@ -459,8 +498,8 @@ export default function App() {
           <motion.div
             key={pageResetKey}
             className="page-transition-layer"
-            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-            animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+            initial={reducePageMotion ? false : { opacity: 0, y: 4 }}
+            animate={reducePageMotion ? undefined : { opacity: 1, y: 0 }}
             transition={{ duration: 0.1, ease: 'easeOut' }}
           >
             {page}
@@ -471,13 +510,14 @@ export default function App() {
   };
 
   return (
-    <div
-      className={`app-shell compact-ui relative min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
-        isCompact
-          ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
-          : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
-      }`}
-    >
+    <MotionConfig reducedMotion={motionReducedMode}>
+      <div
+        className={`app-shell compact-ui relative min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
+          isCompact
+            ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
+            : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
+        }`}
+      >
       <AppErrorBoundary
         resetKey={`global:${userProfile.telegram_id}:${showWebChatTab}`}
         title="Фоновый виджет временно недоступен"
@@ -571,6 +611,7 @@ export default function App() {
           </div>
         )}
       </PwaPushGate>
-    </div>
+      </div>
+    </MotionConfig>
   );
 }

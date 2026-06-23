@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AnimatePresence, motion, type Variants } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion, type Variants } from 'framer-motion';
 import {
   Banknote,
   Brain,
@@ -28,6 +28,7 @@ import EmojiTextField from './EmojiTextField';
 import { BookmakerLogoFrame } from './LogoFrame';
 import { useAuth } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
+import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
 
 type ExperienceLevel = 'novice' | 'amateur' | 'pro';
 type BankrollSize = 'micro' | 'mid' | 'high';
@@ -206,6 +207,9 @@ const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFr
 
 export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizProps) {
   const { user } = useAuth();
+  const reduceMotion = useReducedMotion();
+  const performanceProfile = usePerformanceProfile();
+  const reduceContinuousMotion = reduceMotion || performanceProfile.shouldReduceMotion;
   const [stepIndex, setStepIndex] = useState(0);
   const [direction, setDirection] = useState(1);
   const [answers, setAnswers] = useState<OnboardingAnswers>({
@@ -585,7 +589,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                 />
               )}
               {stepIndex === 4 && (
-                <CalibrationScreen activeIndex={calibrationIndex} proMode={proMode} glow={glow} />
+                <CalibrationScreen activeIndex={calibrationIndex} proMode={proMode} glow={glow} reduceMotion={reduceContinuousMotion} />
               )}
               {stepIndex === 5 && (
                 <FinalScreen
@@ -595,6 +599,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                   manifestAccepted={manifestAccepted}
                   finishing={finishing}
                   glow={glow}
+                  reduceMotion={reduceContinuousMotion}
                   onCurrencyChange={setCurrency}
                   onToggleManifest={() => setManifestAccepted((current) => !current)}
                   onOpenHub={handleNext}
@@ -619,7 +624,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
           </AnimatePresence>
 
           {stepIndex > 0 && stepIndex < 4 ? (
-            <div className={`grid gap-2 ${stepIndex === 1 ? 'grid-cols-2' : 'grid-cols-[0.82fr_1.35fr]'}`}>
+            <div className={`grid gap-2 ${stepIndex === 1 ? 'sm:grid-cols-2' : 'sm:grid-cols-[0.82fr_1.35fr]'}`}>
               <ElectricButton
                 label={stepIndex === 1 ? 'Пропустить опрос' : 'Назад'}
                 icon={stepIndex === 1 ? ChevronRight : ChevronLeft}
@@ -1085,17 +1090,28 @@ function BookmakerChoiceCard({
   );
 }
 
-function CalibrationScreen({ activeIndex, proMode, glow }: { activeIndex: number; proMode: boolean; glow: string }) {
+function CalibrationScreen({
+  activeIndex,
+  proMode,
+  glow,
+  reduceMotion,
+}: {
+  activeIndex: number;
+  proMode: boolean;
+  glow: string;
+  reduceMotion: boolean;
+}) {
   return (
     <div className="flex min-h-[490px] flex-col items-center justify-center gap-6 text-center">
       <motion.div
-        animate={{
+        animate={reduceMotion ? undefined : {
           scale: [1, 1.09, 0.99, 1],
           rotate: [0, 1.5, -1.5, 0],
           boxShadow: [glow, proMode ? GOLD_GLOW : CYAN_GLOW, glow],
         }}
-        transition={{ duration: 1.75, repeat: Infinity, ease: 'easeInOut' }}
+        transition={reduceMotion ? undefined : { duration: 1.75, repeat: Infinity, ease: 'easeInOut' }}
         className={`relative flex h-40 w-40 items-center justify-center rounded-[2rem] ${GLASS_SURFACE}`}
+        style={reduceMotion ? { boxShadow: glow } : undefined}
       >
         <span className="absolute inset-2 rounded-[2rem] bg-white/5 blur-2xl" />
         <Brain className="relative z-10 h-24 w-24" style={{ color: proMode ? GOLD : CYAN, filter: `drop-shadow(0 0 24px ${proMode ? GOLD : CYAN})` }} />
@@ -1124,8 +1140,8 @@ function CalibrationScreen({ activeIndex, proMode, glow }: { activeIndex: number
         <div className={`mt-3 h-2 overflow-hidden rounded-full ${GLASS_SURFACE}`}>
           <motion.span
             className={`block h-full rounded-full ${GLASS_SURFACE}`}
-            animate={{ x: ['-100%', '110%'] }}
-            transition={{ duration: 1.0, repeat: Infinity, ease: 'easeInOut' }}
+            animate={reduceMotion ? undefined : { x: ['-100%', '110%'] }}
+            transition={reduceMotion ? undefined : { duration: 1.0, repeat: Infinity, ease: 'easeInOut' }}
             style={{ boxShadow: glow }}
           />
         </div>
@@ -1144,6 +1160,7 @@ function FinalScreen({
   onCurrencyChange,
   onToggleManifest,
   onOpenHub,
+  reduceMotion,
 }: {
   recommendation: OnboardingRecommendation | null;
   currency: CurrencyCode;
@@ -1151,6 +1168,7 @@ function FinalScreen({
   manifestAccepted: boolean;
   finishing: boolean;
   glow: string;
+  reduceMotion: boolean;
   onCurrencyChange: (value: CurrencyCode) => void;
   onToggleManifest: () => void;
   onOpenHub: () => void;
@@ -1189,7 +1207,7 @@ function FinalScreen({
         </div>
       </div>
 
-      <SuperCompensationDemo glow={glow} proMode={proMode} />
+      <SuperCompensationDemo glow={glow} proMode={proMode} reduceMotion={reduceMotion} />
 
       <div className={`flex items-center justify-between gap-3 rounded-2xl ${GLASS_SURFACE} p-3`}>
         <span className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-300">Валюта расчета</span>
@@ -1235,7 +1253,7 @@ function FinalScreen({
   );
 }
 
-function SuperCompensationDemo({ glow, proMode }: { glow: string; proMode: boolean }) {
+function SuperCompensationDemo({ glow, proMode, reduceMotion }: { glow: string; proMode: boolean; reduceMotion: boolean }) {
   return (
     <div className={`rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
       <div className="flex items-start justify-between gap-3">
@@ -1246,8 +1264,8 @@ function SuperCompensationDemo({ glow, proMode }: { glow: string; proMode: boole
           </p>
         </div>
         <motion.div
-          animate={{ y: [0, -4, 0], scale: [1, 1.04, 1] }}
-          transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+          animate={reduceMotion ? undefined : { y: [0, -4, 0], scale: [1, 1.04, 1] }}
+          transition={reduceMotion ? undefined : { duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
           className={`shrink-0 rounded-2xl ${GLASS_SURFACE} px-3 py-2 text-sm font-black text-white`}
           style={{ boxShadow: glow }}
         >
@@ -1257,8 +1275,8 @@ function SuperCompensationDemo({ glow, proMode }: { glow: string; proMode: boole
       <div className="mt-3 grid grid-cols-3 items-center gap-2 text-center">
         <CompStep label="До" value="5" />
         <motion.div
-          animate={{ opacity: [0.45, 1, 0.45] }}
-          transition={{ duration: 1.1, repeat: Infinity }}
+          animate={reduceMotion ? undefined : { opacity: [0.45, 1, 0.45] }}
+          transition={reduceMotion ? undefined : { duration: 1.1, repeat: Infinity }}
           className={`rounded-2xl ${GLASS_SURFACE} px-2 py-3 text-[10px] font-black uppercase tracking-[0.12em] text-white`}
         >
           LOSS → +1

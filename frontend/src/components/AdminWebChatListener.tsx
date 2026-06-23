@@ -27,7 +27,12 @@ export const ADMIN_WEB_CHAT_CONVERSATION_EVENT = 'shamrai:admin-web-chat-convers
 export const ADMIN_WEB_CHAT_STATUS_EVENT = 'shamrai:admin-web-chat-status';
 
 function supportNoticeText(message: ChatMessageResponse) {
-  const firstLine = (message.text || '').split('\n').map((line) => line.trim()).find(Boolean) || 'Новое сообщение клиента.';
+  const fallback = message.type === 'image'
+    ? 'Клиент прислал скриншот.'
+    : message.type === 'voice'
+      ? 'Клиент прислал голосовое сообщение.'
+      : 'Новое сообщение клиента.';
+  const firstLine = (message.text || '').split('\n').map((line) => line.trim()).find(Boolean) || fallback;
   return firstLine.length > 260 ? `${firstLine.slice(0, 257)}...` : firstLine;
 }
 

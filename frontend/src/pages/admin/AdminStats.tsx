@@ -338,7 +338,7 @@ function ExportPanel({
 }) {
   return (
     <section className="rounded-[26px] border border-cyan-200/15 bg-cyan-200/[0.055] p-3">
-      <div className="grid grid-cols-[1fr_auto] gap-2">
+      <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(5.5rem,0.28fr)]">
         <div className="grid grid-cols-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-1">
           {(['all', 'shamrai', 'clients'] as const).map((scope) => {
             const active = (tab === 'clients' ? 'clients' : driveScope) === scope;
@@ -654,7 +654,7 @@ export default function AdminStats() {
                 icon={<Users className="h-4 w-4 text-cyan-300" />}
                 summary={`${filteredClients.length} клиентов`}
                 actions={(
-                  <label className="flex min-h-[40px] min-w-[220px] items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/40 px-3 text-xs text-slate-300">
+                  <label className="flex min-h-[40px] w-full min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/40 px-3 text-xs text-slate-300 sm:w-auto sm:min-w-[220px]">
                     <Search className="h-4 w-4 text-slate-500" />
                     <input
                       value={clientQuery}

@@ -15,6 +15,7 @@ class TelegramBotAuthSession:
     expires_at: datetime
     status: str = "pending"
     telegram_user: Optional[dict[str, Any]] = None
+    source_user_id: Optional[int] = None
     confirmed_at: Optional[datetime] = None
 
 
@@ -41,7 +42,7 @@ def _cleanup_expired(now: Optional[datetime] = None) -> None:
         _sessions.pop(token, None)
 
 
-async def create_telegram_bot_auth_session() -> TelegramBotAuthSession:
+async def create_telegram_bot_auth_session(source_user_id: Optional[int] = None) -> TelegramBotAuthSession:
     async with _lock:
         _cleanup_expired()
         auth_token = secrets.token_urlsafe(24)
@@ -51,6 +52,7 @@ async def create_telegram_bot_auth_session() -> TelegramBotAuthSession:
         session = TelegramBotAuthSession(
             auth_token=auth_token,
             expires_at=_now() + TELEGRAM_AUTH_SESSION_TTL,
+            source_user_id=source_user_id,
         )
         _sessions[auth_token] = session
         return session

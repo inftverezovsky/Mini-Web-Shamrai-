@@ -6,12 +6,14 @@ import { getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk
 interface WelcomeSplashProps {
   appReady?: boolean;
   leaving?: boolean;
+  allowVideo?: boolean;
   onIntroComplete?: () => void;
 }
 
 export default function WelcomeSplash({
   appReady = false,
   leaving = false,
+  allowVideo = true,
   onIntroComplete,
 }: WelcomeSplashProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -38,6 +40,7 @@ export default function WelcomeSplash({
     const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const slowConnection = ['slow-2g', '2g'].includes(connection?.effectiveType || '');
     const shouldPlayVideo =
+      allowVideo &&
       (Boolean(getTelegramWebApp()) || hasTelegramLaunchParams()) &&
       !prefersReducedMotion &&
       !connection?.saveData &&
@@ -51,7 +54,7 @@ export default function WelcomeSplash({
     setMediaReady(true);
     setLogoPlayed(true);
     setWatchProgress(1);
-  }, []);
+  }, [allowVideo]);
 
   useEffect(() => {
     if (!playLogoVideo) return;

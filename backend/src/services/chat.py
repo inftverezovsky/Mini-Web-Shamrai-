@@ -34,6 +34,9 @@ CHAT_KIND_SUPPORT = "support"
 CHAT_STATUS_OPEN = "open"
 CHAT_STATUS_CLOSED = "closed"
 CHAT_MESSAGE_TYPE_TEXT = "text"
+CHAT_MESSAGE_TYPE_IMAGE = "image"
+CHAT_MESSAGE_TYPE_VOICE = "voice"
+CHAT_MESSAGE_TYPES = {CHAT_MESSAGE_TYPE_TEXT, CHAT_MESSAGE_TYPE_IMAGE, CHAT_MESSAGE_TYPE_VOICE}
 CHAT_MESSAGE_MAX_LENGTH = 4000
 SIGNAL_CONVERSATION_ID = "signals"
 SUPPORT_CONVERSATION_KEY = "support"
@@ -53,6 +56,55 @@ def clean_chat_message_text(text: str) -> str:
             detail=f"Сообщение не может быть длиннее {CHAT_MESSAGE_MAX_LENGTH} символов",
         )
     return clean_text
+
+
+def clean_chat_caption_text(text: Optional[str]) -> Optional[str]:
+    clean_text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not clean_text:
+        return None
+    if len(clean_text) > CHAT_MESSAGE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Подпись не может быть длиннее {CHAT_MESSAGE_MAX_LENGTH} символов",
+        )
+    return clean_text
+
+
+def chat_message_preview(message: ChatMessage) -> str:
+    if message.text:
+        return message.text
+    if message.type == CHAT_MESSAGE_TYPE_IMAGE:
+        return "Скриншот"
+    if message.type == CHAT_MESSAGE_TYPE_VOICE:
+        return "Голосовое сообщение"
+    return ""
+
+
+def validate_chat_message_payload(message_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if message_type not in CHAT_MESSAGE_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Неизвестный тип сообщения")
+    clean_payload = dict(payload or {})
+    if message_type == CHAT_MESSAGE_TYPE_TEXT:
+        return clean_payload
+
+    raw_url = clean_payload.get("url")
+    raw_mime_type = clean_payload.get("mime_type")
+    raw_size = clean_payload.get("size_bytes")
+    if not isinstance(raw_url, str) or not raw_url.startswith("/static/chat/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное вложение")
+    if not isinstance(raw_mime_type, str) or "/" not in raw_mime_type:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный тип вложения")
+    try:
+        clean_payload["size_bytes"] = int(raw_size)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный размер вложения")
+    if int(clean_payload["size_bytes"]) <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный размер вложения")
+    return clean_payload
+
+
+def conversation_status_after_sender_role(sender_role: str) -> str:
+    return CHAT_STATUS_OPEN if sender_role == "user" else CHAT_STATUS_CLOSED
 
 
 def has_web_push_subscription(user: User) -> bool:
@@ -278,7 +330,7 @@ async def support_conversation_payload(
         "owner_user": chat_user_payload(owner_user),
         "assigned_staff_id": conversation.assigned_staff_id,
         "last_message": chat_message_payload(last_message) if last_message else None,
-        "last_message_text": last_message.text if last_message else None,
+        "last_message_text": chat_message_preview(last_message) if last_message else None,
         "last_message_at": (
             last_message.created_at.isoformat()
             if last_message and last_message.created_at
@@ -431,7 +483,9 @@ async def create_chat_message(
     conversation: ChatConversation,
     sender: User,
     client_message_id: UUID,
-    text: str,
+    text: Optional[str],
+    message_type: str = CHAT_MESSAGE_TYPE_TEXT,
+    payload: Optional[dict[str, Any]] = None,
     reply_to_id: Optional[int] = None,
 ) -> tuple[ChatMessage, bool]:
     existing_result = await db.execute(
@@ -442,9 +496,17 @@ async def create_chat_message(
     )
     existing = existing_result.scalars().first()
     if existing:
+        next_status = conversation_status_after_sender_role(existing.sender_role)
+        if conversation.status != next_status:
+            conversation.status = next_status
+            conversation.updated_at = utc_now()
+            await db.flush()
         return existing, False
 
-    clean_text = clean_chat_message_text(text)
+    if message_type not in CHAT_MESSAGE_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Неизвестный тип сообщения")
+    clean_text = clean_chat_message_text(text or "") if message_type == CHAT_MESSAGE_TYPE_TEXT else clean_chat_caption_text(text)
+    clean_payload = validate_chat_message_payload(message_type, payload or {})
     if reply_to_id is not None:
         reply_result = await db.execute(
             select(ChatMessage.id).filter(
@@ -460,14 +522,15 @@ async def create_chat_message(
         conversation_id=conversation.id,
         sender_user_id=sender.telegram_id,
         sender_role=sender.role,
-        type=CHAT_MESSAGE_TYPE_TEXT,
+        type=message_type,
         text=clean_text,
-        payload={},
+        payload=clean_payload,
         client_message_id=client_message_id,
         reply_to_id=reply_to_id,
         created_at=now,
     )
     db.add(message)
+    conversation.status = conversation_status_after_sender_role(sender.role)
     conversation.last_message_at = now
     conversation.updated_at = now
     try:
@@ -609,11 +672,11 @@ async def enqueue_support_web_push(
     signal_payload = {
         "id": message.id,
         "user_id": recipient.telegram_id,
-        "text": message.text or "",
+        "text": chat_message_preview(message),
         "type": "support_staff_message" if message.sender_role != "user" else "support_client_message",
         "data": {
             "push_title": title,
-            "push_body": message.text or "",
+            "push_body": chat_message_preview(message),
             "push_url": frontend_url(url_target),
         },
         "created_at": message.created_at.isoformat() if message.created_at else utc_now().isoformat(),

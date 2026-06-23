@@ -1,16 +1,13 @@
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BellRing,
-  Bot,
   Loader2,
   Lock,
   MessageCircle,
   RefreshCw,
   Search,
-  Send,
   ShieldCheck,
   Unlock,
-  User,
   WifiOff,
 } from 'lucide-react';
 
@@ -24,12 +21,16 @@ import {
 import { apiFetch } from '../../utils/api';
 import { notifyError, notifySuccess } from '../../utils/notify';
 import { registerWebPushSubscription } from '../../utils/webPush';
+import MessageComposer, { ChatComposerAttachment } from '../../features/chat/MessageComposer';
+import SupportMessageBubble, { SupportMessageView } from '../../features/chat/SupportMessageBubble';
 import {
   ADMIN_WEB_CHAT_CONVERSATION_EVENT,
   ADMIN_WEB_CHAT_MESSAGE_EVENT,
   ADMIN_WEB_CHAT_STATUS_EVENT,
   AdminWebChatMessageEventPayload,
 } from '../../components/AdminWebChatListener';
+
+const ADMIN_CHAT_MESSAGES_PAGE_LIMIT = 100;
 
 function messageTime(value?: string | null) {
   if (!value) return '';
@@ -59,9 +60,10 @@ function mergeConversation(
   });
 }
 
-function appendMessage(messages: ChatMessageResponse[], nextMessage: ChatMessageResponse) {
-  if (messages.some((message) => message.id === nextMessage.id)) return messages;
-  return [...messages, nextMessage].sort((left, right) => {
+function appendMessage(messages: SupportMessageView[], nextMessage: SupportMessageView) {
+  if (messages.some((message) => message.id > 0 && message.id === nextMessage.id)) return messages;
+  const withoutOptimisticDuplicate = messages.filter((message) => message.client_message_id !== nextMessage.client_message_id || message.id > 0);
+  return [...withoutOptimisticDuplicate, nextMessage].sort((left, right) => {
     const leftTime = new Date(left.created_at).getTime();
     const rightTime = new Date(right.created_at).getTime();
     return (leftTime - rightTime) || (left.id - right.id);
@@ -87,15 +89,72 @@ function textPreview(value?: string | null) {
   return clean || 'Новый диалог';
 }
 
+function messagePreview(message: ChatMessageResponse | SupportMessageView) {
+  if (message.text?.trim()) return message.text;
+  if (message.type === 'image') return 'Скриншот';
+  if (message.type === 'voice') return 'Голосовое сообщение';
+  return 'Новое сообщение';
+}
+
+function attachmentPayload(attachment: ChatComposerAttachment) {
+  return {
+    url: attachment.previewUrl,
+    mime_type: attachment.file.type,
+    size_bytes: attachment.file.size,
+    original_filename: attachment.file.name,
+    ...(attachment.durationMs ? { duration_ms: attachment.durationMs } : {}),
+  };
+}
+
+function makeOptimisticStaffMessage(
+  conversationId: string,
+  text: string,
+  clientMessageId: string,
+  attachment?: ChatComposerAttachment,
+): SupportMessageView {
+  const now = new Date().toISOString();
+  return {
+    id: -Date.now(),
+    conversation_id: conversationId,
+    sender_user_id: null,
+    sender_role: 'admin',
+    direction: 'staff',
+    author_label: 'Shamrai',
+    type: attachment?.messageType || 'text',
+    text,
+    payload: attachment ? attachmentPayload(attachment) : {},
+    client_message_id: clientMessageId,
+    reply_to_id: null,
+    created_at: now,
+    edited_at: null,
+    deleted_at: null,
+    delivery_state: 'sending',
+    retry_attachment: attachment,
+  };
+}
+
+function syncConversationForStatus(
+  conversations: ChatConversationResponse[],
+  nextConversation: ChatConversationResponse,
+  statusFilter: ChatConversationStatus,
+) {
+  if (!nextConversation.id) return conversations;
+  if (nextConversation.status !== statusFilter) {
+    return conversations.filter((conversation) => conversation.id !== nextConversation.id);
+  }
+  return mergeConversation(conversations, nextConversation);
+}
+
 export default function AdminWebChat() {
   const [conversations, setConversations] = useState<ChatConversationResponse[]>([]);
   const [statusFilter, setStatusFilter] = useState<ChatConversationStatus>('open');
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessageResponse[]>([]);
+  const [messages, setMessages] = useState<SupportMessageView[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [threadsLoading, setThreadsLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -155,6 +214,7 @@ export default function AdminWebChat() {
   useEffect(() => {
     if (!selectedConversationId) {
       setMessages([]);
+      setMessagesError(null);
       return;
     }
 
@@ -162,12 +222,14 @@ export default function AdminWebChat() {
     let cancelled = false;
     async function loadMessages() {
       setMessagesLoading(true);
+      setMessagesError(null);
+      setMessages([]);
       try {
         const response = await apiFetch<ChatMessagePageResponse>(
-          `/chat/admin/conversations/${conversationId}/messages?limit=160`,
+          `/chat/admin/conversations/${conversationId}/messages?limit=${ADMIN_CHAT_MESSAGES_PAGE_LIMIT}`,
         );
         if (!cancelled) {
-          setMessages(response.items);
+          setMessages(response.items.map((message) => ({ ...message, delivery_state: 'sent' as const })));
           const lastMessage = response.items[response.items.length - 1];
           if (lastMessage) {
             void apiFetch(`/chat/admin/conversations/${conversationId}/read`, {
@@ -179,7 +241,11 @@ export default function AdminWebChat() {
           }
         }
       } catch (error: any) {
-        if (!cancelled) notifyError(error?.message || 'Не удалось загрузить переписку');
+        if (!cancelled) {
+          const message = error?.message || 'Не удалось загрузить переписку';
+          setMessagesError(message);
+          notifyError(message);
+        }
       } finally {
         if (!cancelled) setMessagesLoading(false);
       }
@@ -196,10 +262,10 @@ export default function AdminWebChat() {
       const payload = (event as CustomEvent<AdminWebChatMessageEventPayload>).detail;
       if (!payload?.message || !payload.conversation) return;
       const conversationId = selectedConversationId;
-      setConversations((current) => mergeConversation(current, payload.conversation));
+      setConversations((current) => syncConversationForStatus(current, payload.conversation, statusFilter));
       setMessages((current) => (
         payload.conversation.id === conversationId
-          ? appendMessage(current, payload.message)
+          ? appendMessage(current, { ...payload.message, delivery_state: 'sent' })
           : current
       ));
       if (conversationId && payload.conversation.id === conversationId) {
@@ -214,7 +280,7 @@ export default function AdminWebChat() {
     const handleConversation = (event: Event) => {
       const conversation = (event as CustomEvent<ChatConversationResponse>).detail;
       if (!conversation?.id) return;
-      setConversations((current) => mergeConversation(current, conversation));
+      setConversations((current) => syncConversationForStatus(current, conversation, statusFilter));
     };
     const handleStatus = (event: Event) => {
       const state = (event as CustomEvent<{ state?: 'connecting' | 'online' | 'offline' }>).detail?.state;
@@ -229,44 +295,117 @@ export default function AdminWebChat() {
       window.removeEventListener(ADMIN_WEB_CHAT_CONVERSATION_EVENT, handleConversation);
       window.removeEventListener(ADMIN_WEB_CHAT_STATUS_EVENT, handleStatus);
     };
-  }, [clearConversationUnread, selectedConversationId]);
+  }, [clearConversationUnread, selectedConversationId, statusFilter]);
 
-  const handleSend = async (event?: FormEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    const text = draft.trim();
-    if (!selectedConversationId || !selectedConversation || !text) return;
+  const updateConversationAfterStaffReply = useCallback((response: ChatMessageResponse) => {
+    if (!selectedConversation) return;
+    const updatedConversation: ChatConversationResponse = {
+      ...selectedConversation,
+      status: 'closed',
+      last_message: response,
+      last_message_text: messagePreview(response),
+      last_message_at: response.created_at,
+      unread_count: 0,
+    };
+    setConversations((current) => {
+      if (statusFilter === 'closed') {
+        return syncConversationForStatus(current, updatedConversation, statusFilter);
+      }
+      return [updatedConversation];
+    });
+    if (statusFilter !== 'closed') setStatusFilter('closed');
+  }, [selectedConversation, statusFilter]);
+
+  const sendAdminText = useCallback(async (text: string, clientMessageId: string = crypto.randomUUID()) => {
+    const cleanText = text.trim();
+    if (!selectedConversationId || !selectedConversation || !cleanText) return false;
 
     setSending(true);
-    const clientMessageId = crypto.randomUUID();
+    setMessages((current) => appendMessage(current, makeOptimisticStaffMessage(selectedConversationId, cleanText, clientMessageId)));
     try {
       const response = await apiFetch<ChatMessageResponse>(`/chat/admin/conversations/${selectedConversationId}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ client_message_id: clientMessageId, text }),
+        body: JSON.stringify({ client_message_id: clientMessageId, text: cleanText }),
       });
-      setMessages((current) => appendMessage(current, response));
-      setConversations((current) => mergeConversation(current, {
-        ...selectedConversation,
-        status: 'open',
-        last_message: response,
-        last_message_text: response.text,
-        last_message_at: response.created_at,
-        unread_count: 0,
-      }));
+      setMessages((current) => appendMessage(current, { ...response, delivery_state: 'sent' }));
+      updateConversationAfterStaffReply(response);
       setDraft('');
-      notifySuccess('Сообщение отправлено клиенту', 'Чат Shamrai');
+      notifySuccess('Сообщение отправлено клиенту, диалог закрыт', 'Чат Shamrai');
+      return true;
     } catch (error: any) {
+      setMessages((current) => current.map((message) => (
+        message.client_message_id === clientMessageId
+          ? { ...message, delivery_state: 'failed' }
+          : message
+      )));
       notifyError(error?.message || 'Не удалось отправить сообщение');
+      return false;
     } finally {
       setSending(false);
     }
-  };
+  }, [selectedConversation, selectedConversationId, updateConversationAfterStaffReply]);
 
-  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey) return;
-    event.preventDefault();
-    if (!draft.trim() || sending) return;
-    void handleSend();
-  };
+  const sendAdminAttachment = useCallback(async (
+    attachment: ChatComposerAttachment,
+    text: string,
+    clientMessageId: string = crypto.randomUUID(),
+  ) => {
+    const cleanText = text.trim();
+    if (!selectedConversationId || !selectedConversation) return false;
+
+    setSending(true);
+    setMessages((current) => appendMessage(
+      current,
+      makeOptimisticStaffMessage(selectedConversationId, cleanText, clientMessageId, attachment),
+    ));
+
+    const formData = new FormData();
+    formData.append('client_message_id', clientMessageId);
+    formData.append('message_type', attachment.messageType);
+    formData.append('file', attachment.file);
+    if (cleanText) formData.append('text', cleanText);
+    if (attachment.durationMs) formData.append('duration_ms', String(Math.round(attachment.durationMs)));
+
+    try {
+      const response = await apiFetch<ChatMessageResponse>(`/chat/admin/conversations/${selectedConversationId}/attachments`, {
+        method: 'POST',
+        body: formData,
+      });
+      setMessages((current) => appendMessage(current, { ...response, delivery_state: 'sent' }));
+      updateConversationAfterStaffReply(response);
+      URL.revokeObjectURL(attachment.previewUrl);
+      notifySuccess('Вложение отправлено клиенту, диалог закрыт', 'Чат Shamrai');
+      return true;
+    } catch (error: any) {
+      const retryAttachment = {
+        ...attachment,
+        previewUrl: URL.createObjectURL(attachment.file),
+      };
+      setMessages((current) => current.map((message) => (
+        message.client_message_id === clientMessageId
+          ? {
+            ...message,
+            payload: attachmentPayload(retryAttachment),
+            delivery_state: 'failed',
+            retry_attachment: retryAttachment,
+          }
+          : message
+      )));
+      notifyError(error?.message || 'Не удалось отправить вложение');
+      return true;
+    } finally {
+      setSending(false);
+    }
+  }, [selectedConversation, selectedConversationId, updateConversationAfterStaffReply]);
+
+  const handleRetry = useCallback((message: SupportMessageView) => {
+    if (sending) return;
+    if (message.retry_attachment) {
+      void sendAdminAttachment(message.retry_attachment, message.text || '', message.client_message_id);
+      return;
+    }
+    if (message.text) void sendAdminText(message.text, message.client_message_id);
+  }, [sendAdminAttachment, sendAdminText, sending]);
 
   const handleEnablePush = async () => {
     setPushBusy(true);
@@ -303,10 +442,10 @@ export default function AdminWebChat() {
   };
 
   return (
-    <div className="grid min-h-[calc(100dvh-8.5rem)] gap-3 pb-8 lg:grid-cols-[minmax(270px,360px)_minmax(0,1fr)]">
+    <div className="grid min-h-[calc(100dvh-8.5rem)] min-w-0 gap-3 pb-8 xl:grid-cols-[minmax(270px,360px)_minmax(0,1fr)]">
       <section className="min-h-[320px] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
         <div className="border-b border-white/10 px-3 py-3">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center justify-between gap-2">
             <div className="min-w-0">
               <h2 className="flex items-center gap-2 text-base font-black text-white">
                 <MessageCircle className="h-5 w-5 text-cyan-200" />
@@ -328,7 +467,7 @@ export default function AdminWebChat() {
             </button>
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {(['open', 'closed'] as const).map((status) => (
               <button
                 key={status}
@@ -386,7 +525,7 @@ export default function AdminWebChat() {
                     : 'border-white/10 bg-white/[0.035] text-slate-200 hover:border-cyan-300/20'
                 }`}
               >
-                <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-black">{conversation.owner_user.display_name}</p>
                     <p className="mt-0.5 truncate text-[10px] font-bold text-slate-500">
@@ -419,7 +558,7 @@ export default function AdminWebChat() {
       </section>
 
       <section className="flex min-h-[520px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
-        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+        <div className="flex min-w-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
           <div className="min-w-0">
             <p className="truncate text-base font-black text-white">
               {selectedConversation?.owner_user.display_name || 'Выберите диалог'}
@@ -454,7 +593,14 @@ export default function AdminWebChat() {
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        <div
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-slate-950 px-4 py-4"
+          style={{
+            backgroundImage: "linear-gradient(180deg, rgba(2, 6, 23, 0.74), rgba(2, 6, 23, 0.86)), url('/images/admin-chat-bg.jpg')",
+            backgroundPosition: 'center',
+            backgroundSize: 'cover',
+          }}
+        >
           {messagesLoading && (
             <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -472,65 +618,33 @@ export default function AdminWebChat() {
           )}
 
           {selectedConversation && !messagesLoading && messages.length === 0 && (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-center text-xs font-bold text-slate-500">
-              История пуста.
+            <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-center text-xs font-bold text-slate-300 shadow-lg shadow-black/20 backdrop-blur-md">
+              {messagesError || 'История пуста.'}
             </div>
           )}
 
-          {messages.map((message) => {
-            const staff = message.direction === 'staff';
-            return (
-              <div key={message.id} className={`flex items-start gap-3 ${staff ? 'justify-end' : ''}`}>
-                {!staff && (
-                  <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/75 text-fuchsia-100">
-                    <User className="h-4 w-4" />
-                  </div>
-                )}
-                <div className={`max-w-[82%] rounded-2xl border px-3.5 py-3 ${
-                  staff
-                    ? 'rounded-br-md border-cyan-300/25 bg-cyan-300/12 text-cyan-50'
-                    : 'rounded-bl-md border-fuchsia-300/20 bg-fuchsia-300/10 text-fuchsia-50'
-                }`}>
-                  <p className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-white/45">
-                    {staff ? 'Shamrai' : selectedConversation?.owner_user.display_name || 'Клиент'}
-                  </p>
-                  <p className="whitespace-pre-wrap break-words text-sm font-semibold leading-relaxed">{message.text}</p>
-                  <p className="mt-2 text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
-                    {messageTime(message.created_at)}
-                  </p>
-                </div>
-                {staff && (
-                  <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/75 text-cyan-100">
-                    <Bot className="h-4 w-4" />
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {messages.map((message) => (
+            <SupportMessageBubble
+              key={`${message.client_message_id}:${message.id}`}
+              message={message}
+              ownerLabel={selectedConversation?.owner_user.display_name || 'Клиент'}
+              staffSide="right"
+              onRetry={handleRetry}
+            />
+          ))}
         </div>
 
-        <form onSubmit={(event) => void handleSend(event)} className="border-t border-white/10 bg-slate-950/55 px-3 py-3">
-          <div className="grid grid-cols-[1fr_auto] items-end gap-2">
-            <textarea
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              disabled={!selectedConversation || sending}
-              maxLength={4000}
-              rows={2}
-              placeholder={selectedConversation ? 'Ответить от имени Shamrai...' : 'Выберите клиента'}
-              className="min-h-[48px] max-h-32 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/75 px-3 py-2.5 text-sm font-semibold text-white placeholder:text-slate-600 focus:border-cyan-300/45 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={!selectedConversation || sending || !draft.trim()}
-              title="Отправить сообщение клиенту"
-              className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-300/25 bg-cyan-300/15 text-cyan-50 transition-all hover:bg-cyan-300/24 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </button>
-          </div>
-        </form>
+        <MessageComposer
+          draft={draft}
+          onDraftChange={setDraft}
+          disabled={!selectedConversation}
+          sending={sending}
+          placeholder={selectedConversation ? 'Ответить от имени Shamrai...' : 'Выберите клиента'}
+          submitTitle="Отправить сообщение клиенту"
+          onSendText={sendAdminText}
+          onSendAttachment={sendAdminAttachment}
+          onError={notifyError}
+        />
       </section>
     </div>
   );

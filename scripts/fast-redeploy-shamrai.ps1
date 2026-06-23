@@ -9,6 +9,7 @@ param(
   [string]$PublicWebRoot = "/var/www/shamrai_web/dist",
   [string]$VkGroupId = "239419819",
   [string]$ExpectedVkCallbackConfirmationCode = $env:SHAMRAI_EXPECTED_VK_CALLBACK_CONFIRMATION_CODE,
+  [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
   [switch]$RepairShamraiConflicts,
   [switch]$SkipChecks
 )
@@ -217,15 +218,71 @@ if (-not (Test-Path $Workspace)) {
   throw "Workspace not found: $Workspace"
 }
 
-$plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
-$pscp = Find-Tool @("C:\Program Files\PuTTY\pscp.exe", "pscp.exe")
-if (-not $plink -or -not $pscp) {
-  throw "PuTTY plink/pscp not found."
+$defaultSshKeyPath = Join-Path $env:USERPROFILE ".ssh\codex_deploy_ed25519"
+if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and (Test-Path -LiteralPath $defaultSshKeyPath)) {
+  $SshKeyPath = $defaultSshKeyPath
 }
 
-$password = $env:SHAMRAI_SSH_PASSWORD
-if ([string]::IsNullOrWhiteSpace($password)) {
-  throw "Set SHAMRAI_SSH_PASSWORD for this run. Do not store it in files."
+$ssh = Find-Tool @("ssh.exe", "ssh")
+$scp = Find-Tool @("scp.exe", "scp")
+$useSshKey = (-not [string]::IsNullOrWhiteSpace($SshKeyPath)) -and (Test-Path -LiteralPath $SshKeyPath)
+$plink = $null
+$pscp = $null
+$password = $null
+
+if ($useSshKey) {
+  if (-not $ssh -or -not $scp) {
+    throw "OpenSSH ssh/scp not found. Install OpenSSH Client or provide SHAMRAI_SSH_PASSWORD."
+  }
+} else {
+  $plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
+  $pscp = Find-Tool @("C:\Program Files\PuTTY\pscp.exe", "pscp.exe")
+  if (-not $plink -or -not $pscp) {
+    throw "PuTTY plink/pscp not found."
+  }
+
+  $password = $env:SHAMRAI_SSH_PASSWORD
+  if ([string]::IsNullOrWhiteSpace($password)) {
+    throw "Set SHAMRAI_SSH_PASSWORD for this run or provide a valid SshKeyPath. Do not store passwords in files."
+  }
+}
+
+function Invoke-RemoteChecked {
+  param([Parameter(Mandatory = $true)][string]$Command)
+
+  if ($useSshKey) {
+    Invoke-NativeChecked $ssh `
+      "-i" $SshKeyPath `
+      "-o" "BatchMode=yes" `
+      "-o" "IdentitiesOnly=yes" `
+      "-o" "StrictHostKeyChecking=accept-new" `
+      $Server `
+      $Command
+    return
+  }
+
+  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $Command
+}
+
+function Copy-ToRemoteChecked {
+  param(
+    [Parameter(Mandatory = $true)][string]$LocalPath,
+    [Parameter(Mandatory = $true)][string]$RemotePath
+  )
+
+  $target = "${Server}:$RemotePath"
+  if ($useSshKey) {
+    Invoke-NativeChecked $scp `
+      "-i" $SshKeyPath `
+      "-o" "BatchMode=yes" `
+      "-o" "IdentitiesOnly=yes" `
+      "-o" "StrictHostKeyChecking=accept-new" `
+      $LocalPath `
+      $target
+    return
+  }
+
+  Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $LocalPath $target
 }
 
 function Invoke-RemoteSh {
@@ -233,10 +290,7 @@ function Invoke-RemoteSh {
   $normalizedScript = ((($Script -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
   $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedScript))
   $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | bash"
-  & $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
-  if ($LASTEXITCODE -ne 0) {
-    throw "Remote command failed with exit code ${LASTEXITCODE}."
-  }
+  Invoke-RemoteChecked $remoteCommand
 }
 
 Invoke-Step "Server port/project guard" {
@@ -249,7 +303,7 @@ New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
 $deployId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 $frontendDistPath = Join-Path $Workspace "frontend\dist"
 $webArchive = Join-Path $deployDir "shamrai-web-dist-fast.tar.gz"
-$frontendPublicAssets = @()
+$script:frontendPublicAssets = @()
 $publishPublicFrontend = $Target -eq "frontend" -or $Target -eq "all"
 
 $services = @()
@@ -377,7 +431,7 @@ if (-not $SkipChecks) {
 
 if ($publishPublicFrontend) {
   Invoke-Step "Pack public frontend dist" {
-    $frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
+    $script:frontendPublicAssets = @(Get-FrontendDistAssets -DistPath $frontendDistPath)
     if (Test-Path -LiteralPath $webArchive) {
       Remove-Item -LiteralPath $webArchive -Force
     }
@@ -408,7 +462,7 @@ if [ -f backend/.env ]; then cp -a backend/.env "`$backup_root/backend.env"; els
 
   if ($publishPublicFrontend) {
     Invoke-Step "Upload public frontend dist archive" {
-      Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $webArchive "${Server}:/tmp/shamrai-web-dist-fast.tar.gz"
+      Copy-ToRemoteChecked $webArchive "/tmp/shamrai-web-dist-fast.tar.gz"
     }
   }
 
@@ -449,7 +503,7 @@ if [ -f backend/.env ]; then cp -a backend/.env "`$backup_root/backend.env"; els
     }
 
     Invoke-Step "Upload $service archive" {
-      Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey $archive "${Server}:/tmp/shamrai-$service-fast.tar.gz"
+      Copy-ToRemoteChecked $archive "/tmp/shamrai-$service-fast.tar.gz"
     }
 
     Invoke-Step "Stage and swap $service on server" {
@@ -491,7 +545,7 @@ rm -f '$RemotePath/frontend/.env' '$RemotePath/frontend/.env.local'
   }
 
   Invoke-Step "Upload compose file" {
-    Invoke-NativeChecked $pscp -batch -pw $password -hostkey $HostKey (Join-Path $Workspace "docker-compose.yml") "${Server}:/tmp/shamrai-docker-compose.yml"
+    Copy-ToRemoteChecked (Join-Path $Workspace "docker-compose.yml") "/tmp/shamrai-docker-compose.yml"
     $remote = @"
 set -e
 install -m 0644 /tmp/shamrai-docker-compose.yml '$RemotePath/docker-compose.yml'
@@ -758,7 +812,7 @@ trap - ERR
     }
 
     Invoke-Step "Public frontend asset verification" {
-      $expectedAssetArgs = ($frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
+      $expectedAssetArgs = ($script:frontendPublicAssets | ForEach-Object { ConvertTo-ShellSingleQuoted $_ }) -join " "
       if ([string]::IsNullOrWhiteSpace($expectedAssetArgs)) {
         throw "No expected public frontend assets were captured from local dist."
       }

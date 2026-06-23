@@ -251,7 +251,7 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (
         UniqueConstraint("sender_user_id", "client_message_id", name="uq_chat_message_sender_client"),
-        CheckConstraint("type IN ('text')", name="ck_chat_message_type"),
+        CheckConstraint("type IN ('text', 'image', 'voice')", name="ck_chat_message_type"),
         CheckConstraint("text IS NULL OR length(text) BETWEEN 1 AND 4000", name="ck_chat_message_text_length"),
         Index("ix_chat_messages_conversation_id_id", "conversation_id", "id"),
         Index("ix_chat_messages_conversation_created", "conversation_id", "created_at"),

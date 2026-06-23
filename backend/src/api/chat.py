@@ -1,3 +1,4 @@
+import os
 import secrets
 import time
 from datetime import datetime
@@ -5,7 +6,7 @@ from threading import RLock
 from typing import Annotated, Any, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -15,8 +16,6 @@ from src.core.roles import is_staff_role
 from src.models.database import AsyncSessionLocal, get_db, get_read_db
 from src.models.models import ChatConversation, User
 from src.services.chat import (
-    CHAT_STATUS_CLOSED,
-    CHAT_STATUS_OPEN,
     chat_message_payload,
     chat_stream_hub,
     conversations_for_user,
@@ -27,13 +26,15 @@ from src.services.chat import (
     notify_chat_message,
     paginated_signal_messages,
     paginated_support_messages,
-    set_conversation_status,
     support_conversation_for_user,
     support_conversation_payload,
     advance_read_cursor,
+    set_conversation_status,
 )
+from src.services.chat_uploads import CHAT_VOICE_MAX_DURATION_MS, remove_chat_attachment, store_chat_attachment
 
 router = APIRouter(prefix="/chat", tags=["Native Web Chat"])
+CHAT_STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "chat"))
 
 
 class ChatUserResponse(BaseModel):
@@ -60,7 +61,7 @@ class ChatMessageResponse(BaseModel):
     sender_role: str
     direction: Literal["staff", "client"]
     author_label: str
-    type: Literal["text"]
+    type: Literal["text", "image", "voice"]
     text: Optional[str] = None
     payload: dict[str, Any] = Field(default_factory=dict)
     client_message_id: str
@@ -174,6 +175,54 @@ def _conversation_uuid(conversation_id: UUID | str) -> UUID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Диалог не найден")
 
 
+def _validate_attachment_form(reply_to_id: Optional[int], duration_ms: Optional[int]) -> None:
+    if reply_to_id is not None and int(reply_to_id) < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное сообщение для ответа")
+    if duration_ms is not None and (int(duration_ms) < 0 or int(duration_ms) > CHAT_VOICE_MAX_DURATION_MS):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Голосовое сообщение не может быть длиннее 2 минут")
+
+
+async def _create_attachment_message(
+    *,
+    db: AsyncSession,
+    conversation: ChatConversation,
+    sender: User,
+    client_message_id: UUID,
+    message_type: Literal["image", "voice"],
+    text: Optional[str],
+    reply_to_id: Optional[int],
+    duration_ms: Optional[int],
+    file: UploadFile,
+) -> ChatMessageResponse:
+    _validate_attachment_form(reply_to_id, duration_ms)
+    attachment = await store_chat_attachment(
+        file,
+        target_root=CHAT_STATIC_DIR,
+        conversation_id=conversation.id,
+        message_type=message_type,
+        duration_ms=duration_ms if message_type == "voice" else None,
+    )
+    try:
+        message, created = await create_chat_message(
+            db,
+            conversation=conversation,
+            sender=sender,
+            client_message_id=client_message_id,
+            text=text,
+            message_type=message_type,
+            payload=attachment.payload,
+            reply_to_id=reply_to_id,
+        )
+        if not created:
+            remove_chat_attachment(attachment.payload, target_root=CHAT_STATIC_DIR)
+        if created:
+            await notify_chat_message(db, conversation=conversation, message=message)
+        return ChatMessageResponse(**chat_message_payload(message))
+    except Exception:
+        remove_chat_attachment(attachment.payload, target_root=CHAT_STATIC_DIR)
+        raise
+
+
 @router.get("/conversations", response_model=ChatConversationListResponse)
 async def list_chat_conversations(
     current_user: User = Depends(get_current_user_read),
@@ -238,8 +287,6 @@ async def create_support_message(
     conversation = await support_conversation_for_user(db, current_user, create=True)
     if conversation is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не удалось создать диалог")
-    if conversation.status == CHAT_STATUS_CLOSED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Диалог закрыт")
 
     message, created = await create_chat_message(
         db,
@@ -252,6 +299,35 @@ async def create_support_message(
     if created:
         await notify_chat_message(db, conversation=conversation, message=message)
     return ChatMessageResponse(**chat_message_payload(message))
+
+
+@router.post("/conversations/support/attachments", response_model=ChatMessageResponse)
+async def create_support_attachment(
+    client_message_id: Annotated[UUID, Form()],
+    message_type: Annotated[Literal["image", "voice"], Form()],
+    file: Annotated[UploadFile, File()],
+    text: Annotated[Optional[str], Form()] = None,
+    reply_to_id: Annotated[Optional[int], Form()] = None,
+    duration_ms: Annotated[Optional[int], Form()] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if is_staff_role(current_user.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Используйте админский чат для ответа клиентам")
+    conversation = await support_conversation_for_user(db, current_user, create=True)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не удалось создать диалог")
+    return await _create_attachment_message(
+        db=db,
+        conversation=conversation,
+        sender=current_user,
+        client_message_id=client_message_id,
+        message_type=message_type,
+        text=text,
+        reply_to_id=reply_to_id,
+        duration_ms=duration_ms,
+        file=file,
+    )
 
 
 @router.post("/conversations/support/read", response_model=ChatReadResponse)
@@ -339,8 +415,6 @@ async def create_admin_chat_message(
 ):
     _ensure_staff(admin)
     conversation = await load_support_conversation_for_staff(db, _conversation_uuid(conversation_id))
-    if conversation.status == CHAT_STATUS_CLOSED:
-        await set_conversation_status(db, conversation=conversation, status_value=CHAT_STATUS_OPEN)
     message, created = await create_chat_message(
         db,
         conversation=conversation,
@@ -352,6 +426,33 @@ async def create_admin_chat_message(
     if created:
         await notify_chat_message(db, conversation=conversation, message=message)
     return ChatMessageResponse(**chat_message_payload(message))
+
+
+@router.post("/admin/conversations/{conversation_id}/attachments", response_model=ChatMessageResponse)
+async def create_admin_chat_attachment(
+    conversation_id: UUID,
+    client_message_id: Annotated[UUID, Form()],
+    message_type: Annotated[Literal["image", "voice"], Form()],
+    file: Annotated[UploadFile, File()],
+    text: Annotated[Optional[str], Form()] = None,
+    reply_to_id: Annotated[Optional[int], Form()] = None,
+    duration_ms: Annotated[Optional[int], Form()] = None,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_staff(admin)
+    conversation = await load_support_conversation_for_staff(db, _conversation_uuid(conversation_id))
+    return await _create_attachment_message(
+        db=db,
+        conversation=conversation,
+        sender=admin,
+        client_message_id=client_message_id,
+        message_type=message_type,
+        text=text,
+        reply_to_id=reply_to_id,
+        duration_ms=duration_ms,
+        file=file,
+    )
 
 
 @router.post("/admin/conversations/{conversation_id}/read", response_model=ChatReadResponse)

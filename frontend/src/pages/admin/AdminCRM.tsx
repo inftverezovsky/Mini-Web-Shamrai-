@@ -234,7 +234,7 @@ function ClientIntelligenceRow({
       onClick={() => onOpen(user)}
       className="smooth-pressable group w-full overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.045] p-3 text-left text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition-all hover:border-cyan-200/28 hover:bg-white/[0.065] active:scale-[0.995]"
     >
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(14rem,0.85fr)_auto] lg:items-center">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(14rem,0.85fr)_auto] xl:items-center">
         <div className="min-w-0">
           <div className="flex min-w-0 items-start gap-3">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white/10 bg-slate-950/40 text-[11px] font-black text-cyan-100">
@@ -689,7 +689,7 @@ export default function AdminCRM() {
 
       <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_18%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_86%_16%,rgba(16,185,129,0.10),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
         <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.45fr)]">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,32rem)]">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.13em] text-cyan-100">
               <Users className="h-3.5 w-3.5" />
@@ -707,14 +707,14 @@ export default function AdminCRM() {
               <span>баланс {summary.totalBalance}</span>
             </div>
           </div>
-          <div className="grid gap-2">
+          <div className="grid min-w-0 content-start gap-2">
             <ExportActions
               exporting={exportingFormat}
               onCsv={() => void handleClientExport('csv')}
               onXlsx={() => void handleClientExport('xlsx')}
             />
-            <div className="grid grid-cols-[1fr_auto] gap-2">
-              <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
+            <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(5.5rem,0.28fr)]">
+              <div className="flex min-h-[68px] min-w-0 flex-col justify-center rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
                 <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Google Drive</div>
                 <div className="mt-0.5 truncate text-xs font-black text-cyan-100">
                   {driveStatusLabel(driveJob) ?? 'Готов к выгрузке'}

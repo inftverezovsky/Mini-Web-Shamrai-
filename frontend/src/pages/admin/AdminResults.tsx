@@ -658,7 +658,7 @@ export default function AdminResults() {
                           {editSelectedBookmakers.map((bookmaker) => (
                             <div
                               key={bookmaker.id}
-                              className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] gap-2"
+                              className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,8rem)_minmax(0,1fr)]"
                             >
                               <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-black/[0.18] px-2 py-1.5">
                                 <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="h-7 shrink-0" />
@@ -703,7 +703,7 @@ export default function AdminResults() {
                       </span>
                     )}
                   </div>
-                  <div className="mt-2 grid grid-cols-[4.5rem_42px_minmax(0,1fr)] gap-2">
+                  <div className="mt-2 grid grid-cols-[minmax(0,4.5rem)_42px_minmax(0,1fr)] gap-2">
                     <input
                       type="text"
                       inputMode="decimal"
@@ -734,7 +734,7 @@ export default function AdminResults() {
                   </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
                   {resultActions.map(({ status, label, Icon, className }) => (
                     <button
                       key={status}
@@ -750,7 +750,7 @@ export default function AdminResults() {
                     </button>
                   ))}
                 </div>
-                <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <button
                     type="button"
                     onClick={() => handleStartEdit(bet)}

@@ -1,4 +1,5 @@
 import asyncio
+import mimetypes
 from typing import Optional
 import socket
 import time
@@ -190,7 +191,7 @@ async def run_dev_schema_migrations(conn):
                 edited_at TIMESTAMP WITH TIME ZONE,
                 deleted_at TIMESTAMP WITH TIME ZONE,
                 CONSTRAINT uq_chat_message_sender_client UNIQUE (sender_user_id, client_message_id),
-                CONSTRAINT ck_chat_message_type CHECK (type IN ('text')),
+                CONSTRAINT ck_chat_message_type CHECK (type IN ('text', 'image', 'voice')),
                 CONSTRAINT ck_chat_message_text_length CHECK (text IS NULL OR length(text) BETWEEN 1 AND 4000)
             )
             """,
@@ -482,7 +483,7 @@ async def run_dev_schema_migrations(conn):
                 deleted_at DATETIME,
                 PRIMARY KEY (id),
                 CONSTRAINT uq_chat_message_sender_client UNIQUE (sender_user_id, client_message_id),
-                CONSTRAINT ck_chat_message_type CHECK (type IN ('text')),
+                CONSTRAINT ck_chat_message_type CHECK (type IN ('text', 'image', 'voice')),
                 CONSTRAINT ck_chat_message_text_length CHECK (text IS NULL OR length(text) BETWEEN 1 AND 4000),
                 FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE,
                 FOREIGN KEY (sender_user_id) REFERENCES users(telegram_id) ON DELETE SET NULL,
@@ -1199,6 +1200,7 @@ app.add_middleware(SecurityRateLimitMiddleware, limiter=security_rate_limiter)
 import os
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 os.makedirs(static_dir, exist_ok=True)
+mimetypes.add_type("audio/webm", ".webm")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Include endpoint routers under /api prefix
