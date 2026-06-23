@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react';
 import { Loader2, MessageCircle, Send, ShieldCheck } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import { UserResponse } from '../schemas/schemas';
 import { apiFetch } from '../utils/api';
 import { isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
 
 export default function IdentityLinkGate() {
-  const { user, loginWithTelegramBot, setUser } = useAuth();
+  const user = useAuthSelector((state) => state.user);
+  const { loginWithTelegramBot, setUser } = useAuthActions();
   const [busyProvider, setBusyProvider] = useState<'telegram' | 'vk' | null>(null);
   const [error, setError] = useState<string | null>(null);
 

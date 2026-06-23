@@ -26,7 +26,7 @@ from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.api.deps import get_current_user
 from src.services.referrals import get_referral_discount_percent
-from src.services.match_access import activate_match_package
+from src.services.match_access import activate_match_subscription
 from src.services.crowd_bets import apply_verified_crowd_contribution
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.telegram_bot import call_telegram_api_async
@@ -149,7 +149,14 @@ def _tegro_sign_json_body(json_body: str, api_key: str) -> str:
 
 
 def _tegro_payment_form_signature(fields: dict[str, str], secret_key: str) -> str:
-    query = _tegro_signature_query(fields)
+    sign_fields = {
+        key: fields[key]
+        for key in ("shop_id", "amount", "currency", "order_id")
+        if key in fields
+    }
+    if fields.get("test") == "1":
+        sign_fields["test"] = fields["test"]
+    query = _tegro_signature_query(sign_fields)
     return hashlib.md5((query + secret_key).encode("utf-8")).hexdigest().lower()
 
 
@@ -161,6 +168,8 @@ def _create_tegro_payment_url(payload: dict[str, Any]) -> str:
         "lang": str(payload.get("lang") or "ru"),
         "currency": str(payload.get("currency") or "RUB"),
     }
+    if payload.get("test") is not None:
+        fields["test"] = str(payload["test"])
     receipt = payload.get("receipt") or {}
     items = receipt.get("items") if isinstance(receipt, dict) else None
     if isinstance(items, list):
@@ -494,7 +503,7 @@ async def _process_payment_attempt(
     await db.flush()
 
     if plan:
-        subscription = await activate_match_package(
+        subscription = await activate_match_subscription(
             db,
             user=user,
             plan=plan,
@@ -588,7 +597,7 @@ async def create_stars_invoice(
     """
     POST /api/payments/invoice
     Generates a Telegram Stars invoice link (currency: XTR) for a single paid forecast.
-    Match packages are sold through ruble checkout only.
+    Match subscriptions are sold through ruble checkout only.
     """
     if bool(invoice_data.plan_id) == bool(invoice_data.bet_id):
         raise HTTPException(
@@ -789,7 +798,7 @@ async def create_tegro_payment(
     amount = amount.quantize(Decimal("0.01"))
     currency = plan.currency or "RUB"
     if currency != "RUB":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tegro поддерживает только рублевые пакеты")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tegro поддерживает только рублевые абонементы")
 
     attempt = await _create_payment_attempt(
         db,

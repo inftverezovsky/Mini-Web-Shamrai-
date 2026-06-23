@@ -26,9 +26,11 @@ import { isVkIdReady, isVkRedirectStartedError, linkVkProfile } from '../utils/v
 import { BookmakerResponse } from '../schemas/schemas';
 import EmojiTextField from './EmojiTextField';
 import { BookmakerLogoFrame } from './LogoFrame';
-import { useAuth } from '../context/AuthContext';
+import OptimizedImage from './OptimizedImage';
+import { useAuthSelector } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
 import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
+import { useDebouncedCallback } from '../hooks/useThrottledEvents';
 
 type ExperienceLevel = 'novice' | 'amateur' | 'pro';
 type BankrollSize = 'micro' | 'mid' | 'high';
@@ -196,7 +198,7 @@ const pulseLogs = [
   '⚡ Ставка на Футбол рассчитана в плюс',
   '🧠 Shamrai Brain сверяет риск-профили',
   '💎 Закрыт новый value-сигнал для VIP-ленты',
-  '📡 Пакеты ставок обновляют баланс без фрибетов',
+  '📡 Абонементы обновляют баланс без фрибетов',
 ];
 
 const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFromRub: number }> = {
@@ -206,7 +208,7 @@ const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFr
 };
 
 export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizProps) {
-  const { user } = useAuth();
+  const user = useAuthSelector((state) => state.user);
   const reduceMotion = useReducedMotion();
   const performanceProfile = usePerformanceProfile();
   const reduceContinuousMotion = reduceMotion || performanceProfile.shouldReduceMotion;
@@ -665,8 +667,9 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
           <h1 className="mt-1 font-display text-xl font-black leading-none text-white">Добро пожаловать</h1>
         </div>
         <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${GLASS_SURFACE}`}>
-          <img
+          <OptimizedImage
             src="/brand/shamrai-channel-emblem.png"
+            webpSrc="/brand/shamrai-channel-emblem.webp"
             alt="Shamrai"
             className="h-11 w-11 object-contain opacity-95"
             style={{ filter: `drop-shadow(0 0 18px ${accent})` }}
@@ -752,7 +755,7 @@ function ExperienceBankrollStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="03" title="Опыт и рабочий банк" caption="Shamrai не выдает фрибеты. Он настраивает дисциплину пакета." />
+      <StepTitle index="03" title="Опыт и рабочий банк" caption="Shamrai не выдает фрибеты. Он настраивает дисциплину абонемента." />
       <OptionGroup title="Оценка опыта" options={experienceOptions} value={experience} proMode={proMode} glow={glow} onSelect={onExperience} />
       <OptionGroup title="Размер банка" options={bankrollOptions} value={bankroll} proMode={proMode} glow={glow} onSelect={onBankroll} />
       <AnimatePresence>
@@ -796,6 +799,22 @@ function RiskBookmakerStep({
   onOtherBookmakerName: (value: string) => void;
 }) {
   const otherSelected = selectedBookmakerCodes.includes('other');
+  const [draftOtherBookmakerName, setDraftOtherBookmakerName] = useState(otherBookmakerName);
+  const {
+    run: debounceOtherBookmakerName,
+    flush: flushOtherBookmakerName,
+  } = useDebouncedCallback((value: string) => {
+    onOtherBookmakerName(value);
+  }, 300);
+
+  useEffect(() => {
+    setDraftOtherBookmakerName(otherBookmakerName);
+  }, [otherBookmakerName]);
+
+  const handleOtherBookmakerNameChange = (value: string) => {
+    setDraftOtherBookmakerName(value);
+    debounceOtherBookmakerName(value);
+  };
 
   return (
     <div className="space-y-4">
@@ -829,8 +848,9 @@ function RiskBookmakerStep({
               </label>
               <EmojiTextField
                 multiline
-                value={otherBookmakerName}
-                onValueChange={onOtherBookmakerName}
+                value={draftOtherBookmakerName}
+                onValueChange={handleOtherBookmakerNameChange}
+                onBlur={flushOtherBookmakerName}
                 rows={3}
                 maxLength={180}
                 placeholder="Например: 1xBet, Pinnacle, Bet365..."
@@ -1187,7 +1207,7 @@ function FinalScreen({
           <Check className="h-10 w-10 text-white" strokeWidth={3} />
         </div>
         <h2 className="font-display text-2xl font-black leading-tight text-white">Результаты и Манифест</h2>
-        <p className="text-xs font-semibold leading-relaxed text-slate-300">Все дисциплины уже подключены к ленте. На старте нет фрибетов, только пакетная модель.</p>
+        <p className="text-xs font-semibold leading-relaxed text-slate-300">Все дисциплины уже подключены к ленте. На старте нет фрибетов, только абонементная модель.</p>
       </div>
 
       <div className={`rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
@@ -1260,7 +1280,7 @@ function SuperCompensationDemo({ glow, proMode, reduceMotion }: { glow: string; 
         <div>
           <p className="text-[10px] font-black uppercase tracking-[0.18em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>Правило Сверхкомпенсации</p>
           <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-300">
-            При LOSS списанная ставка возвращается, а сверху начисляется еще +1 ставка. Баланс пакета растет на 1.
+            При LOSS списанная ставка возвращается, а сверху начисляется еще +1 ставка. Баланс абонемента растет на 1.
           </p>
         </div>
         <motion.div

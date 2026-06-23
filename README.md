@@ -2,7 +2,7 @@
 
 Shamrai Mini App - full-stack приложение для спортивной аналитики, прогнозов и клиентского сопровождения. Оно работает как Telegram Mini App, браузерная web/PWA-версия и админский cockpit для команды.
 
-Проект закрывает полный цикл: пользователь проходит вход и анкету, выбирает БК и интересующие виды спорта, покупает пакеты матчей, получает прогнозы и сигналы, общается в поддержке, а администратор управляет прогнозами, клиентами, рассылками, оплатами, статистикой и доставкой в Telegram/VK/Web Push.
+Проект закрывает полный цикл: пользователь проходит вход и анкету, выбирает БК и интересующие виды спорта, покупает абонементы на матчи, получает прогнозы и сигналы, общается в поддержке, а администратор управляет прогнозами, клиентами, рассылками, оплатами, статистикой и доставкой в Telegram/VK/Web Push.
 
 GitHub-репозиторий: [inftverezovsky/Mini-Web-Shamrai-](https://github.com/inftverezovsky/Mini-Web-Shamrai-)
 
@@ -41,7 +41,7 @@ GitHub-репозиторий: [inftverezovsky/Mini-Web-Shamrai-](https://github
 | Users | анкета, БК, VK-связка, уведомления, баланс матчей |
 | Bets | публичная лента, закрытые прогнозы, платные наборы, купоны |
 | Payments | Telegram Stars, YooKassa, Tegro, промокоды, идемпотентные webhook-и |
-| Match access | списание матчей из пакета, гарантии, ручная выдача, возвраты |
+| Match access | списание матчей из абонемента, гарантии, ручная выдача, возвраты |
 | Delivery | Telegram, VK, Web Push, WebSocket, retryable outbox |
 | Admin | CRM, прогнозы, рассылки, статистика, аудит действий |
 | Chat | клиентский web-чат, чат сотрудников, unread state, WebSocket updates |
@@ -187,7 +187,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   A["User opens Tariffs"] --> B["GET /api/subscriptions/plans"]
-  B --> C["User chooses package and provider"]
+  B --> C["User chooses subscription and provider"]
   C --> D["POST /api/payments/{provider}/create"]
   D --> E["Backend creates PaymentAttempt pending"]
   E --> F{"Provider"}
@@ -202,11 +202,11 @@ flowchart TD
   L --> M
   M --> N["Verify status, amount, currency, attempt id/signature"]
   N --> O["Lock and process PaymentAttempt once"]
-  O --> P["activate_match_package"]
+  O --> P["activate_match_subscription"]
   P --> Q["matches_remaining and ledger updated"]
 ```
 
-Важный инвариант: доступ начисляется только после серверной проверки provider webhook/update. Повторный webhook не должен начислять пакет второй раз.
+Важный инвариант: доступ начисляется только после серверной проверки provider webhook/update. Повторный webhook не должен начислять абонемент второй раз.
 
 ### Прогноз и доставка
 
@@ -477,7 +477,7 @@ cd C:\Users\Sa1z1ngr0z\Desktop\Mini-Web(Shamrai)\backend
 | `/api/auth/*` | `backend/src/api/auth.py` | Telegram/VK login, bot-session login, cookie session, profile merge |
 | `/api/users/*`, `/api/bookmakers` | `backend/src/api/users.py` | профиль, onboarding, preferences, VK delivery state, history |
 | `/api/bets/*` | `backend/src/api/bets.py` | feed, take bet, hints, admin create/update/resolve, notes |
-| `/api/subscriptions/*` | `backend/src/api/subscriptions.py` | package plans, debug buy, manual assignment, invite links |
+| `/api/subscriptions/*` | `backend/src/api/subscriptions.py` | subscription plans, debug buy, manual assignment, invite links |
 | `/api/payments/*` | `backend/src/api/payments.py` | Telegram Stars, YooKassa, Tegro, promo validation, webhooks |
 | `/api/signals/*` | `backend/src/api/signals.py` | personal signals, web push, WebSocket stream |
 | `/api/chat/*` | `backend/src/api/chat.py` | native support-chat клиента и сотрудников, WebSocket stream |

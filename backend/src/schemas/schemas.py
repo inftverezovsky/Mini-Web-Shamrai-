@@ -48,6 +48,7 @@ class UserBase(BaseModel):
     last_name: Optional[str] = Field(default=None, max_length=128)
     phone: Optional[str] = Field(default=None, max_length=32)
     photo_url: Optional[str] = Field(default=None, max_length=2048)
+    vk_photo_url: Optional[str] = Field(default=None, max_length=2048)
     is_web_only: bool = False
 
 class UserCreate(UserBase):
@@ -176,7 +177,7 @@ class SubscriptionPlanResponse(SubscriptionPlanBase):
 # --- SUBSCRIPTION SCHEMAS ---
 class SubscriptionBase(BaseModel):
     user_id: int
-    plan_id: int
+    plan_id: Optional[int] = None
     status: str = Field(default="pending", max_length=32)
     payment_provider: Optional[str] = Field(default=None, max_length=80)
     payment_id: Optional[str] = Field(default=None, max_length=160)

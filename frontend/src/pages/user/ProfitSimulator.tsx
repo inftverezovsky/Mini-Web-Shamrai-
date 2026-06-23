@@ -1,19 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { TrendingUp } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
+import {
+  CLIENT_CHECKOUT_ROI_PERCENT,
+  resolveProfitSimulatorRoi,
+  shouldFetchGlobalRoi,
+} from '../../utils/profitSimulator';
 
 export default function ProfitSimulator() {
   const [bankroll, setBankroll] = useState<number>(20000);
-  const [roi, setRoi] = useState<number>(18.5); // Default fallback ROI %
-  // Fetch verified stats to obtain the actual current ROI
+  const [roi, setRoi] = useState<number>(CLIENT_CHECKOUT_ROI_PERCENT);
+
   useEffect(() => {
+    if (!shouldFetchGlobalRoi()) return;
+
     async function fetchRoi() {
       try {
-        const stats = await apiFetch('/stats/global');
-        if (stats && typeof stats.roi === 'number') {
-          // Keep ROI positive and reasonable for display
-          setRoi(stats.roi > 0 ? stats.roi : 18.5);
-        }
+        const stats = await apiFetch<{ roi?: unknown }>('/stats/global');
+        setRoi(resolveProfitSimulatorRoi(stats?.roi));
       } catch (err) {
         console.error('Failed to load global ROI for simulator:', err);
       }

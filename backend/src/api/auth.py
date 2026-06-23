@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from html import escape
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -63,6 +64,7 @@ from src.services.telegram_auth import (
     get_telegram_bot_auth_session,
     telegram_auth_start_param,
 )
+from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = logging.getLogger("uvicorn")
@@ -142,6 +144,7 @@ class VkLinkResponse(BaseModel):
     status: str
     vk_user_id: str
     vk_display_name: Optional[str] = None
+    vk_photo_url: Optional[str] = None
 
 
 class VkOAuthError(Exception):
@@ -413,6 +416,7 @@ def _exchange_vk_code(code: str, device_id: str, code_verifier: str, state: str)
 
     access_token = token_payload.get("access_token")
     display_name = None
+    photo_url = None
     if access_token:
         try:
             profile_payload = _vk_oauth_request(
@@ -424,13 +428,62 @@ def _exchange_vk_code(code: str, device_id: str, code_verifier: str, state: str)
             display_name = " ".join(
                 part for part in [user_info.get("first_name"), user_info.get("last_name")] if part
             ).strip() or None
+            photo_url = _extract_vk_photo_url(user_info)
         except VkOAuthError:
             display_name = None
 
     return {
         "vk_user_id": str(token_payload["user_id"]),
         "vk_display_name": display_name,
+        "vk_photo_url": photo_url,
     }
+
+
+def _safe_external_photo_url(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return url
+
+
+def _extract_vk_photo_url(user_info: dict[str, Any]) -> Optional[str]:
+    candidates: list[Any] = []
+    avatar = user_info.get("avatar")
+    if isinstance(avatar, dict):
+        candidates.extend(avatar.get(key) for key in ("url", "base_url", "photo_200", "photo_100"))
+    else:
+        candidates.append(avatar)
+
+    picture = user_info.get("picture")
+    if isinstance(picture, dict):
+        candidates.extend(picture.get(key) for key in ("url", "data"))
+    else:
+        candidates.append(picture)
+
+    candidates.extend(
+        user_info.get(key)
+        for key in (
+            "photo_url",
+            "photo",
+            "photo_50",
+            "photo_100",
+            "photo_200",
+            "photo_400_orig",
+            "photo_max",
+            "photo_max_orig",
+        )
+    )
+
+    for candidate in candidates:
+        safe_url = _safe_external_photo_url(candidate)
+        if safe_url:
+            return safe_url
+    return None
 
 
 def _normalize_vk_code_payload(payload: VkOAuthCodeRequest | dict[str, Any]) -> dict[str, str]:
@@ -582,6 +635,65 @@ def _build_login_response(user: User, response: Optional[Response] = None) -> Lo
     return LoginResponse(access_token=access_token, user=user)
 
 
+def _registration_report_line(label: str, value: object) -> str:
+    rendered = str(value).strip() if value is not None else "не указано"
+    return f"<b>{escape(label)}:</b> {escape(rendered or 'не указано')}"
+
+
+def _registration_client_label(user: User) -> str:
+    display_name = " ".join(
+        part for part in [user.first_name, user.last_name] if part
+    ).strip()
+    username = f"@{user.username}" if user.username else None
+    return " / ".join(part for part in [display_name, username] if part) or "без имени"
+
+
+def _format_user_registration_report(user: User, source: str) -> str:
+    telegram_id = user.telegram_id if user.telegram_id and user.telegram_id > 0 else "не привязан"
+    profile_type = "Web/VK клиент" if getattr(user, "is_web_only", False) else "Telegram клиент"
+    username = f"@{user.username}" if user.username else "не указан"
+    onboarding_status = "пройдена" if user.is_onboarded else "не пройдена"
+
+    lines = [
+        "<b>Новая регистрация клиента</b>",
+        _registration_report_line("Источник регистрации", source),
+        _registration_report_line("Клиент", _registration_client_label(user)),
+        _registration_report_line("Тип профиля", profile_type),
+        _registration_report_line("Telegram ID", telegram_id),
+        _registration_report_line("Username", username),
+        _registration_report_line("Телефон", user.phone or "не указан"),
+        _registration_report_line("VK ID", user.vk_user_id or "не привязан"),
+        _registration_report_line("Анкета", onboarding_status),
+    ]
+
+    if user.referred_by_user_id:
+        lines.append(_registration_report_line("Реферал от", user.referred_by_user_id))
+
+    return "\n".join(lines)
+
+
+async def enqueue_user_registration_report(db: AsyncSession, user: User, source: str) -> None:
+    chat_id = settings.SHAMRAI_ONBOARDING_REPORT_CHAT_ID or settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+    if not chat_id:
+        return
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_TELEGRAM_MESSAGE,
+        user_id=user.telegram_id,
+        dedupe_key=f"user_registration:{user.telegram_id}",
+        payload={
+            "method": "sendMessage",
+            "payload": {
+                "chat_id": chat_id,
+                "text": _format_user_registration_report(user, source),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+        },
+    )
+
+
 @router.post("/logout")
 async def logout_user(response: Response):
     _clear_auth_cookie(response)
@@ -634,7 +746,11 @@ def _apply_telegram_identity_fields(
         user.referred_by_user_id = referred_by_user_id
 
 
-async def _upsert_telegram_user(db: AsyncSession, tg_data: dict[str, Any]) -> User:
+async def _upsert_telegram_user(
+    db: AsyncSession,
+    tg_data: dict[str, Any],
+    registration_source: str = "Telegram",
+) -> User:
     tg_id = int(tg_data.get("id") or 0)
     if not tg_id:
         raise HTTPException(
@@ -703,6 +819,7 @@ async def _upsert_telegram_user(db: AsyncSession, tg_data: dict[str, Any]) -> Us
     )
     db.add(user)
     await db.flush()
+    await enqueue_user_registration_report(db, user, registration_source)
 
     return user
 
@@ -716,7 +833,12 @@ def _web_only_telegram_id_for_vk(vk_user_id: str) -> int:
         return -(2_000_000_000_000 + digest)
 
 
-async def _create_vk_only_user(db: AsyncSession, vk_user_id: str, display_name: Optional[str]) -> User:
+async def _create_vk_only_user(
+    db: AsyncSession,
+    vk_user_id: str,
+    display_name: Optional[str],
+    photo_url: Optional[str] = None,
+) -> User:
     name = (display_name or "VK клиент").strip()
     first_name, _, last_name = name.partition(" ")
     user = User(
@@ -727,11 +849,13 @@ async def _create_vk_only_user(db: AsyncSession, vk_user_id: str, display_name: 
         role="user",
         stats_display_mode="percent",
         vk_user_id=vk_user_id,
+        vk_photo_url=photo_url,
         ab_group=random.choice(["A", "B"]),
         tg_chat_joined=False,
     )
     db.add(user)
     await db.flush()
+    await enqueue_user_registration_report(db, user, "VK ID")
     return user
 
 
@@ -752,6 +876,7 @@ PROFILE_TRANSFER_FIELDS = (
     "vk_group_member",
     "vk_messages_allowed",
     "vk_notifications_allowed",
+    "vk_photo_url",
     "web_push_subscription",
     "currency_preference",
     "purchased_bets_balance",
@@ -1093,6 +1218,7 @@ async def _promote_web_user_to_telegram(
     tg_id = int(tg_data.get("id") or 0)
     source_id = source.telegram_id
     source_vk_user_id = source.vk_user_id
+    source_vk_photo_url = source.vk_photo_url
     source_phone = _telegram_phone_from_data(tg_data) or source.phone
 
     target = User(
@@ -1114,10 +1240,12 @@ async def _promote_web_user_to_telegram(
         target.role = "user"
 
     source.vk_user_id = None
+    source.vk_photo_url = None
     source.phone = None
     await db.flush()
 
     target.vk_user_id = source_vk_user_id
+    target.vk_photo_url = source_vk_photo_url
     target.phone = source_phone
     db.add(target)
     await db.flush()
@@ -1146,10 +1274,12 @@ async def _merge_web_only_user_into_telegram(db: AsyncSession, source: User, tar
     source_id = source.telegram_id
     target_id = target.telegram_id
     source_vk_user_id = source.vk_user_id
+    source_vk_photo_url = source.vk_photo_url
     source_phone = source.phone
 
     _copy_web_profile_fields(target, source)
     source.vk_user_id = None
+    source.vk_photo_url = None
     source.phone = None
     target.vk_group_member = bool(target.vk_group_member or source.vk_group_member)
     target.vk_messages_allowed = bool(target.vk_messages_allowed or source.vk_messages_allowed)
@@ -1157,6 +1287,8 @@ async def _merge_web_only_user_into_telegram(db: AsyncSession, source: User, tar
     await db.flush()
     if source_vk_user_id and not target.vk_user_id:
         target.vk_user_id = source_vk_user_id
+    if source_vk_photo_url and not target.vk_photo_url:
+        target.vk_photo_url = source_vk_photo_url
     if source_phone and not target.phone:
         target.phone = source_phone
 
@@ -1171,13 +1303,14 @@ async def _upsert_telegram_user_with_optional_web_profile(
     tg_data: dict[str, Any],
     current_user: Optional[User] = None,
     device_user: Optional[User] = None,
+    registration_source: str = "Telegram",
 ) -> User:
     source_user = current_user if current_user and _is_web_only_user(current_user) else None
     if not source_user and device_user and _is_web_only_user(device_user):
         source_user = device_user
 
     if not source_user:
-        return await _upsert_telegram_user(db, tg_data)
+        return await _upsert_telegram_user(db, tg_data, registration_source)
 
     tg_id = int(tg_data.get("id") or 0)
     target = await _load_user_with_profile(db, tg_id) if tg_id else None
@@ -1192,7 +1325,7 @@ async def _upsert_telegram_user_with_optional_web_profile(
             detail="Этот Telegram уже привязан к другому VK-профилю",
         )
 
-    target = await _upsert_telegram_user(db, tg_data)
+    target = await _upsert_telegram_user(db, tg_data, registration_source)
     if source_user.telegram_id != target.telegram_id:
         await _merge_web_only_user_into_telegram(db, source_user, target)
     return target
@@ -1204,6 +1337,7 @@ async def _resolve_telegram_login_user(
     *,
     current_user: Optional[User],
     identity_device_id: Any,
+    registration_source: str,
 ) -> User:
     device_user = None if current_user else await _load_identity_device_user(db, identity_device_id)
     return await _upsert_telegram_user_with_optional_web_profile(
@@ -1211,6 +1345,7 @@ async def _resolve_telegram_login_user(
         tg_data,
         current_user,
         device_user,
+        registration_source,
     )
 
 
@@ -1222,6 +1357,7 @@ async def _resolve_vk_login_user(
     identity_device_id: Any,
 ) -> User:
     vk_user_id = vk_profile["vk_user_id"]
+    vk_photo_url = vk_profile.get("vk_photo_url")
     source_user = current_user or await _load_identity_device_user(db, identity_device_id)
     existing_user = await _load_user_by_vk_id(db, vk_user_id)
 
@@ -1241,15 +1377,22 @@ async def _resolve_vk_login_user(
                     )
                 await _merge_web_only_user_into_telegram(db, existing_user, source_user)
             source_user.vk_user_id = vk_user_id
+            if vk_photo_url:
+                source_user.vk_photo_url = vk_photo_url
             return source_user
 
         if _is_web_only_user(source_user):
-            return existing_user or source_user
+            target_user = existing_user or source_user
+            if vk_photo_url:
+                target_user.vk_photo_url = vk_photo_url
+            return target_user
 
     if existing_user:
+        if vk_photo_url:
+            existing_user.vk_photo_url = vk_photo_url
         return existing_user
 
-    return await _create_vk_only_user(db, vk_user_id, vk_profile.get("vk_display_name"))
+    return await _create_vk_only_user(db, vk_user_id, vk_profile.get("vk_display_name"), vk_photo_url)
 
 
 async def _finish_vk_login(
@@ -1322,6 +1465,7 @@ async def _finish_vk_link(
         status="success",
         vk_user_id=vk_user_id,
         vk_display_name=vk_profile.get("vk_display_name"),
+        vk_photo_url=vk_profile.get("vk_photo_url"),
     )
 
 
@@ -1361,6 +1505,7 @@ async def login_user(
         tg_data,
         current_user=source_user,
         identity_device_id=identity_device_id,
+        registration_source="Telegram Mini App",
     )
     await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
@@ -1388,6 +1533,7 @@ async def login_telegram_widget(
         tg_data,
         current_user=source_user,
         identity_device_id=identity_device_id,
+        registration_source="Telegram Login Widget",
     )
     await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
@@ -1419,6 +1565,7 @@ async def telegram_callback(
         tg_data,
         current_user=source_user,
         identity_device_id=identity_device_id,
+        registration_source="Telegram Login Widget",
     )
     await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
@@ -1473,7 +1620,12 @@ async def poll_telegram_bot_auth_session(
     if not source_user:
         source_user = await _load_identity_device_user(db, identity_device_id)
 
-    user = await _upsert_telegram_user_with_optional_web_profile(db, session.telegram_user, source_user)
+    user = await _upsert_telegram_user_with_optional_web_profile(
+        db,
+        session.telegram_user,
+        source_user,
+        registration_source="Telegram Bot",
+    )
     await _bind_identity_device(db, identity_device_id, user)
     telegram_id = user.telegram_id
     await db.commit()

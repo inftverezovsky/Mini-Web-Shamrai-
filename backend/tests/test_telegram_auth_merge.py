@@ -74,6 +74,17 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VK ID временно", message)
         self.assertNotIn("upstream stack detail", message)
 
+    def test_vk_photo_url_is_extracted_from_user_info(self):
+        self.assertEqual(
+            auth._extract_vk_photo_url({"avatar": {"url": "https://vk.example/avatar.jpg"}}),
+            "https://vk.example/avatar.jpg",
+        )
+        self.assertEqual(
+            auth._extract_vk_photo_url({"photo_200": "https://vk.example/photo-200.jpg"}),
+            "https://vk.example/photo-200.jpg",
+        )
+        self.assertIsNone(auth._extract_vk_photo_url({"avatar": {"url": "javascript:alert(1)"}}))
+
     async def test_vk_start_sets_http_only_flow_cookie_and_authorize_url(self):
         response = Response()
 
@@ -223,7 +234,11 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(
                 auth,
                 "_exchange_vk_or_502",
-                new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+                new=AsyncMock(return_value={
+                    "vk_user_id": "741852963",
+                    "vk_display_name": "VK Client",
+                    "vk_photo_url": "https://vk.example/avatar.jpg",
+                }),
             ):
                 response = await auth.vk_id_login(
                     auth.VkOAuthCodeRequest(
@@ -239,11 +254,54 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(response.user.telegram_id, 0)
             self.assertTrue(response.user.is_web_only)
             self.assertEqual(response.user.vk_user_id, "741852963")
+            self.assertEqual(response.user.vk_photo_url, "https://vk.example/avatar.jpg")
 
             result = await db.execute(select(User))
             users = result.scalars().all()
             self.assertEqual(len(users), 1)
             self.assertEqual(users[0].vk_user_id, "741852963")
+            self.assertEqual(users[0].vk_photo_url, "https://vk.example/avatar.jpg")
+
+    async def test_first_vk_login_enqueues_registration_report_without_onboarding(self):
+        async with self.Session() as db:
+            with (
+                patch.object(
+                    auth,
+                    "_exchange_vk_or_502",
+                    new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+                ),
+                patch.object(auth.settings, "SHAMRAI_ONBOARDING_REPORT_CHAT_ID", -100777),
+                patch.object(auth.settings, "TELEGRAM_ADMIN_GROUP_CHAT_ID", -100555),
+            ):
+                response = await auth.vk_id_login(
+                    auth.VkOAuthCodeRequest(
+                        code="code",
+                        device_id="device",
+                        code_verifier="verifier",
+                        state="state",
+                    ),
+                    response=Response(),
+                    current_user=None,
+                    db=db,
+                )
+
+            result = await db.execute(select(DeliveryOutbox))
+            outbox_items = result.scalars().all()
+            self.assertEqual(len(outbox_items), 1)
+            outbox_item = outbox_items[0]
+            self.assertEqual(outbox_item.channel, "telegram_message")
+            self.assertEqual(outbox_item.user_id, response.user.telegram_id)
+            self.assertEqual(outbox_item.dedupe_key, f"user_registration:{response.user.telegram_id}")
+
+            payload = outbox_item.payload["payload"]
+            self.assertEqual(payload["chat_id"], -100777)
+            self.assertIn("Новая регистрация клиента", payload["text"])
+            self.assertIn("Источник регистрации", payload["text"])
+            self.assertIn("VK ID", payload["text"])
+            self.assertIn("Web/VK клиент", payload["text"])
+            self.assertIn("Telegram ID", payload["text"])
+            self.assertIn("не привязан", payload["text"])
+            self.assertNotIn(str(response.user.telegram_id), payload["text"])
 
     async def test_telegram_bot_login_merges_current_vk_only_profile(self):
         async with self.Session() as db:
@@ -456,6 +514,49 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(users), 1)
             self.assertEqual(users[0].telegram_id, 323456789)
             self.assertEqual(users[0].vk_user_id, "741852963")
+
+    async def test_first_telegram_login_enqueues_registration_report_without_onboarding(self):
+        async with self.Session() as db:
+            with (
+                patch.object(
+                    auth,
+                    "verify_telegram_init_data",
+                    return_value={
+                        "id": 423456789,
+                        "first_name": "New",
+                        "last_name": "Client",
+                        "username": "new_client",
+                    },
+                ),
+                patch.object(auth.settings, "SHAMRAI_ONBOARDING_REPORT_CHAT_ID", None),
+                patch.object(auth.settings, "TELEGRAM_ADMIN_GROUP_CHAT_ID", -100555),
+            ):
+                await auth.login_user(
+                    auth.LoginRequest(initData="signed"),
+                    response=Response(),
+                    current_user=None,
+                    db=db,
+                )
+
+            result = await db.execute(select(DeliveryOutbox))
+            outbox_items = result.scalars().all()
+            self.assertEqual(len(outbox_items), 1)
+            outbox_item = outbox_items[0]
+            self.assertEqual(outbox_item.channel, "telegram_message")
+            self.assertEqual(outbox_item.user_id, 423456789)
+            self.assertEqual(outbox_item.dedupe_key, "user_registration:423456789")
+
+            payload = outbox_item.payload["payload"]
+            self.assertEqual(payload["chat_id"], -100555)
+            self.assertEqual(payload["parse_mode"], "HTML")
+            self.assertIn("Новая регистрация клиента", payload["text"])
+            self.assertIn("Источник регистрации", payload["text"])
+            self.assertIn("Telegram Mini App", payload["text"])
+            self.assertIn("New Client / @new_client", payload["text"])
+            self.assertIn("Telegram ID", payload["text"])
+            self.assertIn("423456789", payload["text"])
+            self.assertIn("Анкета", payload["text"])
+            self.assertIn("не пройдена", payload["text"])
 
     async def test_device_binding_does_not_auto_merge_different_real_telegram_profiles(self):
         device_id = "550e8400-e29b-41d4-a716-446655440002"

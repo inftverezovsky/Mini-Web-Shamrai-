@@ -4,7 +4,7 @@ import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
 import { BetResponse, PaginatedResponse } from '../../schemas/schemas';
-import { useAuth } from '../../context/AuthContext';
+import { useAuthSelector } from '../../context/AuthContext';
 import { useLayoutMode } from '../../context/LayoutModeContext';
 import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, ExternalLink, Star, Image as ImageIcon } from 'lucide-react';
 import { hasActivePromo, promoFlags } from '../../config/promoFlags';
@@ -423,7 +423,7 @@ interface BetFeedProps {
 }
 
 export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
-  const { user: userProfile } = useAuth();
+  const userProfile = useAuthSelector((state) => state.user);
   const { isCompact } = useLayoutMode();
   const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
   
@@ -663,7 +663,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
               </span>
             </p>
           <p className="text-[9px] text-slate-400">
-              Купите пакет матчей, чтобы открыть премиум-ленту прогнозов.
+              Купите абонемент на матчи, чтобы открыть премиум-ленту прогнозов.
             </p>
           </div>
           {onNavigateToBilling && (

@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import urllib.parse
 import unittest
 from decimal import Decimal
 from uuid import uuid4
@@ -86,6 +87,32 @@ class TegroSigningTests(unittest.TestCase):
         self.assertIn("order_id=order-1", url)
         self.assertIn("sign=", url)
 
+    def test_tegro_payment_form_signature_uses_only_required_fields(self):
+        with patch.object(payments.settings, "TEGRO_SECRET_KEY", "secret"):
+            url = payments._create_tegro_payment_url(
+                {
+                    "shop_id": "shop-1",
+                    "amount": "100.00",
+                    "order_id": "order-1",
+                    "lang": "ru",
+                    "currency": "RUB",
+                    "receipt": {"items": [{"name": "Pack", "count": 1, "price": "100.00"}]},
+                }
+            )
+
+        params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        signed_fields = {
+            "amount": "100.00",
+            "currency": "RUB",
+            "order_id": "order-1",
+            "shop_id": "shop-1",
+        }
+        expected_sign = hashlib.md5(
+            (payments._tegro_signature_query(signed_fields) + "secret").encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(params["sign"], expected_sign)
+
 
 class TegroPaymentProcessingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -99,7 +126,7 @@ class TegroPaymentProcessingTests(unittest.IsolatedAsyncioTestCase):
             await conn.run_sync(Base.metadata.drop_all)
         await self.engine.dispose()
 
-    async def test_verified_tegro_attempt_activates_match_package_once(self):
+    async def test_verified_tegro_attempt_activates_match_subscription_once(self):
         async with self.Session() as session:
             user = User(telegram_id=303, username="client", matches_remaining=0)
             plan = SubscriptionPlan(

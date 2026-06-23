@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import LogoText from './LogoText';
+import OptimizedImage from './OptimizedImage';
 import { getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
 
 interface WelcomeSplashProps {
@@ -163,9 +164,10 @@ export default function WelcomeSplash({
               onError={handleVideoError}
             />
           ) : (
-            <img
+            <OptimizedImage
               className="welcome-splash__video"
               src="/brand-logo-poster.jpg"
+              webpSrc="/brand-logo-poster.webp"
               alt=""
               loading="eager"
               decoding="async"

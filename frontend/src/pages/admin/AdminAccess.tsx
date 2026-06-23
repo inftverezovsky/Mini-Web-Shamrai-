@@ -14,7 +14,7 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { useAuthSelector } from '../../context/AuthContext';
 import {
   AppRole,
   StaffRole,
@@ -86,7 +86,7 @@ function formatAuditDetails(log: AuditLog) {
 }
 
 export default function AdminAccess() {
-  const { user: currentAdmin } = useAuth();
+  const currentAdmin = useAuthSelector((state) => state.user);
   const [admins, setAdmins] = useState<StaffUser[]>([]);
   const [auditLog, setAuditLog] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);

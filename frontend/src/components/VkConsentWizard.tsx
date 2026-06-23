@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import { isStaffRole } from '../utils/roles';
 import {
   detectVkMiniAppRuntime,
@@ -37,7 +37,8 @@ function stepState(status: VkDeliveryStatus | null, results: VkConsentStepResult
 }
 
 export default function VkConsentWizard() {
-  const { user, setUser } = useAuth();
+  const user = useAuthSelector((state) => state.user);
+  const { setUser } = useAuthActions();
   const [status, setStatus] = useState<VkDeliveryStatus | null>(null);
   const [groupInfo, setGroupInfo] = useState<VkGroupInfo | null>(null);
   const [visible, setVisible] = useState(false);

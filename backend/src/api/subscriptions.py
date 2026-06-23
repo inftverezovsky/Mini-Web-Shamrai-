@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from src.models.database import get_db, get_read_db
-from src.models.models import User, SubscriptionPlan, Subscription, ABTestConfig, AdminAuditLog
+from src.models.models import User, SubscriptionPlan, Subscription, ABTestConfig, AdminAuditLog, PaymentAttempt
 from src.schemas.schemas import (
     SubscriptionPlanResponse,
     SubscriptionPlanCreate,
@@ -16,10 +17,10 @@ from src.schemas.schemas import (
     SubscriptionCreate,
     SubscriptionManualAssign
 )
-from src.api.deps import get_current_user, get_current_privileged_admin, get_optional_user_read
-from src.core.roles import is_admin_role, is_staff_role
+from src.api.deps import get_current_user, get_current_admin, get_current_privileged_admin, get_optional_user_read
+from src.core.roles import is_staff_role
 from src.core.config import settings
-from src.services.match_access import activate_match_package
+from src.services.match_access import activate_match_subscription
 from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
@@ -36,7 +37,7 @@ async def list_plans(
     all_result = await db.execute(select(SubscriptionPlan))
     all_plans = all_result.scalars().all()
 
-    can_view_inactive = bool(include_inactive and current_user and is_admin_role(current_user.role))
+    can_view_inactive = bool(include_inactive and current_user and is_staff_role(current_user.role))
     plans = all_plans if can_view_inactive else [plan for plan in all_plans if plan.is_active]
         
     # Apply A/B pricing if active for each plan
@@ -93,7 +94,7 @@ async def purchase_subscription(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Debug-only direct package activation.
+    Debug-only direct subscription activation.
     Production purchases must go through /payments/invoice or /payments/yookassa/create.
     """
     if not settings.DEBUG_MODE:
@@ -109,7 +110,7 @@ async def purchase_subscription(
         )
         
     now = datetime.now(timezone.utc)
-    subscription = await activate_match_package(
+    subscription = await activate_match_subscription(
         db,
         user=current_user,
         plan=plan,
@@ -147,10 +148,10 @@ async def get_my_subscription_status(
 @router.post("/plans", response_model=SubscriptionPlanResponse, status_code=status.HTTP_201_CREATED)
 async def create_plan(
     plan_data: SubscriptionPlanCreate,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin-only: Create a new billing subscription plan."""
+    """Staff-only: Create a new billing subscription plan."""
     plan = SubscriptionPlan(**plan_data.model_dump())
     db.add(plan)
     add_subscription_audit_log(
@@ -168,10 +169,10 @@ async def create_plan(
 async def update_plan(
     plan_id: int,
     plan_data: SubscriptionPlanUpdate,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin-only: Update a match package plan."""
+    """Staff-only: Update a match subscription plan."""
     result = await db.execute(select(SubscriptionPlan).filter(SubscriptionPlan.id == plan_id))
     plan = result.scalars().first()
     if not plan:
@@ -198,12 +199,12 @@ async def update_plan(
 
 
 @router.delete("/plans/{plan_id}", status_code=status.HTTP_200_OK)
-async def deactivate_plan(
+async def delete_plan(
     plan_id: int,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Admin-only: Soft-disable a match package plan."""
+    """Staff-only: Permanently delete a match subscription plan."""
     result = await db.execute(select(SubscriptionPlan).filter(SubscriptionPlan.id == plan_id))
     plan = result.scalars().first()
     if not plan:
@@ -211,16 +212,21 @@ async def deactivate_plan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Plan not found"
         )
-    if plan.is_active:
-        plan.is_active = False
-        add_subscription_audit_log(
-            db,
-            actor=admin,
-            action="plan_deactivated",
-            details={"plan_id": plan_id, "name": plan.name},
-        )
+
+    plan_name = plan.name
+    was_active = bool(plan.is_active)
+    await db.execute(update(Subscription).where(Subscription.plan_id == plan_id).values(plan_id=None))
+    await db.execute(update(PaymentAttempt).where(PaymentAttempt.plan_id == plan_id).values(plan_id=None))
+    await db.execute(delete(ABTestConfig).where(ABTestConfig.plan_id == plan_id))
+    await db.delete(plan)
+    add_subscription_audit_log(
+        db,
+        actor=admin,
+        action="plan_deleted",
+        details={"plan_id": plan_id, "name": plan_name, "was_active": was_active},
+    )
     await db.commit()
-    return {"status": "success", "message": "Plan deactivated"}
+    return {"status": "success", "message": "Plan deleted"}
 
 @router.post("/assign", response_model=SubscriptionResponse)
 async def manually_assign_subscription(
@@ -248,7 +254,7 @@ async def manually_assign_subscription(
         )
         
     now = datetime.now(timezone.utc)
-    subscription = await activate_match_package(
+    subscription = await activate_match_subscription(
         db,
         user=user,
         plan=plan,

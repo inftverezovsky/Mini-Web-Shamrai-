@@ -1,4 +1,12 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from 'react';
 import { UserResponse } from '../schemas/schemas';
 import { AUTH_EXPIRED_EVENT, apiFetch } from '../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
@@ -44,11 +52,14 @@ interface TelegramBotAuthStatusResponse {
   user?: UserResponse;
 }
 
-interface AuthContextType {
+interface AuthState {
   token: string | null;
   user: UserResponse | null;
   loading: boolean;
   error: string | null;
+}
+
+interface AuthActions {
   login: () => Promise<void>;
   loginWithVk: () => Promise<void>;
   loginWithTelegramWidget: (payload: TelegramWidgetPayload) => Promise<void>;
@@ -57,7 +68,16 @@ interface AuthContextType {
   setUser: React.Dispatch<React.SetStateAction<UserResponse | null>>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+type AuthStateUpdater = AuthState | ((current: AuthState) => AuthState);
+
+interface AuthStore {
+  getSnapshot: () => AuthState;
+  setSnapshot: (updater: AuthStateUpdater) => void;
+  subscribe: (listener: () => void) => () => void;
+}
+
+const AuthStoreContext = createContext<AuthStore | undefined>(undefined);
+const AuthActionsContext = createContext<AuthActions | undefined>(undefined);
 
 const TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS = 1800;
 
@@ -85,11 +105,65 @@ function authErrorMessage(error: unknown, fallback: string) {
   return message || fallback;
 }
 
+function createAuthStore(initialState: AuthState): AuthStore {
+  let snapshot = initialState;
+  const listeners = new Set<() => void>();
+
+  return {
+    getSnapshot: () => snapshot,
+    setSnapshot: (updater) => {
+      const nextSnapshot = typeof updater === 'function'
+        ? updater(snapshot)
+        : updater;
+
+      if (Object.is(snapshot, nextSnapshot)) return;
+
+      snapshot = nextSnapshot;
+      listeners.forEach((listener) => listener());
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setToken] = useState<string | null>(getStoredAuthToken());
-  const [user, setUser] = useState<UserResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const storeRef = useRef<AuthStore>();
+  if (!storeRef.current) {
+    storeRef.current = createAuthStore({
+      token: getStoredAuthToken(),
+      user: null,
+      loading: true,
+      error: null,
+    });
+  }
+  const authStore = storeRef.current;
+
+  const setAuthState = useCallback((updater: AuthStateUpdater) => {
+    authStore.setSnapshot(updater);
+  }, [authStore]);
+
+  const setToken = useCallback((token: string | null) => {
+    setAuthState((current) => (current.token === token ? current : { ...current, token }));
+  }, [setAuthState]);
+
+  const setUser = useCallback<React.Dispatch<React.SetStateAction<UserResponse | null>>>((nextUser) => {
+    setAuthState((current) => {
+      const resolvedUser = typeof nextUser === 'function'
+        ? nextUser(current.user)
+        : nextUser;
+      return current.user === resolvedUser ? current : { ...current, user: resolvedUser };
+    });
+  }, [setAuthState]);
+
+  const setLoading = useCallback((loading: boolean) => {
+    setAuthState((current) => (current.loading === loading ? current : { ...current, loading }));
+  }, [setAuthState]);
+
+  const setError = useCallback((error: string | null) => {
+    setAuthState((current) => (current.error === error ? current : { ...current, error }));
+  }, [setAuthState]);
 
   const API_URL = API_BASE_URL;
   const allowDebugAuth = DEBUG_AUTH_ENABLED;
@@ -160,10 +234,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const clearStoredAuth = useCallback(() => {
-    setToken(null);
-    setUser(null);
+    setAuthState((current) => (
+      current.token === null && current.user === null
+        ? current
+        : { ...current, token: null, user: null }
+    ));
     clearStoredAuthToken();
-  }, []);
+  }, [setAuthState]);
 
   const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
     clearVkAuthCooldown();
@@ -171,7 +248,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(data.user);
     setStoredAuthToken(data.access_token);
     setError(null);
-  }, []);
+  }, [setError, setToken, setUser]);
 
   const fetchCurrentUser = useCallback(async (candidateToken?: string | null) => {
     const headers = {
@@ -194,7 +271,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setStoredAuthToken(candidateToken);
     }
     setError(null);
-  }, [API_URL]);
+  }, [API_URL, setError, setToken, setUser]);
 
   const runTelegramMiniAppLogin = useCallback(async (initData: string) => {
     const response = await fetch(`${API_URL}/api/auth/login`, {
@@ -282,6 +359,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     createMockUser,
     fetchCurrentUser,
     runTelegramMiniAppLogin,
+    setError,
+    setLoading,
+    setToken,
+    setUser,
   ]);
 
   const loginWithVk = useCallback(async () => {
@@ -299,7 +380,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [applyLoginResponse]);
+  }, [applyLoginResponse, setError, setLoading]);
 
   const handleVkRedirectResult = useCallback(async () => {
     let redirectResult: ReturnType<typeof consumeVkRedirectResult> = null;
@@ -333,7 +414,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [applyLoginResponse, fetchCurrentUser]);
+  }, [applyLoginResponse, fetchCurrentUser, setError, setLoading]);
 
   const loginWithTelegramWidget = useCallback(async (payload: TelegramWidgetPayload) => {
     try {
@@ -361,7 +442,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [API_URL, applyLoginResponse]);
+  }, [API_URL, applyLoginResponse, setError, setLoading]);
 
   const loginWithTelegramBot = useCallback(async () => {
     try {
@@ -398,7 +479,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(message);
       throw new Error(message);
     }
-  }, [applyLoginResponse]);
+  }, [applyLoginResponse, setError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -426,7 +507,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   }, [clearStoredAuth, login]);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     void fetch(`${API_URL}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include',
@@ -434,32 +515,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       body: '',
     }).catch(() => undefined);
     clearStoredAuth();
-  };
+  }, [API_URL, clearStoredAuth]);
+
+  const actions = useMemo<AuthActions>(() => ({
+    login,
+    loginWithVk,
+    loginWithTelegramWidget,
+    loginWithTelegramBot,
+    logout,
+    setUser,
+  }), [
+    login,
+    loginWithTelegramBot,
+    loginWithTelegramWidget,
+    loginWithVk,
+    logout,
+    setUser,
+  ]);
 
   return (
-    <AuthContext.Provider
-      value={{
-        token,
-        user,
-        loading,
-        error,
-        login,
-        loginWithVk,
-        loginWithTelegramWidget,
-        loginWithTelegramBot,
-        logout,
-        setUser,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
+    <AuthStoreContext.Provider value={authStore}>
+      <AuthActionsContext.Provider value={actions}>
+        {children}
+      </AuthActionsContext.Provider>
+    </AuthStoreContext.Provider>
   );
 }
 
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
+function useAuthStore() {
+  const store = useContext(AuthStoreContext);
+  if (!store) {
+    throw new Error('useAuthSelector must be used within an AuthProvider');
   }
-  return context;
+  return store;
+}
+
+export function useAuthSelector<TSelected>(selector: (state: AuthState) => TSelected) {
+  const store = useAuthStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    () => selector(store.getSnapshot()),
+    () => selector(store.getSnapshot()),
+  );
+}
+
+export function useAuthActions() {
+  const actions = useContext(AuthActionsContext);
+  if (!actions) {
+    throw new Error('useAuthActions must be used within an AuthProvider');
+  }
+  return actions;
+}
+
+export function useAuth() {
+  const state = useAuthSelector((snapshot) => snapshot);
+  const actions = useAuthActions();
+  return useMemo(() => ({ ...state, ...actions }), [actions, state]);
 }

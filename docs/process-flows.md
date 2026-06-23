@@ -34,12 +34,12 @@ flowchart TD
   E --> F["POST /api/payments/{provider}/create"]
   F --> G["Backend создает PaymentAttempt pending"]
   G --> H{"DEBUG_MODE?"}
-  H -- "да" --> I["Debug complete endpoint начисляет пакет локально"]
+  H -- "да" --> I["Debug complete endpoint начисляет абонемент локально"]
   H -- "нет" --> J["Backend вызывает provider API"]
   J --> K["Клиент получает только payment/confirmation URL"]
   K --> L["Provider webhook приходит в backend"]
   L --> M["Backend проверяет подпись/status/amount/currency/attempt_id"]
-  M --> N["activate_match_package начисляет доступ один раз"]
+  M --> N["activate_match_subscription начисляет доступ один раз"]
   J -- "provider error" --> O["Клиент получает generic error; детали остаются в server logs без provider body"]
 ```
 
@@ -68,7 +68,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   A["Admin создает прогноз или заявку"] --> B["Backend сохраняет Bet / ForecastRequest"]
-  B --> C["Проверка доступа: пакет матчей, гарантия, аудитория"]
+  B --> C["Проверка доступа: абонемент на матчи, гарантия, аудитория"]
   C --> D["Delivery outbox / signals service формирует сообщения"]
   D --> E["Telegram, VK, Web Signal stream"]
   E --> F["Пользователь видит сигнал в ленте или чате"]
@@ -117,4 +117,3 @@ flowchart TD
   F -- "public shamra1.pro" --> K["Build frontend/dist and publish to /var/www/shamrai_web/dist"]
   K --> L["Verify public HTML references new assets"]
 ```
-

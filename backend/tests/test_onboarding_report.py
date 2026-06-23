@@ -66,6 +66,9 @@ class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VK ID", payload["text"])
         self.assertIn("741852963", payload["text"])
         self.assertIn("Тип профиля", payload["text"])
+        self.assertNotIn("Рекомендованный флэт", payload["text"])
+        self.assertNotIn("Потенциал в месяц", payload["text"])
+        self.assertNotIn("Упущено за 24 часа", payload["text"])
 
     async def test_onboarding_report_dedicated_chat_has_priority(self):
         db = SimpleNamespace()

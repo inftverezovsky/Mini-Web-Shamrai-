@@ -30,7 +30,7 @@ class PaymentOutboxTests(unittest.IsolatedAsyncioTestCase):
                 user = User(telegram_id=12345, purchased_bets_balance=0, matches_remaining=0)
                 plan = SubscriptionPlan(
                     id=1,
-                    name="Test package",
+                    name="Test subscription",
                     duration_days=30,
                     match_count=5,
                     price=Decimal("100.00"),

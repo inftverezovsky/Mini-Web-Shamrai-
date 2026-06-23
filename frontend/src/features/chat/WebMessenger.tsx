@@ -20,6 +20,7 @@ import {
 import { WEB_SIGNAL_EVENT, WEB_SIGNAL_STATUS_EVENT } from '../../components/WebSignalListener';
 import { apiFetch, buildApiWebSocketUrl } from '../../utils/api';
 import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../../utils/authStorage';
+import { useThrottledCallback, useThrottledEventBuffer } from '../../hooks/useThrottledEvents';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
@@ -97,6 +98,17 @@ function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMes
     const timeDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
     return timeDelta || left.id - right.id;
   });
+}
+
+function mergeConversations(
+  currentConversations: ChatConversationResponse[],
+  incomingConversations: ChatConversationResponse[],
+) {
+  const byKey = new Map(currentConversations.map((conversation) => [conversation.key, conversation]));
+  incomingConversations.forEach((conversation) => {
+    byKey.set(conversation.key, conversation);
+  });
+  return Array.from(byKey.values());
 }
 
 function conversationTitle(conversation?: ChatConversationResponse | null, key?: ActiveConversationKey) {
@@ -262,6 +274,23 @@ export default function WebMessenger() {
     await Promise.allSettled([loadConversations(), loadSignalMessages(), loadSupportMessages()]);
   }, [loadConversations, loadSignalMessages, loadSupportMessages]);
 
+  const { enqueue: enqueueSignalStreamMessage } = useThrottledEventBuffer<ChatSignalMessageResponse>((incomingSignals) => {
+    setSignals((current) => mergeSignals(current, incomingSignals).slice(-160));
+    void loadConversations().catch(() => undefined);
+  }, 400);
+
+  const { enqueue: enqueueSupportStreamMessage } = useThrottledEventBuffer<SupportMessageView>((incomingMessages) => {
+    setSupportMessages((current) => mergeSupportMessages(current, incomingMessages));
+  }, 400);
+
+  const { enqueue: enqueueStreamConversation } = useThrottledEventBuffer<ChatConversationResponse>((incomingConversations) => {
+    setConversations((current) => mergeConversations(current, incomingConversations));
+  }, 400);
+
+  const refreshConversationsThrottled = useThrottledCallback(() => {
+    void loadConversations().catch(() => undefined);
+  }, 500);
+
   useEffect(() => {
     if (isTma) return;
     void refreshAll();
@@ -303,8 +332,7 @@ export default function WebMessenger() {
       if (!signal || seenSignalIdsRef.current.has(signal.id)) return;
       if (signal.type.startsWith('support_')) return;
       seenSignalIdsRef.current.add(signal.id);
-      setSignals((current) => mergeSignals(current, [signal]).slice(-160));
-      void loadConversations().catch(() => undefined);
+      enqueueSignalStreamMessage(signal);
     };
 
     window.addEventListener(WEB_SIGNAL_STATUS_EVENT, handleStatus);
@@ -313,7 +341,7 @@ export default function WebMessenger() {
       window.removeEventListener(WEB_SIGNAL_STATUS_EVENT, handleStatus);
       window.removeEventListener(WEB_SIGNAL_EVENT, handleSignal as EventListener);
     };
-  }, [isTma, loadConversations]);
+  }, [enqueueSignalStreamMessage, isTma]);
 
   useEffect(() => {
     if (isTma) return;
@@ -341,15 +369,11 @@ export default function WebMessenger() {
       if (!payload.message || seenSupportMessageIdsRef.current.has(payload.message.id)) return;
       seenSupportMessageIdsRef.current.add(payload.message.id);
       const nextMessage = { ...payload.message, delivery_state: 'sent' as const };
-      setSupportMessages((current) => mergeSupportMessages(current, [nextMessage]));
+      enqueueSupportStreamMessage(nextMessage);
       if (payload.conversation) {
-        setConversations((current) => {
-          const byKey = new Map(current.map((conversation) => [conversation.key, conversation]));
-          byKey.set(payload.conversation!.key, payload.conversation!);
-          return Array.from(byKey.values());
-        });
+        enqueueStreamConversation(payload.conversation);
       } else {
-        void loadConversations().catch(() => undefined);
+        refreshConversationsThrottled();
       }
       if (payload.message.direction === 'staff') {
         const body = supportMessagePreview(payload.message).slice(0, 260);
@@ -369,11 +393,7 @@ export default function WebMessenger() {
 
     const handleConversationUpdated = (payload: ChatStreamConversationUpdatedEvent) => {
       if (!payload.conversation) return;
-      setConversations((current) => {
-        const byKey = new Map(current.map((conversation) => [conversation.key, conversation]));
-        byKey.set(payload.conversation.key, payload.conversation);
-        return Array.from(byKey.values());
-      });
+      enqueueStreamConversation(payload.conversation);
     };
 
     async function connect() {
@@ -430,7 +450,13 @@ export default function WebMessenger() {
       if (pingTimer) window.clearInterval(pingTimer);
       socket?.close();
     };
-  }, [isTma, loadConversations, refreshAll]);
+  }, [
+    enqueueStreamConversation,
+    enqueueSupportStreamMessage,
+    isTma,
+    refreshAll,
+    refreshConversationsThrottled,
+  ]);
 
   const updateSignalForecastStatus = useCallback((requestId: string, status: string) => {
     setSignals((current) => current.map((signal) => {

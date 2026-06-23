@@ -422,13 +422,7 @@ def _format_onboarding_report(
     if data.other_bookmaker_name and data.other_bookmaker_name.strip():
         lines.append(_onboarding_report_line("Другие БК", data.other_bookmaker_name.strip()))
 
-    lines.extend([
-        _onboarding_report_line("Валюта", normalize_currency(data.currency_preference)),
-        "",
-        _onboarding_report_line("Рекомендованный флэт", f"{recommendation['flat_stake_percent']}%"),
-        _onboarding_report_line("Потенциал в месяц", f"+{recommendation['monthly_profit_percent']}%"),
-        _onboarding_report_line("Упущено за 24 часа", f"+{recommendation['missed_profit_percent_24h']}%"),
-    ])
+    lines.append(_onboarding_report_line("Валюта", normalize_currency(data.currency_preference)))
 
     return "\n".join(lines)
 

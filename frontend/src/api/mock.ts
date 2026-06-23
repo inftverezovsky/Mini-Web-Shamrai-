@@ -911,7 +911,7 @@ function mockThreadFromUser(user: any, latestMessage: any | null) {
   };
 }
 
-const MOCK_PLANS = [
+let MOCK_PLANS = [
   { id: 1, name: 'Старт', duration_days: 7, match_count: 5, price: 990, price_stars: 0, currency: 'RUB', is_active: true },
   { id: 2, name: 'Профи', duration_days: 30, match_count: 25, price: 3990, price_stars: 0, currency: 'RUB', is_active: true },
   { id: 3, name: 'VIP', duration_days: 30, match_count: 60, price: 7990, price_stars: 0, currency: 'RUB', is_active: true },
@@ -2013,6 +2013,32 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/users/me/payments') return [];
   if (endpoint === '/subscriptions/my-status') return { status: 'inactive' };
+  if (endpoint === '/subscriptions/plans' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const createdPlan = {
+      id: Math.max(0, ...MOCK_PLANS.map((plan) => plan.id)) + 1,
+      name: body.name || 'Новый абонемент',
+      duration_days: Number(body.duration_days || 0),
+      match_count: Number(body.match_count || 1),
+      price: Number(body.price || 0),
+      price_stars: Number(body.price_stars || 0),
+      currency: body.currency || 'RUB',
+      is_active: body.is_active !== false,
+    };
+    MOCK_PLANS = [...MOCK_PLANS, createdPlan];
+    return createdPlan;
+  }
+  if (endpoint.startsWith('/subscriptions/plans/') && options.method === 'PUT') {
+    const planId = Number(endpoint.split('/').pop());
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    MOCK_PLANS = MOCK_PLANS.map((plan) => (plan.id === planId ? { ...plan, ...body } : plan));
+    return MOCK_PLANS.find((plan) => plan.id === planId) || { status: 'success' };
+  }
+  if (endpoint.startsWith('/subscriptions/plans/') && options.method === 'DELETE') {
+    const planId = Number(endpoint.split('/').pop());
+    MOCK_PLANS = MOCK_PLANS.filter((plan) => plan.id !== planId);
+    return { status: 'success' };
+  }
   if (endpoint.startsWith('/subscriptions/plans')) return MOCK_PLANS;
   if (endpoint === '/subscriptions/buy' || endpoint === '/subscriptions/assign') {
     return { status: 'success', user: getMockUser() };
@@ -2368,8 +2394,6 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/admin/promo/list') return [];
   if (endpoint === '/admin/promo' || endpoint.startsWith('/admin/promo/')) return { status: 'success' };
-  if (endpoint === '/subscriptions/plans' && options.method === 'POST') return MOCK_PLANS[0];
-  if (endpoint.startsWith('/subscriptions/plans/')) return { status: 'success' };
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method ?? '')) {
     return { status: 'success' };
   }

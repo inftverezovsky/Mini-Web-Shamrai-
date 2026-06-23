@@ -4,7 +4,7 @@ import { DEBUG_AUTH_ENABLED } from '../../config/api';
 import { SubscriptionPlanResponse } from '../../schemas/schemas';
 import { BadgeRussianRuble, CreditCard, Sparkles, Check, Loader2, RefreshCw } from 'lucide-react';
 import ProfitSimulator from './ProfitSimulator';
-import { useAuth } from '../../context/AuthContext';
+import { useAuthActions } from '../../context/AuthContext';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
 import { trackEvent } from '../../utils/analytics';
 
@@ -13,7 +13,7 @@ interface TariffsProps {
 }
 
 export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
-  const { login } = useAuth();
+  const { login } = useAuthActions();
   const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [referralDiscountPercent, setReferralDiscountPercent] = useState(0);
@@ -122,7 +122,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
           }),
         });
         setSuccessPopup(true);
-        notifySuccess('Debug-оплата Tegro проведена, пакет матчей начислен.');
+        notifySuccess('Debug-оплата Tegro проведена, абонемент начислен.');
         trackEvent('Checkout Completed', {
           provider: 'tegro_debug',
           plan_id: planId,
@@ -198,7 +198,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
           }),
         });
         setSuccessPopup(true);
-        notifySuccess('Debug-оплата проведена, пакет матчей начислен.');
+        notifySuccess('Debug-оплата проведена, абонемент начислен.');
         trackEvent('Checkout Completed', {
           provider: 'yookassa_debug',
           plan_id: planId,
@@ -256,7 +256,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
           Абонементы на матчи
         </h2>
         <p className="text-slate-400 text-xs leading-relaxed max-w-xs mx-auto">
-          Покупайте пакет матчей. Если прогноз проиграет, замены идут бесплатно до победы.
+          Покупайте абонемент на матчи. Если прогноз проиграет, замены идут бесплатно до победы.
         </p>
       </div>
 
@@ -353,7 +353,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
                 <div className="min-w-0">
                   <h4 className="text-sm font-extrabold text-white">{plan.name}</h4>
                   <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                    {plan.match_count} матчей в пакете
+                    {plan.match_count} матчей в абонементе
                   </p>
                 </div>
 

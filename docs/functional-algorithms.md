@@ -263,7 +263,7 @@
 5. Backend добавляет row в `user_bets` с `access_type=free_bet`.
 6. `free_bets_available` уменьшается на 1.
 7. Backend коммитит.
-Финиш: конкретный прогноз открыт без списания match package.
+Финиш: конкретный прогноз открыт без списания матча из абонемента.
 ```
 
 ## 17. Buy Bet Hint
@@ -383,12 +383,12 @@
 11. YooKassa присылает webhook `payment.succeeded`.
 12. Backend re-fetch-ит payment у YooKassa.
 13. Backend сверяет status, amount, currency, attempt_id.
-14. `_process_payment_attempt()` активирует package через `activate_match_package()`.
+14. `_process_payment_attempt()` активирует абонемент через `activate_match_subscription()`.
 15. Backend ставит Telegram confirmation в outbox и коммитит.
 Финиш: баланс матчей увеличен ровно один раз.
 ```
 
-## 24. Match Package Payment With Tegro
+## 24. Match Subscription Payment With Tegro
 
 ```text
 Старт: пользователь выбирает plan и Tegro.
@@ -403,15 +403,15 @@
 9. Backend игнорирует test notification.
 10. Backend сверяет shop id и order_id.
 11. `_process_payment_attempt()` сверяет provider, amount, currency.
-12. `activate_match_package()` начисляет matches и ledger.
+12. `activate_match_subscription()` начисляет matches и ledger.
 13. Backend ставит Telegram confirmation в outbox и коммитит.
-Финиш: пакет активирован, duplicate webhook не начисляет повторно.
+Финиш: абонемент активирован, duplicate webhook не начисляет повторно.
 ```
 
 ## 25. Telegram Stars Payment
 
 ```text
-Старт: пользователь покупает Stars invoice: пакет, прогноз, подсказку или crowd contribution.
+Старт: пользователь покупает Stars invoice: абонемент, прогноз, подсказку или crowd contribution.
 1. Backend заранее создает `PaymentAttempt(provider=telegram_stars, currency=XTR)`.
 2. Backend вызывает Telegram `createInvoiceLink`.
 3. Frontend открывает invoice URL.
@@ -439,14 +439,14 @@
 Финиш: frontend может показать скидку до создания платежа.
 ```
 
-## 27. Manual Package Assignment
+## 27. Manual Subscription Assignment
 
 ```text
-Старт: privileged admin выдает пакет вручную.
+Старт: privileged admin выдает абонемент вручную.
 1. Frontend отправляет `POST /api/subscriptions/assign`.
 2. Backend проверяет target user.
 3. Backend проверяет plan.
-4. Backend вызывает `activate_match_package(payment_provider=admin_manual)`.
+4. Backend вызывает `activate_match_subscription(payment_provider=admin_manual)`.
 5. Backend пишет admin audit log.
 6. Backend коммитит.
 7. Backend возвращает subscription.

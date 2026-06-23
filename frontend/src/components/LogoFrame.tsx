@@ -2,6 +2,8 @@ import React from 'react';
 import { BookmakerResponse } from '../schemas/schemas';
 import { getBookmakerLogoSrc } from '../constants/bookmakers';
 import { getSportIconSrc } from '../constants/sports';
+import { toWebpSource } from '../utils/imageSources';
+import OptimizedImage from './OptimizedImage';
 import SportEmblem from './SportEmblem';
 
 type LogoKind = 'bookmaker' | 'sport';
@@ -45,7 +47,12 @@ export function LogoFrame({
       {kind === 'sport' ? (
         <SportEmblem label={alt} />
       ) : (
-        <img src={src} alt={alt} className="logo-frame__image" />
+        <OptimizedImage
+          src={src}
+          webpSrc={toWebpSource(src)}
+          alt={alt}
+          className="logo-frame__image"
+        />
       )}
     </span>
   );

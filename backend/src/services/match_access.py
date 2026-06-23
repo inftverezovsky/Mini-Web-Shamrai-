@@ -49,7 +49,7 @@ def user_has_full_forecast_access(user: User) -> bool:
     )
 
 
-async def activate_match_package(
+async def activate_match_subscription(
     db: AsyncSession,
     *,
     user: User,
@@ -57,7 +57,7 @@ async def activate_match_package(
     payment_provider: str,
     payment_id: str,
 ) -> Subscription:
-    """Activate a purchased/admin-issued match package and write the balance ledger."""
+    """Activate a purchased/admin-issued match subscription and write the balance ledger."""
     matches = max(0, int(plan.match_count or 0))
     now = datetime.now(timezone.utc)
 
@@ -81,8 +81,8 @@ async def activate_match_package(
             user_id=user.telegram_id,
             subscription_id=subscription.id,
             delta_matches=matches,
-            event_type="package_purchase",
-            note=f"Activated package '{plan.name}' via {payment_provider}",
+            event_type="subscription_purchase",
+            note=f"Activated subscription '{plan.name}' via {payment_provider}",
         )
     )
     return subscription

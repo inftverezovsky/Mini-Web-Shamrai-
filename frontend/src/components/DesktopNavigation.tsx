@@ -1,6 +1,7 @@
 import React from 'react';
 import { PanelLeft } from 'lucide-react';
 import { adminTabs, type AdminShellTabId, userTabs, type UserTabId } from './BottomNavigation';
+import OptimizedImage from './OptimizedImage';
 
 type DesktopTabId = UserTabId | AdminShellTabId;
 
@@ -34,7 +35,12 @@ export default function DesktopNavigation({
       <div className="space-y-3.5">
         <div className="shamrai-glass-card flex items-center gap-2.5 rounded-xl p-2.5">
           <div className="relative grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-cyan-200/20 text-cyan-200">
-            <img src="/brand-logo-poster.jpg" alt="" className="absolute inset-0 h-full w-full object-cover opacity-70" />
+            <OptimizedImage
+              src="/brand-logo-poster.jpg"
+              webpSrc="/brand-logo-poster.webp"
+              alt=""
+              className="absolute inset-0 h-full w-full object-cover opacity-70"
+            />
             <div className="absolute inset-0 bg-slate-950/34" />
             <PanelLeft className="relative h-4 w-4 drop-shadow-[0_0_8px_rgba(0,210,255,0.65)]" />
           </div>

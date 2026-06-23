@@ -1,12 +1,12 @@
 import OnboardingQuiz from '../../components/OnboardingQuiz';
-import { useAuth } from '../../context/AuthContext';
+import { useAuthSelector } from '../../context/AuthContext';
 
 interface OnboardingProps {
   onCompleted: () => void | Promise<void>;
 }
 
 export default function Onboarding({ onCompleted }: OnboardingProps) {
-  const { user } = useAuth();
+  const user = useAuthSelector((state) => state.user);
 
   return (
     <div className="min-h-[74vh] w-full py-4">

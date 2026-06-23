@@ -9,7 +9,7 @@
 ## 1. Что Это За Проект
 
 Shamrai Mini App - спортивно-аналитическое приложение для Telegram Mini App и web/PWA.
-Пользователь получает персональную ленту прогнозов, покупает пакеты матчей, открывает
+Пользователь получает персональную ленту прогнозов, покупает абонементы на матчи, открывает
 закрытые прогнозы, получает сигналы в web-чате, Telegram, VK и Web Push. Администратор
 управляет прогнозами, клиентами, рассылками, статистикой, тарифами, шаблонами сообщений
 и поддержкой.
@@ -26,7 +26,7 @@ Shamrai Mini App - спортивно-аналитическое приложе�
 
 - Профиль клиента: Telegram/VK идентичность, выбранные БК, анкета, баланс матчей.
 - Прогнозы: публичная лента, закрытые teaser-прогнозы, платные наборы, купоны, исходы.
-- Доступ: пакет матчей, гарантия, бесплатные прогнозы, ручная выдача админом.
+- Доступ: абонемент на матчи, гарантия, бесплатные прогнозы, ручная выдача админом.
 - Оплаты: Telegram Stars, YooKassa, Tegro, промокоды и реферальная скидка.
 - Доставка: Telegram Bot API, VK messages, Web Push, WebSocket, delivery outbox.
 - Статистика: ROI, winrate, таймлайны, выгрузки CSV/XLSX/Google Drive.
@@ -181,9 +181,9 @@ Core tables:
 - `bookmakers`: canonical bookmaker list.
 - `bets`: forecast entity. It can be public feed, private forecast, or paid set.
 - `user_bets`: many-to-many access/tracking table with `access_type` and `match_charged`.
-- `subscription_plans`, `subscriptions`: match packages and activations.
+- `subscription_plans`, `subscriptions`: match subscriptions and activations.
 - `payment_attempts`: provider-agnostic payment state.
-- `match_balance_logs`: ledger for package credits/debits/revokes/supercompensation.
+- `match_balance_logs`: ledger for subscription credits/debits/revokes/supercompensation.
 - `forecast_requests`: per-user teaser/private forecast request lifecycle.
 - `personal_signals`: old signal stream and support-message storage.
 - `delivery_outbox`: retryable external delivery queue.
@@ -204,7 +204,7 @@ All routers are mounted under `/api`.
 | `/auth/*` | `backend/src/api/auth.py` | Telegram/VK login, bot-session login, auth cookie, profile merge |
 | `/users/*`, `/bookmakers` | `backend/src/api/users.py` | profile, onboarding, preferences, VK delivery status, history |
 | `/bets/*` | `backend/src/api/bets.py` | feed, bet taking, hints, admin create/update/resolve, notes |
-| `/subscriptions/*` | `backend/src/api/subscriptions.py` | package plans, debug buy, manual assignment, invite links |
+| `/subscriptions/*` | `backend/src/api/subscriptions.py` | subscription plans, debug buy, manual assignment, invite links |
 | `/payments/*` | `backend/src/api/payments.py` | Telegram Stars, YooKassa, Tegro, promo validation, webhooks |
 | `/signals/*` | `backend/src/api/signals.py` | personal signal history, web push, WebSocket stream |
 | `/chat/*` | `backend/src/api/chat.py` | native client/staff support chat and WebSocket stream |
@@ -250,7 +250,7 @@ the provider is verified:
 - locks the attempt;
 - checks provider, provider payment id, amount and currency;
 - avoids double processing;
-- activates a match package with `activate_match_package()`, or unlocks a single bet,
+- activates a match subscription with `activate_match_subscription()`, or unlocks a single bet,
   or marks a hint/crowd contribution as paid;
 - marks the attempt `succeeded`;
 - queues a Telegram confirmation when possible.
@@ -263,7 +263,7 @@ Access logic lives in `backend/src/services/match_access.py`.
 
 Key ideas:
 
-- package purchase adds `plan.match_count` to `purchased_bets_balance` and `matches_remaining`;
+- subscription purchase adds `plan.match_count` to `purchased_bets_balance` and `matches_remaining`;
 - taking a paid match debits exactly one match through `record_user_bet_access()`;
 - staff access does not consume balance;
 - guarantee replacement can grant a no-debit access;

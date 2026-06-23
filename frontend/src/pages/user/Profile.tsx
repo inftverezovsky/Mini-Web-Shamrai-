@@ -10,6 +10,8 @@ import {
   isVkMiniAppRuntime,
   requestVkMessagesPermission,
 } from '../../utils/vkDelivery';
+import { getTelegramIdentityStatus } from '../../utils/identityStatus';
+import { buildProfileAvatarSources } from '../../utils/profileAvatar';
 import type { VkDeliveryStatus } from '../../utils/vkDelivery';
 import { useLayoutMode } from '../../context/LayoutModeContext';
 import { isOtherBookmaker } from '../../constants/bookmakers';
@@ -39,9 +41,10 @@ import {
   Sparkles,
   ChevronDown,
   RefreshCw,
+  Send,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
-import { isPrivilegedRole, isStaffRole, roleLabel } from '../../utils/roles';
+import { useAuthActions, useAuthSelector } from '../../context/AuthContext';
+import { isStaffRole, roleLabel } from '../../utils/roles';
 
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
@@ -84,7 +87,7 @@ const DEFAULT_NIGHT_MODE_END = '08:00';
 const clampAlertMinCoef = (value: number) =>
   Math.min(ALERT_MIN_COEF_MAX, Math.max(ALERT_MIN_COEF_MIN, value));
 
-type CollapsibleSectionKey = 'vk' | 'achievements' | 'notifications' | 'bookmakers' | 'payments' | 'referral';
+type CollapsibleSectionKey = 'telegram' | 'vk' | 'achievements' | 'notifications' | 'bookmakers' | 'payments' | 'referral';
 
 interface CollapsibleSectionProps {
   title: string;
@@ -222,10 +225,11 @@ const AlertMinCoefSlider = React.memo(function AlertMinCoefSlider({
 
 /* ═══════════════════════ Компонент ═══════════════════════ */
 export default function Profile() {
-  const { user: userProfile, setUser, loginWithTelegramBot } = useAuth();
+  const userProfile = useAuthSelector((state) => state.user);
+  const { setUser, loginWithTelegramBot } = useAuthActions();
   const { isCompact } = useLayoutMode();
   const isAdminProfile = isStaffRole(userProfile?.role);
-  const canManageBilling = isPrivilegedRole(userProfile?.role);
+  const canManageBilling = isStaffRole(userProfile?.role);
 
   /* ── Bookmakers (существующая логика) ── */
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
@@ -254,6 +258,7 @@ export default function Profile() {
   const [openSettingsSections, setOpenSettingsSections] = useState<
     Record<CollapsibleSectionKey, boolean>
   >({
+    telegram: false,
     vk: false,
     achievements: false,
     notifications: false,
@@ -283,10 +288,13 @@ export default function Profile() {
 
   /* ── Admin Tabs ── */
   const [activeAdminTab, setActiveAdminTab] = useState<'access' | 'plans' | 'marketing'>('access');
+  const [avatarSourceIndex, setAvatarSourceIndex] = useState(0);
 
-  /* ── Telegram avatar ── */
+  /* ── Profile avatar ── */
   const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
-  const avatarUrl: string | null = userProfile?.photo_url || tgUser?.photo_url || null;
+  const avatarSources = buildProfileAvatarSources(userProfile, tgUser);
+  const avatarSourceKey = avatarSources.join('\n');
+  const avatarUrl: string | null = avatarSources[avatarSourceIndex] ?? null;
   const otherBookmakerSelected = bookmakers.some(
     (bk) => isOtherBookmaker(bk) && selectedBkIds.includes(bk.id),
   );
@@ -298,13 +306,18 @@ export default function Profile() {
   const vkMessagesUrl = getVkMessagesUrl(vkDeliveryStatus?.group_id);
   const vkDeliveryReady = Boolean(userProfile?.vk_user_id && vkMessagesAllowed);
   const vkMissingPermissionsCount = vkDeliveryReady ? 0 : 1;
-  const telegramLinked = Boolean(userProfile && !userProfile.is_web_only && userProfile.telegram_id > 0);
+  const telegramIdentity = getTelegramIdentityStatus(userProfile);
+  const telegramLinked = telegramIdentity.linked;
   const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
     queryKey: ['profile-dashboard', userProfile?.telegram_id],
     queryFn: () => apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard'),
     enabled: Boolean(userProfile && !isAdminProfile),
     staleTime: 60_000,
   });
+
+  useEffect(() => {
+    setAvatarSourceIndex(0);
+  }, [avatarSourceKey]);
 
   /* ────────────────── Data loaders ────────────────── */
   useEffect(() => {
@@ -723,8 +736,16 @@ export default function Profile() {
           {avatarUrl ? (
             <img
               src={avatarUrl}
-              alt="Telegram Avatar"
-              className="w-20 h-20 rounded-full border-2"
+              alt=""
+              draggable={false}
+              onLoad={(event) => {
+                event.currentTarget.style.visibility = 'visible';
+              }}
+              onError={(event) => {
+                event.currentTarget.style.visibility = 'hidden';
+                setAvatarSourceIndex((index) => Math.min(index + 1, avatarSources.length));
+              }}
+              className="w-20 h-20 rounded-full border-2 bg-slate-950/50 object-cover"
               style={{
                 borderColor: ACCENT_PINK,
                 boxShadow: NEON_GLOW_PINK,
@@ -807,53 +828,80 @@ export default function Profile() {
           )}
         </div>
 
-        {!isAdminProfile && (
-          <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
-            <div className="flex items-start gap-3">
-              <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border ${
+        <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
+          <button
+            type="button"
+            onClick={() => toggleSettingsSection('telegram')}
+            aria-expanded={openSettingsSections.telegram}
+            className="w-full flex items-center justify-between gap-3 text-left transition-all active:scale-[0.99]"
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <span
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-[#24a1de]/35 bg-[#24a1de]/90 text-white shadow-[0_0_22px_rgba(36,161,222,0.28)]"
+                aria-hidden="true"
+              >
+                <Send className="h-5 w-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-black uppercase tracking-wider text-white">
+                  Синхронизация Telegram
+                </span>
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-2">
+              <span className={`rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
                 telegramLinked
-                  ? 'border-emerald-300/20 bg-emerald-400/10 text-emerald-200'
+                  ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-200'
                   : 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100'
               }`}>
-                {telegramLinked ? <Check className="h-5 w-5" /> : <MessageCircle className="h-5 w-5" />}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-300">
-                    Telegram профиль
-                  </span>
-                  <span className={`rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
-                    telegramLinked
-                      ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-200'
-                      : 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100'
-                  }`}>
-                    {telegramLinked ? 'привязан' : 'можно подключить'}
-                  </span>
-                </div>
-              </div>
-            </div>
+                {telegramIdentity.badge}
+              </span>
+              <ChevronDown
+                className={`h-4 w-4 text-cyan-200 transition-transform ${openSettingsSections.telegram ? 'rotate-180' : ''}`}
+              />
+            </span>
+          </button>
 
-            {!telegramLinked && (
-              <button
-                type="button"
-                onClick={handleLinkTelegramProfile}
-                disabled={linkingTelegram}
-                className="mt-3 min-h-[44px] w-full rounded-xl border border-[#24a1de]/35 bg-[#24a1de]/18 px-3 text-[10px] font-black uppercase tracking-wider text-white transition hover:bg-[#24a1de]/26 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                <span className="inline-flex items-center justify-center gap-1.5">
-                  {linkingTelegram ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
-                  {linkingTelegram ? 'Ждем подтверждение...' : 'Привязать Telegram'}
+          {openSettingsSections.telegram && (
+            <div className="animate-slide-down space-y-3 border-t border-white/5 pt-3">
+              <div className={`rounded-xl border px-3 py-2 text-[11px] font-black leading-relaxed ${
+                telegramLinked
+                  ? 'border-emerald-300/20 bg-emerald-400/10 text-emerald-100'
+                  : 'border-cyan-300/20 bg-cyan-400/10 text-cyan-100'
+              }`}>
+                <span className="inline-flex items-center gap-2">
+                  {telegramLinked ? <Check className="h-4 w-4" /> : <MessageCircle className="h-4 w-4" />}
+                  {telegramIdentity.detail}
                 </span>
-              </button>
-            )}
+                {telegramIdentity.deliveryDetail && (
+                  <span className="mt-1 block text-[10px] font-bold normal-case tracking-normal text-slate-300">
+                    {telegramIdentity.deliveryDetail}
+                  </span>
+                )}
+              </div>
 
-            {telegramLinkError && (
-              <p className="mt-3 rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
-                {telegramLinkError}
-              </p>
-            )}
-          </div>
-        )}
+              {!telegramLinked && (
+                <button
+                  type="button"
+                  onClick={handleLinkTelegramProfile}
+                  disabled={linkingTelegram}
+                  className="min-h-[44px] w-full rounded-xl border border-[#24a1de]/35 bg-[#24a1de]/18 px-3 text-[10px] font-black uppercase tracking-wider text-white transition hover:bg-[#24a1de]/26 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  <span className="inline-flex items-center justify-center gap-1.5">
+                    {linkingTelegram ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
+                    {linkingTelegram ? 'Ждем подтверждение...' : 'Привязать Telegram'}
+                  </span>
+                </button>
+              )}
+
+              {telegramLinkError && (
+                <p className="rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
+                  {telegramLinkError}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
 
         {!isAdminProfile && <WebPushSettingsCard />}
 
@@ -1072,7 +1120,7 @@ export default function Profile() {
           <div className="bg-slate-950/60 border border-white/10 p-1.5 rounded-full flex items-center justify-between w-full shadow-inner">
             {([
               { id: 'access', label: 'ДОСТУП' },
-              { id: 'plans', label: 'ПАКЕТЫ' },
+              { id: 'plans', label: 'АБОНЕМЕНТЫ' },
               { id: 'marketing', label: 'МАРКЕТИНГ' },
             ] as const).map(tab => {
               const isActive = activeAdminTab === tab.id;
@@ -1081,7 +1129,7 @@ export default function Profile() {
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveAdminTab(tab.id)}
-                  className={`flex-1 text-[10px] font-black uppercase tracking-wider py-2 rounded-full text-center transition-all ${
+                  className={`flex-1 text-[9px] font-black uppercase tracking-wider py-2 rounded-full text-center transition-all sm:text-[10px] ${
                     isActive
                       ? 'bg-[#5f5fed] text-white border border-white/20 shadow-[0_0_12px_rgba(95,95,237,0.4)]'
                       : 'text-slate-400 hover:text-white'
@@ -1101,10 +1149,10 @@ export default function Profile() {
                 <AdminPlans />
               ) : (
                 <div className="bg-slate-900/40 border border-slate-800/60 p-6 rounded-2xl text-center text-slate-500 text-xs font-semibold uppercase tracking-wider leading-relaxed">
-                  🔒 Доступ к пакетам ограничен.
+                  🔒 Доступ к абонементам ограничен.
                   <br />
                   <span className="text-[9px] text-slate-600 block mt-1 font-bold">
-                    Требуется роль Администратора или Владельца.
+                    Требуется роль Модератора, Администратора или Владельца.
                   </span>
                 </div>
               )

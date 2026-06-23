@@ -820,6 +820,10 @@
   mix-blend-mode: screen;
 }
 
+.logo-frame picture {
+  display: contents;
+}
+
 .logo-frame--active {
   border-color: rgba(0, 210, 255, 0.32);
   box-shadow:

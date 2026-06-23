@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { getTelegramWebApp, TELEGRAM_SDK_READY_EVENT } from '../utils/telegramSdk';
+import { useThrottledCallback } from '../hooks/useThrottledEvents';
 
 export type EffectiveLayoutMode = 'compact' | 'full';
 
@@ -15,12 +16,14 @@ const LayoutModeContext = createContext<LayoutModeContextType | undefined>(undef
 export function LayoutModeProvider({ children }: { children: React.ReactNode }) {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [, setTelegramSignal] = useState(0);
+  const handleResize = useThrottledCallback(() => {
+    setViewportWidth(window.innerWidth);
+  }, 150);
 
   useEffect(() => {
-    const handleResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [handleResize]);
 
   useEffect(() => {
     localStorage.removeItem(LEGACY_STORAGE_KEY);
@@ -37,13 +40,13 @@ export function LayoutModeProvider({ children }: { children: React.ReactNode }) 
     document.documentElement.dataset.shamraiLayout = effectiveMode;
   }, [effectiveMode]);
 
+  const contextValue = useMemo(() => ({
+    effectiveMode,
+    isCompact: effectiveMode === 'compact',
+  }), [effectiveMode]);
+
   return (
-    <LayoutModeContext.Provider
-      value={{
-        effectiveMode,
-        isCompact: effectiveMode === 'compact',
-      }}
-    >
+    <LayoutModeContext.Provider value={contextValue}>
       {children}
     </LayoutModeContext.Provider>
   );

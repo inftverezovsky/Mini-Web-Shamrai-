@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useEffect, useState, useTransition } from 'react';
 import { motion, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
-import { useAuth } from './context/AuthContext';
+import { useAuthActions, useAuthSelector } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
 import { usePerformanceProfile } from './hooks/usePerformanceProfile';
 
@@ -97,11 +97,18 @@ function runWhenIdle(
   return () => window.clearTimeout(handle);
 }
 
-function PageLoader() {
+function PageSkeleton() {
   return (
-    <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-slate-400">
-      <Loader2 className="h-7 w-7 animate-spin text-emerald-400" />
-      <span className="text-xs font-semibold">Загрузка раздела...</span>
+    <div
+      className="grid min-h-[50vh] gap-3 p-1 opacity-80 [animation:pulse_1.5s_ease-in-out_infinite]"
+      aria-label="Загрузка раздела"
+    >
+      <div className="shamrai-glass-card h-24 rounded-2xl border-white/10 bg-white/[0.045]" />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="shamrai-glass-card h-40 rounded-2xl border-cyan-200/10 bg-cyan-200/[0.045]" />
+        <div className="shamrai-glass-card h-40 rounded-2xl border-fuchsia-200/10 bg-fuchsia-200/[0.04]" />
+      </div>
+      <div className="shamrai-glass-card h-28 rounded-2xl border-emerald-200/10 bg-emerald-200/[0.04]" />
     </div>
   );
 }
@@ -192,13 +199,13 @@ function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPr
 
 export default function App() {
   const { isReady, isTelegram } = useTelegram();
+  const userProfile = useAuthSelector((state) => state.user);
+  const loading = useAuthSelector((state) => state.loading);
+  const error = useAuthSelector((state) => state.error);
   const {
-    user: userProfile,
-    loading,
-    error,
     login: fetchUserProfile,
     loginWithTelegramBot,
-  } = useAuth();
+  } = useAuthActions();
   const { isCompact } = useLayoutMode();
   const performanceProfile = usePerformanceProfile();
   const reduceMotion = useReducedMotion();
@@ -389,7 +396,7 @@ export default function App() {
     return (
       <MotionConfig reducedMotion={motionReducedMode}>
         <div className="app-shell compact-ui min-h-[100dvh] px-4 py-8 text-slate-50">
-          <PageLoader />
+          <PageSkeleton />
         </div>
       </MotionConfig>
     );
@@ -535,7 +542,7 @@ export default function App() {
 
     return (
       <AppErrorBoundary resetKey={pageResetKey}>
-        <Suspense fallback={<PageLoader />}>
+        <Suspense fallback={<PageSkeleton />}>
           <motion.div
             key={pageResetKey}
             className="page-transition-layer"
@@ -587,7 +594,7 @@ export default function App() {
               title="Анкета временно недоступна"
               description="Остальная часть приложения продолжит работать, а анкету можно попробовать открыть повторно."
             >
-              <Suspense fallback={<PageLoader />}>
+              <Suspense fallback={<PageSkeleton />}>
                 <Onboarding onCompleted={fetchUserProfile} />
               </Suspense>
             </AppErrorBoundary>

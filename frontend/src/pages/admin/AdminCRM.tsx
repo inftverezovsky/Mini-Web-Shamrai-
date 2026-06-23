@@ -6,7 +6,7 @@ import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import SmoothCollapse from '../../components/SmoothCollapse';
-import { useAuth } from '../../context/AuthContext';
+import { useAuthSelector } from '../../context/AuthContext';
 import { isPrivilegedRole } from '../../utils/roles';
 import {
   Activity,
@@ -312,7 +312,7 @@ function ClientIntelligenceRow({
 }
 
 export default function AdminCRM() {
-  const { user: currentAdmin } = useAuth();
+  const currentAdmin = useAuthSelector((state) => state.user);
   const [searchTerm, setSearchTerm] = useState('');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [groupFilter, setGroupFilter] = useState('all');

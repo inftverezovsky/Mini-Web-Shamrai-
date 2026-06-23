@@ -20,6 +20,7 @@ export interface UserResponse {
   last_name: string | null;
   phone: string | null;
   photo_url: string | null;
+  vk_photo_url?: string | null;
   is_web_only: boolean;
   identity_complete: boolean;
   identity_providers: string[];
@@ -77,7 +78,7 @@ export interface SubscriptionPlanResponse {
 export interface SubscriptionResponse {
   id: string;
   user_id: number;
-  plan_id: number;
+  plan_id: number | null;
   status: 'active' | 'expired' | 'pending';
   payment_provider: string | null;
   payment_id: string | null;

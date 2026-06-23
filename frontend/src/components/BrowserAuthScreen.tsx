@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import LogoText from './LogoText';
 import { getVkAuthCooldownStatus, getVkIdConfig } from '../utils/vkId';
 import { trackEvent, trackPageView } from '../utils/analytics';
 
 export default function BrowserAuthScreen() {
-  const { error, loading, loginWithVk, loginWithTelegramBot } = useAuth();
+  const error = useAuthSelector((state) => state.error);
+  const loading = useAuthSelector((state) => state.loading);
+  const { loginWithVk, loginWithTelegramBot } = useAuthActions();
   const [vkBusy, setVkBusy] = useState(false);
   const [vkCooldown, setVkCooldown] = useState(() => getVkAuthCooldownStatus());
   const [telegramBusy, setTelegramBusy] = useState(false);

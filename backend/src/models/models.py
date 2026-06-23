@@ -61,6 +61,7 @@ class User(Base):
     last_name = Column(String, nullable=True)
     phone = Column(String, nullable=True, unique=True, index=True)
     photo_url = Column(Text, nullable=True)
+    vk_photo_url = Column(Text, nullable=True)
     role = Column(String, default="user")  # "owner" | "admin" | "moderator" | "user"
     stats_display_mode = Column(String, default="percent")  # "percent" | "flat"
     bankroll = Column(Float, default=0.0)
