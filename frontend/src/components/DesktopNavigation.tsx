@@ -60,8 +60,10 @@ export default function DesktopNavigation({
                 key={id}
                 type="button"
                 onClick={() => onChangeTab(id)}
+                onMouseEnter={() => onPreloadTab?.(id)}
                 onPointerEnter={() => onPreloadTab?.(id)}
                 onFocus={() => onPreloadTab?.(id)}
+                onTouchStart={() => onPreloadTab?.(id)}
                 aria-current={active ? 'page' : undefined}
                 className={`flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-sm font-bold transition-all ${
                   active

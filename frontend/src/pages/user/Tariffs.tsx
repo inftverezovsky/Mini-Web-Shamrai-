@@ -1,12 +1,18 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
 import { DEBUG_AUTH_ENABLED } from '../../config/api';
-import { SubscriptionPlanResponse } from '../../schemas/schemas';
 import { BadgeRussianRuble, CreditCard, Sparkles, Check, Loader2, RefreshCw } from 'lucide-react';
 import ProfitSimulator from './ProfitSimulator';
 import { useAuthActions } from '../../context/AuthContext';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
 import { trackEvent } from '../../utils/analytics';
+import {
+  TAB_QUERY_STALE_TIME,
+  TARIFFS_QUERY_KEY,
+  fetchTariffsDashboard,
+  type TariffsDashboardData,
+} from '../../utils/tabPrefetch';
 
 interface TariffsProps {
   onSubscriptionActivated?: () => void;
@@ -15,11 +21,6 @@ interface TariffsProps {
 export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const { login } = useAuthActions();
   const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
-  const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
-  const [referralDiscountPercent, setReferralDiscountPercent] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
   const [buying, setBuying] = useState<{ planId: number; provider: 'tegro' | 'yookassa' } | null>(null);
   const [successPopup, setSuccessPopup] = useState(false);
 
@@ -28,27 +29,17 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const [promoError, setPromoError] = useState<string | null>(null);
   const [validatingPromo, setValidatingPromo] = useState(false);
 
-  const loadTariffs = useCallback(async () => {
-    try {
-      setLoading(true);
-      setLoadError(null);
-      const [tariffs, referral] = await Promise.all([
-        apiFetch<SubscriptionPlanResponse[]>('/subscriptions/plans'),
-        apiFetch<{ referral_discount_percent?: number }>('/users/me/referral'),
-      ]);
-      setPlans(tariffs);
-      setReferralDiscountPercent(referral.referral_discount_percent ?? 0);
-    } catch (err) {
-      console.error('Failed to load tariffs list:', err);
-      setLoadError('Не удалось загрузить тарифы. Проверьте подключение и попробуйте еще раз.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadTariffs();
-  }, [loadTariffs]);
+  const tariffsQuery = useQuery<TariffsDashboardData>({
+    queryKey: TARIFFS_QUERY_KEY,
+    queryFn: fetchTariffsDashboard,
+    staleTime: TAB_QUERY_STALE_TIME,
+  });
+  const plans = tariffsQuery.data?.plans ?? [];
+  const referralDiscountPercent = tariffsQuery.data?.referralDiscountPercent ?? 0;
+  const loading = tariffsQuery.isLoading || (tariffsQuery.isFetching && !tariffsQuery.data);
+  const loadError = tariffsQuery.error
+    ? 'Не удалось загрузить тарифы. Проверьте подключение и попробуйте еще раз.'
+    : null;
 
   const handleApplyPromo = async () => {
     const trimmed = promoCodeInput.trim();
@@ -321,7 +312,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
             </p>
             <button
               type="button"
-              onClick={() => void loadTariffs()}
+              onClick={() => void tariffsQuery.refetch()}
               disabled={loading}
               className="mx-auto mt-3 inline-flex min-h-[40px] items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] px-4 py-2.5 text-xs font-black text-white transition-all hover:bg-white/[0.1] active:scale-[0.98] disabled:cursor-wait disabled:opacity-55"
             >

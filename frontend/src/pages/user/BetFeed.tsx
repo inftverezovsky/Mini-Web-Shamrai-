@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect, useSyncExternalStore } from 'react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
@@ -12,6 +12,7 @@ import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import { isStaffRole } from '../../utils/roles';
 import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
 import { trackEvent } from '../../utils/analytics';
+import { BETS_FEED_QUERY_KEY, TAB_QUERY_STALE_TIME, fetchBetsFeedPage } from '../../utils/tabPrefetch';
 
 const MarathonWidget = lazy(() => import('./MarathonWidget'));
 const LiveTracker = lazy(() => import('./LiveTracker'));
@@ -19,6 +20,28 @@ const SwipeCard = lazy(() => import('./SwipeCard'));
 const QuizWidget = lazy(() => import('./QuizWidget'));
 const PvPWidget = lazy(() => import('./PvPWidget'));
 const CrowdBetWidget = lazy(() => import('./CrowdBetWidget'));
+const TAKEN_BETS_STORAGE_KEY = 'bet_tma_taken_ids';
+
+type BetFeedInfiniteData = InfiniteData<PaginatedResponse<BetResponse>, string | null>;
+
+function persistTakenBetIds(ids: string[]) {
+  localStorage.setItem(TAKEN_BETS_STORAGE_KEY, JSON.stringify(ids));
+}
+
+function markBetAsTakenInFeed(data: BetFeedInfiniteData | undefined, betId: string): BetFeedInfiniteData | undefined {
+  if (!data) return data;
+  return {
+    ...data,
+    pages: data.pages.map((page) => ({
+      ...page,
+      items: page.items.map((bet) => (
+        bet.id === betId
+          ? { ...bet, is_taken: true }
+          : bet
+      )),
+    })),
+  };
+}
 
 function resolveAssetUrl(path: string | null) {
   if (!path) return null;
@@ -423,6 +446,7 @@ interface BetFeedProps {
 }
 
 export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
+  const queryClient = useQueryClient();
   const userProfile = useAuthSelector((state) => state.user);
   const { isCompact } = useLayoutMode();
   const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
@@ -431,15 +455,11 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
   const feedQuery = useInfiniteQuery<PaginatedResponse<BetResponse>, Error>({
-    queryKey: ['bets-feed-page'],
+    queryKey: BETS_FEED_QUERY_KEY,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam }) => {
-      const params = new URLSearchParams({ limit: '20' });
-      if (pageParam) params.set('cursor', String(pageParam));
-      return apiFetch<PaginatedResponse<BetResponse>>(`/bets/feed-page?${params.toString()}`);
-    },
+    queryFn: ({ pageParam, signal }) => fetchBetsFeedPage((pageParam as string | null) ?? null, signal),
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
-    staleTime: 20_000,
+    staleTime: TAB_QUERY_STALE_TIME,
   });
   const {
     data: feedData,
@@ -463,49 +483,71 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   useEffect(() => {
     const backendTakenIds = bets.filter((bet) => bet.is_taken).map((bet) => bet.id);
     setTakenBetIds(backendTakenIds);
-    localStorage.setItem('bet_tma_taken_ids', JSON.stringify(backendTakenIds));
+    persistTakenBetIds(backendTakenIds);
   }, [bets]);
 
   const loading = isLoading;
   const error = feedError?.message || null;
 
-  const handleTakeBet = useCallback(async (betId: string) => {
-    const bet = bets.find((item) => item.id === betId);
-
-    try {
+  const takeBetMutation = useMutation({
+    mutationFn: async ({ betId }: { betId: string; bet?: BetResponse }) => {
+      return apiFetch(`/bets/${betId}/take`, { method: 'POST' });
+    },
+    onMutate: async ({ betId }) => {
       setActionLoadingId(betId);
-      trackEvent('Bet Take Started', {
-        category: bet?.category,
-        sport: bet?.sport_type,
-        unlocked: bet?.is_unlocked,
-      });
+      await queryClient.cancelQueries({ queryKey: BETS_FEED_QUERY_KEY });
 
-      // POST /api/bets/{bet_id}/take
-      await apiFetch(`/bets/${betId}/take`, { method: 'POST' });
-      
+      const previousFeed = queryClient.getQueryData<BetFeedInfiniteData>(BETS_FEED_QUERY_KEY);
+      const previousTakenIds = takenBetIds;
+
+      queryClient.setQueryData<BetFeedInfiniteData>(
+        BETS_FEED_QUERY_KEY,
+        (current) => markBetAsTakenInFeed(current, betId),
+      );
       setTakenBetIds((current) => {
         const nextTaken = current.includes(betId) ? current : [...current, betId];
-        localStorage.setItem('bet_tma_taken_ids', JSON.stringify(nextTaken));
+        persistTakenBetIds(nextTaken);
         return nextTaken;
       });
+
+      return { previousFeed, previousTakenIds };
+    },
+    onSuccess: (_data, { bet }) => {
       notifySuccess('Прогноз добавлен в “Мои ставки”.');
       trackEvent('Bet Take Success', {
         category: bet?.category,
         sport: bet?.sport_type,
         unlocked: bet?.is_unlocked,
       });
-      await loadFeed();
-    } catch (err: any) {
+    },
+    onError: (err: any, { bet }, context) => {
+      queryClient.setQueryData(BETS_FEED_QUERY_KEY, context?.previousFeed);
+      if (context?.previousTakenIds) {
+        setTakenBetIds(context.previousTakenIds);
+        persistTakenBetIds(context.previousTakenIds);
+      }
       notifyError(err.message || 'Не удалось принять ставку');
       trackEvent('Bet Take Failed', {
         category: bet?.category,
         sport: bet?.sport_type,
         unlocked: bet?.is_unlocked,
       });
-    } finally {
+    },
+    onSettled: () => {
       setActionLoadingId(null);
-    }
-  }, [bets, loadFeed]);
+      queryClient.invalidateQueries({ queryKey: BETS_FEED_QUERY_KEY });
+    },
+  });
+
+  const handleTakeBet = useCallback((betId: string) => {
+    const bet = bets.find((item) => item.id === betId);
+    trackEvent('Bet Take Started', {
+      category: bet?.category,
+      sport: bet?.sport_type,
+      unlocked: bet?.is_unlocked,
+    });
+    takeBetMutation.mutate({ betId, bet });
+  }, [bets, takeBetMutation]);
 
   const handleBuyBet = useCallback(async (betId: string) => {
     const bet = bets.find((item) => item.id === betId);

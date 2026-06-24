@@ -53,6 +53,9 @@ bet_bookmakers = Table(
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_created_at", "created_at"),
+    )
 
     telegram_id = Column(BigInteger, primary_key=True, index=True)
     referred_by_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
@@ -172,6 +175,7 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
     __table_args__ = (
         UniqueConstraint("payment_provider", "payment_id", name="uq_subscriptions_provider_payment"),
+        Index("ix_subscriptions_user_created", "user_id", "created_at"),
     )
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -195,6 +199,7 @@ class PaymentAttempt(Base):
     __table_args__ = (
         UniqueConstraint("provider", "provider_payment_id", name="uq_payment_attempts_provider_payment"),
         Index("ix_payment_attempts_user_status", "user_id", "status"),
+        Index("ix_payment_attempts_user_created", "user_id", "created_at"),
     )
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -219,6 +224,9 @@ class PaymentAttempt(Base):
 
 class MatchBalanceLog(Base):
     __tablename__ = "match_balance_logs"
+    __table_args__ = (
+        Index("ix_match_balance_logs_user_created", "user_id", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
@@ -239,6 +247,8 @@ class PersonalSignal(Base):
     __table_args__ = (
         Index("ix_personal_signals_user_created", "user_id", "created_at"),
         Index("ix_personal_signals_type_created", "type", "created_at"),
+        Index("ix_personal_signals_user_id_lookup", "user_id", "id"),
+        Index("ix_personal_signals_user_type_id", "user_id", "type", "id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

@@ -1,27 +1,40 @@
-import React, { Suspense, lazy, useState } from 'react';
+import React, { Suspense, lazy, useState, useTransition } from 'react';
 import { Loader2, Settings } from 'lucide-react';
+import { prefetchAdminDashboardTab, type AdminDashboardTabId } from '../../utils/tabPrefetch';
 
 const AdminBets = lazy(() => import('./AdminBets'));
 const AdminBroadcast = lazy(() => import('./AdminBroadcast'));
 const AdminResults = lazy(() => import('./AdminResults'));
 
-type AdminTabId = 'bets' | 'broadcast' | 'requests' | 'results';
-
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState<AdminTabId>('bets');
+  const [, startAdminTabTransition] = useTransition();
+  const [activeTab, setActiveTab] = useState<AdminDashboardTabId>('bets');
+  const [mountedTabs, setMountedTabs] = useState<AdminDashboardTabId[]>(['bets']);
 
-  const adminTabs: Array<{ id: AdminTabId; label: string }> = [
+  const adminTabs: Array<{ id: AdminDashboardTabId; label: string }> = [
     { id: 'bets', label: 'Прогноз' },
     { id: 'broadcast', label: 'Рассылки' },
     { id: 'requests', label: 'Заявки' },
     { id: 'results', label: 'Результаты' },
   ];
 
-  const renderActiveTab = () => {
-    if (activeTab === 'bets') return <AdminBets />;
-    if (activeTab === 'broadcast') return <AdminBroadcast />;
-    if (activeTab === 'requests') return <AdminBroadcast initialMode="requests" showModeTabs={false} />;
-    if (activeTab === 'results') return <AdminResults />;
+  const handleTabIntent = (tab: AdminDashboardTabId) => {
+    void prefetchAdminDashboardTab(tab);
+  };
+
+  const handleTabChange = (tab: AdminDashboardTabId) => {
+    handleTabIntent(tab);
+    startAdminTabTransition(() => {
+      setMountedTabs((current) => current.includes(tab) ? current : [...current, tab]);
+      setActiveTab(tab);
+    });
+  };
+
+  const renderTab = (tab: AdminDashboardTabId) => {
+    if (tab === 'bets') return <AdminBets />;
+    if (tab === 'broadcast') return <AdminBroadcast />;
+    if (tab === 'requests') return <AdminBroadcast initialMode="requests" showModeTabs={false} />;
+    if (tab === 'results') return <AdminResults />;
     return <AdminBets />;
   };
 
@@ -43,7 +56,12 @@ export default function AdminDashboard() {
         {adminTabs.map(tab => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            type="button"
+            onClick={() => handleTabChange(tab.id)}
+            onMouseEnter={() => handleTabIntent(tab.id)}
+            onPointerEnter={() => handleTabIntent(tab.id)}
+            onTouchStart={() => handleTabIntent(tab.id)}
+            onFocus={() => handleTabIntent(tab.id)}
             className={`min-w-0 text-[9px] font-black uppercase tracking-wider py-2 px-1.5 rounded-lg transition-all ${
               activeTab === tab.id
                 ? 'bg-indigo-500 text-white shadow-neon-indigo'
@@ -64,7 +82,15 @@ export default function AdminDashboard() {
             </div>
           }
         >
-          {renderActiveTab()}
+          {adminTabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={activeTab === tab.id ? undefined : 'hidden'}
+              aria-hidden={activeTab !== tab.id}
+            >
+              {(mountedTabs.includes(tab.id) || activeTab === tab.id) ? renderTab(tab.id) : null}
+            </div>
+          ))}
         </Suspense>
       </div>
 

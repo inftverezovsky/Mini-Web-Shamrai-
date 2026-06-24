@@ -3,6 +3,8 @@ import { TrendingUp } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
 import {
   CLIENT_CHECKOUT_ROI_PERCENT,
+  RECOMMENDED_FLAT_PERCENT,
+  calculateRecommendedFlatStake,
   resolveProfitSimulatorRoi,
   shouldFetchGlobalRoi,
 } from '../../utils/profitSimulator';
@@ -26,7 +28,7 @@ export default function ProfitSimulator() {
   }, []);
 
   // Simulator parameters
-  const betPercentage = 5; // 5% of bankroll per bet (standard recommendation)
+  const betPercentage = RECOMMENDED_FLAT_PERCENT;
   const totalBets = 100;
 
   // Calculate coordinates for the projected profit trend
@@ -205,7 +207,7 @@ export default function ProfitSimulator() {
           <div className="bg-slate-900/60 border border-white/5 p-3 rounded-xl flex flex-col justify-between">
             <span className="text-[8px] text-slate-500 font-extrabold uppercase tracking-wider block">Рекомендуемая ставка</span>
             <div className="text-sm font-black text-white mt-1.5">
-              {Math.round(bankroll * (betPercentage / 100))} ₽
+              {calculateRecommendedFlatStake(bankroll)} ₽
               <span className="text-[8px] text-slate-550 font-bold ml-1 uppercase">({betPercentage}%)</span>
             </div>
           </div>

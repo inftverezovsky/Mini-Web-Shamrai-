@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState, useTransition } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { motion, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
 import { useAuthActions, useAuthSelector } from './context/AuthContext';
@@ -23,6 +24,7 @@ import { isStaffRole, roleLabel } from './utils/roles';
 import { buildTabPath, trackEvent, trackPageView } from './utils/analytics';
 import { hasTelegramLaunchParams, isTelegramMiniApp } from './utils/telegramSdk';
 import { registerPwaServiceWorker } from './utils/webPush';
+import { prefetchAdminTab, prefetchUserTab } from './utils/tabPrefetch';
 
 import {
   AlertTriangle,
@@ -113,6 +115,57 @@ function PageSkeleton() {
   );
 }
 
+function addUniqueTab<T extends string>(tabs: T[], tab: T) {
+  return tabs.includes(tab) ? tabs : [...tabs, tab];
+}
+
+interface KeepAlivePanelProps {
+  active: boolean;
+  mounted: boolean;
+  children: React.ReactNode;
+  className?: string;
+}
+
+function KeepAlivePanel({ active, mounted, children, className = '' }: KeepAlivePanelProps) {
+  if (!mounted) return null;
+  return (
+    <div className={active ? className : `hidden ${className}`} aria-hidden={!active}>
+      {children}
+    </div>
+  );
+}
+
+interface AnimatedPagePanelProps extends KeepAlivePanelProps {
+  resetKey: string;
+  reducePageMotion: boolean;
+}
+
+function AnimatedPagePanel({
+  active,
+  mounted,
+  children,
+  className,
+  resetKey,
+  reducePageMotion,
+}: AnimatedPagePanelProps) {
+  return (
+    <KeepAlivePanel active={active} mounted={mounted} className={className}>
+      <AppErrorBoundary resetKey={resetKey}>
+        <Suspense fallback={<PageSkeleton />}>
+          <motion.div
+            className="page-transition-layer"
+            initial={!active || reducePageMotion ? false : { opacity: 0, y: 4 }}
+            animate={active && !reducePageMotion ? { opacity: 1, y: 0 } : undefined}
+            transition={{ duration: 0.1, ease: 'easeOut' }}
+          >
+            {children}
+          </motion.div>
+        </Suspense>
+      </AppErrorBoundary>
+    </KeepAlivePanel>
+  );
+}
+
 interface TelegramLinkPromptProps {
   userId: number;
   vkUserId: string | null;
@@ -198,6 +251,7 @@ function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPr
 }
 
 export default function App() {
+  const queryClient = useQueryClient();
   const { isReady, isTelegram } = useTelegram();
   const userProfile = useAuthSelector((state) => state.user);
   const loading = useAuthSelector((state) => state.loading);
@@ -215,6 +269,8 @@ export default function App() {
 
   const [activeUserTab, setActiveUserTab] = useState<UserTabId>('feed');
   const [activeAdminTab, setActiveAdminTab] = useState<AdminShellTabId>('manage_bets');
+  const [mountedUserTabs, setMountedUserTabs] = useState<UserTabId[]>(['feed']);
+  const [mountedAdminTabs, setMountedAdminTabs] = useState<AdminShellTabId[]>(['manage_bets']);
   const [adminPreviewMode, setAdminPreviewMode] = useState(false);
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [introComplete, setIntroComplete] = useState(false);
@@ -330,6 +386,25 @@ export default function App() {
     && !showAdminInterface
     && !needsOnboarding
     && !requiresIdentityGate;
+  const safeActiveUserTab = activeUserTab === 'chat' && !showWebChatTab ? 'feed' : activeUserTab;
+
+  useEffect(() => {
+    if (!introComplete || !userProfile || needsOnboarding || requiresIdentityGate) return;
+
+    if (showAdminInterface) {
+      setMountedAdminTabs((current) => addUniqueTab(current, activeAdminTab));
+    } else {
+      setMountedUserTabs((current) => addUniqueTab(current, safeActiveUserTab));
+    }
+  }, [
+    activeAdminTab,
+    introComplete,
+    needsOnboarding,
+    requiresIdentityGate,
+    safeActiveUserTab,
+    showAdminInterface,
+    userProfile,
+  ]);
 
   useEffect(() => {
     if (!introComplete || !userProfile) return;
@@ -355,11 +430,7 @@ export default function App() {
     }
 
     const role = showAdminInterface ? 'admin' : 'user';
-    const tab = showAdminInterface
-      ? activeAdminTab
-      : activeUserTab === 'chat' && !showWebChatTab
-        ? 'feed'
-        : activeUserTab;
+    const tab = showAdminInterface ? activeAdminTab : safeActiveUserTab;
 
     trackPageView(buildTabPath(role, tab), {
       role,
@@ -369,13 +440,12 @@ export default function App() {
     });
   }, [
     activeAdminTab,
-    activeUserTab,
     introComplete,
     isCompact,
     needsOnboarding,
     requiresIdentityGate,
+    safeActiveUserTab,
     showAdminInterface,
-    showWebChatTab,
     userProfile,
   ]);
 
@@ -432,7 +502,7 @@ export default function App() {
     return (
       <MotionConfig reducedMotion={motionReducedMode}>
         <div
-          className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
+          className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
             isCompact ? 'mobile-app-shell w-full max-w-none min-w-0 px-3 pt-3' : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
           }`}
         >
@@ -451,20 +521,43 @@ export default function App() {
     const loader = showAdminInterface
       ? adminTabLoaders[tab as AdminShellTabId]
       : userTabLoaders[tab as UserTabId];
-    void loader?.().catch(() => undefined);
+    const context = {
+      loadChunk: loader,
+      userTelegramId: userProfile.telegram_id,
+    };
+
+    if (showAdminInterface) {
+      void prefetchAdminTab(queryClient, tab as AdminShellTabId, context);
+      return;
+    }
+
+    const targetTab = tab === 'chat' && !showWebChatTab ? 'feed' : (tab as UserTabId);
+    void prefetchUserTab(queryClient, targetTab, context);
+  };
+
+  const handleNavigateToBilling = () => {
+    preloadTab('billing');
+    startTabTransition(() => {
+      setMountedUserTabs((current) => addUniqueTab(current, 'billing'));
+      setActiveUserTab('billing');
+    });
   };
 
   const handleTabChange = (tab: UserTabId | AdminShellTabId) => {
     const role = showAdminInterface ? 'admin' : 'user';
-    const from = showAdminInterface ? activeAdminTab : activeUserTab;
+    const from = showAdminInterface ? activeAdminTab : safeActiveUserTab;
     preloadTab(tab);
     trackEvent('Tab Switch', { role, from, to: tab });
 
     startTabTransition(() => {
       if (showAdminInterface) {
-        setActiveAdminTab(tab as AdminShellTabId);
+        const targetTab = tab as AdminShellTabId;
+        setMountedAdminTabs((current) => addUniqueTab(current, targetTab));
+        setActiveAdminTab(targetTab);
       } else {
-        setActiveUserTab(tab as UserTabId);
+        const targetTab = tab === 'chat' && !showWebChatTab ? 'feed' : (tab as UserTabId);
+        setMountedUserTabs((current) => addUniqueTab(current, targetTab));
+        setActiveUserTab(targetTab);
       }
     });
   };
@@ -508,59 +601,75 @@ export default function App() {
     </button>
   ) : null;
 
-  const renderCurrentPage = () => {
-    const safeUserTab = activeUserTab === 'chat' && !showWebChatTab ? 'feed' : activeUserTab;
-    const pageResetKey = showAdminInterface ? `admin:${activeAdminTab}` : `user:${safeUserTab}`;
+  const renderUserPage = (tab: UserTabId) => {
+    if (tab === 'feed') return <BetFeed onNavigateToBilling={handleNavigateToBilling} />;
+    if (tab === 'chat') return <WebBotChat />;
+    if (tab === 'stats' || tab === 'my_bets') return <MyBets />;
+    if (tab === 'billing') return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
+    return <Profile />;
+  };
 
-    const page = showAdminInterface ? (
-      activeAdminTab === 'manage_bets' ? (
-        <AdminDashboard />
-      ) : activeAdminTab === 'stats' ? (
-        <AdminStats />
-      ) : activeAdminTab === 'clients' ? (
-        <AdminCRM />
-      ) : activeAdminTab === 'chats' ? (
-        <AdminWebChat />
-      ) : activeAdminTab === 'settings' ? (
-        <AdminSettings />
-      ) : (
-        <Profile />
-      )
-    ) : safeUserTab === 'feed' ? (
-      <BetFeed onNavigateToBilling={() => setActiveUserTab('billing')} />
-    ) : safeUserTab === 'chat' ? (
-      <WebBotChat />
-    ) : safeUserTab === 'stats' ? (
-      <MyBets />
-    ) : safeUserTab === 'my_bets' ? (
-      <MyBets />
-    ) : safeUserTab === 'billing' ? (
-      <Tariffs onSubscriptionActivated={fetchUserProfile} />
-    ) : (
-      <Profile />
-    );
+  const renderAdminPage = (tab: AdminShellTabId) => {
+    if (tab === 'manage_bets') return <AdminDashboard />;
+    if (tab === 'stats') return <AdminStats />;
+    if (tab === 'clients') return <AdminCRM />;
+    if (tab === 'chats') return <AdminWebChat />;
+    if (tab === 'settings') return <AdminSettings />;
+    return <Profile />;
+  };
+
+  const renderCurrentPage = () => {
+    if (showAdminInterface) {
+      const adminPageTabs: AdminShellTabId[] = ['manage_bets', 'stats', 'clients', 'chats', 'settings', 'profile'];
+      const tabsToRender = mountedAdminTabs.includes(activeAdminTab)
+        ? mountedAdminTabs
+        : [...mountedAdminTabs, activeAdminTab];
+
+      return (
+        <>
+          {adminPageTabs.map((tab) => (
+            <AnimatedPagePanel
+              key={`admin:${tab}`}
+              active={activeAdminTab === tab}
+              mounted={tabsToRender.includes(tab)}
+              resetKey={`admin:${tab}`}
+              reducePageMotion={reducePageMotion}
+            >
+              {renderAdminPage(tab)}
+            </AnimatedPagePanel>
+          ))}
+        </>
+      );
+    }
+
+    const userPageTabs: UserTabId[] = showWebChatTab
+      ? ['feed', 'chat', 'stats', 'my_bets', 'billing', 'profile']
+      : ['feed', 'stats', 'my_bets', 'billing', 'profile'];
+    const tabsToRender = mountedUserTabs.includes(safeActiveUserTab)
+      ? mountedUserTabs
+      : [...mountedUserTabs, safeActiveUserTab];
 
     return (
-      <AppErrorBoundary resetKey={pageResetKey}>
-        <Suspense fallback={<PageSkeleton />}>
-          <motion.div
-            key={pageResetKey}
-            className="page-transition-layer"
-            initial={reducePageMotion ? false : { opacity: 0, y: 4 }}
-            animate={reducePageMotion ? undefined : { opacity: 1, y: 0 }}
-            transition={{ duration: 0.1, ease: 'easeOut' }}
+      <>
+        {userPageTabs.map((tab) => (
+          <AnimatedPagePanel
+            key={`user:${tab}`}
+            active={safeActiveUserTab === tab}
+            mounted={tabsToRender.includes(tab)}
+            resetKey={`user:${tab}`}
+            reducePageMotion={reducePageMotion}
           >
-            {page}
-          </motion.div>
-        </Suspense>
-      </AppErrorBoundary>
+            {renderUserPage(tab)}
+          </AnimatedPagePanel>
+        ))}
+      </>
     );
   };
 
   return (
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
-        className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden selection:bg-pink-500/30 ${
+        className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
           isCompact
             ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
             : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
@@ -624,7 +733,7 @@ export default function App() {
 
             <BottomNavigation
               role={showAdminInterface ? 'admin' : 'user'}
-              activeTab={showAdminInterface ? activeAdminTab : activeUserTab}
+              activeTab={showAdminInterface ? activeAdminTab : safeActiveUserTab}
               onChangeTab={handleTabChange}
               onPreloadTab={preloadTab}
               showWebChat={showWebChatTab}
@@ -634,7 +743,7 @@ export default function App() {
           <div className="relative z-10 mx-auto flex w-full max-w-[1480px] flex-col items-stretch gap-3 sm:gap-4 lg:flex-row lg:items-start">
             <DesktopNavigation
               role={showAdminInterface ? 'admin' : 'user'}
-              activeTab={showAdminInterface ? activeAdminTab : activeUserTab}
+              activeTab={showAdminInterface ? activeAdminTab : safeActiveUserTab}
               onChangeTab={handleTabChange}
               onPreloadTab={preloadTab}
               userLabel={displayName}
@@ -652,7 +761,7 @@ export default function App() {
               </header>
 
               {telegramLinkPrompt}
-              <main className="shamrai-glass-panel min-h-[calc(100dvh-7rem)] transform-gpu overflow-hidden rounded-2xl p-2.5 will-change-transform sm:p-3 xl:p-4">
+              <main className="app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] transform-gpu overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 will-change-transform sm:p-3 xl:p-4">
                 {renderCurrentPage()}
               </main>
             </div>

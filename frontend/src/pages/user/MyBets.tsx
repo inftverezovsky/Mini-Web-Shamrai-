@@ -24,21 +24,17 @@ import {
   streakLabel,
 } from '../../features/performance/performanceUi';
 import { PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
-import { apiFetch, downloadApiFile } from '../../utils/api';
+import { downloadApiFile } from '../../utils/api';
+import {
+  GLOBAL_STATS_QUERY_KEY,
+  TAB_QUERY_STALE_TIME,
+  fetchGlobalStats,
+  fetchMyBetsTimeline,
+  myBetsTimelineQueryKey,
+  type GlobalStatsData,
+} from '../../utils/tabPrefetch';
 
 type ClientStatsView = 'shamrai' | 'mine';
-
-interface GlobalStatsData {
-  winrate: number;
-  roi: number;
-  net_profit: number;
-  total_bets: number;
-  won_bets: number;
-  lost_bets: number;
-  refund_bets: number;
-  average_coefficient?: number;
-  chart_points: Array<{ month: string; profit: number }>;
-}
 
 function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimelineResponse | null {
   if (!stats) return null;
@@ -104,15 +100,15 @@ export default function MyBets() {
   const [exportError, setExportError] = useState<string | null>(null);
 
   const timelineQuery = useQuery<PerformanceTimelineResponse>({
-    queryKey: ['my-bets-timeline', period],
-    queryFn: () => apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`),
-    staleTime: 60_000,
+    queryKey: myBetsTimelineQueryKey(period),
+    queryFn: () => fetchMyBetsTimeline(period),
+    staleTime: TAB_QUERY_STALE_TIME,
   });
 
   const shamraiStatsQuery = useQuery<GlobalStatsData>({
-    queryKey: ['global-stats'],
-    queryFn: () => apiFetch<GlobalStatsData>('/stats/global'),
-    staleTime: 60_000,
+    queryKey: GLOBAL_STATS_QUERY_KEY,
+    queryFn: fetchGlobalStats,
+    staleTime: TAB_QUERY_STALE_TIME,
   });
 
   const data = timelineQuery.data ?? null;

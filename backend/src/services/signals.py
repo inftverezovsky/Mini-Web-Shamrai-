@@ -18,6 +18,7 @@ from src.core.message_templates import (
     load_message_template_body,
     render_message_template_body,
 )
+from src.core.redis_cache import flush_signal_page_cache_invalidations, queue_signal_page_cache_invalidation
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.models.database import AsyncSessionLocal
 from src.models.models import PersonalSignal, User
@@ -425,6 +426,7 @@ async def deliver_personal_signal(
     )
     db.add(signal)
     await db.flush()
+    queue_signal_page_cache_invalidation(db, [user.telegram_id])
 
     payload = signal_to_payload(signal)
     await signal_stream_hub.send_to_user(user.telegram_id, payload)
@@ -485,6 +487,7 @@ async def broadcast_personal_signals(
     for signal in signals:
         db.add(signal)
     await db.flush()
+    queue_signal_page_cache_invalidation(db, (user.telegram_id for user in user_list))
 
     websocket_deliveries: list[tuple[int, dict[str, Any]]] = []
     external_deliveries: list[dict[str, Any]] = []
@@ -511,6 +514,7 @@ async def broadcast_personal_signals(
     if return_report:
         if commit_before_external_delivery:
             await db.commit()
+            await flush_signal_page_cache_invalidations(db)
         external_results = await dispatch_signal_external_delivery_batch(external_deliveries)
         web_push_results = [
             item.get("web_push")
@@ -535,6 +539,7 @@ async def broadcast_personal_signals(
             await enqueue_signal_external_delivery_batch(db, web_push_retry_deliveries)
             if commit_before_external_delivery:
                 await db.commit()
+                await flush_signal_page_cache_invalidations(db)
         web_push_errors = [
             str(item.get("description") or "unknown error")
             for item in web_push_results
@@ -580,6 +585,7 @@ async def broadcast_live_signal(
     ]
     db.add_all(signals)
     await db.flush()
+    queue_signal_page_cache_invalidation(db, (user.telegram_id for user in user_list))
 
     websocket_deliveries: list[tuple[int, dict[str, Any]]] = []
     external_deliveries: list[dict[str, Any]] = []

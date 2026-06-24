@@ -45,6 +45,7 @@ import {
 } from 'lucide-react';
 import { useAuthActions, useAuthSelector } from '../../context/AuthContext';
 import { isStaffRole, roleLabel } from '../../utils/roles';
+import { TAB_QUERY_STALE_TIME, fetchProfileDashboard, profileDashboardQueryKey } from '../../utils/tabPrefetch';
 
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
@@ -309,10 +310,10 @@ export default function Profile() {
   const telegramIdentity = getTelegramIdentityStatus(userProfile);
   const telegramLinked = telegramIdentity.linked;
   const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
-    queryKey: ['profile-dashboard', userProfile?.telegram_id],
-    queryFn: () => apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard'),
+    queryKey: profileDashboardQueryKey(userProfile?.telegram_id),
+    queryFn: fetchProfileDashboard,
     enabled: Boolean(userProfile && !isAdminProfile),
-    staleTime: 60_000,
+    staleTime: TAB_QUERY_STALE_TIME,
   });
 
   useEffect(() => {

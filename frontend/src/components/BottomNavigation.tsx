@@ -78,6 +78,7 @@ export default function BottomNavigation({ role, activeTab, onChangeTab, onPrelo
             key={id}
             type="button"
             onClick={() => onChangeTab(id)}
+            onMouseEnter={() => onPreloadTab?.(id)}
             onPointerEnter={() => onPreloadTab?.(id)}
             onFocus={() => onPreloadTab?.(id)}
             onTouchStart={() => onPreloadTab?.(id)}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { apiFetch, downloadApiFile } from '../../utils/api';
+import { ADMIN_TAB_QUERY_STALE_TIME, BOOKMAKERS_QUERY_KEY, TAB_QUERY_STALE_TIME, adminUsersPageQueryKey, fetchAdminUsersPage, fetchBookmakers } from '../../utils/tabPrefetch';
 import { BookmakerResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
@@ -334,26 +335,23 @@ export default function AdminCRM() {
   const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
 
   const bookmakersQuery = useQuery<BookmakerResponse[]>({
-    queryKey: ['bookmakers'],
-    queryFn: ({ signal }) => apiFetch<BookmakerResponse[]>('/bookmakers', { signal }),
-    staleTime: 5 * 60_000,
+    queryKey: BOOKMAKERS_QUERY_KEY,
+    queryFn: ({ signal }) => fetchBookmakers(signal),
+    staleTime: TAB_QUERY_STALE_TIME,
   });
 
   const usersQuery = useInfiniteQuery<PaginatedResponse<CRMUser>, Error>({
-    queryKey: ['admin-users-page', debouncedSearchTerm, activityFilter, groupFilter, tagFilter],
+    queryKey: adminUsersPageQueryKey(debouncedSearchTerm, activityFilter, groupFilter, tagFilter),
     initialPageParam: null as string | null,
     enabled: Boolean(currentAdmin),
-    queryFn: ({ pageParam, signal }) => {
-      const params = new URLSearchParams({ limit: '50' });
-      if (pageParam) params.set('cursor', String(pageParam));
-      if (debouncedSearchTerm.trim()) params.set('q', debouncedSearchTerm.trim());
-      if (activityFilter !== 'all') params.set('activity', activityFilter);
-      if (groupFilter !== 'all') params.set('group', groupFilter);
-      if (tagFilter !== 'all') params.set('tag', tagFilter);
-      return apiFetch<PaginatedResponse<CRMUser>>(`/admin/users-page?${params.toString()}`, { signal });
-    },
+    queryFn: ({ pageParam, signal }) => fetchAdminUsersPage<CRMUser>((pageParam as string | null) ?? null, {
+      searchTerm: debouncedSearchTerm,
+      activityFilter,
+      groupFilter,
+      tagFilter,
+    }, signal),
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
-    staleTime: 20_000,
+    staleTime: ADMIN_TAB_QUERY_STALE_TIME,
   });
 
   const users = useMemo(() => {

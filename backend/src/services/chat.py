@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
+from src.core.redis_cache import cache_get_json, cache_set_json, signal_page_cache_key
 from src.core.roles import STAFF_ROLES, is_staff_role
 from src.models.models import (
     ChatConversation,
@@ -425,6 +426,15 @@ async def paginated_signal_messages(
     limit: int,
 ) -> dict[str, Any]:
     safe_limit = max(1, min(int(limit or 50), 100))
+    cache_key = signal_page_cache_key(
+        user_id=user.telegram_id,
+        before_id=before_id,
+        limit=safe_limit,
+    )
+    cached_page = await cache_get_json(cache_key)
+    if isinstance(cached_page, dict):
+        return cached_page
+
     filters = [
         PersonalSignal.user_id == user.telegram_id,
         PersonalSignal.type.notin_(list(SUPPORT_MESSAGE_TYPES)),
@@ -441,11 +451,13 @@ async def paginated_signal_messages(
     has_more = len(signals) > safe_limit
     page_signals = list(reversed(signals[:safe_limit]))
     next_before_id = page_signals[0].id if has_more and page_signals else None
-    return {
+    page = {
         "items": [signal_to_payload(signal) for signal in page_signals],
         "next_before_id": next_before_id,
         "has_more": has_more,
     }
+    await cache_set_json(cache_key, page, ttl_seconds=settings.REDIS_HOT_CACHE_TTL_SECONDS)
+    return page
 
 
 async def mark_signals_read(db: AsyncSession, *, user: User, last_read_signal_id: int) -> PersonalSignalReadCursor:

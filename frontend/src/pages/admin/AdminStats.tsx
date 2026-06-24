@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertCircle,
   BarChart3,
@@ -38,9 +39,7 @@ import {
   summaryTone,
 } from '../../features/performance/performanceUi';
 import {
-  AdminAuthorTimelineResponse,
   AdminClientStatsItem,
-  AdminClientsStatsResponse,
   AdminClientTimelineResponse,
   BookmakerResponse,
   PerformanceBetItem,
@@ -51,6 +50,13 @@ import {
   StatsDriveExportScope,
 } from '../../schemas/schemas';
 import { apiFetch, downloadApiFile } from '../../utils/api';
+import {
+  ADMIN_TAB_QUERY_STALE_TIME,
+  adminStatsDashboardQueryKey,
+  fetchAdminAuthorTimeline,
+  fetchAdminStatsDashboard,
+  type AdminStatsDashboardData,
+} from '../../utils/tabPrefetch';
 import AdminStatsBetRow from './AdminStatsBetRow';
 
 type StatsTab = 'all' | 'feed' | 'private' | 'paid_set' | 'clients';
@@ -81,10 +87,6 @@ function summarizeClientSide(bets: PerformanceBetItem[]): PerformanceSummary {
     current_streak: 0,
     current_streak_type: null,
   };
-}
-
-async function loadAuthorTimeline(period: PeriodFilter) {
-  return apiFetch<AdminAuthorTimelineResponse>(`/admin/stats/author-timeline?period=${encodeURIComponent(period)}`);
 }
 
 async function loadClientTimeline(clientId: number, period: PeriodFilter) {
@@ -369,51 +371,46 @@ function ExportPanel({
 }
 
 export default function AdminStats() {
-  const [authorData, setAuthorData] = useState<AdminAuthorTimelineResponse | null>(null);
-  const [clientsData, setClientsData] = useState<AdminClientsStatsResponse | null>(null);
+  const queryClient = useQueryClient();
   const [selectedClient, setSelectedClient] = useState<AdminClientTimelineResponse | null>(null);
-  const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [tab, setTab] = useState<StatsTab>('all');
   const [period, setPeriod] = useState<PeriodFilter>('all');
   const [clientQuery, setClientQuery] = useState('');
-  const [loading, setLoading] = useState(true);
   const [clientLoading, setClientLoading] = useState(false);
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
   const [driveScope, setDriveScope] = useState<StatsDriveExportScope>('all');
   const [driveJob, setDriveJob] = useState<StatsDriveExportJob | null>(null);
   const [driveLoading, setDriveLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [driveError, setDriveError] = useState<string | null>(null);
   const [expandedMonths, setExpandedMonths] = useState<ExpandedMap>({});
   const [expandedDays, setExpandedDays] = useState<ExpandedMap>({});
   const clientDetailRef = useRef<HTMLDivElement | null>(null);
 
-  const loadStats = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSelectedClient(null);
-      const periodQuery = `period=${encodeURIComponent(period)}`;
-      const [authorTimeline, clients, bookmakerList] = await Promise.all([
-        loadAuthorTimeline(period),
-        apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`),
-        apiFetch<BookmakerResponse[]>('/bookmakers'),
-      ]);
-      setAuthorData(authorTimeline);
-      setClientsData(clients);
-      setBookmakers(bookmakerList);
-      setExpandedMonths({});
-      setExpandedDays({});
-    } catch (err: any) {
-      setError(err.message || 'Ошибка загрузки статистики');
-    } finally {
-      setLoading(false);
-    }
-  }, [period]);
+  const statsDashboardQuery = useQuery<AdminStatsDashboardData>({
+    queryKey: adminStatsDashboardQueryKey(period),
+    queryFn: () => fetchAdminStatsDashboard(period),
+    staleTime: ADMIN_TAB_QUERY_STALE_TIME,
+  });
+
+  const authorData = statsDashboardQuery.data?.authorTimeline ?? null;
+  const clientsData = statsDashboardQuery.data?.clients ?? null;
+  const bookmakers: BookmakerResponse[] = statsDashboardQuery.data?.bookmakers ?? [];
+  const loading = statsDashboardQuery.isLoading || (statsDashboardQuery.isFetching && !statsDashboardQuery.data);
+  const error = statsDashboardQuery.error?.message || actionError;
+  const refetchStats = statsDashboardQuery.refetch;
+
+  const loadStats = useCallback(() => {
+    setActionError(null);
+    void refetchStats();
+  }, [refetchStats]);
 
   useEffect(() => {
-    void loadStats();
-  }, [loadStats]);
+    setActionError(null);
+    setSelectedClient(null);
+    setExpandedMonths({});
+    setExpandedDays({});
+  }, [period]);
 
   useEffect(() => {
     if (!driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
@@ -486,16 +483,18 @@ export default function AdminStats() {
         clientDetailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 80);
     } catch (err: any) {
-      setError(err.message || 'Не удалось загрузить клиента');
+      setActionError(err.message || 'Не удалось загрузить клиента');
     } finally {
       setClientLoading(false);
     }
   };
 
   const refreshAuthorTimeline = useCallback(async () => {
-    const freshTimeline = await loadAuthorTimeline(period);
-    setAuthorData(freshTimeline);
-  }, [period]);
+    const freshTimeline = await fetchAdminAuthorTimeline(period);
+    queryClient.setQueryData<AdminStatsDashboardData>(adminStatsDashboardQueryKey(period), (current) => (
+      current ? { ...current, authorTimeline: freshTimeline } : current
+    ));
+  }, [period, queryClient]);
 
   const refreshSelectedClientTimeline = useCallback(async () => {
     if (!selectedClient) return;
@@ -506,13 +505,13 @@ export default function AdminStats() {
   const exportStats = async (format: 'csv' | 'xlsx') => {
     try {
       setExporting(format);
-      setError(null);
+      setActionError(null);
       const scope = tab === 'clients' ? 'clients' : (format === 'xlsx' ? 'shamrai' : 'author');
       const source = tab === 'clients' ? 'all' : tab;
       const params = new URLSearchParams({ scope, format, period, source });
       await downloadApiFile(`/admin/stats/export?${params.toString()}`, `shamrai_stats_${scope}_${period}.${format}`);
     } catch (err: any) {
-      setError(err.message || 'Не удалось скачать экспорт');
+      setActionError(err.message || 'Не удалось скачать экспорт');
     } finally {
       setExporting(null);
     }

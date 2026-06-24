@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from src.core.config import settings
+from src.core.redis_cache import flush_signal_page_cache_invalidations
 
 engine_options = {
     "echo": False,
@@ -37,6 +38,7 @@ async def get_db():
         try:
             yield session
             await session.commit()
+            await flush_signal_page_cache_invalidations(session)
         except Exception:
             await session.rollback()
             raise

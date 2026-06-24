@@ -8,6 +8,7 @@ pydantic-settings==2.2.1
 python-dotenv==1.2.2
 alembic==1.13.1
 psycopg2-binary>=2.9.10
+redis==5.0.8
 pyjwt==2.13.0
 reportlab==4.1.0
 python-multipart==0.0.32

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CLIENT_CHECKOUT_ROI_PERCENT,
   PROFIT_SIMULATOR_ROI_MODE,
+  RECOMMENDED_FLAT_PERCENT,
+  calculateRecommendedFlatStake,
   resolveProfitSimulatorRoi,
   shouldFetchGlobalRoi,
 } from '../src/utils/profitSimulator';
@@ -19,5 +21,10 @@ describe('profit simulator ROI', () => {
     expect(resolveProfitSimulatorRoi(-5, 'global_stats')).toBe(30);
     expect(resolveProfitSimulatorRoi(null, 'global_stats')).toBe(30);
     expect(shouldFetchGlobalRoi('global_stats')).toBe(true);
+  });
+
+  it('recommends a 10% flat stake for checkout simulations', () => {
+    expect(RECOMMENDED_FLAT_PERCENT).toBe(10);
+    expect(calculateRecommendedFlatStake(20_000)).toBe(2_000);
   });
 });
