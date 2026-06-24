@@ -43,8 +43,15 @@ from src.schemas.schemas import (
     AdminUpdateUserPreferences,
     AdminUserListResponse,
     BetResponse,
+    IntegrationSettingsUnlockRequest,
     MessageTemplateResponse,
     MessageTemplateUpdate,
+    MonitoringLogsResponse,
+    OnlineUsersResponse,
+    ParserStatusResponse,
+    ResetSessionsResponse,
+    SystemSettingUpdate,
+    SystemSettingsResponse,
     UserResponse,
 )
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_privileged_admin
@@ -70,6 +77,14 @@ from src.services.statistics import (
     summarize_items,
 )
 from src.services.google_drive_export import get_drive_export_job, start_crm_drive_export_job, start_drive_export_job
+from src.services.system_settings import (
+    get_admin_system_settings,
+    get_unlocked_integration_settings,
+    reset_user_session_cache,
+    update_admin_system_settings,
+    verify_integrations_password,
+)
+from src.services.presence import count_online_users
 from src.services.stats_export import (
     ClientInfoExportRow,
     ClientRecentBetExportRow,
@@ -422,6 +437,112 @@ async def admin_security_rate_limit_metrics(
 ) -> dict[str, Any]:
     """In-memory security limiter counters for the current backend process."""
     return get_security_rate_limit_metrics()
+
+
+@router.get("/settings", response_model=SystemSettingsResponse)
+async def admin_list_system_settings(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    """Return cached admin system settings without exposing stored secret values."""
+    return await get_admin_system_settings(db)
+
+
+@router.put("/settings", response_model=SystemSettingsResponse)
+async def admin_update_system_settings(
+    payload: List[SystemSettingUpdate],
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk update admin system settings and invalidate the Redis response cache."""
+    try:
+        response = await update_admin_system_settings(
+            db,
+            [item.model_dump() for item in payload],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="system_settings_updated",
+        details={"updated_keys": [item.key for item in payload]},
+    )
+    return response
+
+
+@router.post("/settings/integrations/unlock", response_model=SystemSettingsResponse)
+async def admin_unlock_integration_settings(
+    payload: IntegrationSettingsUnlockRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reveal integration values only after an extra admin-side password check."""
+    if not verify_integrations_password(payload.password):
+        add_admin_audit_log(
+            db,
+            actor=admin,
+            action="integration_settings_unlock_failed",
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Неверный пароль интеграций")
+
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="integration_settings_unlocked",
+    )
+    return await get_unlocked_integration_settings(db)
+
+
+@router.post("/settings/reset-sessions", response_model=ResetSessionsResponse)
+async def admin_reset_user_sessions(
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear temporary auth session keys from Redis."""
+    response = await reset_user_session_cache()
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="user_sessions_reset",
+        details={"deleted": response.get("deleted", 0)},
+    )
+    return response
+
+
+@router.get("/monitoring/online", response_model=OnlineUsersResponse)
+async def admin_monitoring_online(
+    admin: User = Depends(get_current_admin_read),
+):
+    """Current online counter from Redis presence heartbeats."""
+    return {"online_users": await count_online_users()}
+
+
+@router.get("/monitoring/logs", response_model=MonitoringLogsResponse)
+async def admin_monitoring_logs(
+    admin: User = Depends(get_current_admin_read),
+):
+    """Recent error log preview. Uses synthetic entries until a persistent error log exists."""
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "logs": [
+            f"{now} [warning] Parser latency probe: bookmaker feed delayed by 1.4s",
+            f"{now} [error] Mock error stream: no persistent error log source configured yet",
+            f"{now} [info] Delivery outbox monitor heartbeat completed",
+        ]
+    }
+
+
+@router.get("/monitoring/parser-status", response_model=ParserStatusResponse)
+async def admin_monitoring_parser_status(
+    admin: User = Depends(get_current_admin_read),
+):
+    """Synthetic parser status until a durable parser state source is connected."""
+    return {
+        "status": "active",
+        "last_sync": datetime.now(timezone.utc),
+    }
 
 
 @router.get("/message-templates", response_model=List[MessageTemplateResponse])

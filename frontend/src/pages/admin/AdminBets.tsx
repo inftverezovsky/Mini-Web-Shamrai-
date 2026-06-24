@@ -7,10 +7,13 @@ import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
 import EmojiTextField from '../../components/EmojiTextField';
 import { notifyError, notifySuccess } from '../../utils/notify';
+import { getClipboardImageFile } from '../../utils/clipboardImages';
 
 interface AdminBetsProps {
   onBetsUpdated?: () => void;
 }
+
+const COUPON_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
 export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
@@ -33,15 +36,34 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [couponImage, setCouponImage] = useState<File | null>(null);
   const [couponPreview, setCouponPreview] = useState<string | null>(null);
 
+  const acceptCouponFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      notifyError('Допустимы только изображения');
+      return;
+    }
+    if (file.size > COUPON_IMAGE_MAX_BYTES) {
+      notifyError('Файл слишком большой. Максимум 5 МБ.');
+      return;
+    }
+    if (couponPreview) {
+      URL.revokeObjectURL(couponPreview);
+    }
+    setCouponImage(file);
+    setCouponPreview(URL.createObjectURL(file));
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (couponPreview) {
-        URL.revokeObjectURL(couponPreview);
-      }
-      setCouponImage(file);
-      setCouponPreview(URL.createObjectURL(file));
-    }
+    if (file) acceptCouponFile(file);
+    e.target.value = '';
+  };
+
+  const handleCouponPaste = (event: React.ClipboardEvent) => {
+    const pastedFile = getClipboardImageFile(event.clipboardData);
+    if (!pastedFile) return;
+    event.preventDefault();
+    event.stopPropagation();
+    acceptCouponFile(pastedFile);
   };
 
   const handleRemoveFile = () => {
@@ -152,6 +174,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       setDescription('');
       setPriceStars('');
       setBookmakerLinks({});
+      if (couponPreview) URL.revokeObjectURL(couponPreview);
       setCouponImage(null);
       setCouponPreview(null);
 
@@ -183,7 +206,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           Новая публикация
         </h3>
 
-        <form onSubmit={handlePublish} className="space-y-2.5 text-[11px] text-slate-300">
+        <form onSubmit={handlePublish} onPaste={handleCouponPaste} className="space-y-2.5 text-[11px] text-slate-300">
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Событие</label>
             <EmojiTextField
@@ -336,7 +359,11 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               Скриншот купона <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
             </label>
             {!couponPreview ? (
-              <label className="relative flex flex-col items-center justify-center border border-dashed border-slate-700/80 hover:border-indigo-500/50 bg-slate-900/40 hover:bg-slate-900/60 rounded-xl p-3 cursor-pointer transition-all group">
+              <label
+                onPaste={handleCouponPaste}
+                tabIndex={0}
+                className="relative flex flex-col items-center justify-center border border-dashed border-slate-700/80 hover:border-indigo-500/50 bg-slate-900/40 hover:bg-slate-900/60 rounded-xl p-3 cursor-pointer transition-all group"
+              >
                 <input
                   type="file"
                   accept="image/*"
@@ -346,7 +373,11 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                 <Upload className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 mb-1 transition-colors" />
               </label>
             ) : (
-              <div className="relative border border-white/10 bg-slate-950/40 rounded-xl p-2 flex items-center justify-between">
+              <div
+                onPaste={handleCouponPaste}
+                tabIndex={0}
+                className="relative border border-white/10 bg-slate-950/40 rounded-xl p-2 flex items-center justify-between"
+              >
                 <div className="flex items-center space-x-2.5 overflow-hidden">
                   <div className="w-8 h-8 rounded-lg overflow-hidden border border-white/5 bg-slate-950 shrink-0">
                     <img

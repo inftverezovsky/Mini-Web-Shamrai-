@@ -400,6 +400,18 @@ class MessageTemplate(Base):
 
     editor = relationship("User", foreign_keys=[updated_by])
 
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key = Column(String(120), primary_key=True, index=True)
+    value = Column(Text, nullable=False, default="")
+    description = Column(Text, nullable=True)
+    is_secret = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+
 class Bet(Base):
     __tablename__ = "bets"
     __table_args__ = (

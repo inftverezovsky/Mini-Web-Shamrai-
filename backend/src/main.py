@@ -19,7 +19,7 @@ from src.core.config import settings
 from src.core.roles import is_staff_role
 from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
-from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go
+from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go, public_settings
 from src.services.delivery_outbox import delivery_outbox_daemon
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.services.vk_delivery import (
@@ -228,6 +228,16 @@ async def run_dev_schema_migrations(conn):
             )
             """,
             "CREATE INDEX IF NOT EXISTS ix_message_templates_updated_by ON message_templates (updated_by)",
+            """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key VARCHAR(120) PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                description TEXT,
+                is_secret BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_author_status_resolved ON bets (author_id, status, resolved_at)",
@@ -570,6 +580,19 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_message_templates_updated_by ON message_templates (updated_by)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key VARCHAR(120) NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                description TEXT,
+                is_secret BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (key)
+            )
+            """
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)"
@@ -1246,6 +1269,7 @@ app.include_router(vk_callback.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(go.router, prefix="/api")
+app.include_router(public_settings.router, prefix="/api")
 
 
 async def require_health_diagnostics_access(

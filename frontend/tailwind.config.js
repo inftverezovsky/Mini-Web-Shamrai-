@@ -18,9 +18,9 @@ export default {
           50: '#E0F7FC',
           100: '#B3EDFA',
           200: '#80E0F7',
-          300: '#4DD3F3',
-          400: '#00d2ff', // Electric Blue base
-          500: '#00B8E0',
+          300: 'rgb(var(--color-primary-rgb) / <alpha-value>)',
+          400: 'rgb(var(--color-primary-rgb) / <alpha-value>)', // Electric Blue base
+          500: 'rgb(var(--color-primary-rgb) / <alpha-value>)',
           600: '#009BC0',
           700: '#007CA0',
           800: '#005F80',
@@ -32,9 +32,9 @@ export default {
           100: '#FFB3D6',
           200: '#FF80BD',
           300: '#FF4DA3',
-          400: '#FF1A8A',
-          450: '#FF0C84',
-          500: '#ff007f', // Neon Pink base
+          400: 'rgb(var(--color-secondary-rgb) / <alpha-value>)',
+          450: 'rgb(var(--color-secondary-rgb) / <alpha-value>)',
+          500: 'rgb(var(--color-secondary-rgb) / <alpha-value>)', // Neon Pink base
           600: '#D6006B',
           700: '#AD0056',
           800: '#850042',
@@ -46,9 +46,9 @@ export default {
           100: '#FFB3D6',
           200: '#FF80BD',
           300: '#FF4DA3',
-          400: '#FF1A8A',
-          450: '#FB4B8E', // preserve old 450 key for compatibility
-          500: '#ff007f', // Neon Pink base
+          400: 'rgb(var(--color-secondary-rgb) / <alpha-value>)',
+          450: 'rgb(var(--color-secondary-rgb) / <alpha-value>)', // preserve old 450 key for compatibility
+          500: 'rgb(var(--color-secondary-rgb) / <alpha-value>)', // Neon Pink base
           600: '#D6006B',
           700: '#AD0056',
           800: '#850042',

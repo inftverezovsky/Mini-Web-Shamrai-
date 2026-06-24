@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
+import { getClipboardImageFile } from '../../utils/clipboardImages';
 import {
   FORECAST_REQUEST_TABS,
   type BetCategory,
@@ -86,6 +87,7 @@ interface UploadDropzoneProps {
   onDragLeave: (event: React.DragEvent) => void;
   onDrop: (event: React.DragEvent) => void;
   onFileInput: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onPaste: (event: React.ClipboardEvent) => void;
   onRemove: () => void;
 }
 
@@ -101,6 +103,7 @@ function UploadDropzone({
   onDragLeave,
   onDrop,
   onFileInput,
+  onPaste,
   onRemove,
 }: UploadDropzoneProps) {
   return (
@@ -113,6 +116,8 @@ function UploadDropzone({
       {!preview && existingUrl ? (
         <div
           onClick={() => inputRef.current?.click()}
+          onPaste={onPaste}
+          tabIndex={0}
           className="relative border border-emerald-500/25 rounded-xl p-4 flex items-center gap-3 cursor-pointer bg-emerald-500/10 hover:bg-emerald-500/15 transition-all"
         >
           <CheckCircle className="w-6 h-6 text-emerald-400 shrink-0" />
@@ -134,7 +139,9 @@ function UploadDropzone({
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
+          onPaste={onPaste}
           onClick={() => inputRef.current?.click()}
+          tabIndex={0}
           className={`relative border-dashed border-2 rounded-xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all ${
             dragging
               ? 'border-[#ff007f] bg-[#ff007f]/5 scale-[1.01]'
@@ -151,7 +158,7 @@ function UploadDropzone({
           />
         </div>
       ) : (
-        <div className="relative group bg-slate-900/50 border border-white/10 rounded-xl p-2">
+        <div onPaste={onPaste} tabIndex={0} className="relative group bg-slate-900/50 border border-white/10 rounded-xl p-2">
           <img
             src={preview}
             alt="Preview"
@@ -396,6 +403,14 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     onFileInput: (event: React.ChangeEvent<HTMLInputElement>) => {
       const selectedFile = event.target.files?.[0];
       if (selectedFile) processImage(selectedFile, setFile, setPreview);
+      event.target.value = '';
+    },
+    onPaste: (event: React.ClipboardEvent) => {
+      const pastedFile = getClipboardImageFile(event.clipboardData);
+      if (!pastedFile) return;
+      event.preventDefault();
+      event.stopPropagation();
+      processImage(pastedFile, setFile, setPreview);
     },
   });
 
@@ -1196,7 +1211,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       )}
 
       {mode === 'announcement' && (
-        <form onSubmit={handleAnnouncementSubmit} className="space-y-4">
+        <form onSubmit={handleAnnouncementSubmit} onPaste={announcementCouponFileHandlers.onPaste} className="space-y-4">
           <div className="backdrop-blur-xl bg-slate-950/40 border border-white/10 rounded-2xl p-5 space-y-4">
             <div>
               <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
@@ -1854,6 +1869,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
         <div className="glass-modal-layer fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm px-3 py-4">
           <form
             onSubmit={handleFullForecastSubmit}
+            onPaste={fullForecastFileHandlers.onPaste}
             className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl border border-emerald-500/25 bg-slate-950 shadow-[0_0_45px_rgba(16,185,129,0.18)] p-5 space-y-4"
           >
             <div className="flex items-start justify-between gap-3">

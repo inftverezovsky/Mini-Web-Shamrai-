@@ -12,6 +12,7 @@ const daysAgoIso = (days: number, hour = 18) => {
 };
 const MOCK_PREFS_STORAGE_KEY = 'bet_tma_mock_preferences';
 const MOCK_MESSAGE_TEMPLATES_STORAGE_KEY = 'bet_tma_mock_message_templates';
+const MOCK_SYSTEM_SETTINGS_STORAGE_KEY = 'bet_tma_mock_system_settings';
 const MOCK_SUPPORT_MESSAGES_STORAGE_KEY = 'bet_tma_mock_support_messages';
 
 const DEFAULT_MOCK_PREFERENCES = {
@@ -23,6 +24,117 @@ const DEFAULT_MOCK_PREFERENCES = {
   preferred_sports: [],
   stats_display_mode: 'percent',
 };
+
+const MOCK_SECRET_SETTING_KEYS = new Set([
+  'VK_ACCESS_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'PAYMENT_GATEWAY_TOKEN',
+  'TELEGRAM_WEBHOOK_SECRET_TOKEN',
+  'VK_CALLBACK_CONFIRMATION_CODE',
+  'VK_CALLBACK_SECRET',
+  'VK_ID_CLIENT_SECRET',
+  'YOOKASSA_SECRET_KEY',
+  'TEGRO_API_KEY',
+  'TEGRO_SECRET_KEY',
+  'WEB_PUSH_VAPID_PRIVATE_KEY',
+  'GOOGLE_OAUTH_CLIENT_SECRET',
+  'GOOGLE_OAUTH_REFRESH_TOKEN',
+  'GOOGLE_SERVICE_ACCOUNT_JSON_B64',
+  'HTTPS_PROXY',
+]);
+
+const DEFAULT_MOCK_SYSTEM_SETTINGS = [
+  {
+    key: 'MAINTENANCE_MODE',
+    value: 'false',
+    description: 'Режим обслуживания для временного ограничения пользовательских сценариев.',
+  },
+  {
+    key: 'DISABLE_REGISTRATIONS',
+    value: 'false',
+    description: 'Закрытый клуб: запрет новых регистраций.',
+  },
+  {
+    key: 'PAUSE_BROADCASTS',
+    value: 'false',
+    description: 'Экстренная пауза исходящих рассылок.',
+  },
+  {
+    key: 'VK_ACCESS_TOKEN',
+    value: '',
+    description: 'Токен доступа VK для внешних интеграций.',
+  },
+  {
+    key: 'TELEGRAM_BOT_TOKEN',
+    value: '',
+    description: 'Токен Telegram-бота для внешних интеграций.',
+  },
+  {
+    key: 'PAYMENT_GATEWAY_TOKEN',
+    value: '',
+    description: 'Токен платежного шлюза.',
+  },
+  { key: 'TELEGRAM_WEBHOOK_SECRET_TOKEN', value: '', description: 'Секрет проверки Telegram webhook.' },
+  { key: 'TELEGRAM_BOT_USERNAME', value: 'Shamra1_bot', description: 'Username Telegram-бота.' },
+  { key: 'TELEGRAM_VIP_CHAT_ID', value: '-100200300400', description: 'ID закрытого Telegram VIP-чата.' },
+  { key: 'TELEGRAM_ADMIN_GROUP_CHAT_ID', value: '', description: 'ID Telegram-группы администраторов.' },
+  { key: 'SALES_MANAGER_TELEGRAM_ID', value: '', description: 'Telegram ID менеджера продаж.' },
+  { key: 'SHAMRAI_ONBOARDING_REPORT_CHAT_ID', value: '', description: 'Telegram chat ID для onboarding-отчетов.' },
+  { key: 'VK_CALLBACK_CONFIRMATION_CODE', value: '', description: 'Код подтверждения VK Callback API.' },
+  { key: 'VK_CALLBACK_SECRET', value: '', description: 'Секретный ключ VK Callback API.' },
+  { key: 'VK_ID_CLIENT_SECRET', value: '', description: 'Client secret для VK ID OAuth.' },
+  { key: 'VK_ID_APP_ID', value: '54626979', description: 'App ID для VK ID.' },
+  { key: 'VK_ID_REDIRECT_URI', value: 'https://shamra1.pro', description: 'Redirect URI для VK ID.' },
+  { key: 'VK_GROUP_ID', value: '239419819', description: 'ID группы VK.' },
+  { key: 'VK_API_VERSION', value: '5.199', description: 'Версия VK API.' },
+  { key: 'API_BASE_URL', value: 'https://shamra1.pro', description: 'Базовый URL API.' },
+  { key: 'FRONTEND_BASE_URL', value: 'https://shamra1.pro/app', description: 'Базовый URL mini app.' },
+  { key: 'YOOKASSA_SHOP_ID', value: '', description: 'Shop ID YooKassa.' },
+  { key: 'YOOKASSA_SECRET_KEY', value: '', description: 'Секретный ключ YooKassa.' },
+  { key: 'YOOKASSA_RETURN_URL', value: 'https://shamra1.pro/app', description: 'Return URL YooKassa.' },
+  { key: 'TEGRO_SHOP_ID', value: '', description: 'Shop ID Tegro.' },
+  { key: 'TEGRO_API_KEY', value: '', description: 'API key Tegro.' },
+  { key: 'TEGRO_SECRET_KEY', value: '', description: 'Secret key Tegro.' },
+  { key: 'TEGRO_RETURN_URL', value: 'https://shamra1.pro/app', description: 'Return URL Tegro.' },
+  { key: 'TEGRO_API_BASE_URL', value: 'https://tegro.money/api', description: 'Base URL Tegro API.' },
+  { key: 'WEB_PUSH_VAPID_PUBLIC_KEY', value: '', description: 'Public VAPID key для Web Push.' },
+  { key: 'WEB_PUSH_VAPID_PRIVATE_KEY', value: '', description: 'Private VAPID key для Web Push.' },
+  { key: 'WEB_PUSH_VAPID_SUBJECT', value: 'mailto:support@shamra1.pro', description: 'Subject для Web Push.' },
+  { key: 'GOOGLE_DRIVE_STATS_ENABLED', value: 'false', description: 'Включение Google Drive stats export.' },
+  { key: 'GOOGLE_DRIVE_AUTH_MODE', value: 'auto', description: 'Режим авторизации Google Drive.' },
+  { key: 'GOOGLE_DRIVE_STATS_FOLDER_ID', value: '', description: 'Folder ID для выгрузки статистики в Google Drive.' },
+  { key: 'GOOGLE_OAUTH_CLIENT_ID', value: '', description: 'Google OAuth client ID.' },
+  { key: 'GOOGLE_OAUTH_CLIENT_SECRET', value: '', description: 'Google OAuth client secret.' },
+  { key: 'GOOGLE_OAUTH_REFRESH_TOKEN', value: '', description: 'Google OAuth refresh token.' },
+  { key: 'GOOGLE_OAUTH_TOKEN_URI', value: 'https://oauth2.googleapis.com/token', description: 'Google OAuth token URI.' },
+  { key: 'GOOGLE_SERVICE_ACCOUNT_JSON_B64', value: '', description: 'Service account JSON в base64 для Google Drive.' },
+  { key: 'HTTPS_PROXY', value: '', description: 'Proxy URL для интеграций, где он нужен.' },
+  {
+    key: 'SUPPORT_URL',
+    value: '',
+    description: 'Публичная ссылка на поддержку.',
+  },
+  {
+    key: 'VIP_CHANNEL_URL',
+    value: '',
+    description: 'Ссылка на закрытый канал.',
+  },
+  {
+    key: 'THEME_PRIMARY_COLOR',
+    value: '#00d2ff',
+    description: 'Основной неоновый цвет интерфейса.',
+  },
+  {
+    key: 'THEME_SECONDARY_COLOR',
+    value: '#d946ef',
+    description: 'Дополнительный неоновый цвет интерфейса.',
+  },
+  {
+    key: 'GLOBAL_PERFORMANCE_MODE',
+    value: 'false',
+    description: 'Глобальный режим сниженной анимации и эффектов.',
+  },
+];
 
 function getMockPreferences() {
   try {
@@ -43,6 +155,68 @@ function saveMockPreferences(preferences: Record<string, any>) {
   };
   localStorage.setItem(MOCK_PREFS_STORAGE_KEY, JSON.stringify(nextPreferences));
   return nextPreferences;
+}
+
+function readMockSystemSettingsState() {
+  try {
+    const stored = localStorage.getItem(MOCK_SYSTEM_SETTINGS_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+}
+
+function getMockSystemSettings(options: { revealSecrets?: boolean } = {}) {
+  const state = readMockSystemSettingsState();
+  return {
+    settings: DEFAULT_MOCK_SYSTEM_SETTINGS.map((setting) => {
+      const stored = state[setting.key] || {};
+      const isSecret = MOCK_SECRET_SETTING_KEYS.has(setting.key);
+      const value = isSecret && !options.revealSecrets ? '' : stored.value ?? setting.value;
+      return {
+        key: setting.key,
+        value,
+        description: setting.description,
+        is_secret: isSecret,
+        is_configured: isSecret ? Boolean(stored.is_configured) : Boolean(String(value || '').trim()),
+        updated_at: stored.updated_at ?? null,
+      };
+    }),
+  };
+}
+
+function saveMockSystemSettings(updates: Array<{ key: string; value: string }>) {
+  const state = readMockSystemSettingsState();
+  const now = nowIso();
+  updates.forEach((item) => {
+    const setting = DEFAULT_MOCK_SYSTEM_SETTINGS.find((candidate) => candidate.key === item.key);
+    if (!setting) return;
+    const isSecret = MOCK_SECRET_SETTING_KEYS.has(setting.key);
+    const value = String(item.value ?? '').trim();
+    if (isSecret) {
+      if (value) {
+        state[setting.key] = { value, is_configured: true, updated_at: now };
+      }
+      return;
+    }
+    state[setting.key] = {
+      value,
+      is_configured: Boolean(value),
+      updated_at: now,
+    };
+  });
+  localStorage.setItem(MOCK_SYSTEM_SETTINGS_STORAGE_KEY, JSON.stringify(state));
+  return getMockSystemSettings();
+}
+
+function getMockPublicThemeSettings() {
+  const settings = getMockSystemSettings().settings;
+  const settingByKey = new Map(settings.map((setting: any) => [setting.key, setting]));
+  return {
+    primary_color: settingByKey.get('THEME_PRIMARY_COLOR')?.value || '#00d2ff',
+    secondary_color: settingByKey.get('THEME_SECONDARY_COLOR')?.value || '#d946ef',
+    global_performance_mode: settingByKey.get('GLOBAL_PERFORMANCE_MODE')?.value === 'true',
+  };
 }
 
 function getMockMessageTemplates() {
@@ -2439,6 +2613,37 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/admin/admins/grant') return { status: 'success', user: getMockUser() };
   if (endpoint.startsWith('/admin/audit-log')) return [];
+  if (endpoint === '/settings/theme') return getMockPublicThemeSettings();
+  if (endpoint === '/users/me/presence' && options.method === 'POST') return { status: 'ok' };
+  if (endpoint === '/admin/monitoring/online') return { online_users: 14 };
+  if (endpoint === '/admin/monitoring/parser-status') {
+    return { status: 'active', last_sync: nowIso() };
+  }
+  if (endpoint === '/admin/monitoring/logs') {
+    const now = nowIso();
+    return {
+      logs: [
+        `${now} [warning] Parser latency probe: bookmaker feed delayed by 1.4s`,
+        `${now} [error] Mock error stream: no persistent error log source configured yet`,
+        `${now} [info] Delivery outbox monitor heartbeat completed`,
+      ],
+    };
+  }
+  if (endpoint === '/admin/settings/reset-sessions' && options.method === 'POST') {
+    return { status: 'success', deleted: 2 };
+  }
+  if (endpoint === '/admin/settings/integrations/unlock' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    if (!String(body.password || '').trim()) throw new Error('Введите пароль интеграций');
+    return getMockSystemSettings({ revealSecrets: true });
+  }
+  if (endpoint === '/admin/settings') {
+    if (options.method === 'PUT') {
+      const body = typeof options.body === 'string' ? JSON.parse(options.body) : [];
+      return saveMockSystemSettings(Array.isArray(body) ? body : []);
+    }
+    return getMockSystemSettings();
+  }
   if (endpoint === '/admin/message-templates') return getMockMessageTemplates();
   if (endpoint.startsWith('/admin/message-templates/')) {
     const match = endpoint.match(/^\/admin\/message-templates\/([^/]+)(?:\/reset)?$/);

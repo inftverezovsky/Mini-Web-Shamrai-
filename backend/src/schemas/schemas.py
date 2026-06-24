@@ -624,6 +624,56 @@ class MessageTemplateUpdate(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
+class SystemSettingResponse(BaseModel):
+    key: str
+    value: str = ""
+    description: Optional[str] = None
+    is_secret: bool = False
+    is_configured: bool = False
+    updated_at: Optional[datetime] = None
+
+
+class SystemSettingUpdate(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(default="", max_length=65536)
+
+
+class SystemSettingsResponse(BaseModel):
+    settings: List[SystemSettingResponse] = Field(default_factory=list)
+
+
+class IntegrationSettingsUnlockRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=120)
+
+
+class ResetSessionsResponse(BaseModel):
+    status: str
+    deleted: int = 0
+
+
+class PublicThemeSettingsResponse(BaseModel):
+    primary_color: str
+    secondary_color: str
+    global_performance_mode: bool = False
+
+
+class PresenceHeartbeatResponse(BaseModel):
+    status: str = "ok"
+
+
+class OnlineUsersResponse(BaseModel):
+    online_users: int = 0
+
+
+class MonitoringLogsResponse(BaseModel):
+    logs: List[str] = Field(default_factory=list)
+
+
+class ParserStatusResponse(BaseModel):
+    status: str
+    last_sync: datetime
+
+
 # --- USER PREFERENCES SCHEMAS ---
 class UserPreferencesUpdate(BaseModel):
     alert_min_coef: Optional[float] = Field(default=None, ge=1.0, le=1.6)

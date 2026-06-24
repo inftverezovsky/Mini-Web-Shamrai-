@@ -5,6 +5,8 @@ import { useTelegram } from './hooks/useTelegram';
 import { useAuthActions, useAuthSelector } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
 import { usePerformanceProfile } from './hooks/usePerformanceProfile';
+import { usePresenceHeartbeat } from './hooks/usePresenceHeartbeat';
+import { useThemeManager } from './hooks/useThemeManager';
 import { useGlassOverlayActive } from './hooks/useGlassOverlayGuard';
 
 import BottomNavigation from './components/BottomNavigation';
@@ -237,6 +239,7 @@ function useWheelScrollBridge() {
 
 export default function App() {
   const queryClient = useQueryClient();
+  useThemeManager();
   const { isReady, isTelegram } = useTelegram();
   const userProfile = useAuthSelector((state) => state.user);
   const loading = useAuthSelector((state) => state.loading);
@@ -261,6 +264,7 @@ export default function App() {
   const [introComplete, setIntroComplete] = useState(false);
 
   useWheelScrollBridge();
+  usePresenceHeartbeat(Boolean(isReady && !loading && userProfile));
 
   useEffect(() => {
     if (!introComplete) return;
@@ -631,6 +635,10 @@ export default function App() {
     );
   };
 
+  const desktopMainPanelClass = showAdminInterface && activeAdminTab === 'settings'
+    ? 'dashboard-blur-root shamrai-glass-panel min-h-[calc(100dvh-7rem)] overflow-visible rounded-2xl p-2.5 sm:p-3 xl:p-4'
+    : 'dashboard-blur-root app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 sm:p-3 xl:p-4';
+
   return (
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
@@ -725,7 +733,7 @@ export default function App() {
                 </div>
               </header>
 
-              <main className="dashboard-blur-root app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 sm:p-3 xl:p-4">
+              <main className={desktopMainPanelClass}>
                 {renderCurrentPage()}
               </main>
             </div>

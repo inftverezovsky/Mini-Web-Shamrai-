@@ -20,6 +20,7 @@ from src.schemas.schemas import (
     BookmakerResponse,
     OnboardRequest,
     OnboardResponse,
+    PresenceHeartbeatResponse,
     SubscriptionResponse,
     UserResponse,
     UserUpdateBankroll,
@@ -36,6 +37,7 @@ from src.core.quiet_hours import (
 )
 from src.core.roles import is_staff_role
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
+from src.services.presence import mark_user_presence
 from src.services.referrals import get_referral_stats
 from src.services.vk_delivery import (
     refresh_vk_delivery_status,
@@ -533,6 +535,13 @@ async def list_bookmakers(db: AsyncSession = Depends(get_db)):
 async def get_my_profile(current_user: User = Depends(get_current_user_read)):
     """GET /api/users/me — Returns the current user profile including badges and bookmakers."""
     return current_user
+
+
+@router.post("/users/me/presence", response_model=PresenceHeartbeatResponse)
+async def update_my_presence(current_user: User = Depends(get_current_user_read)):
+    """Lightweight Redis heartbeat used by admin online monitoring."""
+    await mark_user_presence(current_user.telegram_id)
+    return {"status": "ok"}
 
 
 @router.get("/users/me/profile-dashboard")

@@ -23,8 +23,12 @@
 
   :root {
     --shamrai-ui-scale: 1;
-    --brand-cyan: #00d2ff;
-    --brand-pink: #d946ef;
+    --color-primary: #00d2ff;
+    --color-secondary: #d946ef;
+    --color-primary-rgb: 0 210 255;
+    --color-secondary-rgb: 217 70 239;
+    --brand-cyan: var(--color-primary);
+    --brand-pink: var(--color-secondary);
     --brand-violet: #7c3aed;
     --brand-green: #10b981;
     --brand-gold: #f59e0b;
@@ -38,14 +42,14 @@
     --shamrai-text-primary: #f8fbff;
     --shamrai-text-secondary: rgba(229, 238, 250, 0.9);
     --shamrai-text-muted: rgba(198, 212, 232, 0.82);
-    --neon-button-a: rgba(0, 210, 255, 0.92);
-    --neon-button-b: rgba(217, 70, 239, 0.82);
+    --neon-button-a: rgb(var(--color-primary-rgb) / 0.92);
+    --neon-button-b: rgb(var(--color-secondary-rgb) / 0.82);
     --neon-button-c: rgba(16, 185, 129, 0.72);
     --neon-button-fill: rgba(3, 7, 23, 0.8);
-    --neon-button-glow: rgba(0, 210, 255, 0.22);
-    --neon-button-core-a: rgba(0, 210, 255, 0.3);
+    --neon-button-glow: rgb(var(--color-primary-rgb) / 0.22);
+    --neon-button-core-a: rgb(var(--color-primary-rgb) / 0.3);
     --neon-button-core-b: rgba(16, 185, 129, 0.2);
-    --neon-button-core-c: rgba(217, 70, 239, 0.14);
+    --neon-button-core-c: rgb(var(--color-secondary-rgb) / 0.14);
     --neon-button-base: rgba(3, 7, 23, 0.82);
     --shamrai-brand-font: "Spicy Rice", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
@@ -708,6 +712,13 @@
   display: none;
 }
 .no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
@@ -4094,6 +4105,41 @@
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+html.shamrai-global-performance-mode *,
+html.shamrai-global-performance-mode *::before,
+html.shamrai-global-performance-mode *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.08s !important;
+}
+
+html.shamrai-global-performance-mode .ambient-field::before,
+html.shamrai-global-performance-mode .ambient-field::after,
+html.shamrai-global-performance-mode .ambient-field__grid,
+html.shamrai-global-performance-mode .ambient-field__sweep,
+html.shamrai-global-performance-mode .ambient-field__rings,
+html.shamrai-global-performance-mode .spark-field::before,
+html.shamrai-global-performance-mode .spark-field::after,
+html.shamrai-global-performance-mode .bottom-nav-aurora::before,
+html.shamrai-global-performance-mode .bottom-nav-aurora::after,
+html.shamrai-global-performance-mode .shamrai-glass-button::before,
+html.shamrai-global-performance-mode .shamrai-glass-button::after,
+html.shamrai-global-performance-mode .nav-glow-dot {
+  animation: none !important;
+  filter: none !important;
+}
+
+html.shamrai-global-performance-mode .dashboard-blur-root,
+html.shamrai-global-performance-mode .dashboard-blur-root::before,
+html.shamrai-global-performance-mode .dashboard-blur-root::after,
+html.shamrai-global-performance-mode .app-scroll-panel,
+html.shamrai-global-performance-mode .bottom-nav-aurora,
+html.shamrai-global-performance-mode .desktop-navigation-panel {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 /* Hard final font/readability guard:

@@ -1,5 +1,6 @@
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon, Loader2, Mic, Send, Smile, Square, Trash2, X } from 'lucide-react';
+import { getClipboardImageFile } from '../../utils/clipboardImages';
 
 export type ChatAttachmentType = 'image' | 'voice';
 
@@ -165,6 +166,15 @@ export default function MessageComposer({
     });
   };
 
+  const handlePaste = (event: ClipboardEvent<HTMLFormElement>) => {
+    if (!active || disabled || sending || recording) return;
+    const pastedImage = getClipboardImageFile(event.clipboardData);
+    if (!pastedImage) return;
+    event.preventDefault();
+    event.stopPropagation();
+    handleImageSelected(pastedImage);
+  };
+
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -253,7 +263,7 @@ export default function MessageComposer({
   const canSend = active && !disabled && !sending && !recording && Boolean(draft.trim() || attachment);
 
   return (
-    <form onSubmit={(event) => void handleSubmit(event)} className="min-w-0 border-t border-white/10 bg-slate-950/55 px-3 py-3">
+    <form onSubmit={(event) => void handleSubmit(event)} onPaste={handlePaste} className="min-w-0 border-t border-white/10 bg-slate-950/55 px-3 py-3">
       {attachment && (
         <div className="mb-2 flex min-w-0 items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.045] p-2">
           {attachment.messageType === 'image' ? (
