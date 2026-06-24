@@ -323,7 +323,7 @@
   pointer-events: none;
   background:
     linear-gradient(180deg, rgba(3, 4, 13, 0), rgba(3, 4, 13, 0.42)),
-    url("/brand-logo-poster.jpg") center / cover no-repeat;
+    image-set(url("/brand-logo-poster.webp") type("image/webp"), url("/brand-logo-poster.jpg") type("image/jpeg")) center / cover no-repeat;
   border-radius: 999px;
   opacity: 0.16;
   filter: saturate(1.25) contrast(1.1) blur(0.6px);
@@ -4330,10 +4330,53 @@
   .virtual-bet-feed-row,
   .web-bot-chat,
   .web-bot-chat__virtual-row,
-  [class*="backdrop-blur"]
+  [class*="backdrop-blur"],
+  [class*="blur-xl"],
+  [class*="blur-2xl"],
+  [class*="blur-3xl"],
+  [class*="filter"]
 ) {
   transform: translate3d(0, 0, 0);
   will-change: transform;
+  backface-visibility: hidden;
+}
+
+#root .app-shell :is(
+  [class*="backdrop-blur"],
+  [class*="blur-xl"],
+  [class*="blur-2xl"],
+  [class*="blur-3xl"],
+  .spark-field,
+  .promo-status-panel,
+  .ambient-field,
+  .welcome-splash__aura,
+  .welcome-splash__stars,
+  .welcome-splash__gate,
+  .welcome-splash__scan,
+  .welcome-splash__floor
+) {
+  isolation: isolate;
+  contain: paint;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+#root .app-shell .ambient-field::before,
+#root .app-shell .ambient-field::after,
+#root .app-shell .ambient-field__grid,
+#root .app-shell .ambient-field__sweep,
+#root .app-shell .ambient-field__rings,
+#root .app-shell .spark-field::before,
+#root .app-shell .spark-field::after,
+#root .app-shell .promo-status-panel::before,
+#root .app-shell .promo-status-panel::after,
+#root .app-shell .welcome-splash__aura,
+#root .app-shell .welcome-splash__stars,
+#root .app-shell .welcome-splash__gate,
+#root .app-shell .welcome-splash__scan,
+#root .app-shell .welcome-splash__floor {
+  transform: translate3d(0, 0, 0);
+  will-change: transform, opacity;
   backface-visibility: hidden;
 }
 

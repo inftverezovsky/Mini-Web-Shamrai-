@@ -1,0 +1,21 @@
+# Include this snippet only after the target nginx exposes ngx_brotli.
+# Preflight:
+#   nginx -V 2>&1 | grep -i brotli
+#   nginx -t
+#
+# The current Docker runtime image, nginx:stable-alpine, does not include
+# Brotli by default. Enabling these directives without the module breaks nginx.
+
+gzip off;
+
+brotli on;
+brotli_comp_level 5;
+brotli_min_length 1024;
+brotli_types
+    application/javascript
+    application/json
+    application/xml
+    image/svg+xml
+    text/css
+    text/javascript
+    text/plain;

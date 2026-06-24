@@ -20,6 +20,7 @@ import {
 import { WEB_SIGNAL_EVENT, WEB_SIGNAL_STATUS_EVENT } from '../../components/WebSignalListener';
 import { apiFetch, buildApiWebSocketUrl } from '../../utils/api';
 import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../../utils/authStorage';
+import { useDataProcessorWorker } from '../../hooks/useDataProcessorWorker';
 import { useThrottledCallback, useThrottledEventBuffer } from '../../hooks/useThrottledEvents';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
@@ -61,16 +62,6 @@ interface ChatStreamConversationUpdatedEvent {
   event: 'chat.conversation.updated';
   conversation_id: string;
   conversation: ChatConversationResponse;
-}
-
-function mergeSignals(currentSignals: ChatSignalMessageResponse[], incomingSignals: ChatSignalMessageResponse[]) {
-  const byId = new Map<number, ChatSignalMessageResponse>();
-  currentSignals.forEach((signal) => byId.set(signal.id, signal));
-  incomingSignals.forEach((signal) => byId.set(signal.id, signal));
-  return Array.from(byId.values()).sort((left, right) => {
-    const timeDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
-    return timeDelta || left.id - right.id;
-  });
 }
 
 function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMessages: SupportMessageView[]) {
@@ -195,7 +186,7 @@ export default function WebMessenger() {
     const params = new URLSearchParams(window.location.search);
     return params.get('conversation') === 'support' ? 'support' : 'signals';
   });
-  const [signals, setSignals] = useState<ChatSignalMessageResponse[]>([]);
+  const [signals, setSignalsState] = useState<ChatSignalMessageResponse[]>([]);
   const [supportMessages, setSupportMessages] = useState<SupportMessageView[]>([]);
   const [loadingSignals, setLoadingSignals] = useState(true);
   const [loadingSupport, setLoadingSupport] = useState(true);
@@ -209,8 +200,34 @@ export default function WebMessenger() {
   const [sendingClientIds, setSendingClientIds] = useState<Set<string>>(new Set());
   const seenSignalIdsRef = useRef<Set<number>>(new Set());
   const seenSupportMessageIdsRef = useRef<Set<number>>(new Set());
+  const signalsRef = useRef<ChatSignalMessageResponse[]>([]);
+  const signalMergeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const { mergeSignals: mergeSignalsOffThread } = useDataProcessorWorker();
 
   const isTma = isTelegramMiniApp();
+
+  const setSignals = useCallback((
+    updater: ChatSignalMessageResponse[] | ((current: ChatSignalMessageResponse[]) => ChatSignalMessageResponse[]),
+  ) => {
+    setSignalsState((current) => {
+      const nextSignals = typeof updater === 'function' ? updater(current) : updater;
+      signalsRef.current = nextSignals;
+      return nextSignals;
+    });
+  }, []);
+
+  const mergeSignalsIntoState = useCallback((incomingSignals: ChatSignalMessageResponse[]) => {
+    if (incomingSignals.length === 0) return signalMergeQueueRef.current;
+
+    signalMergeQueueRef.current = signalMergeQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, 160);
+        setSignals(nextSignals);
+      });
+
+    return signalMergeQueueRef.current;
+  }, [mergeSignalsOffThread, setSignals]);
 
   const supportConversation = useMemo(
     () => conversations.find((conversation) => conversation.key === 'support') || null,
@@ -246,14 +263,14 @@ export default function WebMessenger() {
       const response = await apiFetch<ChatSignalMessagePageResponse>('/chat/conversations/signals/messages?limit=100');
       const nextSignals = response.items;
       nextSignals.forEach((signal) => seenSignalIdsRef.current.add(signal.id));
-      setSignals((current) => mergeSignals(current, nextSignals).slice(-160));
+      await mergeSignalsIntoState(nextSignals);
       setSignalsError(null);
     } catch {
       setSignalsError('Не удалось загрузить сообщения личного бота.');
     } finally {
       setLoadingSignals(false);
     }
-  }, []);
+  }, [mergeSignalsIntoState]);
 
   const loadSupportMessages = useCallback(async () => {
     setLoadingSupport(true);
@@ -275,7 +292,7 @@ export default function WebMessenger() {
   }, [loadConversations, loadSignalMessages, loadSupportMessages]);
 
   const { enqueue: enqueueSignalStreamMessage } = useThrottledEventBuffer<ChatSignalMessageResponse>((incomingSignals) => {
-    setSignals((current) => mergeSignals(current, incomingSignals).slice(-160));
+    void mergeSignalsIntoState(incomingSignals);
     void loadConversations().catch(() => undefined);
   }, 400);
 
@@ -469,7 +486,7 @@ export default function WebMessenger() {
         },
       };
     }));
-  }, []);
+  }, [setSignals]);
 
   const openSupportDraft = useCallback((draftText: string) => {
     setActiveConversation('support');
