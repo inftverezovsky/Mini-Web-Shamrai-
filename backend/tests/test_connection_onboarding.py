@@ -8,6 +8,7 @@ from src.models.models import PersonalSignal, User
 from src.services.connection_onboarding import (
     CONNECTION_SETUP_COMPLETE_SIGNAL_TYPE,
     CONNECTION_SETUP_GUIDE_SIGNAL_TYPE,
+    build_connection_setup_guide_text,
     setup_actions_for_user,
     sync_connection_onboarding,
 )
@@ -92,6 +93,13 @@ class ConnectionOnboardingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("setup=vk-messages", actions["allow-vk-messages"]["url"])
         self.assertIn("#connect-vk", actions["allow-vk-messages"]["url"])
+
+    def test_guide_text_promises_guided_one_by_one_setup(self):
+        text = build_connection_setup_guide_text(self._user(vk_user_id=None))
+
+        self.assertIn("Нажимайте кнопки ниже по очереди", text)
+        self.assertIn("я все включу сам", text)
+        self.assertIn("Разрешить", text)
 
     async def test_completion_message_is_sent_once_after_all_channels_are_ready(self):
         async with self.Session() as session:

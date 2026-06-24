@@ -31,13 +31,16 @@ export const ADMIN_WEB_CHAT_MESSAGE_EVENT = 'shamrai:admin-web-chat-message';
 export const ADMIN_WEB_CHAT_CONVERSATION_EVENT = 'shamrai:admin-web-chat-conversation';
 export const ADMIN_WEB_CHAT_STATUS_EVENT = 'shamrai:admin-web-chat-status';
 export const ADMIN_WEB_CHAT_READ_EVENT = 'shamrai:admin-web-chat-read';
+export const ADMIN_WEB_CHAT_TYPING_EVENT = 'shamrai:admin-web-chat-typing';
 
 function supportNoticeText(message: ChatMessageResponse) {
   const fallback = message.type === 'image'
     ? 'Клиент прислал скриншот.'
     : message.type === 'voice'
       ? 'Клиент прислал голосовое сообщение.'
-      : 'Новое сообщение клиента.';
+      : message.type === 'file'
+        ? 'Клиент прислал файл.'
+        : 'Новое сообщение клиента.';
   const firstLine = (message.text || '').split('\n').map((line) => line.trim()).find(Boolean) || fallback;
   return firstLine.length > 260 ? `${firstLine.slice(0, 257)}...` : firstLine;
 }
@@ -148,6 +151,9 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
           }
           if (payload?.event === 'chat.read.updated') {
             window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_READ_EVENT, { detail: payload as ChatReadUpdatedEvent }));
+          }
+          if (payload?.event === 'chat.typing.updated') {
+            window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_TYPING_EVENT, { detail: payload }));
           }
         } catch {
           // Ignore malformed stream frames.

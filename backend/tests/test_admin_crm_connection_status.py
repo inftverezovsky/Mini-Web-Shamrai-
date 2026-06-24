@@ -11,6 +11,8 @@ class AdminCrmConnectionStatusTests(unittest.TestCase):
             username="client",
             first_name="Client",
             last_name="Connected",
+            photo_url="https://telegram.example/avatar.jpg",
+            vk_photo_url="https://vk.example/avatar.jpg",
             role="user",
             stats_display_mode="percent",
             bankroll=0,
@@ -34,5 +36,7 @@ class AdminCrmConnectionStatusTests(unittest.TestCase):
         self.assertTrue(payload["vk_connected"])
         self.assertTrue(payload["vk_delivery_enabled"])
         self.assertFalse(payload["web_push_enabled"])
+        self.assertEqual(payload["photo_url"], "https://telegram.example/avatar.jpg")
+        self.assertEqual(payload["vk_photo_url"], "https://vk.example/avatar.jpg")
         self.assertEqual(payload["identity_providers"], ["telegram", "vk"])
         self.assertEqual(payload["missing_identity_providers"], [])

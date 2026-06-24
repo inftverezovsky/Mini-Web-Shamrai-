@@ -210,6 +210,7 @@ cd frontend
 npm run lint
 npm run build
 npm test
+npm run test:e2e
 npm audit --audit-level=high
 ```
 
@@ -219,7 +220,7 @@ Docker and scripts:
 docker compose config --quiet
 ```
 
-CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile, frontend lint/build, Compose config validation and PowerShell script parsing.
+CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile, frontend lint/unit tests/build, Playwright prelaunch smoke, Compose config validation and PowerShell script parsing.
 
 ## Deployment
 
@@ -293,7 +294,7 @@ Evidence checked:
 
 High-value follow-ups:
 
-- Add frontend `npm test` to `scripts/verify-local.ps1` and CI if the team wants one command to cover all local tests.
+- Keep Playwright prelaunch smoke focused on non-payment launch paths: auth/session, profile setup, support chat and admin web-chat.
 - Install/use a pinned Python dependency scanner such as `pip-audit` in CI.
 - Add at least one Playwright smoke path for auth/session, feed, tariff/payment entry and admin login.
 - Replace production daemon `print(...)` calls with structured logging before incident-heavy usage.

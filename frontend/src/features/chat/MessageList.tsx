@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 interface MessageListItem {
   key: string;
   element: React.ReactNode;
+  createdAt?: string | null;
+  unreadDivider?: boolean;
 }
 
 interface MessageListProps {
@@ -18,6 +20,29 @@ interface MessageListProps {
   onLoadMore?: () => void;
 }
 
+function dayKey(value?: string | null) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function dateLabel(value?: string | null) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (dayKey(value) === dayKey(today.toISOString())) return 'Сегодня';
+  if (dayKey(value) === dayKey(yesterday.toISOString())) return 'Вчера';
+  return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+}
+
+function isNearBottom(element: HTMLDivElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+}
+
 function MessageList({
   items,
   loading = false,
@@ -30,14 +55,21 @@ function MessageList({
   onLoadMore,
 }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const previousScrollRef = useRef<{
     firstKey?: string;
     lastKey?: string;
     scrollHeight: number;
     scrollTop: number;
+    wasNearBottom: boolean;
   } | null>(null);
+  const decoratedItems = useMemo(() => items.map((item, index) => {
+    const previous = items[index - 1];
+    const showDateSeparator = Boolean(item.createdAt && dayKey(item.createdAt) !== dayKey(previous?.createdAt));
+    return { ...item, showDateSeparator };
+  }), [items]);
   const virtualizer = useVirtualizer({
-    count: items.length,
+    count: decoratedItems.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 132,
     overscan: 1,
@@ -52,15 +84,32 @@ function MessageList({
     const scrollElement = parentRef.current;
     if (!scrollElement || scrollElement.scrollTop > 80) return;
     if (items.length > 0) {
+      const nearBottom = isNearBottom(scrollElement);
+      setShowJumpToBottom(!nearBottom);
       previousScrollRef.current = {
         firstKey: items[0]?.key,
         lastKey: items[items.length - 1]?.key,
         scrollHeight: scrollElement.scrollHeight,
         scrollTop: scrollElement.scrollTop,
+        wasNearBottom: nearBottom,
       };
     }
     requestOlderMessages();
   }, [items, requestOlderMessages]);
+
+  const scrollToBottom = useCallback(() => {
+    const scrollElement = parentRef.current;
+    if (!scrollElement) return;
+    scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'smooth' });
+    setShowJumpToBottom(false);
+    previousScrollRef.current = {
+      firstKey: items[0]?.key,
+      lastKey: items[items.length - 1]?.key,
+      scrollHeight: scrollElement.scrollHeight,
+      scrollTop: scrollElement.scrollTop,
+      wasNearBottom: true,
+    };
+  }, [items]);
 
   useEffect(() => {
     const scrollElement = parentRef.current;
@@ -79,7 +128,9 @@ function MessageList({
       && previousScroll.firstKey !== firstKey
       && previousScroll.lastKey === lastKey,
     );
-    const shouldStickToBottom = !previousScroll || previousScroll.lastKey !== lastKey;
+    const shouldStickToBottom = !previousScroll || (
+      previousScroll.lastKey !== lastKey && previousScroll.wasNearBottom
+    );
 
     const frame = window.requestAnimationFrame(() => {
       if (prependedMessages && previousScroll) {
@@ -88,11 +139,14 @@ function MessageList({
       } else if (shouldStickToBottom) {
         scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'auto' });
       }
+      const nearBottom = isNearBottom(scrollElement);
+      setShowJumpToBottom(!nearBottom);
       previousScrollRef.current = {
         firstKey,
         lastKey,
         scrollHeight: scrollElement.scrollHeight,
         scrollTop: scrollElement.scrollTop,
+        wasNearBottom: nearBottom,
       };
     });
     return () => window.cancelAnimationFrame(frame);
@@ -102,7 +156,7 @@ function MessageList({
     <div
       ref={parentRef}
       onScroll={handleScroll}
-      className={`web-bot-chat__list chat-cover-backdrop min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 ${className}`}
+      className={`web-bot-chat__list chat-cover-backdrop relative min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 ${className}`}
     >
       {(hasMore || loadingMore) && (
         <div className="mb-3 flex justify-center">
@@ -136,7 +190,7 @@ function MessageList({
           style={{ height: `${virtualizer.getTotalSize()}px` }}
         >
           {virtualizer.getVirtualItems().map((virtualItem) => {
-            const item = items[virtualItem.index];
+            const item = decoratedItems[virtualItem.index];
             return (
               <div
                 key={item.key}
@@ -145,11 +199,37 @@ function MessageList({
                 className="web-bot-chat__virtual-row absolute left-0 top-0 w-full pb-3"
                 style={{ transform: `translateY(${virtualItem.start}px)` }}
               >
+                {item.showDateSeparator && (
+                  <div className="mb-3 flex justify-center">
+                    <span className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-slate-400 backdrop-blur-md">
+                      {dateLabel(item.createdAt)}
+                    </span>
+                  </div>
+                )}
+                {item.unreadDivider && (
+                  <div className="mb-3 flex items-center gap-3">
+                    <span className="h-px flex-1 bg-cyan-200/25" />
+                    <span className="rounded-full border border-cyan-200/25 bg-cyan-300/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-cyan-100">
+                      Новые
+                    </span>
+                    <span className="h-px flex-1 bg-cyan-200/25" />
+                  </div>
+                )}
                 {item.element}
               </div>
             );
           })}
         </div>
+      )}
+
+      {showJumpToBottom && items.length > 0 && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          className="sticky bottom-3 z-10 mx-auto mt-2 flex min-h-[34px] items-center justify-center rounded-full border border-cyan-200/25 bg-slate-950/80 px-4 py-2 text-[11px] font-black text-cyan-100 shadow-lg shadow-cyan-500/10 backdrop-blur-md transition hover:border-cyan-200/45 hover:bg-cyan-300/12"
+        >
+          К новым
+        </button>
       )}
     </div>
   );

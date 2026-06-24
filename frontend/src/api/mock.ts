@@ -14,6 +14,9 @@ const MOCK_PREFS_STORAGE_KEY = 'bet_tma_mock_preferences';
 const MOCK_MESSAGE_TEMPLATES_STORAGE_KEY = 'bet_tma_mock_message_templates';
 const MOCK_SYSTEM_SETTINGS_STORAGE_KEY = 'bet_tma_mock_system_settings';
 const MOCK_SUPPORT_MESSAGES_STORAGE_KEY = 'bet_tma_mock_support_messages';
+const MOCK_AVATAR_CYAN = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23051b2b%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%2380e0f7%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%2320c997%22/%3E%3C/svg%3E';
+const MOCK_AVATAR_GOLD = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23221805%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%23f59e0b%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%23facc15%22/%3E%3C/svg%3E';
+const MOCK_AVATAR_GREEN = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23071917%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%2334d399%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%2380e0f7%22/%3E%3C/svg%3E';
 
 const DEFAULT_MOCK_PREFERENCES = {
   alert_min_coef: 1.5,
@@ -845,6 +848,8 @@ function buildMockUsers() {
       username: 'debug_user',
       first_name: 'Иван',
       last_name: 'Подписчик',
+      photo_url: MOCK_AVATAR_CYAN,
+      vk_photo_url: null,
       role: 'user',
       matches_remaining: 12,
       guarantee_active: false,
@@ -865,6 +870,8 @@ function buildMockUsers() {
       username: 'Gold_ForzaJuve',
       first_name: 'Тимур',
       last_name: 'Голдобин',
+      photo_url: null,
+      vk_photo_url: MOCK_AVATAR_GOLD,
       role: 'user',
       purchased_bets_balance: -3,
       matches_remaining: -3,
@@ -886,6 +893,8 @@ function buildMockUsers() {
       username: 'new_client',
       first_name: 'Мария',
       last_name: 'Новикова',
+      photo_url: null,
+      vk_photo_url: null,
       role: 'user',
       matches_remaining: 0,
       guarantee_active: false,
@@ -906,6 +915,8 @@ function buildMockUsers() {
       username: 'guarantee_client',
       first_name: 'Олег',
       last_name: 'Гарантия',
+      photo_url: null,
+      vk_photo_url: MOCK_AVATAR_GREEN,
       role: 'user',
       matches_remaining: 0,
       guarantee_active: true,
@@ -923,6 +934,8 @@ function buildMockUsers() {
       username: 'debug_admin',
       first_name: 'Алексей',
       last_name: 'Админ',
+      photo_url: null,
+      vk_photo_url: null,
       role: 'admin',
       has_active_subscription: false,
       subscription_end_date: null,
@@ -943,6 +956,8 @@ function getMockUsers() {
           'client_group' in user
           && 'client_tag' in user
           && 'recent_match_results' in user
+          && 'photo_url' in user
+          && 'vk_photo_url' in user
           && 'telegram_connected' in user
           && 'vk_connected' in user
           && 'web_push_enabled' in user
@@ -1019,6 +1034,11 @@ function mockConversationId(userId: number) {
 }
 
 function mockSupportMessageToChatMessage(message: any) {
+  const messageType = message.message_type || message.chat_type || 'text';
+  const payload = {
+    ...(message.payload || {}),
+    ...(messageType !== 'text' && message.id ? { download_url: `/chat/attachments/${message.id}/download` } : {}),
+  };
   return {
     id: message.id,
     conversation_id: mockConversationId(message.user_id),
@@ -1026,11 +1046,12 @@ function mockSupportMessageToChatMessage(message: any) {
     sender_role: message.sender_role ?? (message.direction === 'client' ? 'user' : 'admin'),
     direction: message.direction,
     author_label: message.direction === 'staff' ? 'Shamrai' : message.author_label || 'Клиент',
-    type: 'text',
+    type: messageType,
     text: message.text,
-    payload: {},
+    payload,
     client_message_id: message.client_message_id || `mock-${message.id}`,
-    reply_to_id: null,
+    reply_to_id: message.reply_to_id ?? null,
+    reply_to: message.reply_to ?? null,
     created_at: message.created_at,
     edited_at: null,
     deleted_at: null,
@@ -1147,6 +1168,8 @@ function withMockIdentityFields<T extends { telegram_id: number; vk_user_id: str
   const webPushEnabled = Boolean((user as any).web_push_enabled);
   return {
     ...user,
+    photo_url: (user as any).photo_url ?? null,
+    vk_photo_url: (user as any).vk_photo_url ?? null,
     identity_complete: missingIdentityProviders.length === 0,
     identity_providers: identityProviders,
     missing_identity_providers: missingIdentityProviders,
@@ -1174,6 +1197,7 @@ function getMockUser() {
     last_name: isAdmin ? 'Админ' : 'Подписчик',
     phone: null,
     photo_url: null,
+    vk_photo_url: null,
     is_web_only: false,
     role: isAdmin ? 'admin' : 'user',
     stats_display_mode: 'percent',
@@ -1364,15 +1388,35 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
     const message = buildMockSupportMessage(getMockUser().telegram_id, String(body.text || ''), 'client', {
       client_message_id: body.client_message_id || `mock-${Date.now()}`,
+      reply_to_id: body.reply_to_id ?? null,
     });
     const messages = [...getMockSupportMessages(), message];
     saveMockSupportMessages(messages);
+    return mockSupportMessageToChatMessage(message);
+  }
+  if (endpoint === '/chat/conversations/support/attachments' && options.method === 'POST') {
+    const formData = options.body instanceof FormData ? options.body : null;
+    const file = formData?.get('file') as File | null;
+    const messageType = String(formData?.get('message_type') || 'file');
+    const text = String(formData?.get('text') || '');
+    const message = buildMockSupportMessage(getMockUser().telegram_id, text, 'client', {
+      client_message_id: String(formData?.get('client_message_id') || `mock-${Date.now()}`),
+      reply_to_id: Number(formData?.get('reply_to_id')) || null,
+      message_type: messageType,
+      payload: {
+        original_filename: file?.name || 'attachment.bin',
+        mime_type: file?.type || 'application/octet-stream',
+        size_bytes: file?.size || 1,
+      },
+    });
+    saveMockSupportMessages([...getMockSupportMessages(), message]);
     return mockSupportMessageToChatMessage(message);
   }
   if (endpoint === '/chat/conversations/support/read' && options.method === 'POST') {
     const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
     return { status: 'ok', last_read_message_id: body.last_read_message_id ?? null, last_read_signal_id: null };
   }
+  if (endpoint === '/chat/conversations/support/typing' && options.method === 'POST') return { status: 'ok' };
   if (endpoint === '/chat/stream-ticket' && options.method === 'POST') {
     return { ticket: `mock-chat-v2-ticket-${Date.now()}`, expires_in: 30 };
   }
@@ -1454,6 +1498,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const user = {
       ...getMockUser(),
       is_onboarded: true,
+      onboarding_goal: body.onboarding_goal ?? 'fast_signals',
       experience_level: body.experience_level ?? 'amateur',
       bankroll_size: body.bankroll_size ?? 'mid',
       risk_tolerance: body.risk_tolerance ?? 'balanced',
@@ -1464,6 +1509,9 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       purchased_bets_balance: 12,
       free_bets_available: 0,
       bookmakers: selectedBookmakers,
+      favorite_sports: Array.isArray(body.favorite_sports) && body.favorite_sports.length
+        ? body.favorite_sports
+        : ['Футбол'],
       preferred_sports: [
         'Автогонки',
         'Ам. футбол',
@@ -1496,6 +1544,12 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         'Футзал',
         'Хоккей',
       ],
+      client_group: body.experience_level === 'pro' || body.bankroll_size === 'high'
+        ? 'Новый PRO'
+        : body.risk_tolerance === 'aggressive'
+          ? 'Новый aggressive'
+          : 'Новый balanced',
+      client_tag: `goal: ${body.onboarding_goal ?? 'fast_signals'}`,
     };
     return {
       status: 'success',
@@ -2478,6 +2532,27 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
     const message = buildMockSupportMessage(user?.telegram_id || 123456789, String(body.text || ''), 'staff', {
       client_message_id: body.client_message_id || `mock-${Date.now()}`,
+      reply_to_id: body.reply_to_id ?? null,
+    });
+    saveMockSupportMessages([...getMockSupportMessages(), message]);
+    return mockSupportMessageToChatMessage(message);
+  }
+  const chatAdminAttachmentsMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/attachments$/);
+  if (chatAdminAttachmentsMatch && options.method === 'POST') {
+    const conversationId = chatAdminAttachmentsMatch[1];
+    const user = getMockUsers().find((item: any) => mockConversationId(item.telegram_id) === conversationId);
+    const formData = options.body instanceof FormData ? options.body : null;
+    const file = formData?.get('file') as File | null;
+    const messageType = String(formData?.get('message_type') || 'file');
+    const message = buildMockSupportMessage(user?.telegram_id || 123456789, String(formData?.get('text') || ''), 'staff', {
+      client_message_id: String(formData?.get('client_message_id') || `mock-${Date.now()}`),
+      reply_to_id: Number(formData?.get('reply_to_id')) || null,
+      message_type: messageType,
+      payload: {
+        original_filename: file?.name || 'attachment.bin',
+        mime_type: file?.type || 'application/octet-stream',
+        size_bytes: file?.size || 1,
+      },
     });
     saveMockSupportMessages([...getMockSupportMessages(), message]);
     return mockSupportMessageToChatMessage(message);
@@ -2497,6 +2572,8 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       .sort((left: any, right: any) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())[0] || null;
     return mockConversationFromUser(user || getMockUser(), latestMessage, body.status || 'open');
   }
+  const chatAdminTypingMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/typing$/);
+  if (chatAdminTypingMatch && options.method === 'POST') return { status: 'ok' };
   if (endpoint === '/admin/web-chat/threads') {
     const cleanQ = (queryParams.get('q') || '').trim().toLowerCase();
     const limit = Math.max(1, Number(queryParams.get('limit')) || 40);

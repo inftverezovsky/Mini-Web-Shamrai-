@@ -90,6 +90,10 @@ export function pickPrimaryAuthProvider(environment: AuthProviderEnvironment): I
     return 'telegram';
   }
 
+  if (environment.telegramAvailable !== false) {
+    return 'telegram';
+  }
+
   if (
     environment.runsInVkApp
     && environment.vkReady
@@ -102,5 +106,5 @@ export function pickPrimaryAuthProvider(environment: AuthProviderEnvironment): I
     return 'vk';
   }
 
-  return environment.telegramAvailable === false ? 'vk' : 'telegram';
+  return 'telegram';
 }

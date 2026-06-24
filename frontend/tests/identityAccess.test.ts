@@ -74,7 +74,7 @@ describe('identityAccess', () => {
     expect(getMissingIdentityActions(user).map((action) => action.provider)).toEqual(['vk']);
   });
 
-  it('lets a VK-only client enter while suggesting Telegram linking', () => {
+  it('keeps legacy VK-only clients readable while suggesting Telegram linking', () => {
     const user = makeUser({
       telegram_id: -741852963,
       is_web_only: true,
@@ -101,7 +101,7 @@ describe('identityAccess', () => {
     expect(isVkDeliveryReady(linkedWithMessages)).toBe(true);
   });
 
-  it('picks the primary auth provider from the runtime environment', () => {
+  it('uses Telegram as the first-login provider whenever Telegram auth is available', () => {
     expect(pickPrimaryAuthProvider({
       runsInTelegramMiniApp: true,
       vkReady: true,
@@ -114,18 +114,33 @@ describe('identityAccess', () => {
       vkReady: true,
       vkOriginCompatible: true,
       telegramAvailable: true,
-    })).toBe('vk');
+    })).toBe('telegram');
 
     expect(pickPrimaryAuthProvider({
       vkReady: true,
       vkOriginCompatible: true,
       telegramAvailable: true,
-    })).toBe('vk');
+    })).toBe('telegram');
 
     expect(pickPrimaryAuthProvider({
       vkReady: false,
       vkOriginCompatible: false,
       telegramAvailable: true,
     })).toBe('telegram');
+  });
+
+  it('falls back to VK only when Telegram auth is unavailable', () => {
+    expect(pickPrimaryAuthProvider({
+      runsInVkApp: true,
+      vkReady: true,
+      vkOriginCompatible: true,
+      telegramAvailable: false,
+    })).toBe('vk');
+
+    expect(pickPrimaryAuthProvider({
+      vkReady: true,
+      vkOriginCompatible: true,
+      telegramAvailable: false,
+    })).toBe('vk');
   });
 });

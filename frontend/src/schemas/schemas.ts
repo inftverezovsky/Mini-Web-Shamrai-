@@ -324,11 +324,18 @@ export interface ChatMessageResponse {
   sender_role: string;
   direction: ChatSupportDirection;
   author_label: string;
-  type: 'text' | 'image' | 'voice';
+  type: 'text' | 'image' | 'voice' | 'file';
   text: string | null;
   payload: Record<string, any>;
   client_message_id: string;
   reply_to_id: number | null;
+  reply_to?: {
+    id: number;
+    author_label: string;
+    type: 'text' | 'image' | 'voice' | 'file';
+    text: string | null;
+    payload: Record<string, any>;
+  } | null;
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;

@@ -61,6 +61,7 @@ router = APIRouter(tags=["Users"])
 EXPERIENCE_LEVELS = {"novice", "amateur", "pro"}
 BANKROLL_SIZES = {"micro", "mid", "high"}
 RISK_TOLERANCES = {"cautious", "balanced", "aggressive"}
+ONBOARDING_GOALS = {"trust_check", "discipline", "fast_signals", "raise_level"}
 BOOKMAKER_CODES = {
     "fonbet",
     "betboom",
@@ -124,6 +125,12 @@ RISK_LABELS = {
     "cautious": "Осторожная",
     "balanced": "Сбалансированная",
     "aggressive": "Агрессивная",
+}
+ONBOARDING_GOAL_LABELS = {
+    "trust_check": "Проверить честность",
+    "discipline": "Дисциплина банка",
+    "fast_signals": "Быстрые входы по линии",
+    "raise_level": "Поднять уровень",
 }
 
 class AdminUserListResponse(BaseModel):
@@ -249,6 +256,11 @@ def build_stored_vk_delivery_payload(user: User) -> dict[str, Any]:
 
 
 def validate_onboarding_payload(data: OnboardRequest) -> None:
+    if data.onboarding_goal not in ONBOARDING_GOALS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid onboarding_goal"
+        )
     if data.experience_level not in EXPERIENCE_LEVELS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -272,17 +284,63 @@ def validate_onboarding_payload(data: OnboardRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Select at least one bookmaker"
         )
+    if "other" in selected_bookmakers and not (data.other_bookmaker_name or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="other_bookmaker_name is required when Other bookmaker is selected"
+        )
     invalid_bookmakers = sorted(code for code in selected_bookmakers if code not in BOOKMAKER_CODES)
     if invalid_bookmakers:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid bookmakers: {invalid_bookmakers}"
         )
+    normalized_sports = normalize_onboarding_sports(data.favorite_sports)
+    if not normalized_sports:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Select at least one favorite sport"
+        )
     if normalize_currency(data.currency_preference) not in {"RUB", "USD", "FLATS"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid currency_preference"
         )
+
+
+def normalize_onboarding_sports(sports: List[str]) -> List[str]:
+    allowed = set(ALL_SPORT_LABELS)
+    normalized: List[str] = []
+    invalid: List[str] = []
+    for raw_sport in sports or []:
+        sport = str(raw_sport).strip()
+        if not sport:
+            continue
+        if sport not in allowed:
+            invalid.append(sport)
+            continue
+        if sport not in normalized:
+            normalized.append(sport)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid favorite_sports: {sorted(set(invalid))}"
+        )
+    return normalized
+
+
+def onboarding_client_group(data: OnboardRequest) -> str:
+    if data.experience_level == "pro" or data.bankroll_size == "high":
+        return "Новый PRO"
+    if data.risk_tolerance == "cautious":
+        return "Новый осторожный"
+    if data.risk_tolerance == "aggressive":
+        return "Новый aggressive"
+    return "Новый balanced"
+
+
+def onboarding_client_tag(data: OnboardRequest) -> str:
+    return f"goal: {data.onboarding_goal}"
 
 
 def validate_onboarding_vk_link(user: User, data: OnboardRequest) -> None:
@@ -402,7 +460,11 @@ def _format_onboarding_report(
     client_label = " / ".join(part for part in [display_name, username] if part) or "без имени"
     selected_bookmaker_names = ", ".join(bookmaker.name for bookmaker in selected_bookmakers) or "не указано"
     pains = "; ".join(data.anti_capper_pains or []) or "не указано"
+    favorite_sports = ", ".join(normalize_onboarding_sports(data.favorite_sports)) or "не указано"
     profile_type = "Web/VK клиент" if getattr(user, "is_web_only", False) else "Telegram клиент"
+    goal_label = ONBOARDING_GOAL_LABELS.get(data.onboarding_goal or "", data.onboarding_goal or "не указано")
+    source = recommendation.get("source") or "не указано"
+    resolved_bets = recommendation.get("resolved_bets_24h", 0)
 
     lines = [
         "<b>Новая анкета приветственного опроса</b>",
@@ -412,19 +474,30 @@ def _format_onboarding_report(
         _onboarding_report_line("Username", username or "не указан"),
         _onboarding_report_line("Телефон", user.phone or "не указан"),
         _onboarding_report_line("VK ID", user.vk_user_id or data.vk_user_id or "не привязан"),
+        _onboarding_report_line("CRM группа", getattr(user, "client_group", None) or onboarding_client_group(data)),
+        _onboarding_report_line("CRM тег", getattr(user, "client_tag", None) or onboarding_client_tag(data)),
         "",
+        _onboarding_report_line("Цель", goal_label),
         _onboarding_report_line("Что раздражает", pains),
         _onboarding_report_line("Опыт", EXPERIENCE_LABELS.get(data.experience_level, data.experience_level)),
         _onboarding_report_line("Банк", BANKROLL_LABELS.get(data.bankroll_size, data.bankroll_size)),
         _onboarding_report_line("Риск", RISK_LABELS.get(data.risk_tolerance, data.risk_tolerance)),
         _onboarding_report_line("БК", selected_bookmaker_names),
+        _onboarding_report_line("Спорты", favorite_sports),
         _onboarding_report_line("VK", f"привязан {user.vk_user_id}" if user.vk_user_id else "пропущен"),
     ]
 
     if data.other_bookmaker_name and data.other_bookmaker_name.strip():
         lines.append(_onboarding_report_line("Другие БК", data.other_bookmaker_name.strip()))
 
-    lines.append(_onboarding_report_line("Валюта", normalize_currency(data.currency_preference)))
+    lines.extend([
+        "",
+        _onboarding_report_line("Рекомендованный флэт", f"{recommendation.get('flat_stake_percent', 'не указано')}%"),
+        _onboarding_report_line("FOMO 24ч", f"+{recommendation.get('missed_profit_percent_24h', 'не указано')}%"),
+        _onboarding_report_line("Потенциал модели", f"до +{recommendation.get('monthly_profit_percent', 'не указано')}%"),
+        _onboarding_report_line("Источник расчета", f"{source}; закрытых прогнозов: {resolved_bets}"),
+        _onboarding_report_line("Валюта", normalize_currency(data.currency_preference)),
+    ])
 
     return "\n".join(lines)
 
@@ -464,6 +537,7 @@ async def save_onboarding_profile(
 ) -> OnboardResponse:
     validate_onboarding_payload(data)
     validate_onboarding_vk_link(user, data)
+    favorite_sports = normalize_onboarding_sports(data.favorite_sports)
     recommendation = await build_onboarding_recommendation(db, data)
     active_bookmakers = await ensure_standard_bookmakers(db)
     bookmakers_by_id = {bookmaker.id: bookmaker for bookmaker in active_bookmakers}
@@ -497,6 +571,7 @@ async def save_onboarding_profile(
     user.experience_level = data.experience_level
     user.bankroll_size = data.bankroll_size
     user.risk_tolerance = data.risk_tolerance
+    user.onboarding_goal = data.onboarding_goal
     user.primary_bookmaker = selected_bookmakers[0].code if selected_bookmakers else None
     user.bookmakers = selected_bookmakers
     has_other_bookmaker = any(bookmaker.code == "other" for bookmaker in selected_bookmakers)
@@ -507,8 +582,12 @@ async def save_onboarding_profile(
     )
     user.currency_preference = normalize_currency(data.currency_preference)
     user.free_bets_available = 0
-    user.favorite_sports = []
+    user.favorite_sports = favorite_sports
     user.preferred_sports = ALL_SPORT_LABELS
+    if not user.client_group:
+        user.client_group = onboarding_client_group(data)
+    if not user.client_tag:
+        user.client_tag = onboarding_client_tag(data)
     user.is_onboarded = True
 
     telegram_id = user.telegram_id

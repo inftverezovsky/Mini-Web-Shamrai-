@@ -1,8 +1,8 @@
-import { ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Image as ImageIcon, Loader2, Mic, Send, Smile, Square, Trash2, X } from 'lucide-react';
+import { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { FileText, Loader2, Mic, Paperclip, Send, Smile, Square, Trash2, X } from 'lucide-react';
 import { getClipboardImageFile } from '../../utils/clipboardImages';
 
-export type ChatAttachmentType = 'image' | 'voice';
+export type ChatAttachmentType = 'image' | 'voice' | 'file';
 
 export interface ChatComposerAttachment {
   messageType: ChatAttachmentType;
@@ -22,10 +22,12 @@ interface MessageComposerProps {
   onSendText: (text: string) => Promise<boolean>;
   onSendAttachment: (attachment: ChatComposerAttachment, text: string) => Promise<boolean>;
   onError: (message: string) => void;
+  onTyping?: () => void;
 }
 
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const VOICE_MAX_BYTES = 10 * 1024 * 1024;
+const FILE_MAX_BYTES = 25 * 1024 * 1024;
 const VOICE_MAX_DURATION_MS = 120_000;
 const EMOJI_OPTIONS = ['🙂', '😊', '🔥', '❤️', '👍', '🙏', '💪', '✅', '🚀', '👀', '🤝', '💬', '😎', '🥳', '⚡', '📌', '🎯', '💎'];
 
@@ -65,6 +67,7 @@ export default function MessageComposer({
   onSendText,
   onSendAttachment,
   onError,
+  onTyping,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -78,6 +81,7 @@ export default function MessageComposer({
   const [attachment, setAttachment] = useState<ChatComposerAttachment | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => () => {
     if (focusTimerRef.current !== undefined) window.clearTimeout(focusTimerRef.current);
@@ -130,16 +134,21 @@ export default function MessageComposer({
     setAttachment(nextAttachment);
   };
 
+  const handleDraftChange = (value: string) => {
+    onDraftChange(value);
+    onTyping?.();
+  };
+
   const insertEmoji = (emoji: string) => {
     const textarea = textareaRef.current;
     if (!textarea) {
-      onDraftChange(`${draft}${emoji}`);
+      handleDraftChange(`${draft}${emoji}`);
       return;
     }
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const nextDraft = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`;
-    onDraftChange(nextDraft);
+    handleDraftChange(nextDraft);
     if (focusTimerRef.current !== undefined) window.clearTimeout(focusTimerRef.current);
     focusTimerRef.current = window.setTimeout(() => {
       focusTimerRef.current = undefined;
@@ -149,18 +158,27 @@ export default function MessageComposer({
     }, 0);
   };
 
-  const handleImageSelected = (file?: File | null) => {
+  const handleFileSelected = (file?: File | null) => {
     if (!file) return;
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      onError('Разрешены скрины PNG, JPG или WEBP');
+    const isImage = ['image/png', 'image/jpeg', 'image/webp'].includes(file.type);
+    if (isImage) {
+      if (file.size > IMAGE_MAX_BYTES) {
+        onError('Скрин слишком большой. Максимум 5 МБ');
+        return;
+      }
+      replaceAttachment({
+        messageType: 'image',
+        file,
+        previewUrl: URL.createObjectURL(file),
+      });
       return;
     }
-    if (file.size > IMAGE_MAX_BYTES) {
-      onError('Скрин слишком большой. Максимум 5 МБ');
+    if (file.size > FILE_MAX_BYTES) {
+      onError('Файл слишком большой. Максимум 25 МБ');
       return;
     }
     replaceAttachment({
-      messageType: 'image',
+      messageType: 'file',
       file,
       previewUrl: URL.createObjectURL(file),
     });
@@ -172,7 +190,26 @@ export default function MessageComposer({
     if (!pastedImage) return;
     event.preventDefault();
     event.stopPropagation();
-    handleImageSelected(pastedImage);
+    handleFileSelected(pastedImage);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLFormElement>) => {
+    if (!active || disabled || sending || recording) return;
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLFormElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLFormElement>) => {
+    if (!active || disabled || sending || recording) return;
+    event.preventDefault();
+    setDragActive(false);
+    handleFileSelected(event.dataTransfer.files?.[0]);
   };
 
   const stopStream = () => {
@@ -250,7 +287,7 @@ export default function MessageComposer({
     }
     if (!sent) return;
     clearAttachment();
-    onDraftChange('');
+    handleDraftChange('');
     setEmojiOpen(false);
   };
 
@@ -263,17 +300,30 @@ export default function MessageComposer({
   const canSend = active && !disabled && !sending && !recording && Boolean(draft.trim() || attachment);
 
   return (
-    <form onSubmit={(event) => void handleSubmit(event)} onPaste={handlePaste} className="min-w-0 border-t border-white/10 bg-slate-950/55 px-3 py-3">
+    <form
+      onSubmit={(event) => void handleSubmit(event)}
+      onPaste={handlePaste}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`min-w-0 border-t border-white/10 bg-slate-950/55 px-3 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] transition ${
+        dragActive ? 'ring-2 ring-cyan-300/40' : ''
+      }`}
+    >
       {attachment && (
         <div className="mb-2 flex min-w-0 items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.045] p-2">
           {attachment.messageType === 'image' ? (
             <img src={attachment.previewUrl} alt="preview" className="h-14 w-14 shrink-0 rounded-xl object-cover" />
-          ) : (
+          ) : attachment.messageType === 'voice' ? (
             <audio controls preload="metadata" src={attachment.previewUrl} className="h-10 min-w-0 flex-1" />
+          ) : (
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-cyan-300/10 text-cyan-100">
+              <FileText className="h-5 w-5" />
+            </div>
           )}
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-black text-white">
-              {attachment.messageType === 'image' ? attachment.file.name : 'Голосовое сообщение'}
+              {attachment.messageType === 'voice' ? 'Голосовое сообщение' : attachment.file.name}
             </p>
             <p className="mt-1 text-[10px] font-bold text-slate-500">
               {formatBytes(attachment.file.size)}
@@ -327,10 +377,9 @@ export default function MessageComposer({
         <input
           ref={imageInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/webp"
           className="hidden"
           onChange={(event) => {
-            handleImageSelected(event.target.files?.[0]);
+            handleFileSelected(event.target.files?.[0]);
             event.target.value = '';
           }}
         />
@@ -338,10 +387,10 @@ export default function MessageComposer({
           type="button"
           onClick={() => imageInputRef.current?.click()}
           disabled={disabled || sending || recording}
-          title="Прикрепить скрин"
+          title="Прикрепить файл или скрин"
           className="flex h-[46px] w-[46px] items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-slate-200 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-45"
         >
-          <ImageIcon className="h-4 w-4" />
+          <Paperclip className="h-4 w-4" />
         </button>
         <button
           type="button"
@@ -368,7 +417,7 @@ export default function MessageComposer({
         <textarea
           ref={textareaRef}
           value={draft}
-          onChange={(event) => onDraftChange(event.target.value)}
+          onChange={(event) => handleDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}
           disabled={disabled || sending || recording}
           maxLength={4000}

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle2, Info, Loader2, X } from 'lucide-react';
 import {
   ConfirmPayload,
@@ -37,6 +38,8 @@ export default function NotificationCenter() {
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const [confirm, setConfirm] = useState<ConfirmPayload | null>(null);
   const timeoutIdsRef = React.useRef<Set<number>>(new Set());
+  const confirmCancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const previousFocusRef = React.useRef<HTMLElement | null>(null);
 
   useGlassOverlayGuard(Boolean(confirm));
 
@@ -99,6 +102,32 @@ export default function NotificationCenter() {
     setConfirm(null);
   };
 
+  useEffect(() => {
+    if (!confirm) return undefined;
+
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const frameId = window.requestAnimationFrame(() => {
+      confirmCancelButtonRef.current?.focus();
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      confirm.resolve(false);
+      setConfirm(null);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener('keydown', handleKeyDown);
+      previousFocusRef.current?.focus?.();
+      previousFocusRef.current = null;
+    };
+  }, [confirm]);
+
   return (
     <>
       <div className="pointer-events-none fixed left-3 right-3 top-3 z-[1200] mx-auto flex max-w-md flex-col gap-2">
@@ -134,26 +163,37 @@ export default function NotificationCenter() {
         })}
       </div>
 
-      {confirm && (
-        <div className="glass-modal-layer fixed inset-0 z-[1250] flex items-center justify-center bg-slate-950/72 p-4 backdrop-blur-md">
-          <div className={`w-full max-w-sm rounded-3xl border p-5 shadow-2xl ${confirmTone}`}>
+      {confirm && createPortal((
+        <div
+          className="glass-modal-layer fixed inset-0 flex items-center justify-center bg-slate-950/72 p-4 backdrop-blur-md"
+          style={{ zIndex: 2147483000 }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="destructive-confirm-title"
+            className={`w-full max-w-sm rounded-3xl border p-5 shadow-2xl ${confirmTone}`}
+          >
             <div className="flex items-start gap-3">
               <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-rose-300">
                 <AlertTriangle className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="text-sm font-black text-white">{confirm.title}</h3>
+                <h3 id="destructive-confirm-title" className="text-sm font-black text-white">{confirm.title}</h3>
                 <p className="mt-1.5 text-xs leading-relaxed text-slate-300">{confirm.message}</p>
               </div>
             </div>
             <div className="mt-5 grid grid-cols-2 gap-2">
               <button
+                ref={confirmCancelButtonRef}
+                type="button"
                 onClick={() => resolveConfirm(false)}
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-xs font-black text-slate-200 transition-colors hover:bg-white/10"
               >
                 {confirm.cancelLabel || 'Отмена'}
               </button>
               <button
+                type="button"
                 onClick={() => resolveConfirm(true)}
                 className="rounded-xl bg-rose-500 px-3 py-2.5 text-xs font-black text-white shadow-[0_0_22px_rgba(244,63,94,0.24)] transition-colors hover:bg-rose-400"
               >
@@ -162,7 +202,7 @@ export default function NotificationCenter() {
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
     </>
   );
 }

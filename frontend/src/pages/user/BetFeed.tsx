@@ -719,7 +719,7 @@ export default function BetFeed({ onNavigateToBilling, active: feedActive = true
         <div className="motion-card shimmer-border relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 text-center shadow-glass backdrop-blur-md">
           <Trophy className="iridescent-icon w-8 h-8 mx-auto mb-2" />
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
-          <p className="text-slate-400 text-[10px] mt-1 leading-relaxed">
+          <p className="mx-auto mt-1 text-center text-[10px] leading-relaxed text-slate-400">
             {active ? 'Сейчас нет активных прогнозов. Ожидайте уведомлений.' : 'Премиум-лента откроется после покупки абонемента.'}
           </p>
         </div>

@@ -1,11 +1,15 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState, type MouseEvent } from 'react';
 import { motion } from 'framer-motion';
 import {
+  BellRing,
   Bot,
   Check,
+  ChevronRight,
   ExternalLink,
   Image as ImageIcon,
   Loader2,
+  MessageCircle,
+  ShieldCheck,
   X,
   Zap,
 } from 'lucide-react';
@@ -13,9 +17,25 @@ import {
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import { ChatSignalMessageResponse } from '../../schemas/schemas';
 import { API_BASE_URL } from '../../utils/api';
-import { normalizeConnectionSetupActionUrl } from '../../utils/profileSetup';
+import { syncConnectionOnboarding } from '../../utils/connectionOnboarding';
+import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
+import {
+  connectionSetupActionPresentation,
+  navigateToConnectionSetupAction,
+  normalizeConnectionSetupActionUrl,
+  shouldRunConnectionSetupInline,
+  type ConnectionSetupActionPresentation,
+} from '../../utils/profileSetup';
+import { unlockIncomingSignalSound } from '../../utils/signalAudio';
+import { getWebPushReadiness, registerWebPushSubscription } from '../../utils/webPush';
 
 type ForecastSignalAction = 'take' | 'decline';
+type SetupActionFeedbackTone = 'info' | 'success' | 'warning' | 'error';
+
+interface SetupActionFeedback {
+  tone: SetupActionFeedbackTone;
+  message: string;
+}
 
 interface SignalBookmaker {
   id: number | string;
@@ -29,6 +49,7 @@ interface SignalSetupAction {
   id: string;
   label: string;
   url: string;
+  presentation: ConnectionSetupActionPresentation;
 }
 
 interface SignalMessageCardProps {
@@ -136,8 +157,48 @@ function setupActions(signal: ChatSignalMessageResponse): SignalSetupAction[] {
       id,
       label,
       url,
+      presentation: connectionSetupActionPresentation(id, label),
     }];
   });
+}
+
+function isPlainLeftClick(event: MouseEvent<HTMLAnchorElement>) {
+  return (
+    !event.defaultPrevented
+    && event.button === 0
+    && !event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.shiftKey
+  );
+}
+
+function setupActionIcon(actionId: string, busy: boolean, feedback?: SetupActionFeedback) {
+  if (busy) return <Loader2 className="h-4 w-4 animate-spin" />;
+  if (feedback?.tone === 'success') return <Check className="h-4 w-4" />;
+  if (actionId === 'enable-web-push') return <BellRing className="h-4 w-4" />;
+  if (actionId === 'connect-telegram') return <MessageCircle className="h-4 w-4" />;
+  if (actionId === 'connect-vk' || actionId === 'allow-vk-messages') return <ShieldCheck className="h-4 w-4" />;
+  return <ExternalLink className="h-4 w-4" />;
+}
+
+function setupActionClass(feedback?: SetupActionFeedback) {
+  if (feedback?.tone === 'success') return 'border-emerald-300/35 bg-emerald-400/14 hover:border-emerald-200/50';
+  if (feedback?.tone === 'warning') return 'border-amber-300/30 bg-amber-400/12 hover:border-amber-200/45';
+  if (feedback?.tone === 'error') return 'border-rose-300/30 bg-rose-400/12 hover:border-rose-200/45';
+  return 'border-cyan-200/25 bg-cyan-200/12 hover:border-cyan-200/45 hover:bg-cyan-200/18';
+}
+
+function setupActionIconClass(feedback?: SetupActionFeedback) {
+  if (feedback?.tone === 'success') return 'border-emerald-200/30 bg-emerald-300/16 text-emerald-100';
+  if (feedback?.tone === 'warning') return 'border-amber-200/30 bg-amber-300/14 text-amber-100';
+  if (feedback?.tone === 'error') return 'border-rose-200/30 bg-rose-300/14 text-rose-100';
+  return 'border-cyan-200/25 bg-slate-950/28 text-cyan-100';
+}
+
+function feedbackMessageForWebPush(statusMessage: string) {
+  const message = statusMessage.trim();
+  return message || 'Открыл профиль с точной инструкцией для этого устройства.';
 }
 
 function cleanForecastText(
@@ -240,6 +301,76 @@ function SignalMessageCard({
   const messageText = useMemo(() => signalText(signal), [signal]);
   const renderedMessage = useMemo(() => renderTextWithLinks(messageText), [messageText]);
   const connectionSetupActions = useMemo(() => setupActions(signal), [signal]);
+  const [setupActionBusy, setSetupActionBusy] = useState<string | null>(null);
+  const [setupActionFeedback, setSetupActionFeedback] = useState<Record<string, SetupActionFeedback>>({});
+
+  const setActionFeedback = (
+    actionId: string,
+    tone: SetupActionFeedbackTone,
+    message: string,
+  ) => {
+    setSetupActionFeedback((current) => ({
+      ...current,
+      [actionId]: { tone, message },
+    }));
+  };
+
+  const runWebPushSetup = async (action: SignalSetupAction) => {
+    setSetupActionBusy(action.id);
+    setActionFeedback(action.id, 'info', 'Сейчас браузер может показать запрос разрешения.');
+
+    try {
+      void unlockIncomingSignalSound();
+      const result = await registerWebPushSubscription();
+
+      if (result.status === 'subscribed') {
+        setActionFeedback(action.id, 'success', 'Готово. Сигналы будут приходить в уведомления этого устройства.');
+        notifySuccess('Web Push подключен для этого устройства.', 'Уведомления готовы');
+        void syncConnectionOnboarding().catch(() => undefined);
+        return;
+      }
+
+      const readiness = await getWebPushReadiness().catch(() => null);
+      const message = feedbackMessageForWebPush(readiness?.message || result.message);
+      const isHardFailure = result.status === 'failed' || result.status === 'unsupported';
+      setActionFeedback(action.id, isHardFailure ? 'error' : 'warning', message);
+
+      if (isHardFailure) {
+        notifyError(message, 'Web Push не включился');
+      } else {
+        notifyInfo(message, action.presentation.fallbackLabel);
+      }
+      navigateToConnectionSetupAction(action.id, action.url);
+    } catch {
+      const message = 'Не удалось включить уведомления автоматически. Открыл профиль с ручным шагом.';
+      setActionFeedback(action.id, 'error', message);
+      notifyError(message, 'Web Push');
+      navigateToConnectionSetupAction(action.id, action.url);
+    } finally {
+      setSetupActionBusy(null);
+    }
+  };
+
+  const handleSetupActionClick = (event: MouseEvent<HTMLAnchorElement>, action: SignalSetupAction) => {
+    if (!isPlainLeftClick(event)) return;
+
+    event.preventDefault();
+    if (setupActionBusy) return;
+
+    if (shouldRunConnectionSetupInline(action.id)) {
+      void runWebPushSetup(action);
+      return;
+    }
+
+    setSetupActionBusy(action.id);
+    setActionFeedback(action.id, 'info', action.presentation.busyLabel);
+    notifyInfo(action.presentation.caption, action.presentation.fallbackLabel);
+    if (navigateToConnectionSetupAction(action.id, action.url)) {
+      window.setTimeout(() => setSetupActionBusy(null), 700);
+      return;
+    }
+    window.location.href = action.url;
+  };
 
   return (
     <motion.div
@@ -275,16 +406,39 @@ function SignalMessageCard({
 
         {connectionSetupActions.length > 0 && (
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {connectionSetupActions.map((action) => (
-              <a
-                key={action.id}
-                href={action.url}
-                className="inline-flex min-h-[42px] min-w-0 items-center justify-center gap-2 rounded-xl border border-cyan-200/25 bg-cyan-200/12 px-3 py-2 text-center text-xs font-black text-white transition-all hover:border-cyan-200/45 hover:bg-cyan-200/18 active:scale-[0.98]"
-              >
-                <span className="min-w-0 truncate">{action.label}</span>
-                <ExternalLink className="h-3.5 w-3.5 shrink-0 text-cyan-100/85" />
-              </a>
-            ))}
+            {connectionSetupActions.map((action) => {
+              const feedback = setupActionFeedback[action.id];
+              const busy = setupActionBusy === action.id;
+              const title = busy
+                ? action.presentation.busyLabel
+                : feedback?.tone === 'success'
+                  ? action.presentation.successLabel
+                  : action.presentation.title;
+              const caption = feedback?.message || action.presentation.caption;
+              return (
+                <a
+                  key={action.id}
+                  href={action.url}
+                  onClick={(event) => handleSetupActionClick(event, action)}
+                  aria-busy={busy}
+                  className={`group inline-flex min-h-[72px] min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left text-xs text-white transition-all active:scale-[0.98] ${setupActionClass(feedback)} ${setupActionBusy && !busy ? 'pointer-events-none opacity-55' : ''}`}
+                >
+                  <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${setupActionIconClass(feedback)}`}>
+                    {setupActionIcon(action.id, busy, feedback)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-black leading-tight">{title}</span>
+                    <span className="mt-1 block text-[10px] font-bold leading-snug text-slate-200/80">
+                      {caption}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.07] px-1.5 py-1 text-[9px] font-black uppercase tracking-[0.08em] text-cyan-50/85">
+                    {shouldRunConnectionSetupInline(action.id) ? '1 клик' : 'авто'}
+                    <ChevronRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+                  </span>
+                </a>
+              );
+            })}
           </div>
         )}
 

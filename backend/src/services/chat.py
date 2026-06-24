@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
@@ -37,10 +38,12 @@ CHAT_STATUS_CLOSED = "closed"
 CHAT_MESSAGE_TYPE_TEXT = "text"
 CHAT_MESSAGE_TYPE_IMAGE = "image"
 CHAT_MESSAGE_TYPE_VOICE = "voice"
-CHAT_MESSAGE_TYPES = {CHAT_MESSAGE_TYPE_TEXT, CHAT_MESSAGE_TYPE_IMAGE, CHAT_MESSAGE_TYPE_VOICE}
+CHAT_MESSAGE_TYPE_FILE = "file"
+CHAT_MESSAGE_TYPES = {CHAT_MESSAGE_TYPE_TEXT, CHAT_MESSAGE_TYPE_IMAGE, CHAT_MESSAGE_TYPE_VOICE, CHAT_MESSAGE_TYPE_FILE}
 CHAT_MESSAGE_MAX_LENGTH = 4000
 SIGNAL_CONVERSATION_ID = "signals"
 SUPPORT_CONVERSATION_KEY = "support"
+CHAT_FILE_STORAGE_PATH_PATTERN = re.compile(r"^[0-9a-f]{32}\.[a-z0-9][a-z0-9._-]{0,15}$")
 
 
 def utc_now() -> datetime:
@@ -71,6 +74,20 @@ def clean_chat_caption_text(text: Optional[str]) -> Optional[str]:
     return clean_text
 
 
+def is_safe_chat_file_storage_path(value: object) -> bool:
+    if not isinstance(value, str) or "\\" in value:
+        return False
+    parts = value.split("/")
+    if len(parts) != 2:
+        return False
+    raw_conversation_id, filename = parts
+    try:
+        UUID(raw_conversation_id)
+    except (TypeError, ValueError):
+        return False
+    return bool(CHAT_FILE_STORAGE_PATH_PATTERN.fullmatch(filename))
+
+
 def chat_message_preview(message: ChatMessage) -> str:
     if message.text:
         return message.text
@@ -78,6 +95,9 @@ def chat_message_preview(message: ChatMessage) -> str:
         return "Скриншот"
     if message.type == CHAT_MESSAGE_TYPE_VOICE:
         return "Голосовое сообщение"
+    if message.type == CHAT_MESSAGE_TYPE_FILE:
+        filename = (message.payload or {}).get("original_filename")
+        return str(filename or "Файл")
     return ""
 
 
@@ -89,9 +109,13 @@ def validate_chat_message_payload(message_type: str, payload: dict[str, Any]) ->
         return clean_payload
 
     raw_url = clean_payload.get("url")
+    raw_storage_path = clean_payload.get("storage_path")
     raw_mime_type = clean_payload.get("mime_type")
     raw_size = clean_payload.get("size_bytes")
-    if not isinstance(raw_url, str) or not raw_url.startswith("/static/chat/"):
+    if message_type == CHAT_MESSAGE_TYPE_FILE:
+        if not is_safe_chat_file_storage_path(raw_storage_path):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное вложение")
+    elif not isinstance(raw_url, str) or not raw_url.startswith("/static/chat/"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное вложение")
     if not isinstance(raw_mime_type, str) or "/" not in raw_mime_type:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный тип вложения")
@@ -102,6 +126,27 @@ def validate_chat_message_payload(message_type: str, payload: dict[str, Any]) ->
     if int(clean_payload["size_bytes"]) <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный размер вложения")
     return clean_payload
+
+
+def _public_chat_payload(message: ChatMessage) -> dict[str, Any]:
+    payload = dict(message.payload or {})
+    if message.type == CHAT_MESSAGE_TYPE_FILE:
+        payload.pop("storage_path", None)
+    if message.type in {CHAT_MESSAGE_TYPE_IMAGE, CHAT_MESSAGE_TYPE_VOICE, CHAT_MESSAGE_TYPE_FILE} and message.id:
+        payload["download_url"] = f"/chat/attachments/{message.id}/download"
+    return payload
+
+
+def _reply_preview_payload(message: Optional[ChatMessage]) -> Optional[dict[str, Any]]:
+    if not message:
+        return None
+    return {
+        "id": message.id,
+        "author_label": "Shamrai" if message.sender_role != "user" else "Клиент",
+        "type": message.type,
+        "text": chat_message_preview(message),
+        "payload": _public_chat_payload(message),
+    }
 
 
 def conversation_status_after_sender_role(sender_role: str) -> str:
@@ -142,6 +187,7 @@ def chat_message_payload(
 ) -> dict[str, Any]:
     direction = "client" if message.sender_role == "user" else "staff"
     read_at = (read_at_by_message_id or {}).get(int(message.id or 0))
+    reply_to = message.__dict__.get("reply_to")
     return {
         "id": message.id,
         "conversation_id": str(message.conversation_id),
@@ -151,9 +197,10 @@ def chat_message_payload(
         "author_label": "Shamrai" if direction == "staff" else "Клиент",
         "type": message.type,
         "text": message.text,
-        "payload": message.payload or {},
+        "payload": _public_chat_payload(message),
         "client_message_id": str(message.client_message_id),
         "reply_to_id": message.reply_to_id,
+        "reply_to": _reply_preview_payload(reply_to),
         "created_at": message.created_at.isoformat() if message.created_at else utc_now().isoformat(),
         "edited_at": message.edited_at.isoformat() if message.edited_at else None,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
@@ -458,6 +505,7 @@ async def paginated_support_messages(
     result = await db.execute(
         select(ChatMessage)
         .filter(*filters)
+        .options(selectinload(ChatMessage.reply_to))
         .order_by(ChatMessage.id.desc())
         .limit(safe_limit + 1)
     )
@@ -581,14 +629,16 @@ async def create_chat_message(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Неизвестный тип сообщения")
     clean_text = clean_chat_message_text(text or "") if message_type == CHAT_MESSAGE_TYPE_TEXT else clean_chat_caption_text(text)
     clean_payload = validate_chat_message_payload(message_type, payload or {})
+    reply_to_message: Optional[ChatMessage] = None
     if reply_to_id is not None:
         reply_result = await db.execute(
-            select(ChatMessage.id).filter(
+            select(ChatMessage).filter(
                 ChatMessage.id == int(reply_to_id),
                 ChatMessage.conversation_id == conversation.id,
             )
         )
-        if reply_result.scalar() is None:
+        reply_to_message = reply_result.scalars().first()
+        if reply_to_message is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Сообщение для ответа не найдено")
 
     now = utc_now()
@@ -603,6 +653,8 @@ async def create_chat_message(
         reply_to_id=reply_to_id,
         created_at=now,
     )
+    if reply_to_message is not None:
+        message.reply_to = reply_to_message
     db.add(message)
     conversation.status = conversation_status_after_sender_role(sender.role)
     conversation.last_message_at = now

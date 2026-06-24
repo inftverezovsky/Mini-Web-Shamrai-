@@ -7,14 +7,15 @@ from typing import Annotated, Any, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_user, get_current_user_read
-from src.core.roles import is_staff_role
+from src.core.roles import STAFF_ROLES, is_staff_role
 from src.models.database import AsyncSessionLocal, get_db, get_read_db
-from src.models.models import ChatConversation, User
+from src.models.models import ChatConversation, ChatMessage, User
 from src.services.chat import (
     chat_message_payload,
     chat_stream_hub,
@@ -32,7 +33,7 @@ from src.services.chat import (
     advance_read_cursor,
     set_conversation_status,
 )
-from src.services.chat_uploads import CHAT_VOICE_MAX_DURATION_MS, remove_chat_attachment, store_chat_attachment
+from src.services.chat_uploads import CHAT_VOICE_MAX_DURATION_MS, remove_chat_attachment, resolve_chat_attachment_path, store_chat_attachment
 
 router = APIRouter(prefix="/chat", tags=["Native Web Chat"])
 CHAT_STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "chat"))
@@ -62,11 +63,12 @@ class ChatMessageResponse(BaseModel):
     sender_role: str
     direction: Literal["staff", "client"]
     author_label: str
-    type: Literal["text", "image", "voice"]
+    type: Literal["text", "image", "voice", "file"]
     text: Optional[str] = None
     payload: dict[str, Any] = Field(default_factory=dict)
     client_message_id: str
     reply_to_id: Optional[int] = None
+    reply_to: Optional[dict[str, Any]] = None
     created_at: str
     edited_at: Optional[str] = None
     deleted_at: Optional[str] = None
@@ -120,6 +122,14 @@ class ChatReadResponse(BaseModel):
 
 class ChatStatusUpdate(BaseModel):
     status: Literal["open", "closed"]
+
+
+class ChatTypingUpdate(BaseModel):
+    is_typing: bool = True
+
+
+class ChatTypingResponse(BaseModel):
+    status: str = "ok"
 
 
 class ChatStreamTicketResponse(BaseModel):
@@ -184,13 +194,39 @@ def _validate_attachment_form(reply_to_id: Optional[int], duration_ms: Optional[
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Голосовое сообщение не может быть длиннее 2 минут")
 
 
+async def _load_downloadable_message(
+    db: AsyncSession,
+    *,
+    message_id: int,
+    current_user: User,
+) -> ChatMessage:
+    result = await db.execute(
+        select(ChatMessage, ChatConversation)
+        .join(ChatConversation, ChatMessage.conversation_id == ChatConversation.id)
+        .filter(
+            ChatMessage.id == int(message_id),
+            ChatMessage.deleted_at.is_(None),
+            ChatConversation.kind == "support",
+        )
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+    message, conversation = row
+    if not is_staff_role(current_user.role) and conversation.owner_user_id != current_user.telegram_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к вложению")
+    if message.type not in {"image", "voice", "file"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+    return message
+
+
 async def _create_attachment_message(
     *,
     db: AsyncSession,
     conversation: ChatConversation,
     sender: User,
     client_message_id: UUID,
-    message_type: Literal["image", "voice"],
+    message_type: Literal["image", "voice", "file"],
     text: Optional[str],
     reply_to_id: Optional[int],
     duration_ms: Optional[int],
@@ -223,6 +259,30 @@ async def _create_attachment_message(
     except Exception:
         remove_chat_attachment(attachment.payload, target_root=CHAT_STATIC_DIR)
         raise
+
+
+async def _emit_typing_update(
+    db: AsyncSession,
+    *,
+    conversation: ChatConversation,
+    sender: User,
+    is_typing: bool,
+) -> None:
+    staff_result = await db.execute(select(User).filter(User.role.in_(list(STAFF_ROLES))))
+    recipient_ids = {conversation.owner_user_id, *(staff_user.telegram_id for staff_user in staff_result.scalars().all())}
+    await chat_stream_hub.send_to_users(
+        list(recipient_ids),
+        {
+            "event": "chat.typing.updated",
+            "conversation_id": str(conversation.id),
+            "user_id": sender.telegram_id,
+            "sender_user_id": sender.telegram_id,
+            "sender_role": sender.role,
+            "direction": "client" if sender.role == "user" else "staff",
+            "is_typing": bool(is_typing),
+            "updated_at": datetime.now().astimezone().isoformat(),
+        },
+    )
 
 
 @router.get("/conversations", response_model=ChatConversationListResponse)
@@ -306,7 +366,7 @@ async def create_support_message(
 @router.post("/conversations/support/attachments", response_model=ChatMessageResponse)
 async def create_support_attachment(
     client_message_id: Annotated[UUID, Form()],
-    message_type: Annotated[Literal["image", "voice"], Form()],
+    message_type: Annotated[Literal["image", "voice", "file"], Form()],
     file: Annotated[UploadFile, File()],
     text: Annotated[Optional[str], Form()] = None,
     reply_to_id: Annotated[Optional[int], Form()] = None,
@@ -359,6 +419,40 @@ async def create_chat_stream_ticket(
         ticket=_issue_chat_stream_ticket(current_user.telegram_id),
         expires_in=CHAT_STREAM_TICKET_TTL_SECONDS,
     )
+
+
+@router.get("/attachments/{message_id}/download")
+async def download_chat_attachment(
+    message_id: int,
+    current_user: User = Depends(get_current_user_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    message = await _load_downloadable_message(db, message_id=message_id, current_user=current_user)
+    payload = message.payload or {}
+    absolute_path = resolve_chat_attachment_path(payload, target_root=CHAT_STATIC_DIR)
+    filename = str(payload.get("original_filename") or f"chat-attachment-{message.id}")
+    media_type = str(payload.get("mime_type") or "application/octet-stream")
+    return FileResponse(
+        absolute_path,
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type="attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.post("/conversations/support/typing", response_model=ChatTypingResponse)
+async def update_support_typing(
+    payload: ChatTypingUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_read_db),
+):
+    if is_staff_role(current_user.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Используйте админский чат для ответа клиентам")
+    conversation = await support_conversation_for_user(db, current_user)
+    if conversation:
+        await _emit_typing_update(db, conversation=conversation, sender=current_user, is_typing=payload.is_typing)
+    return ChatTypingResponse()
 
 
 @router.get("/admin/conversations", response_model=ChatConversationListResponse)
@@ -443,7 +537,7 @@ async def create_admin_chat_message(
 async def create_admin_chat_attachment(
     conversation_id: UUID,
     client_message_id: Annotated[UUID, Form()],
-    message_type: Annotated[Literal["image", "voice"], Form()],
+    message_type: Annotated[Literal["image", "voice", "file"], Form()],
     file: Annotated[UploadFile, File()],
     text: Annotated[Optional[str], Form()] = None,
     reply_to_id: Annotated[Optional[int], Form()] = None,
@@ -497,6 +591,19 @@ async def update_admin_chat_status(
     await set_conversation_status(db, conversation=conversation, status_value=payload.status)
     await emit_conversation_updated(db, conversation=conversation)
     return ChatConversationResponse(**await support_conversation_payload(db, conversation, viewer=admin, owner=conversation.owner))
+
+
+@router.post("/admin/conversations/{conversation_id}/typing", response_model=ChatTypingResponse)
+async def update_admin_chat_typing(
+    conversation_id: UUID,
+    payload: ChatTypingUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_read_db),
+):
+    _ensure_staff(admin)
+    conversation = await load_support_conversation_for_staff(db, _conversation_uuid(conversation_id))
+    await _emit_typing_update(db, conversation=conversation, sender=admin, is_typing=payload.is_typing)
+    return ChatTypingResponse()
 
 
 @router.websocket("/stream")

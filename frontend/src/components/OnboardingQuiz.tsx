@@ -25,29 +25,27 @@ import { apiFetch } from '../utils/api';
 import { isVkIdReady, isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
 import { BookmakerResponse } from '../schemas/schemas';
 import EmojiTextField from './EmojiTextField';
-import { BookmakerLogoFrame } from './LogoFrame';
+import { BookmakerLogoFrame, SportIconFrame } from './LogoFrame';
 import OptimizedImage from './OptimizedImage';
 import { useAuthSelector } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
 import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
-import { useDebouncedCallback } from '../hooks/useThrottledEvents';
+import { getBookmakerLogoSrc } from '../constants/bookmakers';
+import { SPORT_OPTIONS } from '../constants/sports';
+import {
+  buildOnboardingPayload,
+  isBookmakerStepComplete,
+  type BankrollSize,
+  type CurrencyCode,
+  type ExperienceLevel,
+  type OnboardingDraftAnswers,
+  type OnboardingGoal,
+  type RiskTolerance,
+} from '../utils/onboardingQuiz';
 import { toggleBookmakerCodeSelection } from '../utils/bookmakerSelection';
 
-type ExperienceLevel = 'novice' | 'amateur' | 'pro';
-type BankrollSize = 'micro' | 'mid' | 'high';
-type RiskTolerance = 'cautious' | 'balanced' | 'aggressive';
-type CurrencyCode = 'RUB' | 'USD' | 'FLATS';
 type VkLinkStatus = 'idle' | 'loading' | 'linked' | 'error';
-
-interface OnboardingAnswers {
-  anti_capper_pains: string[];
-  experience_level: ExperienceLevel | null;
-  bankroll_size: BankrollSize | null;
-  risk_tolerance: RiskTolerance | null;
-  bookmaker_codes: string[];
-  other_bookmaker_name: string;
-  vk_user_id: string | null;
-}
+type OnboardingAnswers = OnboardingDraftAnswers;
 
 interface OnboardingRecommendation {
   flat_stake_percent: number;
@@ -87,26 +85,52 @@ const GOLD_GLOW = '0 0 32px rgba(246,196,83,0.62), 0 0 84px rgba(246,196,83,0.22
 
 const slideVariants: Variants = {
   enter: (direction: number) => ({
-    x: direction > 0 ? 56 : -56,
+    x: direction > 0 ? 36 : -36,
     opacity: 0,
-    filter: 'blur(12px)',
   }),
   center: {
     x: 0,
     opacity: 1,
-    filter: 'blur(0px)',
   },
   exit: (direction: number) => ({
-    x: direction > 0 ? -56 : 56,
+    x: direction > 0 ? -36 : 36,
     opacity: 0,
-    filter: 'blur(12px)',
   }),
 };
 
 const antiCapperPains = [
   'Реклама скам-казино и постоянный спам',
-  'Удаление/редактирование минусовых прогнозов',
+  'Удаление или редактирование минусовых прогнозов',
   'Обещания 100% проходимости и договорных матчей',
+  'Поздние сигналы, когда линия уже ушла',
+  'Нет флэта, риска и понятной дистанции',
+];
+
+const goalOptions: ChoiceOption<OnboardingGoal>[] = [
+  {
+    value: 'fast_signals',
+    title: 'Быстрые входы по линии',
+    description: 'Нужны уведомления, пока коэффициент еще живой.',
+    icon: Zap,
+  },
+  {
+    value: 'discipline',
+    title: 'Дисциплина банка',
+    description: 'Хочу работать по флэту, без импульсивных доборов.',
+    icon: Gauge,
+  },
+  {
+    value: 'trust_check',
+    title: 'Проверить честность',
+    description: 'Сначала смотрю прозрачность, статистику и логику.',
+    icon: ShieldCheck,
+  },
+  {
+    value: 'raise_level',
+    title: 'Поднять уровень',
+    description: 'Интересуют value, движение линии и холодная математика.',
+    icon: TrendingUp,
+  },
 ];
 
 const experienceOptions: ChoiceOption<ExperienceLevel>[] = [
@@ -126,7 +150,7 @@ const experienceOptions: ChoiceOption<ExperienceLevel>[] = [
     value: 'pro',
     title: 'Профи',
     description: 'Работаете от value, линии, риска и холодной математики.',
-    icon: Zap,
+    icon: Brain,
   },
 ];
 
@@ -146,7 +170,7 @@ const bankrollOptions: ChoiceOption<BankrollSize>[] = [
   {
     value: 'high',
     title: 'Более 100 000 ₽',
-    description: 'Крупный банк: скрытый PRO-контур и повышенный Brain Score.',
+    description: 'Крупный банк: расширенный контроль риска и приоритет точности.',
     icon: TrendingUp,
   },
 ];
@@ -187,20 +211,29 @@ const fallbackBookmakers: BookmakerResponse[] = [
   { id: 12, name: 'Другие', code: 'other', is_active: true },
 ];
 
-
-const calibrationLogs = [
-  'Синхронизация с сервером...',
-  'Оценка совместимости (94% Match)...',
-  'Расчет математического ожидания профита...',
-];
-
 const pulseLogs = [
-  '🔥 Сейчас калибруются: 142 пользователя',
-  '⚡ Ставка на Футбол рассчитана в плюс',
-  '🧠 Shamrai Brain сверяет риск-профили',
-  '💎 Закрыт новый value-сигнал для VIP-ленты',
-  '📡 Абонементы обновляют баланс без фрибетов',
+  '142 профиля сверяют риск-модель',
+  'Линия по футболу ушла на 0.18 пункта',
+  'Shamrai Brain пересчитал флэт-порог',
+  'Закрытая лента обновила value-сигнал',
+  'Абонементы работают без фрибет-приманок',
 ];
+
+const favoriteSportLabels = [
+  'Футбол',
+  'Хоккей',
+  'Баскетбол',
+  'Теннис',
+  'Киберспорт',
+  'Единоборства',
+  'Бокс',
+  'Н/Т',
+  'Другие',
+];
+
+const favoriteSportOptions = favoriteSportLabels
+  .map((label) => SPORT_OPTIONS.find((sport) => sport.label === label))
+  .filter((sport): sport is NonNullable<typeof sport> => Boolean(sport));
 
 const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFromRub: number }> = {
   RUB: { label: '₽', symbol: '₽', rateFromRub: 1 },
@@ -208,26 +241,40 @@ const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFr
   FLATS: { label: '₮', symbol: '₮', rateFromRub: 92 },
 };
 
+const riskFlatHint: Record<RiskTolerance, string> = {
+  cautious: 'Базовый коридор флэта: 1-2% от банка. Цель - пережить просадку без нервных догонов.',
+  balanced: 'Базовый коридор флэта: 2-3% от банка. Это рабочий режим для дистанции и скорости.',
+  aggressive: 'Базовый коридор флэта: 3-5% от банка. Входы быстрее, но цена ошибки выше.',
+};
+
+const sourceLabels: Record<string, string> = {
+  channel_24h_resolved_bets: 'по закрытым прогнозам Shamrai за последние 24 часа',
+  simulated_from_empty_24h_window: 'ретро-симуляция по вашей модели риска',
+  mock_channel_24h: 'локальная демо-выборка Shamrai за 24 часа',
+};
+
 export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizProps) {
   const user = useAuthSelector((state) => state.user);
   const reduceMotion = useReducedMotion();
   const performanceProfile = usePerformanceProfile();
   const reduceContinuousMotion = reduceMotion || performanceProfile.shouldReduceMotion;
+  const calmControls = reduceContinuousMotion || performanceProfile.isBalanced;
   const [stepIndex, setStepIndex] = useState(0);
   const [direction, setDirection] = useState(1);
   const [answers, setAnswers] = useState<OnboardingAnswers>({
     anti_capper_pains: [],
+    onboarding_goal: null,
     experience_level: null,
     bankroll_size: null,
     risk_tolerance: null,
     bookmaker_codes: [],
     other_bookmaker_name: '',
+    favorite_sports: [],
     vk_user_id: null,
   });
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>(fallbackBookmakers);
   const [bookmakersLoading, setBookmakersLoading] = useState(true);
   const [recommendation, setRecommendation] = useState<OnboardingRecommendation | null>(null);
-  const [calibrationIndex, setCalibrationIndex] = useState(0);
   const [currency, setCurrency] = useState<CurrencyCode>('RUB');
   const [manifestAccepted, setManifestAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -239,7 +286,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const [flashActive, setFlashActive] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const proMode = answers.bankroll_size === 'high';
+  const proMode = answers.bankroll_size === 'high' || answers.experience_level === 'pro';
   const glow = proMode ? GOLD_GLOW : PINK_GLOW;
   const accent = proMode ? GOLD : PINK;
   const secondaryGlow = proMode ? GOLD_GLOW : CYAN_GLOW;
@@ -266,18 +313,10 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       const timer = window.setTimeout(() => {
         setDirection(1);
         setStepIndex(1);
-      }, 850);
+      }, 650);
       return () => window.clearTimeout(timer);
     }
   }, [stepIndex, user?.vk_user_id]);
-
-  const canContinue = useMemo(() => {
-    if (stepIndex === 0 || stepIndex === 4) return false;
-    if (stepIndex === 1) return answers.anti_capper_pains.length > 0;
-    if (stepIndex === 2) return Boolean(answers.experience_level && answers.bankroll_size);
-    if (stepIndex === 3) return Boolean(answers.risk_tolerance && answers.bookmaker_codes.length);
-    return manifestAccepted && !finishing;
-  }, [answers, finishing, manifestAccepted, stepIndex]);
 
   useEffect(() => {
     let mounted = true;
@@ -302,13 +341,27 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   }, []);
 
   useEffect(() => {
-    if (stepIndex !== 4) return;
-    setCalibrationIndex(0);
-    const timer = window.setInterval(() => {
-      setCalibrationIndex((current) => Math.min(current + 1, calibrationLogs.length - 1));
-    }, 820);
-    return () => window.clearInterval(timer);
-  }, [stepIndex]);
+    if (typeof Image === 'undefined') return;
+    visibleBookmakers.forEach((bookmaker) => {
+      const image = new Image();
+      image.src = getBookmakerLogoSrc(bookmaker);
+    });
+  }, [visibleBookmakers]);
+
+  const canContinue = useMemo(() => {
+    if (stepIndex === 0) return false;
+    if (stepIndex === 1) return answers.anti_capper_pains.length > 0;
+    if (stepIndex === 2) return Boolean(answers.onboarding_goal && answers.experience_level);
+    if (stepIndex === 3) return Boolean(answers.bankroll_size && answers.risk_tolerance);
+    if (stepIndex === 4) {
+      return isBookmakerStepComplete({
+        selectedBookmakerCodes: answers.bookmaker_codes,
+        otherBookmakerName: answers.other_bookmaker_name,
+        favoriteSports: answers.favorite_sports,
+      });
+    }
+    return manifestAccepted && !finishing;
+  }, [answers, finishing, manifestAccepted, stepIndex]);
 
   const togglePain = useCallback((pain: string) => {
     setErrorMessage(null);
@@ -327,39 +380,56 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
 
   const toggleBookmaker = useCallback((bookmakerCode: string) => {
     setErrorMessage(null);
-    setAnswers((current) => {
-      return {
-        ...current,
-        bookmaker_codes: toggleBookmakerCodeSelection(current.bookmaker_codes, bookmakerCode),
-      };
-    });
+    setAnswers((current) => ({
+      ...current,
+      bookmaker_codes: toggleBookmakerCodeSelection(current.bookmaker_codes, bookmakerCode),
+      other_bookmaker_name: bookmakerCode === 'other' && current.bookmaker_codes.includes('other')
+        ? ''
+        : current.other_bookmaker_name,
+    }));
   }, []);
 
-  const handleOtherBookmakerName = useCallback((value: string) => {
+  const toggleFavoriteSport = useCallback((sport: string) => {
     setErrorMessage(null);
-    setAnswers((current) => ({ ...current, other_bookmaker_name: value }));
+    setAnswers((current) => ({
+      ...current,
+      favorite_sports: current.favorite_sports.includes(sport)
+        ? current.favorite_sports.filter((item) => item !== sport)
+        : [...current.favorite_sports, sport],
+    }));
   }, []);
 
   const revealResults = () => {
     setDirection(1);
-    setFlashActive(true);
+    setFlashActive(!reduceContinuousMotion);
     setStepIndex(5);
-    window.setTimeout(() => setFlashActive(false), 760);
+    if (!reduceContinuousMotion) {
+      window.setTimeout(() => setFlashActive(false), 560);
+    }
   };
 
   const submitCalibration = async (nextVkUserId = answers.vk_user_id) => {
-    if (!answers.experience_level || !answers.bankroll_size || !answers.risk_tolerance || !answers.bookmaker_codes.length) return;
+    if (!answers.onboarding_goal || !answers.experience_level || !answers.bankroll_size || !answers.risk_tolerance) return;
+
+    if (!isBookmakerStepComplete({
+      selectedBookmakerCodes: answers.bookmaker_codes,
+      otherBookmakerName: answers.other_bookmaker_name,
+      favoriteSports: answers.favorite_sports,
+    })) {
+      setErrorMessage('Выберите БК, любимые виды спорта и укажите название, если выбрали "Другие".');
+      return;
+    }
 
     try {
       setSubmitting(true);
       setErrorMessage(null);
-      setDirection(1);
-      setStepIndex(4);
       trackEvent('Onboarding Submitted', {
+        onboarding_goal: answers.onboarding_goal,
         experience_level: answers.experience_level,
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
         bookmakers_count: answers.bookmaker_codes.length,
+        favorite_sports_count: answers.favorite_sports.length,
         vk_linked: Boolean(nextVkUserId),
         currency,
       });
@@ -368,24 +438,15 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       const [response] = await Promise.all([
         apiFetch<OnboardingResponse>(onboardingEndpoint, {
           method: 'POST',
-          body: JSON.stringify({
-            anti_capper_pains: answers.anti_capper_pains,
-            experience_level: answers.experience_level,
-            bankroll_size: answers.bankroll_size,
-            risk_tolerance: answers.risk_tolerance,
-            bookmakers: answers.bookmaker_codes,
-            primary_bookmaker: answers.bookmaker_codes[0],
-            other_bookmaker_name: answers.other_bookmaker_name.trim() || null,
-            vk_user_id: nextVkUserId,
-            currency_preference: currency,
-          }),
+          body: JSON.stringify(buildOnboardingPayload(answers, currency, nextVkUserId)),
         }),
-        new Promise((resolve) => window.setTimeout(resolve, 3600)),
+        new Promise((resolve) => window.setTimeout(resolve, reduceContinuousMotion ? 420 : 860)),
       ]);
 
       setRecommendation(response.recommendation);
       setCurrency(response.recommendation.currency || currency);
       trackEvent('Onboarding Result Shown', {
+        onboarding_goal: answers.onboarding_goal,
         experience_level: answers.experience_level,
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
@@ -394,13 +455,15 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       });
       revealResults();
     } catch (error: any) {
-      setStepIndex(3);
+      setStepIndex(4);
       setErrorMessage(error?.message || 'Не удалось завершить калибровку Shamrai');
       trackEvent('Onboarding Submit Failed', {
+        onboarding_goal: answers.onboarding_goal,
         experience_level: answers.experience_level,
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
         bookmakers_count: answers.bookmaker_codes.length,
+        favorite_sports_count: answers.favorite_sports.length,
         vk_linked: Boolean(nextVkUserId),
       });
     } finally {
@@ -409,12 +472,12 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   };
 
   const handleVkLink = async () => {
-      if (!vkReady) {
-        setVkLinkStatus('error');
-        setVkLinkError('VK ID не настроен. Обратитесь к администратору Shamrai.');
-        trackEvent('Onboarding VK Link Failed', { reason: 'not_configured' });
-        return;
-      }
+    if (!vkReady) {
+      setVkLinkStatus('error');
+      setVkLinkError('VK ID не настроен. Можно продолжить без привязки и включить VK позже в профиле.');
+      trackEvent('Onboarding VK Link Failed', { reason: 'not_configured' });
+      return;
+    }
 
     try {
       setVkLinkStatus('loading');
@@ -428,11 +491,11 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       window.setTimeout(() => {
         setDirection(1);
         setStepIndex(1);
-      }, 800);
+      }, 620);
     } catch (error: any) {
       if (isVkRedirectStartedError(error)) return;
       setVkLinkStatus('error');
-      setVkLinkError(error?.message || 'Не удалось привязать VK. Попробуйте еще раз.');
+      setVkLinkError(error?.message || 'Не удалось привязать VK. Можно продолжить и вернуться к этому позже.');
       trackEvent('Onboarding VK Link Failed', { reason: 'request_error' });
     }
   };
@@ -461,12 +524,12 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   };
 
   const handleNext = async () => {
-    if (stepIndex === 1 || stepIndex === 2) {
+    if (stepIndex > 0 && stepIndex < 4) {
       setDirection(1);
       setStepIndex((current) => current + 1);
       return;
     }
-    if (stepIndex === 3) {
+    if (stepIndex === 4) {
       await submitCalibration();
       return;
     }
@@ -475,9 +538,11 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         setFinishing(true);
         await onCompleted();
         trackEvent('Onboarding Completed', {
+          onboarding_goal: answers.onboarding_goal,
           experience_level: answers.experience_level,
           bankroll_size: answers.bankroll_size,
           risk_tolerance: answers.risk_tolerance,
+          favorite_sports_count: answers.favorite_sports.length,
           vk_linked: Boolean(answers.vk_user_id),
           currency,
         });
@@ -490,8 +555,10 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const handleBack = () => {
     if (stepIndex === 0 || submitting || finishing) return;
     setDirection(-1);
-    setStepIndex((current) => current - 1);
+    setStepIndex((current) => Math.max(0, current - 1));
   };
+
+  const showPulseWidget = stepIndex !== 4 && !performanceProfile.isLowPower && !performanceProfile.isBalanced;
 
   return (
     <section
@@ -512,12 +579,12 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         {flashActive && (
           <motion.div
             initial={{ opacity: 0 }}
-            animate={{ opacity: [0, 0.95, 0] }}
+            animate={{ opacity: [0, 0.9, 0] }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.68, ease: 'easeOut' }}
+            transition={{ duration: 0.52, ease: 'easeOut' }}
             className="pointer-events-none absolute inset-0 z-40"
             style={{
-              background: 'linear-gradient(115deg, transparent, rgba(255,255,255,0.98), rgba(0,210,255,0.78), transparent)',
+              background: 'linear-gradient(115deg, transparent, rgba(255,255,255,0.92), rgba(0,210,255,0.7), transparent)',
             }}
           />
         )}
@@ -535,17 +602,18 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
               initial="enter"
               animate="center"
               exit="exit"
-              transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
-            className={`min-h-[520px] rounded-[1.45rem] ${GLASS_SURFACE} p-4 shadow-glass`}
+              transition={{ duration: reduceContinuousMotion ? 0.12 : 0.28, ease: [0.16, 1, 0.3, 1] }}
+              className={`min-h-[520px] rounded-[1.45rem] ${GLASS_SURFACE} p-4 shadow-glass`}
               style={{ boxShadow: stepIndex === 5 ? secondaryGlow : undefined }}
             >
               {stepIndex === 0 && (
-                <VkLinkStep
+                <IntroVkStep
                   status={vkLinkStatus}
                   displayName={vkDisplayName}
                   error={vkLinkError}
                   vkReady={vkReady}
                   glow={glow}
+                  calm={calmControls}
                   onLink={handleVkLink}
                   onSkip={handleSkipVk}
                 />
@@ -558,31 +626,37 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                 />
               )}
               {stepIndex === 2 && (
-                <ExperienceBankrollStep
+                <GoalExperienceStep
+                  goal={answers.onboarding_goal}
                   experience={answers.experience_level}
-                  bankroll={answers.bankroll_size}
                   proMode={proMode}
                   glow={glow}
+                  onGoal={(value) => updateAnswer('onboarding_goal', value)}
                   onExperience={(value) => updateAnswer('experience_level', value)}
-                  onBankroll={(value) => updateAnswer('bankroll_size', value)}
                 />
               )}
               {stepIndex === 3 && (
-                <RiskBookmakerStep
+                <BankrollRiskStep
+                  bankroll={answers.bankroll_size}
                   risk={answers.risk_tolerance}
-                  bookmakers={visibleBookmakers}
-                  selectedBookmakerCodes={answers.bookmaker_codes}
-                  otherBookmakerName={answers.other_bookmaker_name}
-                  bookmakersLoading={bookmakersLoading}
                   proMode={proMode}
                   glow={glow}
+                  onBankroll={(value) => updateAnswer('bankroll_size', value)}
                   onRisk={(value) => updateAnswer('risk_tolerance', value)}
-                  onBookmaker={toggleBookmaker}
-                  onOtherBookmakerName={handleOtherBookmakerName}
                 />
               )}
               {stepIndex === 4 && (
-                <CalibrationScreen activeIndex={calibrationIndex} proMode={proMode} glow={glow} reduceMotion={reduceContinuousMotion} />
+                <BookmakerSportsStep
+                  bookmakers={visibleBookmakers}
+                  selectedBookmakerCodes={answers.bookmaker_codes}
+                  otherBookmakerName={answers.other_bookmaker_name}
+                  favoriteSports={answers.favorite_sports}
+                  bookmakersLoading={bookmakersLoading}
+                  proMode={proMode}
+                  onBookmaker={toggleBookmaker}
+                  onOtherBookmakerName={(value) => updateAnswer('other_bookmaker_name', value)}
+                  onFavoriteSport={toggleFavoriteSport}
+                />
               )}
               {stepIndex === 5 && (
                 <FinalScreen
@@ -592,7 +666,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                   manifestAccepted={manifestAccepted}
                   finishing={finishing}
                   glow={glow}
-                  reduceMotion={reduceContinuousMotion}
+                  calm={calmControls}
                   onCurrencyChange={setCurrency}
                   onToggleManifest={() => setManifestAccepted((current) => !current)}
                   onOpenHub={handleNext}
@@ -616,7 +690,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
             )}
           </AnimatePresence>
 
-          {stepIndex > 0 && stepIndex < 4 ? (
+          {stepIndex > 0 && stepIndex < 5 ? (
             <div className={`grid gap-2 ${stepIndex === 1 ? 'sm:grid-cols-2' : 'sm:grid-cols-[0.82fr_1.35fr]'}`}>
               <ElectricButton
                 label={stepIndex === 1 ? 'Пропустить опрос' : 'Назад'}
@@ -625,23 +699,25 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                 disabled={submitting || skipping}
                 loading={stepIndex === 1 && skipping}
                 glow={glow}
+                calm={calmControls || stepIndex === 4}
                 onClick={stepIndex === 1 ? handleSkip : handleBack}
               />
               <ElectricButton
-                label="Далее"
+                label={stepIndex === 4 ? 'Рассчитать модель' : 'Далее'}
                 icon={submitting ? Loader2 : ChevronRight}
                 iconAfter
                 highlighted={canContinue}
                 loading={submitting}
                 disabled={!canContinue || submitting || skipping}
                 glow={glow}
+                calm={calmControls || stepIndex === 4}
                 onClick={handleNext}
               />
             </div>
           ) : null}
         </div>
 
-        <PulseWidget proMode={proMode} glow={proMode ? GOLD_GLOW : CYAN_GLOW} />
+        {showPulseWidget && <PulseWidget proMode={proMode} glow={proMode ? GOLD_GLOW : CYAN_GLOW} />}
       </div>
     </section>
   );
@@ -652,8 +728,8 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
     <div className={`rounded-[1.35rem] ${GLASS_SURFACE} p-3`} style={{ boxShadow: glow }}>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-[10px] font-black uppercase tracking-[0.22em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>
-            Shamrai Neural Gate
+          <p className="text-[10px] font-black uppercase tracking-[0.18em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>
+            Shamrai intake model
           </p>
           <h1 className="mt-1 font-display text-xl font-black leading-none text-white">Добро пожаловать</h1>
         </div>
@@ -680,6 +756,105 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
   );
 }
 
+function IntroVkStep({
+  status,
+  displayName,
+  error,
+  vkReady,
+  glow,
+  calm,
+  onLink,
+  onSkip,
+}: {
+  status: VkLinkStatus;
+  displayName: string | null;
+  error: string | null;
+  vkReady: boolean;
+  glow: string;
+  calm: boolean;
+  onLink: () => void;
+  onSkip: () => void;
+}) {
+  const linked = status === 'linked';
+  const loading = status === 'loading';
+
+  return (
+    <div className="flex min-h-[490px] flex-col justify-between gap-5">
+      <div className="space-y-5">
+        <StepTitle
+          index="01"
+          title="Настроим ленту за 60 секунд"
+          caption="Сначала поймем ваш стиль: БК, риск, спорт и цель. После этого Shamrai покажет персональную модель входа."
+        />
+
+        <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
+          <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_0%,rgba(0,210,255,0.24),transparent_38%),linear-gradient(135deg,rgba(255,255,255,0.06),transparent)]" />
+          <div className="relative z-10 grid gap-3">
+            <div className="flex items-center gap-3">
+              <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl ${GLASS_SURFACE}`}>
+                <Brain className="h-7 w-7 text-cyan-100" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-black leading-tight text-white">Не капперская анкета, а калибровка риска</p>
+                <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
+                  Мы не обещаем исходы. Мы настраиваем фильтр, флэт и скорость доставки под ваш профиль.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <Metric label="Время" value="~60с" caption="без длинной формы" compact />
+              <Metric label="Данные" value="CRM" caption="видят админы" compact />
+              <Metric label="Риск" value="18+" caption="без гарантий" compact />
+            </div>
+          </div>
+        </div>
+
+        <AnimatePresence mode="wait">
+          {linked ? (
+            <motion.div
+              key="vk-linked"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              className="rounded-2xl border border-emerald-200/20 bg-emerald-400/12 p-4 text-center text-sm font-black leading-relaxed text-emerald-50 shadow-[0_0_34px_rgba(34,197,94,0.32)]"
+            >
+              VK ID привязан: {displayName || 'профиль VK'}. Переходим к настройке.
+            </motion.div>
+          ) : (
+            <ElectricButton
+              label={loading ? 'Открываем VK ID...' : 'Связать VK для дублирования'}
+              icon={loading ? Loader2 : Zap}
+              highlighted={vkReady && !loading}
+              loading={loading}
+              disabled={!vkReady || loading}
+              glow={glow}
+              calm={calm}
+              onClick={onLink}
+            />
+          )}
+        </AnimatePresence>
+
+        {(!vkReady || error) && !linked && (
+          <p className="rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-300">
+            {error || 'VK ID не настроен для этой сборки. Можно продолжить без привязки.'}
+          </p>
+        )}
+      </div>
+
+      {!linked && (
+        <button
+          type="button"
+          onClick={onSkip}
+          disabled={loading}
+          className="mx-auto rounded-full border border-white/5 bg-white/[0.025] px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-white/15 hover:bg-white/[0.055] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Настроить без VK
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AntiCapperStep({
   selectedPains,
   onTogglePain,
@@ -691,7 +866,7 @@ function AntiCapperStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="02" title="Что вас больше всего раздражает в других капперах или каналах?" caption="Выберите хотя бы один пункт. Это триггер честности Shamrai." />
+      <StepTitle index="02" title="Что сразу убивает доверие?" caption="Выберите все, что бесит. По этим ответам мы понимаем, как говорить с вами честно и без цирка." />
       <div className="space-y-2">
         {antiCapperPains.map((pain) => {
           const selected = selectedPains.includes(pain);
@@ -699,6 +874,7 @@ function AntiCapperStep({
             <button
               key={pain}
               type="button"
+              aria-pressed={selected}
               onClick={() => onTogglePain(pain)}
               className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-2xl ${GLASS_SURFACE} p-3 text-left transition duration-300 active:scale-[0.98]`}
               style={selected ? { boxShadow: glow } : undefined}
@@ -715,13 +891,13 @@ function AntiCapperStep({
       <AnimatePresence>
         {selectedPains.length > 0 && (
           <motion.div
-            initial={{ opacity: 0, y: 14, filter: 'blur(10px)' }}
-            animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-            exit={{ opacity: 0, y: 10, filter: 'blur(10px)' }}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
             className={`rounded-2xl ${GLASS_SURFACE} p-4 text-sm font-bold leading-relaxed text-white`}
             style={{ boxShadow: glow }}
           >
-            Мы тоже это ненавидим. В Shamrai вся статистика верифицирована, рекламы БК нет, а за честность отвечает алгоритм. Вы в правильном месте.
+            Принято. В Shamrai фокус на прозрачной дистанции, риске и скорости входа, а не на сказках про безошибочные серии.
           </motion.div>
         )}
       </AnimatePresence>
@@ -729,240 +905,168 @@ function AntiCapperStep({
   );
 }
 
-function ExperienceBankrollStep({
+function GoalExperienceStep({
+  goal,
   experience,
-  bankroll,
   proMode,
   glow,
+  onGoal,
   onExperience,
-  onBankroll,
 }: {
+  goal: OnboardingGoal | null;
   experience: ExperienceLevel | null;
-  bankroll: BankrollSize | null;
   proMode: boolean;
   glow: string;
+  onGoal: (value: OnboardingGoal) => void;
   onExperience: (value: ExperienceLevel) => void;
-  onBankroll: (value: BankrollSize) => void;
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="03" title="Опыт и рабочий банк" caption="Shamrai не выдает фрибеты. Он настраивает дисциплину абонемента." />
-      <OptionGroup title="Оценка опыта" options={experienceOptions} value={experience} proMode={proMode} glow={glow} onSelect={onExperience} />
-      <OptionGroup title="Размер банка" options={bankrollOptions} value={bankroll} proMode={proMode} glow={glow} onSelect={onBankroll} />
-      <AnimatePresence>
-        {bankroll === 'high' && (
-          <motion.div
-            initial={{ opacity: 0, y: 14, filter: 'blur(10px)' }}
-            animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-            exit={{ opacity: 0, y: 10, filter: 'blur(10px)' }}
-            className={`rounded-2xl ${GLASS_SURFACE} p-4 text-sm font-black leading-relaxed text-amber-100`}
-            style={{ boxShadow: GOLD_GLOW }}
-          >
-            Обнаружен крупный рабочий банк. Автоматически активирован скрытый интерфейс 'Shamrai PRO' с доступом к повышенному Brain Score.
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <StepTitle index="03" title="Цель и уровень" caption="Это попадет в CRM: админы увидят, кто пришел за скоростью, кто за дисциплиной, а кто сначала проверяет доверие." />
+      <OptionGroup title="Зачем вы здесь" options={goalOptions} value={goal} proMode={proMode} glow={glow} onSelect={onGoal} />
+      <OptionGroup title="Опыт" options={experienceOptions} value={experience} proMode={proMode} glow={glow} onSelect={onExperience} />
     </div>
   );
 }
 
-function RiskBookmakerStep({
+function BankrollRiskStep({
+  bankroll,
   risk,
+  proMode,
+  glow,
+  onBankroll,
+  onRisk,
+}: {
+  bankroll: BankrollSize | null;
+  risk: RiskTolerance | null;
+  proMode: boolean;
+  glow: string;
+  onBankroll: (value: BankrollSize) => void;
+  onRisk: (value: RiskTolerance) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <StepTitle index="04" title="Банк и риск" caption="Здесь математика важнее эмоций: флэт считается от размера банка и выбранной амплитуды риска." />
+      <OptionGroup title="Рабочий банк" options={bankrollOptions} value={bankroll} proMode={proMode} glow={glow} onSelect={onBankroll} />
+      <OptionGroup title="Риск-профиль" options={riskOptions} value={risk} proMode={proMode} glow={glow} onSelect={onRisk} />
+      {risk && (
+        <div className={`rounded-2xl ${GLASS_SURFACE} p-4 text-sm font-bold leading-relaxed text-white`} style={{ boxShadow: glow }}>
+          {riskFlatHint[risk]}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BookmakerSportsStep({
   bookmakers,
   selectedBookmakerCodes,
   otherBookmakerName,
+  favoriteSports,
   bookmakersLoading,
   proMode,
-  glow,
-  onRisk,
   onBookmaker,
   onOtherBookmakerName,
+  onFavoriteSport,
 }: {
-  risk: RiskTolerance | null;
   bookmakers: BookmakerResponse[];
   selectedBookmakerCodes: string[];
   otherBookmakerName: string;
+  favoriteSports: string[];
   bookmakersLoading: boolean;
   proMode: boolean;
-  glow: string;
-  onRisk: (value: RiskTolerance) => void;
   onBookmaker: (value: string) => void;
   onOtherBookmakerName: (value: string) => void;
+  onFavoriteSport: (value: string) => void;
 }) {
   const selectedBookmakerCodeSet = useMemo(
     () => new Set(selectedBookmakerCodes),
     [selectedBookmakerCodes],
   );
+  const selectedSportSet = useMemo(() => new Set(favoriteSports), [favoriteSports]);
   const otherSelected = selectedBookmakerCodeSet.has('other');
-  const [draftOtherBookmakerName, setDraftOtherBookmakerName] = useState(otherBookmakerName);
-  const {
-    run: debounceOtherBookmakerName,
-    flush: flushOtherBookmakerName,
-  } = useDebouncedCallback((value: string) => {
-    onOtherBookmakerName(value);
-  }, 300);
-
-  useEffect(() => {
-    setDraftOtherBookmakerName(otherBookmakerName);
-  }, [otherBookmakerName]);
-
-  const handleOtherBookmakerNameChange = (value: string) => {
-    setDraftOtherBookmakerName(value);
-    debounceOtherBookmakerName(value);
-  };
 
   return (
     <div className="space-y-4">
-      <StepTitle index="04" title="Стратегия рисков и выбор БК" caption="Выберите стиль и несколько контор, с которыми реально работаете." />
-      <OptionGroup title="Стиль рисков" options={riskOptions} value={risk} proMode={proMode} glow={glow} onSelect={onRisk} />
-      <div className="space-y-2">
-        <SectionLabel>Букмекерские конторы</SectionLabel>
-        <div className="grid grid-cols-2 gap-2">
-          {bookmakers.map((bookmaker) => (
-            <BookmakerChoiceCard
-              key={bookmaker.code}
-              bookmaker={bookmaker}
-              selected={selectedBookmakerCodeSet.has(bookmaker.code)}
-              glow={glow}
-              proMode={proMode}
-              onSelect={onBookmaker}
-            />
-          ))}
+      <StepTitle index="05" title="БК и спорт-интересы" caption="Быстро отмечаем, где вы реально ставите и какие виды спорта важны. Этот экран специально облегчён, чтобы не лагал." />
+
+      <div className="onboarding-fast-picker rounded-2xl p-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <SectionLabel compact>Букмекерские конторы</SectionLabel>
+          <span className="shrink-0 rounded-xl border border-white/10 bg-slate-950/45 px-2 py-1 text-[10px] font-black text-cyan-100">
+            {selectedBookmakerCodes.length || 0}
+          </span>
         </div>
-        <AnimatePresence>
-          {otherSelected && (
-            <motion.div
-              initial={{ opacity: 0, y: 10, filter: 'blur(8px)' }}
-              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              exit={{ opacity: 0, y: 8, filter: 'blur(8px)' }}
-              className={`rounded-2xl ${GLASS_SURFACE} p-3`}
-              style={{ boxShadow: glow }}
-            >
-              <label className="block text-[10px] font-black uppercase tracking-[0.16em] text-cyan-100">
-                Какие БК используете?
-              </label>
-              <EmojiTextField
-                multiline
-                value={draftOtherBookmakerName}
-                onValueChange={handleOtherBookmakerNameChange}
-                onBlur={flushOtherBookmakerName}
-                rows={3}
-                maxLength={180}
-                placeholder="Например: 1xBet, Pinnacle, Bet365..."
-                className="mt-2 min-h-[88px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-sm font-bold leading-relaxed text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-200/60 focus:ring-2 focus:ring-cyan-300/25"
-              />
-              <p className="mt-2 text-[10px] font-semibold leading-snug text-slate-400">
-                Это поле только для информации. Рассылка останется по категории "Другие".
-              </p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="grid grid-cols-2 gap-2 min-[430px]:grid-cols-3">
+          {bookmakers.map((bookmaker) => {
+            const selected = selectedBookmakerCodeSet.has(bookmaker.code);
+            return (
+              <button
+                key={bookmaker.code}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => onBookmaker(bookmaker.code)}
+                className={`onboarding-bookmaker-card ${selected ? 'onboarding-bookmaker-card--active' : ''} ${proMode ? 'onboarding-bookmaker-card--pro' : ''}`}
+              >
+                <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="onboarding-bookmaker-card__logo" />
+                <span className="onboarding-bookmaker-card__name">{bookmaker.name}</span>
+                <span className="onboarding-bookmaker-card__check">
+                  {selected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
         {bookmakersLoading && (
-          <p className="text-center text-[10px] font-bold text-cyan-100">Обновляем список БК...</p>
+          <p className="mt-2 text-center text-[10px] font-bold text-cyan-100">Обновляем список БК...</p>
         )}
       </div>
-    </div>
-  );
-}
 
-function VkLinkStep({
-  status,
-  displayName,
-  error,
-  vkReady,
-  glow,
-  onLink,
-  onSkip,
-}: {
-  status: VkLinkStatus;
-  displayName: string | null;
-  error: string | null;
-  vkReady: boolean;
-  glow: string;
-  onLink: () => void;
-  onSkip: () => void;
-}) {
-  const linked = status === 'linked';
-  const loading = status === 'loading';
-
-  return (
-    <div className="flex min-h-[490px] flex-col justify-between gap-5">
-      <div className="space-y-5">
-        <StepTitle
-          index="01"
-          title="Дублирование сигналов в VK"
-          caption="Привяжи аккаунт ВКонтакте через VK ID. Для доставки анонсов в личные сообщения и VK-уведомления потребуется отдельно разрешить сообщения от сообщества Shamrai."
-        />
-
-        <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: linked ? '0 0 34px rgba(34,197,94,0.48), inset 0 1px 0 rgba(255,255,255,0.16)' : glow }}>
-          <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_0%,rgba(0,119,255,0.34),transparent_38%),linear-gradient(135deg,rgba(255,255,255,0.06),transparent)]" />
-          <div className="relative z-10 flex items-center gap-3">
-            <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/15 bg-[#0077ff]/90 text-lg font-black text-white shadow-[0_0_28px_rgba(0,119,255,0.46)]`}>
-              VK
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-black leading-tight text-white">VK ID secure link</p>
-              <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
-                VK ID связывает профиль; разрешения на доставку можно включить в профиле после привязки.
-              </p>
-            </div>
-          </div>
+      {otherSelected && (
+        <div className="rounded-2xl border border-white/10 bg-slate-950/42 p-3">
+          <label className="block text-[10px] font-black uppercase tracking-[0.12em] text-cyan-100">
+            Какие БК используете?
+          </label>
+          <EmojiTextField
+            multiline
+            value={otherBookmakerName}
+            onValueChange={onOtherBookmakerName}
+            rows={3}
+            maxLength={180}
+            placeholder="Например: 1xBet, Pinnacle, Bet365..."
+            className="mt-2 min-h-[88px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-sm font-bold leading-relaxed text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-200/60 focus:ring-2 focus:ring-cyan-300/25"
+          />
+          <p className="mt-2 text-[10px] font-semibold leading-snug text-slate-400">
+            Обязательно для CRM: админы увидят название, а рассылка останется по категории "Другие".
+          </p>
         </div>
-
-        <AnimatePresence mode="wait">
-          {linked ? (
-            <motion.div
-              key="vk-linked"
-              initial={{ opacity: 0, y: 12, filter: 'blur(10px)' }}
-              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              exit={{ opacity: 0, y: 8, filter: 'blur(10px)' }}
-              className="rounded-2xl border border-emerald-200/20 bg-emerald-400/12 p-4 text-center text-sm font-black leading-relaxed text-emerald-50 shadow-[0_0_34px_rgba(34,197,94,0.32)]"
-            >
-              ✅ VK ID привязан: {displayName || 'профиль VK'}. Для доставки включите разрешения VK в профиле.
-            </motion.div>
-          ) : (
-            <motion.button
-              key="vk-link-button"
-              type="button"
-              disabled={!vkReady || loading}
-              onClick={onLink}
-              whileTap={vkReady && !loading ? { scale: 0.98 } : undefined}
-              className={`group relative min-h-[64px] w-full overflow-hidden rounded-2xl border border-white/12 bg-white/5 px-4 text-left transition duration-300 disabled:cursor-not-allowed disabled:opacity-45`}
-              style={vkReady ? { boxShadow: glow } : undefined}
-            >
-              <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.16),transparent)]" />
-              <span className="relative z-10 flex items-center justify-center gap-3 text-sm font-black uppercase tracking-[0.08em] text-white">
-                <span className="text-lg">{loading ? '⏳' : '🔗'}</span>
-                {loading ? 'Открываем VK ID...' : 'Связать профиль VK'}
-              </span>
-            </motion.button>
-          )}
-        </AnimatePresence>
-
-        <AnimatePresence>
-          {(!vkReady || error) && !linked && (
-            <motion.p
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              className="rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-300"
-            >
-              {error || 'VK ID не настроен для этой сборки. Обратитесь к администратору Shamrai.'}
-            </motion.p>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {!linked && (
-        <button
-          type="button"
-          onClick={onSkip}
-          disabled={loading}
-          className="mx-auto rounded-full border border-white/5 bg-white/[0.025] px-4 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-500 transition hover:border-white/15 hover:bg-white/[0.055] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Пропустить привязку VK
-        </button>
       )}
+
+      <div className="onboarding-fast-picker rounded-2xl p-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <SectionLabel compact>Спорт-интересы</SectionLabel>
+          <span className="shrink-0 rounded-xl border border-white/10 bg-slate-950/45 px-2 py-1 text-[10px] font-black text-cyan-100">
+            {favoriteSports.length || 0}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-2 min-[430px]:grid-cols-3">
+          {favoriteSportOptions.map((sport) => {
+            const selected = selectedSportSet.has(sport.label);
+            return (
+              <button
+                key={sport.label}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => onFavoriteSport(sport.label)}
+                className={`onboarding-sport-chip ${selected ? 'onboarding-sport-chip--active' : ''}`}
+              >
+                <SportIconFrame label={sport.label} size="tiny" active={selected} />
+                <span className="truncate">{sport.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1004,20 +1108,20 @@ function OptionGroup<TValue extends string>({
 function StepTitle({ index, title, caption }: { index: string; title: string; caption: string }) {
   return (
     <div className="space-y-2 text-center">
-      <div className={`mx-auto inline-flex rounded-full ${GLASS_SURFACE} px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-cyan-100`}>
-        calibration step {index}
+      <div className={`mx-auto inline-flex rounded-full ${GLASS_SURFACE} px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-cyan-100`}>
+        step {index}
       </div>
       <h2 className="font-display text-2xl font-black leading-tight text-white">{title}</h2>
-      <p className="mx-auto max-w-[330px] text-xs font-semibold leading-relaxed text-slate-300">{caption}</p>
+      <p className="mx-auto max-w-[360px] text-xs font-semibold leading-relaxed text-slate-300">{caption}</p>
     </div>
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function SectionLabel({ children, compact = false }: { children: React.ReactNode; compact?: boolean }) {
   return (
-    <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-300">
+    <div className={`flex min-w-0 items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-300 ${compact ? 'flex-1' : ''}`}>
       <span className="h-px flex-1 bg-white/10" />
-      <span>{children}</span>
+      <span className="shrink-0">{children}</span>
       <span className="h-px flex-1 bg-white/10" />
     </div>
   );
@@ -1063,112 +1167,6 @@ function ChoiceCard<TValue extends string>({
   );
 }
 
-interface BookmakerChoiceCardProps {
-  bookmaker: BookmakerResponse;
-  selected: boolean;
-  glow: string;
-  proMode: boolean;
-  onSelect: (value: string) => void;
-}
-
-const BookmakerChoiceCard = React.memo(function BookmakerChoiceCard({
-  bookmaker,
-  selected,
-  glow,
-  proMode,
-  onSelect,
-}: BookmakerChoiceCardProps) {
-  const handleClick = useCallback(() => {
-    onSelect(bookmaker.code);
-  }, [bookmaker.code, onSelect]);
-
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={handleClick}
-      className={`group relative min-h-[82px] w-full overflow-hidden rounded-2xl ${GLASS_SURFACE} p-3 text-left text-white transition duration-300 active:scale-[0.98]`}
-      style={selected ? { boxShadow: glow } : undefined}
-    >
-      <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.12),transparent)]" />
-      <span className="relative z-10 flex h-full items-center gap-3">
-        <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="h-10 w-12" />
-        <span className="min-w-0 flex-1">
-          <span className="block break-words text-sm font-black leading-tight">{bookmaker.name}</span>
-          {bookmaker.code !== 'other' && (
-            <span className="mt-1 block text-[10px] font-semibold leading-snug text-slate-400">
-              {selected ? 'Добавлена в профиль' : 'Multi-select'}
-            </span>
-          )}
-        </span>
-        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${GLASS_SURFACE}`} style={selected ? { boxShadow: glow, color: proMode ? GOLD : CYAN } : undefined}>
-          {selected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
-        </span>
-      </span>
-    </button>
-  );
-});
-
-function CalibrationScreen({
-  activeIndex,
-  proMode,
-  glow,
-  reduceMotion,
-}: {
-  activeIndex: number;
-  proMode: boolean;
-  glow: string;
-  reduceMotion: boolean;
-}) {
-  return (
-    <div className="flex min-h-[490px] flex-col items-center justify-center gap-6 text-center">
-      <motion.div
-        animate={reduceMotion ? undefined : {
-          scale: [1, 1.09, 0.99, 1],
-          rotate: [0, 1.5, -1.5, 0],
-          boxShadow: [glow, proMode ? GOLD_GLOW : CYAN_GLOW, glow],
-        }}
-        transition={reduceMotion ? undefined : { duration: 1.75, repeat: Infinity, ease: 'easeInOut' }}
-        className={`relative flex h-40 w-40 items-center justify-center rounded-[2rem] ${GLASS_SURFACE}`}
-        style={reduceMotion ? { boxShadow: glow } : undefined}
-      >
-        <span className="absolute inset-2 rounded-[2rem] bg-white/5 blur-2xl" />
-        <Brain className="relative z-10 h-24 w-24" style={{ color: proMode ? GOLD : CYAN, filter: `drop-shadow(0 0 24px ${proMode ? GOLD : CYAN})` }} />
-      </motion.div>
-
-      <div className="space-y-2">
-        <p className="font-display text-2xl font-black text-white">Синхронизация Разума</p>
-        <p className="text-xs font-bold uppercase tracking-[0.16em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>
-          Shamrai Brain is online
-        </p>
-      </div>
-
-      <div className={`w-full overflow-hidden rounded-2xl ${GLASS_SURFACE} p-3`}>
-        <AnimatePresence mode="wait">
-          <motion.p
-            key={calibrationLogs[activeIndex]}
-            initial={{ opacity: 0, x: 18 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -18 }}
-            transition={{ duration: 0.26 }}
-            className="text-left font-mono text-[11px] font-bold text-cyan-100"
-          >
-            {calibrationLogs[activeIndex]}
-          </motion.p>
-        </AnimatePresence>
-        <div className={`mt-3 h-2 overflow-hidden rounded-full ${GLASS_SURFACE}`}>
-          <motion.span
-            className={`block h-full rounded-full ${GLASS_SURFACE}`}
-            animate={reduceMotion ? undefined : { x: ['-100%', '110%'] }}
-            transition={reduceMotion ? undefined : { duration: 1.0, repeat: Infinity, ease: 'easeInOut' }}
-            style={{ boxShadow: glow }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function FinalScreen({
   recommendation,
   currency,
@@ -1176,10 +1174,10 @@ function FinalScreen({
   manifestAccepted,
   finishing,
   glow,
+  calm,
   onCurrencyChange,
   onToggleManifest,
   onOpenHub,
-  reduceMotion,
 }: {
   recommendation: OnboardingRecommendation | null;
   currency: CurrencyCode;
@@ -1187,7 +1185,7 @@ function FinalScreen({
   manifestAccepted: boolean;
   finishing: boolean;
   glow: string;
-  reduceMotion: boolean;
+  calm: boolean;
   onCurrencyChange: (value: CurrencyCode) => void;
   onToggleManifest: () => void;
   onOpenHub: () => void;
@@ -1198,6 +1196,9 @@ function FinalScreen({
   const amountLabel = `${currencyMeta[currency].symbol}${missedAmount.toLocaleString('ru-RU', {
     maximumFractionDigits: currency === 'RUB' ? 0 : 1,
   })}`;
+  const sourceLabel = recommendation?.source
+    ? sourceLabels[recommendation.source] || recommendation.source
+    : 'модельная оценка Shamrai';
 
   return (
     <div className="space-y-4">
@@ -1205,31 +1206,37 @@ function FinalScreen({
         <div className={`mx-auto flex h-20 w-20 items-center justify-center rounded-[1.75rem] ${GLASS_SURFACE}`} style={{ boxShadow: glow }}>
           <Check className="h-10 w-10 text-white" strokeWidth={3} />
         </div>
-        <h2 className="font-display text-2xl font-black leading-tight text-white">Результаты и Манифест</h2>
-        <p className="text-xs font-semibold leading-relaxed text-slate-300">Все дисциплины уже подключены к ленте. На старте нет фрибетов, только абонементная модель.</p>
+        <h2 className="font-display text-2xl font-black leading-tight text-white">Ваша модель собрана</h2>
+        <p className="text-xs font-semibold leading-relaxed text-slate-300">
+          Ниже не обещание выигрыша, а ретро-оценка того, как ваш риск-профиль смотрелся бы на последнем окне Shamrai.
+        </p>
       </div>
 
       <div className={`rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
-        <p className="text-[10px] font-black uppercase tracking-[0.18em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>Персональный флэт</p>
+        <p className="text-[10px] font-black uppercase tracking-[0.16em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>Персональный флэт</p>
         <p className="mt-2 font-display text-xl font-black text-white">
-          Рекомендация системы: строго {recommendation?.flat_stake_percent ?? 3}% от банка
+          {recommendation?.flat_stake_percent ?? 3}% от банка
+        </p>
+        <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-300">
+          Это дисциплинарный размер входа, а не призыв увеличивать ставку после минуса.
         </p>
       </div>
 
       <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: proMode ? GOLD_GLOW : PINK_GLOW }}>
         <div className="relative z-10 space-y-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-pink-100">FOMO-модуль</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-pink-100">FOMO-ретро окно</p>
           <div className="grid grid-cols-2 gap-2">
-            <Metric label="Потенциальный профит" value={`до +${recommendation?.monthly_profit_percent ?? 35}%`} caption="в месяц" />
-            <Metric label="Упущено за 24 часа" value={`+${recommendation?.missed_profit_percent_24h ?? 7.4}%`} caption={`${amountLabel} к банку`} />
+            <Metric label="Потенциал модели" value={`до +${recommendation?.monthly_profit_percent ?? 35}%`} caption="оценка месяца" />
+            <Metric label="24 часа" value={`+${recommendation?.missed_profit_percent_24h ?? 7.4}%`} caption={`${amountLabel} к банку`} />
           </div>
+          <p className="text-[10px] font-semibold leading-relaxed text-slate-400">
+            Источник: {sourceLabel}; закрытых прогнозов за 24ч: {recommendation?.resolved_bets_24h ?? 0}.
+          </p>
         </div>
       </div>
 
-      <SuperCompensationDemo glow={glow} proMode={proMode} reduceMotion={reduceMotion} />
-
       <div className={`flex items-center justify-between gap-3 rounded-2xl ${GLASS_SURFACE} p-3`}>
-        <span className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-300">Валюта расчета</span>
+        <span className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-300">Валюта расчета</span>
         <div className={`grid grid-cols-3 gap-1 rounded-2xl ${GLASS_SURFACE} p-1`}>
           {(Object.keys(currencyMeta) as CurrencyCode[]).map((item) => (
             <button
@@ -1255,72 +1262,29 @@ function FinalScreen({
           {manifestAccepted ? <ToggleRight className="h-6 w-6 text-white" /> : <ToggleLeft className="h-6 w-6 text-slate-300" />}
         </span>
         <span className="text-[11px] font-bold leading-relaxed text-white">
-          Манифест Shamrai: Я обязуюсь действовать разумно, соблюдать флэт и следовать калибровке мозга Shamrai
+          Я понимаю: ставки связаны с риском, могут вызывать зависимость, а расчеты Shamrai не гарантируют доход.
         </span>
       </button>
 
       <ElectricButton
-        label="⚡ Войти в Analytics Hub"
+        label="Войти в Analytics Hub"
         icon={manifestAccepted ? Zap : Lock}
         highlighted={manifestAccepted}
         loading={finishing}
         disabled={!manifestAccepted || finishing}
         glow={glow}
+        calm={calm}
         onClick={onOpenHub}
       />
     </div>
   );
 }
 
-function SuperCompensationDemo({ glow, proMode, reduceMotion }: { glow: string; proMode: boolean; reduceMotion: boolean }) {
+function Metric({ label, value, caption, compact = false }: { label: string; value: string; caption: string; compact?: boolean }) {
   return (
-    <div className={`rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-[10px] font-black uppercase tracking-[0.18em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>Правило Сверхкомпенсации</p>
-          <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-300">
-            При LOSS списанная ставка возвращается, а сверху начисляется еще +1 ставка. Баланс абонемента растет на 1.
-          </p>
-        </div>
-        <motion.div
-          animate={reduceMotion ? undefined : { y: [0, -4, 0], scale: [1, 1.04, 1] }}
-          transition={reduceMotion ? undefined : { duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
-          className={`shrink-0 rounded-2xl ${GLASS_SURFACE} px-3 py-2 text-sm font-black text-white`}
-          style={{ boxShadow: glow }}
-        >
-          +1
-        </motion.div>
-      </div>
-      <div className="mt-3 grid grid-cols-3 items-center gap-2 text-center">
-        <CompStep label="До" value="5" />
-        <motion.div
-          animate={reduceMotion ? undefined : { opacity: [0.45, 1, 0.45] }}
-          transition={reduceMotion ? undefined : { duration: 1.1, repeat: Infinity }}
-          className={`rounded-2xl ${GLASS_SURFACE} px-2 py-3 text-[10px] font-black uppercase tracking-[0.12em] text-white`}
-        >
-          LOSS → +1
-        </motion.div>
-        <CompStep label="После" value="6" />
-      </div>
-    </div>
-  );
-}
-
-function CompStep({ label, value }: { label: string; value: string }) {
-  return (
-    <div className={`rounded-2xl ${GLASS_SURFACE} p-3`}>
-      <p className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-400">{label}</p>
-      <p className="mt-1 font-display text-xl font-black text-white">{value}</p>
-      <p className="text-[10px] font-semibold text-cyan-100">ставок</p>
-    </div>
-  );
-}
-
-function Metric({ label, value, caption }: { label: string; value: string; caption: string }) {
-  return (
-    <div className={`rounded-2xl ${GLASS_SURFACE} p-3`}>
-      <p className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-400">{label}</p>
-      <p className="mt-1 font-display text-lg font-black text-white">{value}</p>
+    <div className={`rounded-2xl ${GLASS_SURFACE} ${compact ? 'p-2' : 'p-3'}`}>
+      <p className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">{label}</p>
+      <p className={`mt-1 font-display font-black text-white ${compact ? 'text-base' : 'text-lg'}`}>{value}</p>
       <p className="text-[10px] font-semibold text-cyan-100">{caption}</p>
     </div>
   );
@@ -1344,7 +1308,7 @@ const PulseWidget = React.memo(function PulseWidget({ proMode, glow }: { proMode
           <RadioTower className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Пульс Shamrai</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Пульс Shamrai</p>
           <AnimatePresence mode="wait">
             <motion.p
               key={message}
@@ -1371,6 +1335,7 @@ function ElectricButton({
   loading = false,
   disabled = false,
   glow,
+  calm = false,
   onClick,
 }: {
   label: string;
@@ -1380,6 +1345,7 @@ function ElectricButton({
   loading?: boolean;
   disabled?: boolean;
   glow: string;
+  calm?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -1387,7 +1353,7 @@ function ElectricButton({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`shamrai-electric-button relative flex min-h-[52px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl ${GLASS_SURFACE} px-3 text-[11px] font-black uppercase tracking-[0.08em] text-white transition duration-300 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 ${highlighted && !disabled ? 'shamrai-electric-button--hot' : ''}`}
+      className={`shamrai-electric-button relative flex min-h-[52px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl ${GLASS_SURFACE} px-3 text-[11px] font-black uppercase tracking-[0.06em] text-white transition duration-300 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 ${highlighted && !disabled ? 'shamrai-electric-button--hot' : ''} ${calm ? 'shamrai-electric-button--calm' : ''}`}
       style={highlighted && !disabled ? { boxShadow: glow } : undefined}
     >
       {!iconAfter && <Icon className={`relative z-10 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}

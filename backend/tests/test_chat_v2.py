@@ -5,7 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
@@ -16,6 +16,7 @@ from src.api import chat
 from src.api.deps import get_current_admin, get_current_admin_read
 from src.models.database import Base
 from src.models.models import ChatMessage, ChatReadCursor, DeliveryOutbox, PersonalSignal, PersonalSignalReadCursor, User
+from src.services import chat as chat_service
 from src.services.signals import SUPPORT_STAFF_MESSAGE_TYPE
 
 
@@ -284,6 +285,114 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first.id, second.id)
             stored_messages = (await session.execute(select(ChatMessage))).scalars().all()
             self.assertEqual(len(stored_messages), 1)
+
+    async def test_file_attachment_download_authorization_and_reply_preview(self):
+        async with self.Session() as session:
+            with tempfile.TemporaryDirectory() as temp_dir, patch.object(chat, "CHAT_STATIC_DIR", temp_dir):
+                client = self._user(101)
+                other_client = self._user(102)
+                admin = self._user(901, role="admin")
+                session.add_all([client, other_client, admin])
+                await session.commit()
+
+                file_message = await chat.create_support_attachment(
+                    client_message_id=uuid4(),
+                    message_type="file",
+                    text="Лог ошибки",
+                    reply_to_id=None,
+                    duration_ms=None,
+                    file=_upload("debug.log", b"error line\n", "text/plain"),
+                    current_user=client,
+                    db=session,
+                )
+                self.assertEqual(file_message.type, "file")
+                self.assertEqual(file_message.payload["original_filename"], "debug.log")
+                self.assertEqual(file_message.payload["download_url"], f"/chat/attachments/{file_message.id}/download")
+                self.assertNotIn("url", file_message.payload)
+                self.assertNotIn("storage_path", file_message.payload)
+
+                response = await chat.download_chat_attachment(file_message.id, current_user=client, db=session)
+                self.assertEqual(os.path.abspath(response.path), os.path.abspath(os.path.join(temp_dir, str(file_message.conversation_id), os.listdir(os.path.join(temp_dir, str(file_message.conversation_id)))[0])))
+                self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
+                self.assertIn("attachment", response.headers.get("content-disposition", ""))
+
+                with self.assertRaises(HTTPException) as other_raised:
+                    await chat.download_chat_attachment(file_message.id, current_user=other_client, db=session)
+                self.assertEqual(other_raised.exception.status_code, 403)
+
+                admin_download = await chat.download_chat_attachment(file_message.id, current_user=admin, db=session)
+                self.assertTrue(os.path.exists(admin_download.path))
+
+                reply = await chat.create_admin_chat_message(
+                    file_message.conversation_id,
+                    chat.ChatMessageCreate(client_message_id=uuid4(), text="Посмотрел лог", reply_to_id=file_message.id),
+                    admin=admin,
+                    db=session,
+                )
+                self.assertEqual(reply.reply_to_id, file_message.id)
+                self.assertIsNotNone(reply.reply_to)
+                self.assertEqual(reply.reply_to["type"], "file")
+                self.assertEqual(reply.reply_to["text"], "Лог ошибки")
+                self.assertNotIn("storage_path", reply.reply_to["payload"])
+
+    async def test_file_payload_rejects_unsafe_storage_path(self):
+        async with self.Session() as session:
+            client = self._user(101)
+            session.add(client)
+            await session.commit()
+            conversation = await chat_service.support_conversation_for_user(session, client, create=True)
+            unsafe_paths = [
+                "../outside/debug.log",
+                f"{conversation.id}/../debug.log",
+                f"{conversation.id}/nested/debug.log",
+                f"{conversation.id}/debug.log",
+                f"{conversation.id}/..\\debug.log",
+                f"not-a-uuid/{'a' * 32}.log",
+            ]
+
+            for unsafe_path in unsafe_paths:
+                with self.subTest(unsafe_path=unsafe_path):
+                    with self.assertRaises(HTTPException) as raised:
+                        await chat_service.create_chat_message(
+                            session,
+                            conversation=conversation,
+                            sender=client,
+                            client_message_id=uuid4(),
+                            text=None,
+                            message_type="file",
+                            payload={
+                                "storage_path": unsafe_path,
+                                "mime_type": "text/plain",
+                                "size_bytes": 12,
+                                "original_filename": "debug.log",
+                            },
+                        )
+                    self.assertEqual(raised.exception.status_code, 400)
+
+    async def test_typing_update_emits_ephemeral_stream_event(self):
+        async with self.Session() as session:
+            client = self._user(101)
+            admin = self._user(901, role="admin")
+            session.add_all([client, admin])
+            await session.commit()
+            client_message = await self._send_client_message(session, client, "Печатаю")
+
+            with patch.object(chat.chat_stream_hub, "send_to_users", new=AsyncMock()) as send_mock:
+                await chat.update_admin_chat_typing(
+                    client_message.conversation_id,
+                    chat.ChatTypingUpdate(is_typing=True),
+                    admin=admin,
+                    db=session,
+                )
+
+            send_mock.assert_awaited_once()
+            recipient_ids, payload = send_mock.await_args.args
+            self.assertIn(client.telegram_id, recipient_ids)
+            self.assertIn(admin.telegram_id, recipient_ids)
+            self.assertEqual(payload["event"], "chat.typing.updated")
+            self.assertEqual(payload["conversation_id"], client_message.conversation_id)
+            self.assertEqual(payload["direction"], "staff")
+            self.assertTrue(payload["is_typing"])
 
     async def test_pagination_does_not_skip_or_duplicate_messages(self):
         async with self.Session() as session:

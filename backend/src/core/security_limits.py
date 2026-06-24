@@ -56,6 +56,7 @@ UPLOAD_PATH_PREFIXES = (
     "/api/admin/announcements",
     "/api/admin/forecast-broadcast",
     "/api/admin/forecast-requests/bulk-send",
+    "/api/chat/conversations/support/attachments",
 )
 
 
@@ -116,6 +117,9 @@ def classify_rate_limit_group(path: str, method: str = "GET") -> str:
         return "default"
 
     if any(clean_path.startswith(prefix) for prefix in UPLOAD_PATH_PREFIXES):
+        return "upload"
+
+    if clean_path.startswith("/api/chat/admin/conversations/") and clean_path.endswith("/attachments"):
         return "upload"
 
     if clean_path in JSON_WEBHOOK_PATHS or clean_path in FORM_WEBHOOK_PATHS:

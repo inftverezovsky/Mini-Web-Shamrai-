@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { apiFetch, downloadApiFile } from '../../utils/api';
 import { ADMIN_TAB_QUERY_STALE_TIME, BOOKMAKERS_QUERY_KEY, TAB_QUERY_STALE_TIME, adminUsersPageQueryKey, fetchAdminUsersPage, fetchBookmakers } from '../../utils/tabPrefetch';
@@ -10,11 +11,21 @@ import SmoothCollapse from '../../components/SmoothCollapse';
 import { useAuthSelector } from '../../context/AuthContext';
 import { isPrivilegedRole } from '../../utils/roles';
 import {
+  getClientAvatarSources,
+  getClientChannelStatuses,
+  getClientPriority,
+  getClientRecentMatchSummary,
+  getCrmBookmakerPreview,
+  getCrmMatchBalance,
+  getStableMatchSegments,
+  type CrmChannelTone,
+  type CrmPriorityTone,
+} from '../../utils/adminCrmDisplay';
+import {
   Activity,
   AlertTriangle,
   BadgeCheck,
   Calendar,
-  CheckCircle2,
   CheckSquare,
   ChevronDown,
   Clock,
@@ -31,7 +42,6 @@ import {
   TrendingDown,
   Users,
   X,
-  XCircle,
 } from 'lucide-react';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import {
@@ -49,6 +59,8 @@ interface CRMUser {
   username: string | null;
   first_name: string | null;
   last_name: string | null;
+  photo_url?: string | null;
+  vk_photo_url?: string | null;
   is_web_only?: boolean;
   role: string;
   has_active_subscription: boolean;
@@ -107,17 +119,7 @@ function cleanText(value: string) {
 }
 
 function getMatchBalance(user: Pick<CRMUser, 'purchased_bets_balance' | 'matches_remaining'>) {
-  return user.purchased_bets_balance !== undefined && user.purchased_bets_balance !== 0
-    ? user.purchased_bets_balance
-    : user.matches_remaining || 0;
-}
-
-function pluralRu(value: number, one: string, few: string, many: string) {
-  const mod10 = value % 10;
-  const mod100 = value % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
-  return many;
+  return getCrmMatchBalance(user);
 }
 
 function useDebouncedValue<T>(value: T, delayMs: number) {
@@ -131,27 +133,6 @@ function useDebouncedValue<T>(value: T, delayMs: number) {
   return debouncedValue;
 }
 
-function getMatchStreak(results: ClientRecentMatchResult[]) {
-  const currentStatus = results[0]?.status;
-  if (!currentStatus) return null;
-
-  let count = 0;
-  for (const result of results) {
-    if (result.status !== currentStatus) break;
-    count += 1;
-  }
-
-  const noun = currentStatus === 'win'
-    ? pluralRu(count, 'победа', 'победы', 'побед')
-    : pluralRu(count, 'неудача', 'неудачи', 'неудач');
-
-  return {
-    count,
-    status: currentStatus,
-    label: `${count} ${noun} подряд`,
-  };
-}
-
 function driveStatusLabel(job: StatsDriveExportJob | null) {
   if (!job) return null;
   if (job.status === 'completed') return 'CRM-отчет готов на Google Drive';
@@ -160,55 +141,15 @@ function driveStatusLabel(job: StatsDriveExportJob | null) {
   return 'CRM-отчет в очереди';
 }
 
-function getClientHealth(user: CRMUser) {
-  const balance = getMatchBalance(user);
-  if (balance < 0) {
-    return {
-      label: `${balance} матч.`,
-      detail: 'Долг',
-      className: 'border-rose-300/25 bg-rose-400/10 text-rose-100',
-      Icon: TrendingDown,
-    };
-  }
-  if (user.guarantee_active) {
-    return {
-      label: 'Гарантия',
-      detail: `${balance} матч.`,
-      className: 'border-amber-300/25 bg-amber-400/10 text-amber-100',
-      Icon: Sparkles,
-    };
-  }
-  if (user.has_active_subscription || balance > 0) {
-    return {
-      label: `${balance} матч.`,
-      detail: 'Активен',
-      className: 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100',
-      Icon: ShieldCheck,
-    };
-  }
-  return {
-    label: 'Демо',
-    detail: 'Нет матчей',
-    className: 'border-white/10 bg-white/[0.05] text-slate-400',
-    Icon: Clock,
-  };
-}
-
-function getRecentSplit(results: ClientRecentMatchResult[]) {
-  const wins = results.filter((result) => result.status === 'win').length;
-  return { wins, losses: results.length - wins };
-}
-
 function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) {
-  const chronologicalResults = [...results].reverse();
+  const segments = getStableMatchSegments(results);
   return (
-    <div className="flex items-center gap-1">
-      {Array.from({ length: 10 }).map((_, index) => {
-        const result = chronologicalResults[index];
+    <div className="grid grid-cols-10 gap-1">
+      {segments.map((result, index) => {
         return (
           <span
             key={`result-${index}-${result?.bet_id || 'empty'}`}
-            className={`h-2 flex-1 rounded-full border transition-all ${
+            className={`h-2.5 min-w-0 rounded-full border transition-all ${
               result?.status === 'win'
                 ? 'border-emerald-200/30 bg-emerald-300'
                 : result?.status === 'loss'
@@ -229,87 +170,134 @@ function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) 
   );
 }
 
-function ConnectionMark({ enabled, label }: { enabled: boolean; label: string }) {
-  const Icon = enabled ? CheckCircle2 : XCircle;
+const channelToneClasses: Record<CrmChannelTone, string> = {
+  ready: 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100',
+  warning: 'border-amber-300/25 bg-amber-300/10 text-amber-100',
+  missing: 'border-rose-300/18 bg-rose-300/[0.08] text-rose-100',
+};
+
+const priorityToneClasses: Record<CrmPriorityTone, string> = {
+  danger: 'border-rose-300/30 bg-rose-400/12 text-rose-100',
+  warning: 'border-amber-300/30 bg-amber-400/12 text-amber-100',
+  success: 'border-emerald-300/30 bg-emerald-400/12 text-emerald-100',
+  info: 'border-cyan-300/30 bg-cyan-400/12 text-cyan-100',
+  muted: 'border-white/10 bg-white/[0.05] text-slate-400',
+};
+
+function getPriorityIcon(priority: ReturnType<typeof getClientPriority>) {
+  if (priority.label === 'Долг') return TrendingDown;
+  if (priority.label === 'Гарантия') return Sparkles;
+  if (priority.label === 'Активен') return ShieldCheck;
+  if (priority.label === 'Связаться') return Activity;
+  return Clock;
+}
+
+function getClientInitials(user: CRMUser) {
+  const displayName = getDisplayName(user);
+  const words = displayName.split(/\s+/).filter(Boolean);
+  const initials = words.length > 1
+    ? `${words[0][0] || ''}${words[1][0] || ''}`
+    : displayName.slice(0, 2);
+  return initials.toUpperCase();
+}
+
+function ClientAvatar({ user, size = 'row' }: { user: CRMUser; size?: 'row' | 'modal' }) {
+  const sources = useMemo(() => getClientAvatarSources({
+    photo_url: user.photo_url,
+    vk_photo_url: user.vk_photo_url,
+  }), [user.photo_url, user.vk_photo_url]);
+  const sourceKey = sources.join('\n');
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const avatarUrl = sources[sourceIndex] ?? null;
+  const sizeClass = size === 'modal' ? 'h-14 w-14 rounded-[22px] text-sm' : 'h-11 w-11 rounded-2xl text-[11px]';
+
+  useEffect(() => {
+    setSourceIndex(0);
+  }, [sourceKey]);
+
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt=""
+        draggable={false}
+        onError={() => setSourceIndex((index) => Math.min(index + 1, sources.length))}
+        className={`${sizeClass} shrink-0 border border-white/10 bg-slate-950/45 object-cover`}
+      />
+    );
+  }
+
+  return (
+    <div className={`grid ${sizeClass} shrink-0 place-items-center border border-white/10 bg-slate-950/45 font-black text-cyan-100`}>
+      {getClientInitials(user)}
+    </div>
+  );
+}
+
+function ClientPriorityBadge({ user, compact = false }: { user: CRMUser; compact?: boolean }) {
+  const priority = getClientPriority(user);
+  const Icon = getPriorityIcon(priority);
   return (
     <span
-      className={`inline-flex items-center gap-0.5 rounded-md px-1 py-0.5 ${
-        enabled ? 'bg-emerald-300/10 text-emerald-100' : 'bg-rose-300/10 text-rose-100'
-      }`}
-      title={label}
-      aria-label={`${label}: ${enabled ? 'да' : 'нет'}`}
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl border font-black uppercase tracking-[0.08em] ${compact ? 'px-2 py-1 text-[8px]' : 'px-2.5 py-1.5 text-[9px]'} ${priorityToneClasses[priority.tone]}`}
+      title={`${priority.label}: ${priority.detail}`}
+      aria-label={`Приоритет клиента: ${priority.label}. ${priority.detail}`}
     >
-      <Icon className="h-3 w-3" />
+      <Icon className="h-3.5 w-3.5" />
+      <span>{priority.label}</span>
+      <span className="text-current/70">{priority.detail}</span>
     </span>
   );
 }
 
 function ClientConnectionBadges({ user }: { user: CRMUser }) {
-  const telegramConnected = user.telegram_connected ?? user.telegram_id > 0;
-  const telegramSynced = user.telegram_delivery_enabled ?? Boolean(user.tg_chat_joined);
-  const vkConnected = user.vk_connected ?? Boolean(user.vk_user_id);
-  const vkSynced = user.vk_delivery_enabled ?? Boolean(user.vk_messages_allowed);
-  const webPushEnabled = Boolean(user.web_push_enabled);
-  const channels = [
-    {
-      key: 'telegram',
-      label: 'TG',
-      auth: telegramConnected,
-      sync: telegramSynced,
-      title: `Telegram: вход ${telegramConnected ? 'есть' : 'нет'}, синхронизация ${telegramSynced ? 'есть' : 'нет'}`,
-    },
-    {
-      key: 'vk',
-      label: 'VK',
-      auth: vkConnected,
-      sync: vkSynced,
-      title: `VK: вход ${vkConnected ? 'есть' : 'нет'}, сообщения ${vkSynced ? 'разрешены' : 'не разрешены'}`,
-    },
-    {
-      key: 'web',
-      label: 'Web',
-      auth: webPushEnabled,
-      sync: webPushEnabled,
-      title: `Web Push: ${webPushEnabled ? 'подключен' : 'не подключен'}`,
-      pushOnly: true,
-    },
-  ];
+  const channels = getClientChannelStatuses(user);
 
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-label="Статусы авторизации и синхронизации клиента">
-      {channels.map((channel) => {
-        const ready = channel.pushOnly ? channel.sync : channel.auth && channel.sync;
-        const partiallyReady = !ready && channel.auth;
-        const toneClass = ready
-          ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
-          : partiallyReady
-            ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
-            : 'border-rose-300/18 bg-rose-300/[0.08] text-rose-100';
+    <div className="flex flex-wrap items-center gap-1.5" aria-label="Статусы авторизации и синхронизации клиента">
+      {channels.map((channel) => (
+        <span
+          key={channel.key}
+          className={`inline-flex min-h-[24px] items-center gap-1.5 rounded-lg border px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] ${channelToneClasses[channel.tone]}`}
+          title={channel.detail}
+        >
+          <span>{channel.shortLabel}</span>
+          <span className="text-current/80">{channel.label}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
-        return (
-          <span
-            key={channel.key}
-            className={`inline-flex min-h-[24px] items-center gap-1.5 rounded-lg border px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] ${toneClass}`}
-            title={channel.title}
-          >
-            <span>{channel.label}</span>
-            {channel.pushOnly ? (
-              <ConnectionMark enabled={channel.sync} label="Web Push" />
-            ) : (
-              <>
-                <span className="inline-flex items-center gap-0.5 text-[7px] text-current/80">
-                  Вход
-                  <ConnectionMark enabled={channel.auth} label={`${channel.label} авторизация`} />
-                </span>
-                <span className="inline-flex items-center gap-0.5 text-[7px] text-current/80">
-                  Синк
-                  <ConnectionMark enabled={channel.sync} label={`${channel.label} синхронизация`} />
-                </span>
-              </>
-            )}
-          </span>
-        );
-      })}
+function ClientBookmakerSummary({ user, align = 'end' }: { user: CRMUser; align?: 'start' | 'end' }) {
+  const preview = getCrmBookmakerPreview(user.bookmakers, user.other_bookmaker_name);
+  const hasBookmakers = preview.visibleBookmakers.length > 0;
+
+  return (
+    <div className={`flex min-w-0 flex-wrap gap-1 ${align === 'end' ? 'justify-end' : 'justify-start'}`}>
+      {hasBookmakers ? preview.visibleBookmakers.map((bookmaker) => (
+        <span
+          key={bookmaker.id}
+          className="inline-flex max-w-[9rem] items-center gap-1 rounded-lg border border-white/10 bg-white/[0.045] px-1.5 py-1 text-[8px] font-bold text-slate-300"
+        >
+          <BookmakerLogoFrame bookmaker={bookmaker} size="tiny" />
+          <span className="truncate">{bookmaker.name}</span>
+        </span>
+      )) : (
+        <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-500">
+          БК не выбраны
+        </span>
+      )}
+      {preview.extraCount > 0 && (
+        <span className="rounded-lg border border-cyan-200/16 bg-cyan-200/[0.07] px-2 py-1 text-[8px] font-black text-cyan-100">
+          +{preview.extraCount}
+        </span>
+      )}
+      {preview.otherLabel && (
+        <span className="max-w-[10rem] truncate rounded-lg border border-amber-200/16 bg-amber-200/[0.06] px-2 py-1 text-[8px] font-black text-amber-100">
+          {preview.otherLabel}
+        </span>
+      )}
     </div>
   );
 }
@@ -322,11 +310,7 @@ function ClientIntelligenceRow({
   onOpen: (user: CRMUser) => void;
 }) {
   const recentResults = user.recent_match_results || [];
-  const streak = getMatchStreak(recentResults);
-  const split = getRecentSplit(recentResults);
-  const health = getClientHealth(user);
-  const HealthIcon = health.Icon;
-  const primaryBookmakers = user.bookmakers.slice(0, 3);
+  const matchSummary = getClientRecentMatchSummary(recentResults);
 
   return (
     <button
@@ -334,19 +318,13 @@ function ClientIntelligenceRow({
       onClick={() => onOpen(user)}
       className="smooth-pressable group w-full overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.045] p-3 text-left text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition-all hover:border-cyan-200/28 hover:bg-white/[0.065] active:scale-[0.995]"
     >
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(14rem,0.85fr)_auto] xl:items-center">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(12rem,0.68fr)_minmax(14rem,0.78fr)_minmax(12rem,0.62fr)] xl:items-center">
         <div className="min-w-0">
           <div className="flex min-w-0 items-start gap-3">
-            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white/10 bg-slate-950/40 text-[11px] font-black text-cyan-100">
-              {getDisplayName(user).slice(0, 2).toUpperCase()}
-            </div>
+            <ClientAvatar user={user} />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h4 className="truncate text-sm font-black leading-snug text-white">{getDisplayName(user)}</h4>
-                <span className={`inline-flex shrink-0 items-center gap-1 rounded-xl border px-2 py-1 text-[9px] font-black uppercase tracking-[0.08em] ${health.className}`}>
-                  <HealthIcon className="h-3 w-3" />
-                  {health.label}
-                </span>
               </div>
               <p className="mt-1 truncate text-[10px] font-bold text-slate-500">
                 {user.username ? `@${user.username}` : 'без юзернейма'} / {getClientIdLabel(user)}
@@ -362,24 +340,32 @@ function ClientIntelligenceRow({
                   A/B {user.ab_group || 'A'}
                 </span>
               </div>
-              <ClientConnectionBadges user={user} />
             </div>
           </div>
         </div>
 
         <div className="min-w-0 rounded-2xl border border-white/10 bg-slate-950/32 p-2.5">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ClientPriorityBadge user={user} />
+          </div>
+          <div className="mt-2">
+            <ClientConnectionBadges user={user} />
+          </div>
+        </div>
+
+        <div className="min-w-0 rounded-2xl border border-white/10 bg-slate-950/32 p-2.5">
+          <div className="grid gap-1">
             <span className={`truncate text-[9px] font-black uppercase tracking-[0.09em] ${
-              streak?.status === 'win'
+              matchSummary.streak?.status === 'win'
                 ? 'text-emerald-200'
-                : streak?.status === 'loss'
+                : matchSummary.streak?.status === 'loss'
                   ? 'text-rose-200'
                   : 'text-slate-500'
             }`}>
-              {streak ? streak.label : 'Истории матчей нет'}
+              {matchSummary.headline}
             </span>
-            <span className="shrink-0 text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
-              {split.wins}/{split.losses}
+            <span className="truncate text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">
+              {matchSummary.splitLabel}
             </span>
           </div>
           <div className="mt-2">
@@ -387,22 +373,8 @@ function ClientIntelligenceRow({
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-3 lg:flex-col lg:items-end lg:justify-center">
-          <div className="flex min-w-0 flex-wrap justify-end gap-1">
-            {primaryBookmakers.length ? primaryBookmakers.map((bookmaker) => (
-              <span
-                key={bookmaker.id}
-                className="inline-flex max-w-[9rem] items-center gap-1 rounded-lg border border-white/10 bg-white/[0.045] px-1.5 py-1 text-[8px] font-bold text-slate-300"
-              >
-                <BookmakerLogoFrame bookmaker={bookmaker} size="tiny" />
-                <span className="truncate">{bookmaker.name}</span>
-              </span>
-            )) : (
-              <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-500">
-                БК не выбраны
-              </span>
-            )}
-          </div>
+        <div className="flex items-center justify-between gap-3 xl:flex-col xl:items-end xl:justify-center">
+          <ClientBookmakerSummary user={user} />
           <span className="shrink-0 rounded-xl border border-cyan-200/18 bg-cyan-200/[0.07] px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-cyan-100 transition-all group-hover:bg-cyan-200/[0.12]">
             Открыть
           </span>
@@ -435,6 +407,17 @@ export default function AdminCRM() {
   const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
 
   useGlassOverlayGuard(Boolean(selectedUser));
+
+  useEffect(() => {
+    if (!selectedUser) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedUser]);
 
   const bookmakersQuery = useQuery<BookmakerResponse[]>({
     queryKey: BOOKMAKERS_QUERY_KEY,
@@ -547,6 +530,10 @@ export default function AdminCRM() {
       .filter(bookmaker => editBkIds.includes(bookmaker.id))
       .map(bookmaker => bookmaker.name)
   ), [bookmakers, editBkIds]);
+  const selectedEditBookmakerSummary = useMemo(() => {
+    const otherName = otherBookmakerSelected ? cleanText(editOtherBookmakerName) : null;
+    return otherName ? [...selectedEditBookmakerNames, otherName] : selectedEditBookmakerNames;
+  }, [editOtherBookmakerName, otherBookmakerSelected, selectedEditBookmakerNames]);
 
   const openEditModal = (user: CRMUser) => {
     setSelectedUser(user);
@@ -929,30 +916,43 @@ export default function AdminCRM() {
         </button>
       )}
 
-      {selectedUser && (
-        <div className="glass-modal-layer fixed inset-0 z-50 flex items-end justify-center bg-slate-950/72 p-3 backdrop-blur-sm animate-fade-in sm:items-center lg:justify-end lg:p-4">
-          <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[28px] border border-white/10 bg-[#0C1226]/95 p-4 shadow-2xl animate-scale-up lg:h-[calc(100dvh-2rem)] lg:max-h-none lg:max-w-xl lg:p-5">
+      {selectedUser && createPortal((
+        <div className="glass-modal-layer shamrai-modal-root fixed inset-0 z-[100] flex items-end justify-center bg-slate-950/72 p-2 backdrop-blur-sm animate-fade-in sm:items-center sm:p-3 lg:justify-end lg:p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="crm-client-edit-title"
+            className="relative flex max-h-[calc(100dvh-1rem)] w-full max-w-lg flex-col overflow-y-auto overscroll-contain rounded-[24px] border border-white/10 bg-[#0C1226]/95 p-3 shadow-2xl animate-scale-up sm:max-h-[calc(100dvh-2rem)] sm:rounded-[28px] sm:p-4 lg:h-[calc(100dvh-2rem)] lg:max-h-none lg:max-w-xl lg:p-5"
+          >
             <button
               type="button"
               onClick={closeEditModal}
               disabled={saving}
-              className="absolute right-4 top-4 rounded-xl border border-white/10 bg-white/[0.05] p-2 text-slate-450 transition-colors hover:text-white disabled:opacity-40"
+              className="sticky top-0 z-20 -mb-10 ml-auto w-fit rounded-xl border border-white/10 bg-white/[0.05] p-2 text-slate-450 backdrop-blur transition-colors hover:text-white disabled:opacity-40"
               aria-label="Закрыть карточку клиента"
             >
               <X className="w-5 h-5" />
             </button>
 
-            <div className="space-y-1 pr-12">
-              <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.12em] text-cyan-100">
-                <Users className="h-3.5 w-3.5" />
-                Карточка клиента
+            <div className="space-y-3 pr-12">
+              <div className="flex min-w-0 items-start gap-3">
+                <ClientAvatar user={selectedUser} size="modal" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.12em] text-cyan-100">
+                    <Users className="h-3.5 w-3.5" />
+                    Карточка клиента
+                  </div>
+                  <h3 id="crm-client-edit-title" className="mt-1 truncate text-lg font-black text-white">{getDisplayName(selectedUser)}</h3>
+                  <p className="mt-0.5 truncate text-[10px] font-bold uppercase tracking-[0.08em] text-slate-450">
+                    {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <ClientPriorityBadge user={selectedUser} compact />
+                  </div>
+                </div>
               </div>
-              <h3 className="truncate text-lg font-black text-white">{getDisplayName(selectedUser)}</h3>
-              <p className="truncate text-[10px] font-bold uppercase tracking-[0.08em] text-slate-450">
-                {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
-              </p>
               <ClientConnectionBadges user={selectedUser} />
-              <div className="grid grid-cols-3 gap-2 pt-2">
+              <div className="grid grid-cols-1 gap-2 pt-2 min-[390px]:grid-cols-3">
                 <StatTile
                   label="Баланс"
                   value={`${getMatchBalance(selectedUser)}`}
@@ -983,7 +983,7 @@ export default function AdminCRM() {
                   <Layers3 className="h-3.5 w-3.5 text-cyan-200" />
                   Профиль
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <label className="space-y-1.5">
                     <span className="text-[9px] text-slate-500 font-black uppercase tracking-wider flex items-center">
                       <Layers3 className="w-3.5 h-3.5 text-cyan-300 mr-1.5" />
@@ -1035,7 +1035,7 @@ export default function AdminCRM() {
                     {getMatchBalance(selectedUser)} матч.
                   </span>
                 </div>
-                <div className="grid grid-cols-[1fr_auto] gap-2">
+                <div className="grid grid-cols-1 gap-2 min-[430px]:grid-cols-[1fr_auto]">
                   <input
                     type="number"
                     value={matchDelta}
@@ -1051,25 +1051,25 @@ export default function AdminCRM() {
                     Обнулить
                   </button>
                 </div>
-                <div className="flex space-x-1.5 pt-1">
+                <div className="grid grid-cols-1 gap-1.5 pt-1 min-[430px]:grid-cols-3">
                   <button
                     type="button"
                     onClick={() => setMatchDelta('5')}
-                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                    className="bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
                   >
                     +5 матчей
                   </button>
                   <button
                     type="button"
                     onClick={() => setMatchDelta('10')}
-                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                    className="bg-white/5 hover:bg-white/10 text-slate-300 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
                   >
                     +10 матчей
                   </button>
                   <button
                     type="button"
                     onClick={() => setMatchDelta('')}
-                    className="flex-1 bg-white/5 hover:bg-white/10 text-slate-400 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
+                    className="bg-white/5 hover:bg-white/10 text-slate-400 py-1.5 rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all text-center"
                   >
                     Сбросить
                   </button>
@@ -1091,7 +1091,7 @@ export default function AdminCRM() {
                   type="button"
                   onClick={() => setEditBookmakersOpen((current) => !current)}
                   aria-expanded={editBookmakersOpen}
-                  className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-2.5 text-left transition-all hover:border-indigo-400/45 hover:bg-slate-900"
+                  className="flex w-full flex-col items-stretch justify-between gap-3 rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-2.5 text-left transition-all hover:border-indigo-400/45 hover:bg-slate-900 min-[430px]:flex-row min-[430px]:items-center"
                 >
                   <span className="min-w-0">
                     <span className="flex items-center font-extrabold uppercase tracking-wider text-[9px] text-slate-400">
@@ -1099,12 +1099,12 @@ export default function AdminCRM() {
                       Букмекерские конторы
                     </span>
                     <span className="mt-1 block truncate text-[10px] font-semibold text-slate-300">
-                      {selectedEditBookmakerNames.length > 0
-                        ? selectedEditBookmakerNames.join(', ')
+                      {selectedEditBookmakerSummary.length > 0
+                        ? selectedEditBookmakerSummary.join(', ')
                         : 'БК не выбраны'}
                     </span>
                   </span>
-                  <span className="flex shrink-0 items-center gap-2">
+                  <span className="flex shrink-0 items-center justify-between gap-2 min-[430px]:justify-end">
                     <span className="rounded-xl border border-white/10 bg-slate-950/55 px-2.5 py-1.5 text-right">
                       <span className="block text-[8px] uppercase font-bold tracking-wider text-slate-500">Выбрано</span>
                       <span className="block text-[11px] font-black text-white">{editBkIds.length}</span>
@@ -1116,7 +1116,7 @@ export default function AdminCRM() {
                 </button>
 
                 <SmoothCollapse open={editBookmakersOpen}>
-                  <div className="grid grid-cols-2 gap-1.5 max-h-[150px] overflow-y-auto pr-1">
+                  <div className="grid max-h-[min(40dvh,220px)] grid-cols-1 gap-1.5 overflow-y-auto pr-1 min-[430px]:grid-cols-2">
                     {bookmakers.map(bookmaker => {
                       const isChecked = editBkIds.includes(bookmaker.id);
                       return (
@@ -1154,7 +1154,7 @@ export default function AdminCRM() {
                 )}
               </section>
 
-              <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.035] p-3">
+              <section className="sticky bottom-0 z-10 space-y-2 rounded-[22px] border border-white/10 bg-[#0C1226]/95 p-3 shadow-[0_-16px_34px_rgba(12,18,38,0.92)] backdrop-blur">
                 <div className="mb-2 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
                   <Activity className="h-3.5 w-3.5 text-emerald-200" />
                   Действия
@@ -1196,7 +1196,7 @@ export default function AdminCRM() {
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
     </div>
   );
 }

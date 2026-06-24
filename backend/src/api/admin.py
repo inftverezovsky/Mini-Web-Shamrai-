@@ -192,6 +192,7 @@ def build_admin_user_response(
         "first_name": user.first_name,
         "last_name": user.last_name,
         "photo_url": user.photo_url,
+        "vk_photo_url": user.vk_photo_url,
         "is_web_only": user.is_web_only,
         "identity_providers": user.identity_providers,
         "missing_identity_providers": user.missing_identity_providers,

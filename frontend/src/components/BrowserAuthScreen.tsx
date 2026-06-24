@@ -1,71 +1,28 @@
 import React, { useState } from 'react';
-import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
+import { ExternalLink, Loader2, MessageCircle, ShieldCheck } from 'lucide-react';
 import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import LogoText from './LogoText';
 import TelegramAuthAssist from './TelegramAuthAssist';
-import { getVkAuthCooldownStatus, getVkIdConfig } from '../utils/vkId';
-import { pickPrimaryAuthProvider, type IdentityProvider } from '../utils/identityAccess';
 import { trackEvent, trackPageView } from '../utils/analytics';
-import { hasTelegramLaunchParams, isTelegramMiniApp } from '../utils/telegramSdk';
-import { isVkMiniAppRuntime } from '../utils/vkDelivery';
 
 export default function BrowserAuthScreen() {
   const error = useAuthSelector((state) => state.error);
   const loading = useAuthSelector((state) => state.loading);
-  const { loginWithVk, loginWithTelegramBot } = useAuthActions();
-  const [vkBusy, setVkBusy] = useState(false);
-  const [vkCooldown, setVkCooldown] = useState(() => getVkAuthCooldownStatus());
+  const { loginWithTelegramBot } = useAuthActions();
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [telegramError, setTelegramError] = useState<string | null>(null);
   const [telegramAuthBotUrl, setTelegramAuthBotUrl] = useState<string | null>(null);
-  const vkConfig = getVkIdConfig();
   const botUsername = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'Shamra1_bot';
   const cleanBotUsername = botUsername.replace(/^@/, '');
   const telegramBotUrl = `https://t.me/${cleanBotUsername}`;
-  const showVkLogin = vkConfig.ready && vkConfig.originCompatible;
-  const secureAppUrl = vkConfig.canonicalAppUrl || 'https://shamra1.pro/app/';
-  const vkLoginDisabled = vkBusy || loading || vkCooldown.active;
-  const primaryProvider = pickPrimaryAuthProvider({
-    runsInTelegramMiniApp: isTelegramMiniApp(),
-    hasTelegramLaunchParams: hasTelegramLaunchParams(),
-    runsInVkApp: isVkMiniAppRuntime(),
-    vkReady: showVkLogin,
-    vkOriginCompatible: vkConfig.originCompatible,
-    telegramAvailable: Boolean(botUsername),
-  });
-  const secondaryProvider: IdentityProvider = primaryProvider === 'telegram' ? 'vk' : 'telegram';
 
   React.useEffect(() => {
     trackPageView('/auth', {
-      vk_ready: showVkLogin,
+      telegram_first: true,
       telegram_ready: Boolean(botUsername),
+      post_login_recommendations: 'vk_web_push',
     });
-  }, [botUsername, showVkLogin]);
-
-  React.useEffect(() => {
-    if (!vkCooldown.active) return undefined;
-    const timer = window.setInterval(() => {
-      setVkCooldown(getVkAuthCooldownStatus());
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [vkCooldown.active]);
-
-  const handleVkLogin = async () => {
-    const cooldown = getVkAuthCooldownStatus();
-    setVkCooldown(cooldown);
-    if (!vkConfig.ready || cooldown.active) return;
-    try {
-      setVkBusy(true);
-      trackEvent('Auth Started', { provider: 'vk' });
-      await loginWithVk();
-    } catch {
-      setVkCooldown(getVkAuthCooldownStatus());
-      trackEvent('Auth Failed', { provider: 'vk' });
-      // AuthContext exposes the message in-place; keep the screen available.
-    } finally {
-      setVkBusy(false);
-    }
-  };
+  }, [botUsername]);
 
   const handleTelegramLogin = async () => {
     try {
@@ -84,82 +41,21 @@ export default function BrowserAuthScreen() {
     }
   };
 
-  const handlePrimaryLogin = () => (
-    primaryProvider === 'vk' ? handleVkLogin() : handleTelegramLogin()
-  );
-
-  const renderVkAction = (variant: 'primary' | 'secondary') => {
-    const content = (
-      <>
-        {vkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-        <span>
-          {variant === 'primary'
-            ? (vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Начать')
-            : (vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Войти через VK ID')}
-        </span>
-      </>
-    );
-
-    if (showVkLogin) {
-      return (
-        <button
-          type="button"
-          onClick={variant === 'primary' ? handlePrimaryLogin : handleVkLogin}
-          disabled={vkLoginDisabled}
-          className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 ${
-            variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
-          }`}
-        >
-          {content}
-        </button>
-      );
-    }
-
-    if (vkConfig.configured) {
-      return (
-        <a
-          href={secureAppUrl}
-          className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] ${
-            variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
-          }`}
-        >
-          <ExternalLink className="h-4 w-4" />
-          <span>{variant === 'primary' ? 'Начать' : 'Открыть защищенный вход'}</span>
-        </a>
-      );
-    }
-
-    if (variant === 'secondary') return null;
-
-    return (
-      <button
-        type="button"
-        disabled
-        className="auth-readable-action shamrai-glass-button group relative flex min-h-[54px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white opacity-55"
-      >
-        <LogIn className="h-4 w-4" />
-        <span>Начать</span>
-      </button>
-    );
-  };
-
-  const renderTelegramAction = (variant: 'primary' | 'secondary') => {
+  const renderTelegramAction = () => {
     if (!botUsername) return null;
 
     return (
       <button
         type="button"
-        onClick={variant === 'primary' ? handlePrimaryLogin : handleTelegramLogin}
+        onClick={handleTelegramLogin}
         disabled={telegramBusy || loading}
-        className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 ${
-          variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
-        }`}
+        className="auth-readable-action shamrai-glass-button group relative flex min-h-[54px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
       >
         {telegramBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
         <span>
           {telegramBusy
             ? 'Ожидаем Start в Telegram'
-            : variant === 'primary' ? 'Начать' : 'Войти через Telegram'}
+            : 'Войти через Telegram'}
         </span>
       </button>
     );
@@ -189,18 +85,13 @@ export default function BrowserAuthScreen() {
           </div>
 
           <div className="space-y-4">
-            {primaryProvider === 'vk' ? renderVkAction('primary') : renderTelegramAction('primary')}
+            {renderTelegramAction()}
 
             {telegramBusy && <TelegramAuthAssist botUrl={telegramAuthBotUrl} />}
 
-            <div className="grid gap-2">
-              {secondaryProvider === 'vk' ? renderVkAction('secondary') : renderTelegramAction('secondary')}
-              {secondaryProvider === 'vk' && !showVkLogin && !vkConfig.configured && (
-                <p className="rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] font-semibold text-amber-200">
-                  VK ID не настроен для этой сборки.
-                </p>
-              )}
-            </div>
+            <p className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-center text-[11px] font-semibold leading-relaxed text-slate-300">
+              VK и Web Push подключаются после входа в кабинете.
+            </p>
 
             {botUsername ? (
               <a
@@ -222,12 +113,6 @@ export default function BrowserAuthScreen() {
           {(error || telegramError) && (
             <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-3.5 py-3 text-xs font-semibold leading-relaxed text-rose-100">
               {telegramError || error}
-            </div>
-          )}
-
-          {vkCooldown.active && vkCooldown.message && !error && (
-            <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3.5 py-3 text-xs font-semibold leading-relaxed text-amber-100">
-              {vkCooldown.message}
             </div>
           )}
         </div>

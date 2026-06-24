@@ -29,6 +29,11 @@ import { registerPwaServiceWorker } from './utils/webPush';
 import { prefetchAdminTab, prefetchUserTab } from './utils/tabPrefetch';
 import { canEnterCabinet } from './utils/identityAccess';
 import { syncConnectionOnboarding } from './utils/connectionOnboarding';
+import {
+  PROFILE_SETUP_NAVIGATION_EVENT,
+  profileSetupIntentFromLocation,
+  type ProfileSetupNavigationDetail,
+} from './utils/profileSetup';
 
 import {
   AlertTriangle,
@@ -280,21 +285,52 @@ export default function App() {
   useEffect(() => {
     if (!isReady || isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams()) return;
     void registerPwaServiceWorker();
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('open') === 'web-bot-chat' || params.get('open') === 'web-chat') {
-      setActiveUserTab('chat');
-      window.setTimeout(() => document.getElementById('web-bot-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250);
-    } else if (params.get('open') === 'admin-web-chat') {
-      setActiveAdminTab('chats');
-    } else if (params.get('open') === 'profile') {
+
+    let scrollTimer: number | undefined;
+
+    const scrollToTarget = (targetId: string, delay: number) => {
+      if (!targetId) return;
+      if (scrollTimer) window.clearTimeout(scrollTimer);
+      scrollTimer = window.setTimeout(() => {
+        document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, delay);
+    };
+
+    const openProfileTarget = (targetId: string, delay = 350) => {
+      setMountedUserTabs((current) => addUniqueTab(current, 'profile'));
       setActiveUserTab('profile');
-      window.setTimeout(() => {
-        const targetId = window.location.hash.replace(/^#/, '');
-        if (targetId) {
-          document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-      }, 350);
-    }
+      scrollToTarget(targetId, delay);
+    };
+
+    const applyOpenTargetFromLocation = () => {
+      const params = new URLSearchParams(window.location.search);
+      const openTarget = params.get('open');
+      if (openTarget === 'web-bot-chat' || openTarget === 'web-chat') {
+        setMountedUserTabs((current) => addUniqueTab(current, 'chat'));
+        setActiveUserTab('chat');
+        scrollToTarget('web-bot-chat', 250);
+      } else if (openTarget === 'admin-web-chat') {
+        setMountedAdminTabs((current) => addUniqueTab(current, 'chats'));
+        setActiveAdminTab('chats');
+      } else if (openTarget === 'profile') {
+        openProfileTarget(profileSetupIntentFromLocation().targetId, 350);
+      }
+    };
+
+    const handleProfileSetupNavigation = (event: Event) => {
+      const detail = (event as CustomEvent<ProfileSetupNavigationDetail>).detail;
+      openProfileTarget(detail?.intent?.targetId || profileSetupIntentFromLocation().targetId, 260);
+    };
+
+    applyOpenTargetFromLocation();
+    window.addEventListener(PROFILE_SETUP_NAVIGATION_EVENT, handleProfileSetupNavigation);
+    window.addEventListener('popstate', applyOpenTargetFromLocation);
+
+    return () => {
+      if (scrollTimer) window.clearTimeout(scrollTimer);
+      window.removeEventListener(PROFILE_SETUP_NAVIGATION_EVENT, handleProfileSetupNavigation);
+      window.removeEventListener('popstate', applyOpenTargetFromLocation);
+    };
   }, [isReady, isTelegram]);
 
   const appReady = isReady && !loading;

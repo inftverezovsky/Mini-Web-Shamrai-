@@ -9,7 +9,8 @@
     "build:analyze": "tsc && vite build --mode analyze",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run --exclude e2e/**",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@plausible-analytics/tracker": "^0.4.5",
@@ -24,6 +25,7 @@
     "react-router-dom": "^6.22.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/react": "^18.2.56",
     "@types/react-dom": "^18.2.19",
     "@typescript-eslint/eslint-plugin": "^7.18.0",

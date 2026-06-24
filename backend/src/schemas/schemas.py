@@ -101,6 +101,7 @@ class UserResponse(UserBase):
 
 class OnboardRequest(BaseModel):
     anti_capper_pains: List[str] = Field(default_factory=list, max_length=30)
+    onboarding_goal: Optional[str] = Field(default=None, max_length=80)
     experience_level: str = Field(max_length=80)
     bankroll_size: str = Field(max_length=80)
     risk_tolerance: str = Field(max_length=80)
@@ -109,6 +110,7 @@ class OnboardRequest(BaseModel):
     vk_user_id: Optional[str] = Field(default=None, max_length=80)
     other_bookmaker_name: Optional[str] = Field(default=None, max_length=120)
     bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
+    favorite_sports: List[str] = Field(default_factory=list, max_length=30)
     currency_preference: str = Field(default="RUB", max_length=12)
 
 
@@ -546,6 +548,7 @@ class AdminUserListResponse(BaseModel):
     first_name: Optional[str]
     last_name: Optional[str]
     photo_url: Optional[str] = None
+    vk_photo_url: Optional[str] = None
     is_web_only: bool = False
     identity_providers: List[str] = Field(default_factory=list)
     missing_identity_providers: List[str] = Field(default_factory=list)

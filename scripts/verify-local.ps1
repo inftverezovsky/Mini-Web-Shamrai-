@@ -67,6 +67,7 @@ Create it before running backend checks:
 if (-not $SkipFrontend) {
   Invoke-InDirectory $FrontendDir {
     Invoke-Checked "npm" @("run", "lint")
+    Invoke-Checked "npm" @("test")
     Invoke-Checked "npm" @("run", "build")
   }
 }

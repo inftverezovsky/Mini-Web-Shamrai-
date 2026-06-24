@@ -61,8 +61,20 @@ jobs:
       - name: Run lint
         run: npm run lint
 
+      - name: Run unit tests
+        run: npm test
+
       - name: Build frontend
         run: npm run build
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run prelaunch smoke tests
+        run: npm run test:e2e
+        env:
+          VITE_ENABLE_DEBUG_AUTH: "true"
+          VITE_TELEGRAM_BOT_USERNAME: "Shamra1_bot"
 
   compose:
     name: Docker Compose config

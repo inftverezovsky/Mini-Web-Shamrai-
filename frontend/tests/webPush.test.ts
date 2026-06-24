@@ -131,4 +131,27 @@ describe('web push readiness', () => {
     expect(state.fallbackRecommended).toBe(false);
     expect(apiFetchMock).toHaveBeenCalledWith('/signals/web-push/subscription', expect.objectContaining({ method: 'PUT' }));
   });
+
+  it('requests notification permission before fetching keys during one-click setup', async () => {
+    const order: string[] = [];
+    apiFetchMock.mockImplementation(async (path: string) => {
+      order.push(path === '/signals/web-push/public-key' ? 'load-key' : 'save-subscription');
+      return path === '/signals/web-push/public-key'
+        ? { public_key: 'BElkTestPublicKey' }
+        : { status: 'ok' };
+    });
+    setBrowserEnv({ permission: 'default' });
+    const notificationApi = window.Notification as unknown as { requestPermission: ReturnType<typeof vi.fn> };
+    notificationApi.requestPermission.mockImplementation(async () => {
+      order.push('request-permission');
+      return 'granted';
+    });
+    const { registerWebPushSubscription } = await import('../src/utils/webPush');
+
+    const result = await registerWebPushSubscription();
+
+    expect(result.status).toBe('subscribed');
+    expect(order[0]).toBe('request-permission');
+    expect(order).toEqual(['request-permission', 'load-key', 'save-subscription']);
+  });
 });

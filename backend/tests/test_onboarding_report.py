@@ -9,11 +9,13 @@ from src.schemas.schemas import OnboardRequest
 def make_onboarding_request() -> OnboardRequest:
     return OnboardRequest(
         anti_capper_pains=["Не успеваю зайти", "Нет дисциплины"],
+        onboarding_goal="fast_signals",
         experience_level="amateur",
         bankroll_size="mid",
         risk_tolerance="balanced",
         bookmakers=["fonbet"],
         primary_bookmaker="fonbet",
+        favorite_sports=["Футбол", "Теннис"],
         vk_user_id="741852963",
         currency_preference="RUB",
     )
@@ -66,9 +68,13 @@ class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VK ID", payload["text"])
         self.assertIn("741852963", payload["text"])
         self.assertIn("Тип профиля", payload["text"])
-        self.assertNotIn("Рекомендованный флэт", payload["text"])
-        self.assertNotIn("Потенциал в месяц", payload["text"])
-        self.assertNotIn("Упущено за 24 часа", payload["text"])
+        self.assertIn("Цель", payload["text"])
+        self.assertIn("Быстрые входы по линии", payload["text"])
+        self.assertIn("Спорты", payload["text"])
+        self.assertIn("Футбол, Теннис", payload["text"])
+        self.assertIn("Рекомендованный флэт", payload["text"])
+        self.assertIn("FOMO 24ч", payload["text"])
+        self.assertIn("Источник расчета", payload["text"])
 
     async def test_onboarding_report_dedicated_chat_has_priority(self):
         db = SimpleNamespace()
@@ -102,6 +108,47 @@ class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
 
         payload = enqueue_delivery.await_args.kwargs["payload"]["payload"]
         self.assertEqual(payload["chat_id"], -100777)
+
+
+class OnboardingPayloadValidationTests(unittest.TestCase):
+    def test_rejects_invalid_onboarding_goal(self):
+        request = make_onboarding_request().model_copy(update={"onboarding_goal": "guaranteed_profit"})
+
+        with self.assertRaises(Exception) as context:
+            users.validate_onboarding_payload(request)
+
+        self.assertIn("Invalid onboarding_goal", str(context.exception))
+
+    def test_rejects_unknown_favorite_sport(self):
+        request = make_onboarding_request().model_copy(update={"favorite_sports": ["Футбол", "Квиддич"]})
+
+        with self.assertRaises(Exception) as context:
+            users.validate_onboarding_payload(request)
+
+        self.assertIn("Invalid favorite_sports", str(context.exception))
+
+    def test_requires_other_bookmaker_name_for_other_code(self):
+        request = make_onboarding_request().model_copy(update={
+            "bookmakers": ["other"],
+            "primary_bookmaker": "other",
+            "other_bookmaker_name": "",
+        })
+
+        with self.assertRaises(Exception) as context:
+            users.validate_onboarding_payload(request)
+
+        self.assertIn("other_bookmaker_name is required", str(context.exception))
+
+    def test_derives_crm_segment_from_onboarding_answers(self):
+        request = make_onboarding_request().model_copy(update={
+            "experience_level": "pro",
+            "bankroll_size": "high",
+            "risk_tolerance": "aggressive",
+            "onboarding_goal": "fast_signals",
+        })
+
+        self.assertEqual(users.onboarding_client_group(request), "Новый PRO")
+        self.assertEqual(users.onboarding_client_tag(request), "goal: fast_signals")
 
 
 if __name__ == "__main__":

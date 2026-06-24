@@ -59,7 +59,7 @@ function removeStorage(type: 'local' | 'session', key: string): void {
 }
 
 export function getStoredAuthToken(): string | null {
-  const token = memoryAuthToken || readStorage('session', AUTH_TOKEN_STORAGE_KEY) || readStorage('local', AUTH_TOKEN_STORAGE_KEY);
+  const token = memoryAuthToken || readStorage('local', AUTH_TOKEN_STORAGE_KEY) || readStorage('session', AUTH_TOKEN_STORAGE_KEY);
   if (!token) return null;
   if (isAllowedStoredToken(token)) return token;
   clearStoredAuthToken();
@@ -76,7 +76,9 @@ export function setStoredAuthToken(token: string): void {
     return;
   }
 
-  writeStorage('session', AUTH_TOKEN_STORAGE_KEY, token);
+  if (!writeStorage('local', AUTH_TOKEN_STORAGE_KEY, token)) {
+    writeStorage('session', AUTH_TOKEN_STORAGE_KEY, token);
+  }
 }
 
 export function clearStoredAuthToken(): void {

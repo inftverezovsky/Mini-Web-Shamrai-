@@ -26,6 +26,10 @@ import {
   rememberVkAuthCooldownForError,
 } from '../utils/vkId';
 import { identityDeviceHeader } from '../utils/identityDevice';
+import {
+  createTelegramBotAuthCoordinator,
+  type TelegramBotAuthOptions,
+} from '../utils/telegramBotAuthCoordinator';
 
 export interface TelegramWidgetPayload {
   id: number;
@@ -50,15 +54,6 @@ interface TelegramBotAuthStatusResponse {
   access_token?: string;
   token_type?: string;
   user?: UserResponse;
-}
-
-export interface TelegramBotAuthSessionStarted {
-  botUrl: string;
-  expiresAt: string;
-}
-
-interface TelegramBotAuthOptions {
-  onSessionStarted?: (session: TelegramBotAuthSessionStarted) => void;
 }
 
 interface AuthState {
@@ -148,6 +143,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }
   const authStore = storeRef.current;
+  const telegramBotAuthCoordinatorRef = useRef<ReturnType<typeof createTelegramBotAuthCoordinator>>();
+  if (!telegramBotAuthCoordinatorRef.current) {
+    telegramBotAuthCoordinatorRef.current = createTelegramBotAuthCoordinator();
+  }
+  const telegramBotAuthCoordinator = telegramBotAuthCoordinatorRef.current;
 
   const setAuthState = useCallback((updater: AuthStateUpdater) => {
     authStore.setSnapshot(updater);
@@ -453,46 +453,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [API_URL, applyLoginResponse, setError, setLoading]);
 
-  const loginWithTelegramBot = useCallback(async (options: TelegramBotAuthOptions = {}) => {
-    try {
-      setError(null);
-      const session = await apiFetch<TelegramBotAuthStartResponse>('/auth/telegram/bot-session', {
-        method: 'POST',
-      });
+  const loginWithTelegramBot = useCallback((options: TelegramBotAuthOptions = {}) => (
+    telegramBotAuthCoordinator.run(options, async (notifySessionStarted) => {
+      try {
+        setError(null);
+        const session = await apiFetch<TelegramBotAuthStartResponse>('/auth/telegram/bot-session', {
+          method: 'POST',
+        });
 
-      window.open(session.bot_url, '_blank', 'noopener,noreferrer');
-      options.onSessionStarted?.({
-        botUrl: session.bot_url,
-        expiresAt: session.expires_at,
-      });
+        window.open(session.bot_url, '_blank', 'noopener,noreferrer');
+        notifySessionStarted({
+          botUrl: session.bot_url,
+          expiresAt: session.expires_at,
+        });
 
-      const expiresAt = new Date(session.expires_at).getTime();
-      while (Date.now() < expiresAt) {
-        await wait(TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS);
-        const authStatus = await apiFetch<TelegramBotAuthStatusResponse>(
-          `/auth/telegram/bot-session/${encodeURIComponent(session.auth_token)}`,
-        );
+        const expiresAt = new Date(session.expires_at).getTime();
+        while (Date.now() < expiresAt) {
+          await wait(TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS);
+          const authStatus = await apiFetch<TelegramBotAuthStatusResponse>(
+            `/auth/telegram/bot-session/${encodeURIComponent(session.auth_token)}`,
+          );
 
-        if (authStatus.status === 'confirmed' && authStatus.access_token && authStatus.user) {
-          applyLoginResponse({
-            access_token: authStatus.access_token,
-            user: authStatus.user,
-          });
-          return;
+          if (authStatus.status === 'confirmed' && authStatus.access_token && authStatus.user) {
+            applyLoginResponse({
+              access_token: authStatus.access_token,
+              user: authStatus.user,
+            });
+            return;
+          }
+
+          if (authStatus.status === 'expired' || authStatus.status === 'consumed') {
+            break;
+          }
         }
 
-        if (authStatus.status === 'expired' || authStatus.status === 'consumed') {
-          break;
-        }
+        throw new Error('Ссылка Telegram-входа устарела. Нажмите кнопку еще раз.');
+      } catch (err: any) {
+        const message = authErrorMessage(err, 'Не удалось войти через Telegram');
+        setError(message);
+        throw new Error(message);
       }
-
-      throw new Error('Ссылка Telegram-входа устарела. Нажмите кнопку еще раз.');
-    } catch (err: any) {
-      const message = authErrorMessage(err, 'Не удалось войти через Telegram');
-      setError(message);
-      throw new Error(message);
-    }
-  }, [applyLoginResponse, setError]);
+    })
+  ), [applyLoginResponse, setError, telegramBotAuthCoordinator]);
 
   useEffect(() => {
     let cancelled = false;

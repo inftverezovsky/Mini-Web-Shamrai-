@@ -5,8 +5,10 @@ import {
   MessageCircle,
   Radio,
   RefreshCw,
+  Search,
   ShieldCheck,
   WifiOff,
+  X,
 } from 'lucide-react';
 
 import {
@@ -19,7 +21,7 @@ import {
   ChatSignalMessageResponse,
 } from '../../schemas/schemas';
 import { WEB_SIGNAL_EVENT, WEB_SIGNAL_STATUS_EVENT } from '../../components/WebSignalListener';
-import { apiFetch, buildApiWebSocketUrl } from '../../utils/api';
+import { apiFetch, buildApiWebSocketUrl, downloadApiFile } from '../../utils/api';
 import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../../utils/authStorage';
 import { useDataProcessorWorker } from '../../hooks/useDataProcessorWorker';
 import { useThrottledCallback, useThrottledEventBuffer } from '../../hooks/useThrottledEvents';
@@ -66,6 +68,27 @@ interface ChatStreamConversationUpdatedEvent {
   event: 'chat.conversation.updated';
   conversation_id: string;
   conversation: ChatConversationResponse;
+}
+
+interface ChatTypingUpdatedEvent {
+  event: 'chat.typing.updated';
+  conversation_id: string;
+  sender_user_id: number;
+  sender_role: string;
+  direction: 'staff' | 'client';
+  is_typing: boolean;
+}
+
+type ChatReplyTarget = NonNullable<ChatMessageResponse['reply_to']>;
+
+function replyTargetFromMessage(message: ChatMessageResponse): ChatReplyTarget {
+  return {
+    id: message.id,
+    author_label: message.author_label,
+    type: message.type,
+    text: supportMessagePreview(message),
+    payload: message.payload || {},
+  };
 }
 
 function mergeSupportMessages(
@@ -127,6 +150,7 @@ function supportMessagePreview(message: ChatMessageResponse) {
   if (message.text?.trim()) return message.text;
   if (message.type === 'image') return 'Скриншот';
   if (message.type === 'voice') return 'Голосовое сообщение';
+  if (message.type === 'file') return String(message.payload?.original_filename || 'Файл');
   return 'Новое сообщение';
 }
 
@@ -144,6 +168,7 @@ function makeOptimisticMessage(
   text: string,
   clientMessageId: string,
   attachment?: ChatComposerAttachment,
+  replyTo?: ChatReplyTarget | null,
 ): SupportMessageView {
   const now = new Date().toISOString();
   return {
@@ -157,7 +182,8 @@ function makeOptimisticMessage(
     text,
     payload: attachment ? attachmentPayload(attachment) : {},
     client_message_id: clientMessageId,
-    reply_to_id: null,
+    reply_to_id: replyTo?.id || null,
+    reply_to: replyTo || null,
     created_at: now,
     edited_at: null,
     deleted_at: null,
@@ -217,11 +243,16 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   const [supportStreamState, setSupportStreamState] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [replyTarget, setReplyTarget] = useState<ChatReplyTarget | null>(null);
+  const [supportSearch, setSupportSearch] = useState('');
+  const [supportTypingText, setSupportTypingText] = useState('');
   const [sendingClientIds, setSendingClientIds] = useState<Set<string>>(new Set());
   const seenSignalIdsRef = useRef<Set<number>>(new Set());
   const seenSupportMessageIdsRef = useRef<Set<number>>(new Set());
   const signalsRef = useRef<ChatSignalMessageResponse[]>([]);
   const signalMergeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const typingClearTimerRef = useRef<number | undefined>();
+  const lastTypingSentAtRef = useRef(0);
   const { mergeSignals: mergeSignalsOffThread } = useDataProcessorWorker();
 
   const isTma = isTelegramMiniApp();
@@ -237,6 +268,12 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
       signalsRef.current = nextSignals;
       return nextSignals;
     });
+  }, []);
+
+  useEffect(() => () => {
+    if (typingClearTimerRef.current !== undefined) {
+      window.clearTimeout(typingClearTimerRef.current);
+    }
   }, []);
 
   const mergeSignalsIntoState = useCallback((incomingSignals: ChatSignalMessageResponse[]) => {
@@ -488,6 +525,18 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
       setSupportMessages((current) => applyReadReceiptToMessages(current, payload));
     };
 
+    const handleTypingUpdated = (payload: ChatTypingUpdatedEvent) => {
+      if (!payload?.is_typing || payload.direction !== 'staff') return;
+      if (typingClearTimerRef.current !== undefined) {
+        window.clearTimeout(typingClearTimerRef.current);
+      }
+      setSupportTypingText('Shamrai печатает...');
+      typingClearTimerRef.current = window.setTimeout(() => {
+        typingClearTimerRef.current = undefined;
+        setSupportTypingText('');
+      }, 4500);
+    };
+
     async function connect() {
       setSupportStreamState('connecting');
       let ticket: string;
@@ -519,6 +568,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           if (payload?.event === 'chat.message.created') handleMessageCreated(payload as ChatStreamMessageCreatedEvent);
           if (payload?.event === 'chat.conversation.updated') handleConversationUpdated(payload as ChatStreamConversationUpdatedEvent);
           if (payload?.event === 'chat.read.updated') handleReadUpdated(payload as ChatReadUpdatedEvent);
+          if (payload?.event === 'chat.typing.updated') handleTypingUpdated(payload as ChatTypingUpdatedEvent);
         } catch {
           // Ignore malformed stream frames.
         }
@@ -604,14 +654,18 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     }
   }, [openSupportDraft, updateSignalForecastStatus]);
 
-  const sendSupportText = useCallback(async (text: string, clientMessageId: string = crypto.randomUUID()) => {
+  const sendSupportText = useCallback(async (
+    text: string,
+    clientMessageId: string = crypto.randomUUID(),
+    replyTo: ChatReplyTarget | null = replyTarget,
+  ) => {
     const cleanText = text.trim();
     if (!cleanText) {
       notifyError('Введите сообщение для Shamrai');
       return false;
     }
 
-    const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId);
+    const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId, undefined, replyTo);
     setSendingClientIds((current) => new Set(current).add(clientMessageId));
     setSupportMessages((current) => mergeSupportMessages(current, [optimisticMessage]));
     void unlockIncomingSignalSound();
@@ -619,7 +673,11 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     try {
       const response = await apiFetch<ChatMessageResponse>('/chat/conversations/support/messages', {
         method: 'POST',
-        body: JSON.stringify({ client_message_id: clientMessageId, text: cleanText }),
+        body: JSON.stringify({
+          client_message_id: clientMessageId,
+          text: cleanText,
+          ...(replyTo?.id ? { reply_to_id: replyTo.id } : {}),
+        }),
       });
       rememberRecentId(seenSupportMessageIdsRef.current, response.id);
       setSupportMessages((current) => mergeSupportMessages(
@@ -627,6 +685,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         [{ ...response, delivery_state: 'sent' }],
       ));
       setDraft('');
+      setReplyTarget(null);
       void loadConversations().catch(() => undefined);
       return true;
     } catch (error: any) {
@@ -644,15 +703,16 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         return next;
       });
     }
-  }, [loadConversations]);
+  }, [loadConversations, replyTarget]);
 
   const sendSupportAttachment = useCallback(async (
     attachment: ChatComposerAttachment,
     text: string,
     clientMessageId: string = crypto.randomUUID(),
+    replyTo: ChatReplyTarget | null = replyTarget,
   ) => {
     const cleanText = text.trim();
-    const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId, attachment);
+    const optimisticMessage = makeOptimisticMessage(cleanText, clientMessageId, attachment, replyTo);
     setSendingClientIds((current) => new Set(current).add(clientMessageId));
     setSupportMessages((current) => mergeSupportMessages(current, [optimisticMessage]));
     void unlockIncomingSignalSound();
@@ -662,6 +722,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     formData.append('message_type', attachment.messageType);
     formData.append('file', attachment.file);
     if (cleanText) formData.append('text', cleanText);
+    if (replyTo?.id) formData.append('reply_to_id', String(replyTo.id));
     if (attachment.durationMs) formData.append('duration_ms', String(Math.round(attachment.durationMs)));
 
     try {
@@ -675,6 +736,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         [{ ...response, delivery_state: 'sent' }],
       ));
       URL.revokeObjectURL(attachment.previewUrl);
+      setReplyTarget(null);
       void loadConversations().catch(() => undefined);
       return true;
     } catch (error: any) {
@@ -701,16 +763,52 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         return next;
       });
     }
-  }, [loadConversations]);
+  }, [loadConversations, replyTarget]);
 
   const handleRetry = useCallback((message: SupportMessageView) => {
     if (sendingClientIds.has(message.client_message_id)) return;
     if (message.retry_attachment) {
-      void sendSupportAttachment(message.retry_attachment, message.text || '', message.client_message_id);
+      void sendSupportAttachment(message.retry_attachment, message.text || '', message.client_message_id, message.reply_to || null);
       return;
     }
-    if (message.text) void sendSupportText(message.text, message.client_message_id);
+    if (message.text) void sendSupportText(message.text, message.client_message_id, message.reply_to || null);
   }, [sendSupportAttachment, sendSupportText, sendingClientIds]);
+
+  const handleReply = useCallback((message: SupportMessageView) => {
+    setActiveConversation('support');
+    setReplyTarget(replyTargetFromMessage(message));
+  }, []);
+
+  const handleCopy = useCallback((message: SupportMessageView) => {
+    const text = message.text?.trim();
+    if (!text) return;
+    void navigator.clipboard.writeText(text)
+      .then(() => notifySuccess('Текст скопирован'))
+      .catch(() => notifyError('Не удалось скопировать текст'));
+  }, []);
+
+  const handleDownload = useCallback((message: SupportMessageView) => {
+    const downloadUrl = typeof message.payload?.download_url === 'string' ? message.payload.download_url : '';
+    if (!downloadUrl) {
+      notifyError('Вложение пока недоступно для скачивания');
+      return;
+    }
+    const filename = String(message.payload?.original_filename || `chat-attachment-${message.id}`);
+    void downloadApiFile(downloadUrl, filename).catch((error: any) => {
+      notifyError(error?.message || 'Не удалось скачать вложение');
+    });
+  }, []);
+
+  const sendSupportTyping = useCallback(() => {
+    if (activeConversation !== 'support') return;
+    const now = Date.now();
+    if (now - lastTypingSentAtRef.current < 2500) return;
+    lastTypingSentAtRef.current = now;
+    void apiFetch('/chat/conversations/support/typing', {
+      method: 'POST',
+      body: JSON.stringify({ is_typing: true }),
+    }).catch(() => undefined);
+  }, [activeConversation]);
 
   const markActiveRead = useCallback(() => {
     if (activeConversation === 'signals') {
@@ -744,11 +842,16 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     void answerForecastRequest(nextSignal, action);
   }, [answerForecastRequest]);
 
+  const signalUnreadStartIndex = signalsConversation?.unread_count
+    ? Math.max(0, signals.length - signalsConversation.unread_count)
+    : -1;
   const signalItems = useMemo(() => signals.map((signal, index) => {
     const requestId = signal.data?.forecast_request_id;
     const signalBusy = requestId && actionBusy?.startsWith(`${requestId}:`) ? actionBusy : null;
     return {
       key: `signal:${signal.id}`,
+      createdAt: signal.created_at,
+      unreadDivider: signalUnreadStartIndex === index,
       element: (
         <SignalMessageCard
           signal={signal}
@@ -758,18 +861,38 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         />
       ),
     };
-  }), [actionBusy, handleForecastAction, signals]);
+  }), [actionBusy, handleForecastAction, signalUnreadStartIndex, signals]);
 
-  const supportItems = useMemo(() => supportMessages.map((message) => ({
+  const visibleSupportMessages = useMemo(() => {
+    const cleanSearch = supportSearch.trim().toLowerCase();
+    if (!cleanSearch) return supportMessages;
+    return supportMessages.filter((message) => [
+      message.text,
+      message.author_label,
+      message.payload?.original_filename,
+      message.reply_to?.text,
+      message.reply_to?.author_label,
+    ].join(' ').toLowerCase().includes(cleanSearch));
+  }, [supportMessages, supportSearch]);
+
+  const supportUnreadStartIndex = !supportSearch.trim() && supportConversation?.unread_count
+    ? Math.max(0, visibleSupportMessages.length - supportConversation.unread_count)
+    : -1;
+  const supportItems = useMemo(() => visibleSupportMessages.map((message, index) => ({
     key: `support:${message.client_message_id}:${message.id}`,
+    createdAt: message.created_at,
+    unreadDivider: supportUnreadStartIndex === index,
     element: (
       <SupportMessageBubble
         message={message}
         ownerLabel={message.direction === 'client' ? 'Вы' : undefined}
         onRetry={handleRetry}
+        onReply={handleReply}
+        onCopy={handleCopy}
+        onDownload={handleDownload}
       />
     ),
-  })), [handleRetry, supportMessages]);
+  })), [handleCopy, handleDownload, handleReply, handleRetry, supportUnreadStartIndex, visibleSupportMessages]);
 
   if (isTma) return null;
 
@@ -861,27 +984,55 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           )}
         />
       ) : (
-        <MessageList
-          items={supportItems}
-          loading={loadingSupport}
-          active={active}
-          hasMore={supportHasMore}
-          loadingMore={supportLoadingMore}
-          loadMoreLabel="Показать раннюю историю"
-          onLoadMore={() => void loadOlderSupportMessages()}
-          empty={(
-            <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
-              {supportError || conversationError ? (
-                <ErrorRetryCard message={supportError || conversationError || ''} onRetry={() => void refreshAll()} />
-              ) : (
-                <div className="grid place-items-center">
-                  <MessageCircle className="mx-auto h-6 w-6 text-cyan-200" />
-                  <p className="mt-2 text-sm font-black text-white">История поддержки пуста</p>
-                </div>
+        <>
+          <div className="border-b border-white/10 bg-slate-950/30 px-3 py-2">
+            <label className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded-xl border border-white/10 bg-slate-950/55 px-3 py-2">
+              <Search className="h-4 w-4 text-slate-500" />
+              <input
+                value={supportSearch}
+                onChange={(event) => setSupportSearch(event.target.value)}
+                placeholder="Поиск по истории поддержки"
+                className="min-w-0 bg-transparent text-sm font-semibold text-white placeholder:text-slate-600 focus:outline-none"
+              />
+              {supportSearch.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setSupportSearch('')}
+                  title="Очистить поиск"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               )}
-            </div>
-          )}
-        />
+            </label>
+          </div>
+          <MessageList
+            items={supportItems}
+            loading={loadingSupport}
+            active={active}
+            hasMore={supportHasMore}
+            loadingMore={supportLoadingMore}
+            loadMoreLabel="Показать раннюю историю"
+            onLoadMore={() => void loadOlderSupportMessages()}
+            empty={(
+              <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
+                {supportError || conversationError ? (
+                  <ErrorRetryCard message={supportError || conversationError || ''} onRetry={() => void refreshAll()} />
+                ) : supportSearch.trim() ? (
+                  <div className="grid place-items-center">
+                    <Search className="mx-auto h-6 w-6 text-slate-400" />
+                    <p className="mt-2 text-sm font-black text-white">Ничего не найдено</p>
+                  </div>
+                ) : (
+                  <div className="grid place-items-center">
+                    <MessageCircle className="mx-auto h-6 w-6 text-cyan-200" />
+                    <p className="mt-2 text-sm font-black text-white">История поддержки пуста</p>
+                  </div>
+                )}
+              </div>
+            )}
+          />
+        </>
       )}
 
       {activeConversation === 'support' && (
@@ -890,6 +1041,29 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
             <p className="mx-3 mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-[11px] font-bold text-amber-100">
               Диалог закрыт. Новое сообщение снова откроет обращение.
             </p>
+          )}
+          {supportTypingText && (
+            <p className="mx-3 mt-2 rounded-xl border border-cyan-300/15 bg-cyan-300/10 px-3 py-2 text-[11px] font-bold text-cyan-100">
+              {supportTypingText}
+            </p>
+          )}
+          {replyTarget && (
+            <div className="mx-3 mt-2 flex min-w-0 items-center gap-3 rounded-xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] font-black uppercase tracking-[0.12em] text-cyan-100/75">
+                  Ответ на {replyTarget.author_label}
+                </p>
+                <p className="mt-1 truncate text-xs font-bold text-white/75">{replyTarget.text || 'Сообщение'}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReplyTarget(null)}
+                title="Отменить ответ"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-white/65 transition hover:bg-white/[0.08] hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
           )}
           <MessageComposer
             draft={draft}
@@ -901,6 +1075,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
             onSendText={sendSupportText}
             onSendAttachment={sendSupportAttachment}
             onError={notifyError}
+            onTyping={sendSupportTyping}
           />
         </>
       )}

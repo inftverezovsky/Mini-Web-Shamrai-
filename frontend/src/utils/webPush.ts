@@ -277,11 +277,6 @@ export async function registerWebPushSubscription(): Promise<WebPushSubscription
     return { status: 'unsupported', message: 'Web Push доступен только в HTTPS/PWA браузере.' };
   }
 
-  const publicKey = await loadVapidPublicKey();
-  if (!publicKey) {
-    return { status: 'missing_key', message: 'VAPID public key не настроен.' };
-  }
-
   let permission = Notification.permission;
   if (permission === 'default') {
     permission = await Notification.requestPermission();
@@ -293,6 +288,11 @@ export async function registerWebPushSubscription(): Promise<WebPushSubscription
 
   if (permission !== 'granted') {
     return { status: 'default', message: 'Push-уведомления не включены.' };
+  }
+
+  const publicKey = await loadVapidPublicKey();
+  if (!publicKey) {
+    return { status: 'missing_key', message: 'VAPID public key не настроен.' };
   }
 
   try {

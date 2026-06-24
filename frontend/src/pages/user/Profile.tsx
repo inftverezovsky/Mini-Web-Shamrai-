@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
 import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
@@ -13,7 +13,11 @@ import {
 import { getTelegramIdentityStatus } from '../../utils/identityStatus';
 import { isVkDeliveryReady } from '../../utils/identityAccess';
 import { syncConnectionOnboarding } from '../../utils/connectionOnboarding';
-import { resolveProfileSetupIntent } from '../../utils/profileSetup';
+import {
+  PROFILE_SETUP_NAVIGATION_EVENT,
+  profileSetupIntentFromLocation,
+  type ProfileSetupNavigationDetail,
+} from '../../utils/profileSetup';
 import { buildProfileAvatarSources } from '../../utils/profileAvatar';
 import type { VkDeliveryStatus } from '../../utils/vkDelivery';
 import { useLayoutMode } from '../../context/LayoutModeContext';
@@ -319,12 +323,8 @@ export default function Profile() {
   const vkMissingPermissionsCount = vkDeliveryReady ? 0 : 1;
   const telegramIdentity = getTelegramIdentityStatus(userProfile);
   const telegramLinked = telegramIdentity.linked;
-  const profileSetupIntent = useMemo(
-    () => (typeof window === 'undefined'
-      ? resolveProfileSetupIntent('')
-      : resolveProfileSetupIntent(window.location.search, window.location.hash)),
-    [],
-  );
+  const [profileSetupIntent, setProfileSetupIntent] = useState(profileSetupIntentFromLocation);
+  const [profileSetupIntentRevision, setProfileSetupIntentRevision] = useState(0);
   const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
     queryKey: profileDashboardQueryKey(userProfile?.telegram_id),
     queryFn: fetchProfileDashboard,
@@ -332,6 +332,25 @@ export default function Profile() {
     staleTime: TAB_QUERY_STALE_TIME,
   });
   const refetchProfileDashboard = profileDashboardQuery.refetch;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const refreshProfileSetupIntent = (event?: Event) => {
+      const detail = event?.type === PROFILE_SETUP_NAVIGATION_EVENT
+        ? (event as CustomEvent<ProfileSetupNavigationDetail>).detail
+        : null;
+      setProfileSetupIntent(detail?.intent || profileSetupIntentFromLocation());
+      setProfileSetupIntentRevision((current) => current + 1);
+    };
+
+    window.addEventListener(PROFILE_SETUP_NAVIGATION_EVENT, refreshProfileSetupIntent);
+    window.addEventListener('popstate', refreshProfileSetupIntent);
+    return () => {
+      window.removeEventListener(PROFILE_SETUP_NAVIGATION_EVENT, refreshProfileSetupIntent);
+      window.removeEventListener('popstate', refreshProfileSetupIntent);
+    };
+  }, []);
 
   const handleIdentityProfileUpdated = useCallback(async () => {
     await refetchProfileDashboard();
@@ -691,6 +710,7 @@ export default function Profile() {
     const startKey = [
       action,
       profileSetupIntent.targetId,
+      profileSetupIntentRevision,
       userProfile?.telegram_id ?? 'anon',
       userProfile?.vk_user_id ?? 'no-vk',
       vkMessagesAllowed ? 'vk-messages-ready' : 'vk-messages-missing',
@@ -744,6 +764,7 @@ export default function Profile() {
     linkingTelegram,
     linkingVk,
     profileSetupIntent.autoAction,
+    profileSetupIntentRevision,
     profileSetupIntent.targetId,
     telegramLinked,
     userProfile?.telegram_id,
