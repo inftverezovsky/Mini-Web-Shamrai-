@@ -6,8 +6,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from contextlib import suppress
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.future import select
@@ -21,6 +22,7 @@ from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go, public_settings
 from src.services.delivery_outbox import delivery_outbox_daemon
+from src.services.system_settings import is_system_setting_enabled
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.services.vk_delivery import (
     get_vk_unread_conversations,
@@ -1244,6 +1246,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityRateLimitMiddleware, limiter=security_rate_limiter)
+
+MAINTENANCE_EXEMPT_PATH_PREFIXES = (
+    "/api/admin",
+    "/api/auth",
+    "/api/health",
+    "/api/payments/telegram-webhook",
+    "/api/payments/tegro/webhook",
+    "/api/payments/yookassa/webhook",
+    "/api/settings/theme",
+    "/api/telegram",
+    "/api/vk/callback",
+    "/api/users/me/presence",
+    "/static",
+)
+
+
+def is_maintenance_exempt_path(path: str) -> bool:
+    if not path.startswith("/api"):
+        return True
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in MAINTENANCE_EXEMPT_PATH_PREFIXES)
+
+
+@app.middleware("http")
+async def maintenance_mode_middleware(request: Request, call_next):
+    if is_maintenance_exempt_path(request.url.path):
+        return await call_next(request)
+
+    maintenance_enabled = False
+    try:
+        async with AsyncSessionLocal() as db:
+            maintenance_enabled = await is_system_setting_enabled(db, "MAINTENANCE_MODE")
+    except Exception:
+        maintenance_enabled = False
+
+    if maintenance_enabled:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": "Сервис временно находится на обслуживании. Попробуйте позже.",
+                "code": "maintenance_mode",
+            },
+        )
+
+    return await call_next(request)
 
 # Mount static files directory for serving uploaded coupon images
 import os

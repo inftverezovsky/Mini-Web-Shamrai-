@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_TOKEN_URI: str = "https://oauth2.googleapis.com/token"
     GOOGLE_SERVICE_ACCOUNT_JSON_B64: str = ""
     ADMIN_INTEGRATIONS_PASSWORD: str = ""
+    ADMIN_MONITORING_LOG_PATH: str = ""
 
     @property
     def sales_manager_telegram_id(self) -> Optional[int]:

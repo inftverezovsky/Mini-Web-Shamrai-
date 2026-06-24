@@ -1,7 +1,9 @@
 import base64
 import csv
 import json
+import re
 from io import BytesIO, StringIO
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
@@ -43,7 +45,9 @@ from src.schemas.schemas import (
     AdminUpdateUserPreferences,
     AdminUserListResponse,
     BetResponse,
+    IntegrationDiagnosticsRequest,
     IntegrationSettingsUnlockRequest,
+    IntegrationSettingsUnlockResponse,
     MessageTemplateResponse,
     MessageTemplateUpdate,
     MonitoringLogsResponse,
@@ -55,6 +59,7 @@ from src.schemas.schemas import (
     UserResponse,
 )
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_privileged_admin
+from src.core.config import settings
 from src.core.roles import ADMIN_ROLES, ROLE_LABELS, STAFF_ROLES, VALID_ROLES, is_admin_role, is_owner_role, normalize_role
 from src.core.message_templates import (
     list_message_templates,
@@ -78,8 +83,10 @@ from src.services.statistics import (
 )
 from src.services.google_drive_export import get_drive_export_job, start_crm_drive_export_job, start_drive_export_job
 from src.services.system_settings import (
+    create_integration_unlock_token,
     get_admin_system_settings,
     get_unlocked_integration_settings,
+    run_integration_diagnostics,
     reset_user_session_cache,
     update_admin_system_settings,
     verify_integrations_password,
@@ -472,7 +479,7 @@ async def admin_update_system_settings(
     return response
 
 
-@router.post("/settings/integrations/unlock", response_model=SystemSettingsResponse)
+@router.post("/settings/integrations/unlock", response_model=IntegrationSettingsUnlockResponse)
 async def admin_unlock_integration_settings(
     payload: IntegrationSettingsUnlockRequest,
     admin: User = Depends(get_current_privileged_admin),
@@ -492,7 +499,32 @@ async def admin_unlock_integration_settings(
         actor=admin,
         action="integration_settings_unlocked",
     )
-    return await get_unlocked_integration_settings(db)
+    unlocked_settings = await get_unlocked_integration_settings(db)
+    token_payload = await create_integration_unlock_token(admin_id=admin.telegram_id)
+    return {
+        **unlocked_settings,
+        "unlock_token": token_payload["unlock_token"],
+        "expires_at": token_payload["expires_at"],
+    }
+
+
+@router.post("/settings/integrations/diagnostics")
+async def admin_integration_diagnostics(
+    payload: IntegrationDiagnosticsRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_read_db),
+):
+    """Read-only integration diagnostics. Never returns secret values."""
+    try:
+        response = await run_integration_diagnostics(
+            db,
+            unlock_token=payload.unlock_token,
+            group=payload.group,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    return response
 
 
 @router.post("/settings/reset-sessions", response_model=ResetSessionsResponse)
@@ -519,11 +551,96 @@ async def admin_monitoring_online(
     return {"online_users": await count_online_users()}
 
 
+def _redact_sensitive_text(value: str) -> str:
+    redacted = str(value or "")
+    redacted = re.sub(r"(?i)(token|secret|password|authorization|api[_-]?key)=([^\s,;]+)", r"\1=[redacted]", redacted)
+    redacted = re.sub(r"(?i)(postgres(?:ql)?|mysql|redis)://[^\s]+", r"\1://[redacted]", redacted)
+    redacted = re.sub(r"\b\d{6,}:[A-Za-z0-9_-]{12,}\b", "[telegram-token-redacted]", redacted)
+    redacted = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer [redacted]", redacted)
+    return redacted
+
+
+def _monitoring_log_candidates() -> list[Path]:
+    return [
+        Path(str(getattr(settings, "ADMIN_MONITORING_LOG_PATH", "") or "")),
+        Path("logs/backend.log"),
+        Path("/opt/shamrai-mini-app/logs/backend.log"),
+        Path("/var/log/shamrai/backend.log"),
+    ]
+
+
+def _tail_log_lines(path: Path, limit: int = 50) -> list[str]:
+    try:
+        if not path or not path.is_file():
+            return []
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return [_redact_sensitive_text(line) for line in lines[-limit:]]
+    except Exception:
+        return []
+
+
+async def _recent_audit_summary(db: AsyncSession, limit: int = 5) -> list[dict[str, Any]]:
+    result = await db.execute(
+        select(AdminAuditLog)
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "id": log.id,
+            "actor_id": log.actor_id,
+            "action": log.action,
+            "created_at": log.created_at.isoformat() if hasattr(log.created_at, "isoformat") else log.created_at,
+        }
+        for log in result.scalars().all()
+    ]
+
+
+@router.get("/monitoring/summary")
+async def admin_monitoring_summary(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Aggregated admin operations center payload with no secret-bearing data."""
+    database_status = "ok"
+    database_error = None
+    try:
+        await db.execute(select(1))
+    except Exception as exc:
+        database_status = "error"
+        database_error = type(exc).__name__
+
+    parser_status = await admin_monitoring_parser_status(admin=admin)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "online": {"online_users": await count_online_users()},
+        "health": {
+            "api": "ok",
+            "database": database_status,
+            "database_error": database_error,
+        },
+        "delivery_outbox": await get_delivery_outbox_metrics(db),
+        "rate_limit": get_security_rate_limit_metrics(),
+        "parser": {
+            "status": parser_status["status"],
+            "last_sync": parser_status["last_sync"].isoformat()
+            if hasattr(parser_status["last_sync"], "isoformat")
+            else parser_status["last_sync"],
+        },
+        "audit": await _recent_audit_summary(db),
+    }
+
+
 @router.get("/monitoring/logs", response_model=MonitoringLogsResponse)
 async def admin_monitoring_logs(
     admin: User = Depends(get_current_admin_read),
 ):
-    """Recent error log preview. Uses synthetic entries until a persistent error log exists."""
+    """Recent error log preview with sensitive fragments redacted."""
+    for candidate in _monitoring_log_candidates():
+        lines = _tail_log_lines(candidate, limit=50)
+        if lines:
+            return {"logs": lines}
+
     now = datetime.now(timezone.utc).isoformat()
     return {
         "logs": [
@@ -543,6 +660,44 @@ async def admin_monitoring_parser_status(
         "status": "active",
         "last_sync": datetime.now(timezone.utc),
     }
+
+
+@router.get("/monitoring/diagnostic-report")
+async def admin_monitoring_diagnostic_report(
+    format: str = Query("txt", pattern="^(txt|json)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> Response:
+    """Download sanitized monitoring diagnostics without secrets or env values."""
+    summary = await admin_monitoring_summary(admin=admin, db=db)
+    logs = await admin_monitoring_logs(admin=admin)
+    report_payload = {
+        "summary": summary,
+        "logs": logs.get("logs", []),
+    }
+    if format == "json":
+        return Response(
+            content=json.dumps(report_payload, ensure_ascii=False, indent=2, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=shamrai-monitoring-diagnostic.json"},
+        )
+
+    lines = [
+        "Shamrai Analytics Hub diagnostic report",
+        f"generated_at: {summary.get('generated_at')}",
+        "",
+        "[summary]",
+        json.dumps(summary, ensure_ascii=False, default=str),
+        "",
+        "[logs]",
+        *[str(line) for line in logs.get("logs", [])],
+    ]
+    text_report = _redact_sensitive_text("\n".join(lines))
+    return Response(
+        content=text_report,
+        media_type="text/plain",
+        headers={"Content-Disposition": "attachment; filename=shamrai-monitoring-diagnostic.txt"},
+    )
 
 
 @router.get("/message-templates", response_model=List[MessageTemplateResponse])

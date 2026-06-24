@@ -1,18 +1,32 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
-import { apiFetch } from '../../utils/api';
+import { apiFetch, downloadApiFile } from '../../utils/api';
 import type { MessageTemplateResponse } from '../../schemas/schemas';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import SmoothCollapse from '../../components/SmoothCollapse';
 import {
+  BRAND_BACKGROUND_URL_KEY,
+  BRAND_LOGO_URL_KEY,
   DEFAULT_THEME_SETTINGS,
   GLOBAL_PERFORMANCE_MODE_KEY,
   PUBLIC_THEME_QUERY_KEY,
+  THEME_DENSITY_KEY,
+  THEME_FONT_SCALE_KEY,
+  THEME_GLASS_BLUR_PX_KEY,
+  THEME_GLASS_OPACITY_KEY,
+  THEME_GLOW_STRENGTH_KEY,
   THEME_PRIMARY_COLOR_KEY,
+  THEME_RADIUS_SCALE_KEY,
   THEME_SECONDARY_COLOR_KEY,
   normalizeHexColor,
 } from '../../features/settings/themeSettings';
+import {
+  createCollapsedSectionState,
+  setAllSectionsOpen,
+  toggleSection,
+  type SettingsAccordionState,
+} from '../../features/settings/settingsAccordion';
 import {
   Activity,
   AlertTriangle,
@@ -28,6 +42,7 @@ import {
   Eye,
   EyeOff,
   Globe2,
+  Info,
   KeyRound,
   Link2,
   LockKeyhole,
@@ -85,6 +100,11 @@ interface AdminSettingsResponse {
   settings: AdminSettingResponse[];
 }
 
+interface IntegrationUnlockResponse extends AdminSettingsResponse {
+  unlock_token: string;
+  expires_at: string;
+}
+
 interface ResetSessionsResponse {
   status: string;
   deleted: number;
@@ -125,6 +145,28 @@ interface ThemeColorFieldConfig {
   fallback: string;
 }
 
+interface ThemeTextFieldConfig {
+  key: typeof BRAND_LOGO_URL_KEY | typeof BRAND_BACKGROUND_URL_KEY;
+  label: string;
+  description: string;
+  placeholder: string;
+}
+
+interface ThemeNumberFieldConfig {
+  key:
+    | typeof THEME_GLASS_OPACITY_KEY
+    | typeof THEME_GLASS_BLUR_PX_KEY
+    | typeof THEME_RADIUS_SCALE_KEY
+    | typeof THEME_FONT_SCALE_KEY
+    | typeof THEME_GLOW_STRENGTH_KEY;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+  suffix?: string;
+}
+
 interface OnlineMonitoringResponse {
   online_users: number;
 }
@@ -138,8 +180,35 @@ interface MonitoringLogsResponse {
   logs: string[];
 }
 
+interface MonitoringSummaryResponse {
+  generated_at: string;
+  online: { online_users: number };
+  health: Record<string, string | null>;
+  delivery_outbox: Record<string, any>;
+  rate_limit: Record<string, any>;
+  parser: { status: string; last_sync: string };
+  audit: Array<Record<string, any>>;
+}
+
 interface IntegrationUnlockRequest {
   password: string;
+}
+
+interface IntegrationDiagnosticsResponse {
+  overall_status: 'ok' | 'warning' | 'error' | 'missing';
+  generated_at: string;
+  groups: Array<{
+    group: string;
+    status: 'ok' | 'warning' | 'error' | 'missing';
+    checks: Array<{
+      key: string;
+      label: string;
+      status: 'ok' | 'warning' | 'error' | 'missing';
+      configured: boolean;
+      is_secret: boolean;
+      message: string;
+    }>;
+  }>;
 }
 
 type TemplateEditorToken =
@@ -303,6 +372,54 @@ const DEFAULT_INTEGRATION_VALUES = INTEGRATION_FIELDS.reduce<Record<string, stri
   return acc;
 }, {});
 
+const INTEGRATION_FIELD_HELP: Record<string, string> = {
+  TELEGRAM_BOT_TOKEN: 'Ключ доступа к Telegram Bot API. Нужен, чтобы бот отправлял сообщения, уведомления, счета и служебные ответы пользователям.',
+  TELEGRAM_WEBHOOK_SECRET_TOKEN: 'Секретная метка webhook-запросов Telegram. Помогает принимать события только от вашего бота, а чужие запросы отсеивать.',
+  TELEGRAM_BOT_USERNAME: 'Публичное имя Telegram-бота. Используется в ссылках, кнопках перехода и подсказках для пользователя.',
+  TELEGRAM_VIP_CHAT_ID: 'ID закрытого VIP-чата или канала. Нужен для инвайтов, проверки доступа и доставки закрытых материалов.',
+  TELEGRAM_ADMIN_GROUP_CHAT_ID: 'ID служебной админ-группы. Сюда бот отправляет важные уведомления по пользователям, оплатам и ошибкам.',
+  SALES_MANAGER_TELEGRAM_ID: 'Telegram ID менеджера продаж. Нужен для ручных продаж, персональных уведомлений и передачи лидов ответственному человеку.',
+  SHAMRAI_ONBOARDING_REPORT_CHAT_ID: 'Чат для onboarding-отчетов. Сюда уходят анкеты и события новых пользователей после первичного входа.',
+
+  VK_ACCESS_TOKEN: 'Токен сообщества VK. Нужен для отправки сообщений, рассылок, обработки диалогов и синхронизации разрешений на доставку.',
+  VK_CALLBACK_CONFIRMATION_CODE: 'Код подтверждения VK Callback API. Используется один раз или при перепривязке callback URL в кабинете VK.',
+  VK_CALLBACK_SECRET: 'Секретный ключ VK Callback API. Нужен, чтобы backend доверял только событиям, пришедшим из вашего сообщества VK.',
+  VK_ID_CLIENT_SECRET: 'Client secret приложения VK ID. Используется при OAuth-авторизации для обмена кода входа на токены.',
+  VK_ID_APP_ID: 'ID приложения VK ID. Связывает авторизацию пользователей с нужным VK-приложением.',
+  VK_ID_REDIRECT_URI: 'Адрес возврата после VK ID OAuth. Должен совпадать с redirect URI, указанным в настройках VK.',
+  VK_GROUP_ID: 'ID сообщества VK. Используется для проверки callback-событий и правильной доставки сообщений от имени группы.',
+  VK_API_VERSION: 'Версия VK API для запросов. Обычно оставляют текущую стабильную версию, чтобы методы VK отвечали ожидаемым форматом.',
+
+  YOOKASSA_SHOP_ID: 'ID магазина YooKassa. Нужен для создания платежей и связывания оплат с вашим магазином.',
+  YOOKASSA_SECRET_KEY: 'Секретный ключ YooKassa. Используется backend для создания платежей и проверки статусов оплаты.',
+  YOOKASSA_RETURN_URL: 'Страница, куда YooKassa возвращает клиента после оплаты. Обычно это mini app или страница результата.',
+  TEGRO_SHOP_ID: 'ID магазина Tegro. Нужен платежному API, чтобы понимать, для какого магазина создается платеж.',
+  TEGRO_API_KEY: 'API key Tegro. Используется для авторизованных запросов к платежному шлюзу Tegro.',
+  TEGRO_SECRET_KEY: 'Secret key Tegro. Нужен для подписи и проверки платежных операций.',
+  TEGRO_RETURN_URL: 'Страница возврата клиента после оплаты через Tegro. Должна вести обратно в приложение или на страницу статуса.',
+  TEGRO_API_BASE_URL: 'Базовый URL API Tegro. Меняйте только если Tegro выдал другой endpoint или нужен тестовый контур.',
+  PAYMENT_GATEWAY_TOKEN: 'Резервный токен старого платежного шлюза. Нужен только если legacy-интеграция еще используется в проекте.',
+
+  WEB_PUSH_VAPID_PUBLIC_KEY: 'Публичный VAPID-ключ для web push. Передается браузеру, чтобы он мог подписаться на push-уведомления.',
+  WEB_PUSH_VAPID_PRIVATE_KEY: 'Приватный VAPID-ключ для web push. Нужен серверу для отправки push-уведомлений подписанным браузерам.',
+  WEB_PUSH_VAPID_SUBJECT: 'Контакт отправителя push-уведомлений. Обычно mailto или URL, который видит push-сервис как владельца ключей.',
+
+  GOOGLE_DRIVE_STATS_ENABLED: 'Включает экспорт статистики в Google Drive. Полезно для отчетов, таблиц и автоматической выгрузки аналитики.',
+  GOOGLE_DRIVE_AUTH_MODE: 'Режим авторизации Google Drive. Определяет, использовать OAuth, service account или автоматический выбор.',
+  GOOGLE_DRIVE_STATS_FOLDER_ID: 'ID папки Google Drive для выгрузок. Именно туда будут складываться отчеты и файлы статистики.',
+  GOOGLE_OAUTH_CLIENT_ID: 'Google OAuth Client ID. Идентификатор OAuth-приложения для подключения Google Drive от имени аккаунта.',
+  GOOGLE_OAUTH_CLIENT_SECRET: 'Google OAuth Client Secret. Секрет OAuth-приложения, нужен для обновления и получения access token.',
+  GOOGLE_OAUTH_REFRESH_TOKEN: 'Refresh token Google OAuth. Позволяет backend получать новые access token без повторного ручного входа.',
+  GOOGLE_OAUTH_TOKEN_URI: 'URL выдачи токенов Google OAuth. Обычно стандартный endpoint Google, менять нужно редко.',
+  GOOGLE_SERVICE_ACCOUNT_JSON_B64: 'JSON service account в base64. Используется для серверного доступа к Google Drive без личного OAuth-входа.',
+
+  API_BASE_URL: 'Публичный базовый URL backend API. Используется в callback, ссылках, внешних интеграциях и клиентских запросах.',
+  FRONTEND_BASE_URL: 'Публичный URL frontend/mini app. Нужен для ссылок возврата, кнопок открытия приложения и внешних переходов.',
+  SUPPORT_URL: 'Ссылка на поддержку. По ней пользователя отправляют за ручной помощью, оплатами, доступом или вопросами.',
+  VIP_CHANNEL_URL: 'Ссылка на закрытый канал или чат. Используется в интерфейсе и сообщениях для перехода в VIP-зону.',
+  HTTPS_PROXY: 'Proxy для исходящих HTTPS-запросов. Используйте только для сервисов, которым нужен обход сетевых ограничений.',
+};
+
 const THEME_COLOR_FIELDS: ThemeColorFieldConfig[] = [
   {
     key: THEME_PRIMARY_COLOR_KEY,
@@ -318,6 +435,80 @@ const THEME_COLOR_FIELDS: ThemeColorFieldConfig[] = [
   },
 ];
 
+const THEME_TEXT_FIELDS: ThemeTextFieldConfig[] = [
+  {
+    key: BRAND_LOGO_URL_KEY,
+    label: 'Logo URL',
+    description: 'Ссылка на логотип, который можно использовать в шапках и бренд-блоках.',
+    placeholder: 'https://cdn.example.com/logo.png',
+  },
+  {
+    key: BRAND_BACKGROUND_URL_KEY,
+    label: 'Background URL',
+    description: 'Ссылка на фоновое изображение бренда для ambient-слоя.',
+    placeholder: 'https://cdn.example.com/background.webp',
+  },
+];
+
+const THEME_NUMBER_FIELDS: ThemeNumberFieldConfig[] = [
+  {
+    key: THEME_GLASS_OPACITY_KEY,
+    label: 'Glass opacity',
+    description: 'Прозрачность стеклянных панелей.',
+    min: 0.15,
+    max: 0.9,
+    step: 0.01,
+  },
+  {
+    key: THEME_GLASS_BLUR_PX_KEY,
+    label: 'Glass blur',
+    description: 'Сила blur-эффекта стекла.',
+    min: 0,
+    max: 36,
+    step: 1,
+    suffix: 'px',
+  },
+  {
+    key: THEME_RADIUS_SCALE_KEY,
+    label: 'Radius scale',
+    description: 'Множитель скруглений интерфейса.',
+    min: 0.75,
+    max: 1.5,
+    step: 0.05,
+  },
+  {
+    key: THEME_FONT_SCALE_KEY,
+    label: 'Font scale',
+    description: 'Множитель размера текста в интерфейсе.',
+    min: 0.85,
+    max: 1.2,
+    step: 0.01,
+  },
+  {
+    key: THEME_GLOW_STRENGTH_KEY,
+    label: 'Glow strength',
+    description: 'Интенсивность неонового свечения.',
+    min: 0,
+    max: 1.6,
+    step: 0.05,
+  },
+];
+
+const THEME_PRESETS = [
+  { id: 'classic', label: 'Classic', primary: '#00d2ff', secondary: '#d946ef' },
+  { id: 'mint', label: 'Mint', primary: '#34d399', secondary: '#22d3ee' },
+  { id: 'gold', label: 'Gold', primary: '#facc15', secondary: '#38bdf8' },
+  { id: 'rose', label: 'Rose', primary: '#fb7185', secondary: '#a78bfa' },
+];
+
+const TAB_SECTION_IDS: Record<SettingsTabId, string[]> = {
+  texts: ['texts-telegram', 'texts-vk', 'texts-site', 'texts-editor', 'texts-preview', 'texts-variables'],
+  switches: ['switches-access', 'switches-broadcasts', 'switches-sessions', 'switches-audit'],
+  integrations: INTEGRATION_GROUPS.map(group => `integrations-${group.id}`),
+  theme: ['theme-colors', 'theme-brand', 'theme-effects', 'theme-preview'],
+  monitoring: ['monitoring-overview', 'monitoring-health', 'monitoring-delivery', 'monitoring-logs', 'monitoring-audit'],
+};
+
 const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   ...DEFAULT_INTEGRATION_VALUES,
   MAINTENANCE_MODE: false,
@@ -326,6 +517,14 @@ const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   THEME_PRIMARY_COLOR: DEFAULT_THEME_SETTINGS.primary_color,
   THEME_SECONDARY_COLOR: DEFAULT_THEME_SETTINGS.secondary_color,
   GLOBAL_PERFORMANCE_MODE: DEFAULT_THEME_SETTINGS.global_performance_mode,
+  BRAND_LOGO_URL: DEFAULT_THEME_SETTINGS.brand_logo_url,
+  BRAND_BACKGROUND_URL: DEFAULT_THEME_SETTINGS.brand_background_url,
+  THEME_GLASS_OPACITY: String(DEFAULT_THEME_SETTINGS.glass_opacity),
+  THEME_GLASS_BLUR_PX: String(DEFAULT_THEME_SETTINGS.glass_blur_px),
+  THEME_RADIUS_SCALE: String(DEFAULT_THEME_SETTINGS.radius_scale),
+  THEME_FONT_SCALE: String(DEFAULT_THEME_SETTINGS.font_scale),
+  THEME_DENSITY: DEFAULT_THEME_SETTINGS.theme_density,
+  THEME_GLOW_STRENGTH: String(DEFAULT_THEME_SETTINGS.glow_strength),
 };
 
 const CHANNEL_GROUPS: ChannelGroupConfig[] = [
@@ -528,6 +727,14 @@ function formValuesFromSettings(data?: AdminSettingsResponse): AdminSettingsForm
       DEFAULT_THEME_SETTINGS.secondary_color,
     ),
     GLOBAL_PERFORMANCE_MODE: truthySettingValue(settingsByKey.get(GLOBAL_PERFORMANCE_MODE_KEY)?.value),
+    BRAND_LOGO_URL: settingsByKey.get(BRAND_LOGO_URL_KEY)?.value || DEFAULT_THEME_SETTINGS.brand_logo_url,
+    BRAND_BACKGROUND_URL: settingsByKey.get(BRAND_BACKGROUND_URL_KEY)?.value || DEFAULT_THEME_SETTINGS.brand_background_url,
+    THEME_GLASS_OPACITY: settingsByKey.get(THEME_GLASS_OPACITY_KEY)?.value || String(DEFAULT_THEME_SETTINGS.glass_opacity),
+    THEME_GLASS_BLUR_PX: settingsByKey.get(THEME_GLASS_BLUR_PX_KEY)?.value || String(DEFAULT_THEME_SETTINGS.glass_blur_px),
+    THEME_RADIUS_SCALE: settingsByKey.get(THEME_RADIUS_SCALE_KEY)?.value || String(DEFAULT_THEME_SETTINGS.radius_scale),
+    THEME_FONT_SCALE: settingsByKey.get(THEME_FONT_SCALE_KEY)?.value || String(DEFAULT_THEME_SETTINGS.font_scale),
+    THEME_DENSITY: settingsByKey.get(THEME_DENSITY_KEY)?.value || DEFAULT_THEME_SETTINGS.theme_density,
+    THEME_GLOW_STRENGTH: settingsByKey.get(THEME_GLOW_STRENGTH_KEY)?.value || String(DEFAULT_THEME_SETTINGS.glow_strength),
   };
 
   INTEGRATION_FIELDS.forEach(field => {
@@ -564,6 +771,38 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
       key: GLOBAL_PERFORMANCE_MODE_KEY,
       value: truthySettingValue(values[GLOBAL_PERFORMANCE_MODE_KEY]) ? 'true' : 'false',
     },
+    {
+      key: BRAND_LOGO_URL_KEY,
+      value: String(values[BRAND_LOGO_URL_KEY] || '').trim(),
+    },
+    {
+      key: BRAND_BACKGROUND_URL_KEY,
+      value: String(values[BRAND_BACKGROUND_URL_KEY] || '').trim(),
+    },
+    {
+      key: THEME_GLASS_OPACITY_KEY,
+      value: String(values[THEME_GLASS_OPACITY_KEY] || DEFAULT_THEME_SETTINGS.glass_opacity).trim(),
+    },
+    {
+      key: THEME_GLASS_BLUR_PX_KEY,
+      value: String(values[THEME_GLASS_BLUR_PX_KEY] || DEFAULT_THEME_SETTINGS.glass_blur_px).trim(),
+    },
+    {
+      key: THEME_RADIUS_SCALE_KEY,
+      value: String(values[THEME_RADIUS_SCALE_KEY] || DEFAULT_THEME_SETTINGS.radius_scale).trim(),
+    },
+    {
+      key: THEME_FONT_SCALE_KEY,
+      value: String(values[THEME_FONT_SCALE_KEY] || DEFAULT_THEME_SETTINGS.font_scale).trim(),
+    },
+    {
+      key: THEME_DENSITY_KEY,
+      value: String(values[THEME_DENSITY_KEY] || DEFAULT_THEME_SETTINGS.theme_density).trim(),
+    },
+    {
+      key: THEME_GLOW_STRENGTH_KEY,
+      value: String(values[THEME_GLOW_STRENGTH_KEY] || DEFAULT_THEME_SETTINGS.glow_strength).trim(),
+    },
   ];
 
   INTEGRATION_FIELDS.forEach(field => {
@@ -577,6 +816,112 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
   });
 
   return payload;
+}
+
+function IntegrationFieldHelp({ text }: { text: string }) {
+  return (
+    <span className="group/help relative inline-flex shrink-0 items-center">
+      <button
+        type="button"
+        aria-label={`Подсказка: ${text}`}
+        title={text}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        className="flex h-5 w-5 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-400 transition-all hover:border-cyan-300/35 hover:bg-cyan-300/10 hover:text-cyan-100 focus:border-cyan-300/45 focus:bg-cyan-300/10 focus:text-cyan-100 focus:outline-none focus:ring-2 focus:ring-cyan-300/10"
+      >
+        <Info className="h-3 w-3" />
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-3rem)] translate-y-1 rounded-2xl border border-cyan-300/20 bg-slate-950/95 px-3 py-2 text-left text-[11px] font-semibold leading-relaxed text-slate-100 opacity-0 shadow-[0_18px_48px_rgba(2,6,23,0.48)] backdrop-blur-xl transition-all duration-150 group-hover/help:translate-y-0 group-hover/help:opacity-100 group-focus-within/help:translate-y-0 group-focus-within/help:opacity-100"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+interface SettingsAccordionSectionProps {
+  id: string;
+  title: string;
+  subtitle: string;
+  badge?: string;
+  open: boolean;
+  onToggle: () => void;
+  Icon: LucideIcon;
+  tone?: 'cyan' | 'emerald' | 'amber' | 'rose' | 'violet';
+  dirty?: boolean;
+  status?: React.ReactNode;
+  rightActions?: React.ReactNode;
+  children: React.ReactNode;
+}
+
+function SettingsAccordionSection({
+  id,
+  title,
+  subtitle,
+  badge,
+  open,
+  onToggle,
+  Icon,
+  tone = 'cyan',
+  dirty = false,
+  status,
+  rightActions,
+  children,
+}: SettingsAccordionSectionProps) {
+  const toneClass = {
+    cyan: 'border-cyan-300/25 bg-cyan-300/[0.075] text-cyan-100',
+    emerald: 'border-emerald-300/25 bg-emerald-300/[0.075] text-emerald-100',
+    amber: 'border-amber-300/25 bg-amber-300/[0.085] text-amber-100',
+    rose: 'border-rose-300/25 bg-rose-300/[0.085] text-rose-100',
+    violet: 'border-violet-300/25 bg-violet-300/[0.085] text-violet-100',
+  }[tone];
+
+  return (
+    <section className="overflow-visible rounded-2xl border border-white/10 bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`${id}-content`}
+        data-settings-accordion-toggle={id}
+        onClick={onToggle}
+        className={`smooth-pressable flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-all ${toneClass}`}
+      >
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-black/20">
+          <Icon className="h-4 w-4" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="truncate text-xs font-black uppercase tracking-wider text-white">{title}</span>
+            {badge && (
+              <span className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider">
+                {badge}
+              </span>
+            )}
+            {dirty && (
+              <span className="shrink-0 rounded-lg border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-amber-100">
+                изменено
+              </span>
+            )}
+          </span>
+          <span className="mt-0.5 block truncate text-[10px] font-bold text-slate-400">{subtitle}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          {status}
+          {rightActions}
+          <ChevronDown className={`h-4 w-4 text-slate-300 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </span>
+      </button>
+      <SmoothCollapse open={open}>
+        <div id={`${id}-content`} className="p-3 sm:p-4">
+          {children}
+        </div>
+      </SmoothCollapse>
+    </section>
+  );
 }
 
 export default function AdminSettings() {
@@ -601,6 +946,15 @@ export default function AdminSettings() {
   ));
   const [integrationsUnlocked, setIntegrationsUnlocked] = useState(false);
   const [integrationPassword, setIntegrationPassword] = useState('');
+  const [integrationUnlockToken, setIntegrationUnlockToken] = useState('');
+  const [integrationDiagnostics, setIntegrationDiagnostics] = useState<Record<string, IntegrationDiagnosticsResponse['groups'][number]>>({});
+  const [openSections, setOpenSections] = useState<Record<SettingsTabId, SettingsAccordionState>>(() => ({
+    texts: createCollapsedSectionState(TAB_SECTION_IDS.texts),
+    switches: createCollapsedSectionState(TAB_SECTION_IDS.switches),
+    integrations: createCollapsedSectionState(TAB_SECTION_IDS.integrations),
+    theme: createCollapsedSectionState(TAB_SECTION_IDS.theme),
+    monitoring: createCollapsedSectionState(TAB_SECTION_IDS.monitoring),
+  }));
   const queryClient = useQueryClient();
   const settingsForm = useForm<AdminSettingsFormValues>({
     defaultValues: DEFAULT_ADMIN_SETTINGS_VALUES,
@@ -612,7 +966,7 @@ export default function AdminSettings() {
     staleTime: 60_000,
   });
   const unlockIntegrationsMutation = useMutation({
-    mutationFn: (payload: IntegrationUnlockRequest) => apiFetch<AdminSettingsResponse>('/admin/settings/integrations/unlock', {
+    mutationFn: (payload: IntegrationUnlockRequest) => apiFetch<IntegrationUnlockResponse>('/admin/settings/integrations/unlock', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -626,6 +980,7 @@ export default function AdminSettings() {
         });
       });
       setIntegrationsUnlocked(true);
+      setIntegrationUnlockToken(data.unlock_token);
       setIntegrationPassword('');
       notifySuccess('Интеграции разблокированы');
     },
@@ -684,6 +1039,34 @@ export default function AdminSettings() {
     enabled: activeTab === 'monitoring',
     refetchInterval: activeTab === 'monitoring' ? 10_000 : false,
   });
+  const monitoringSummaryQuery = useQuery({
+    queryKey: ['admin-monitoring-summary'],
+    queryFn: () => apiFetch<MonitoringSummaryResponse>('/admin/monitoring/summary'),
+    enabled: activeTab === 'monitoring',
+    refetchInterval: activeTab === 'monitoring' ? 10_000 : false,
+  });
+  const integrationDiagnosticsMutation = useMutation({
+    mutationFn: (groupId: string) => apiFetch<IntegrationDiagnosticsResponse>('/admin/settings/integrations/diagnostics', {
+      method: 'POST',
+      body: JSON.stringify({
+        unlock_token: integrationUnlockToken,
+        group: groupId,
+      }),
+    }),
+    onSuccess: (data) => {
+      setIntegrationDiagnostics(current => {
+        const next = { ...current };
+        data.groups.forEach(group => {
+          next[group.group] = group;
+        });
+        return next;
+      });
+      notifySuccess('Диагностика интеграции обновлена');
+    },
+    onError: (err: any) => {
+      notifyError(err.message || 'Не удалось проверить интеграцию');
+    },
+  });
 
   const loadTemplates = async () => {
     try {
@@ -723,6 +1106,48 @@ export default function AdminSettings() {
   useEffect(() => () => {
     if (editorScrollFrameRef.current !== undefined) window.cancelAnimationFrame(editorScrollFrameRef.current);
   }, []);
+
+  const sectionIsOpen = (tab: SettingsTabId, sectionId: string) => Boolean(openSections[tab]?.[sectionId]);
+
+  const toggleAccordionSection = (tab: SettingsTabId, sectionId: string) => {
+    setOpenSections(current => ({
+      ...current,
+      [tab]: toggleSection(current[tab] || createCollapsedSectionState(TAB_SECTION_IDS[tab]), sectionId),
+    }));
+  };
+
+  const setActiveTabSectionsOpen = (open: boolean) => {
+    if (activeTab === 'texts') {
+      setExpandedGroups({
+        telegram: open,
+        vk: open,
+        site: open,
+      });
+    }
+    setOpenSections(current => ({
+      ...current,
+      [activeTab]: setAllSectionsOpen(TAB_SECTION_IDS[activeTab], open),
+    }));
+  };
+
+  const renderSectionControls = () => (
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button"
+        onClick={() => setActiveTabSectionsOpen(true)}
+        className="smooth-pressable rounded-xl border border-cyan-300/20 bg-cyan-300/[0.08] px-3 py-2 text-[9px] font-black uppercase tracking-wider text-cyan-100 transition-all hover:bg-cyan-300/[0.14]"
+      >
+        Раскрыть все
+      </button>
+      <button
+        type="button"
+        onClick={() => setActiveTabSectionsOpen(false)}
+        className="smooth-pressable rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[9px] font-black uppercase tracking-wider text-slate-300 transition-all hover:border-white/20 hover:bg-white/[0.07]"
+      >
+        Свернуть все
+      </button>
+    </div>
+  );
 
   const templateByKey = useMemo(() => (
     new Map(templates.map(template => [template.key, template]))
@@ -913,18 +1338,44 @@ export default function AdminSettings() {
     setVisibleSecrets(current => ({ ...current, [key]: !current[key] }));
   };
 
-  const handleDownloadMonitoringLog = () => {
+  const handleDownloadMonitoringLog = async () => {
     const timestamp = new Date().toISOString();
-    const onlineUsers = onlineQuery.data?.online_users ?? 0;
-    const parserStatus = parserStatusQuery.data?.status || 'unknown';
-    const parserLastSync = parserStatusQuery.data?.last_sync || 'unknown';
+    try {
+      await downloadApiFile(
+        '/admin/monitoring/diagnostic-report?format=txt',
+        `shamrai-monitoring-${timestamp.replace(/[:.]/g, '-')}.txt`,
+      );
+      return;
+    } catch (err: any) {
+      if (!import.meta.env.DEV) {
+        notifyError(err.message || 'Не удалось скачать диагностический отчет');
+        return;
+      }
+    }
+
+    const summary = monitoringSummaryQuery.data;
+    const onlineUsers = summary?.online?.online_users ?? onlineQuery.data?.online_users ?? 0;
+    const parserStatus = summary?.parser?.status || parserStatusQuery.data?.status || 'unknown';
+    const parserLastSync = summary?.parser?.last_sync || parserStatusQuery.data?.last_sync || 'unknown';
     const logs = monitoringLogsQuery.data?.logs || [];
     const body = [
-      'Shamrai Analytics Hub monitoring log',
+      'Shamrai Analytics Hub sanitized diagnostic report',
       `created_at=${timestamp}`,
       `online_users=${onlineUsers}`,
       `parser_status=${parserStatus}`,
       `parser_last_sync=${parserLastSync}`,
+      '',
+      'health:',
+      JSON.stringify(summary?.health || {}, null, 2),
+      '',
+      'delivery_outbox:',
+      JSON.stringify(summary?.delivery_outbox || {}, null, 2),
+      '',
+      'rate_limit:',
+      JSON.stringify(summary?.rate_limit || {}, null, 2),
+      '',
+      'audit:',
+      JSON.stringify(summary?.audit || [], null, 2),
       '',
       'logs:',
       ...(logs.length ? logs : ['<empty>']),
@@ -950,6 +1401,67 @@ export default function AdminSettings() {
     });
     if (!confirmed) return;
     resetSessionsMutation.mutate();
+  };
+
+  const handleRunIntegrationDiagnostics = (groupId: string) => {
+    if (!integrationUnlockToken) {
+      notifyError('Сначала откройте сейф интеграций');
+      return;
+    }
+    integrationDiagnosticsMutation.mutate(groupId);
+  };
+
+  const handleApplyThemePreset = (preset: (typeof THEME_PRESETS)[number]) => {
+    settingsForm.setValue(THEME_PRIMARY_COLOR_KEY, preset.primary, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
+    settingsForm.setValue(THEME_SECONDARY_COLOR_KEY, preset.secondary, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
+  };
+
+  const renderStatusBadge = (status?: string, label?: string) => {
+    const normalizedStatus = status || 'missing';
+    const className = normalizedStatus === 'ok' || normalizedStatus === 'active'
+      ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
+      : normalizedStatus === 'warning'
+        ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+        : normalizedStatus === 'error'
+          ? 'border-rose-300/25 bg-rose-300/10 text-rose-100'
+          : 'border-white/10 bg-black/20 text-slate-300';
+
+    return (
+      <span className={`shrink-0 rounded-lg border px-2 py-1 text-[8px] font-black uppercase tracking-wider ${className}`}>
+        {label || normalizedStatus}
+      </span>
+    );
+  };
+
+  const renderMetricCard = (
+    label: string,
+    value: React.ReactNode,
+    description: string,
+    tone: 'cyan' | 'emerald' | 'amber' | 'rose' | 'violet' = 'cyan',
+  ) => {
+    const toneClass = {
+      cyan: 'border-cyan-300/20 bg-cyan-300/[0.075] text-cyan-100',
+      emerald: 'border-emerald-300/20 bg-emerald-300/[0.075] text-emerald-100',
+      amber: 'border-amber-300/20 bg-amber-300/[0.085] text-amber-100',
+      rose: 'border-rose-300/20 bg-rose-300/[0.085] text-rose-100',
+      violet: 'border-violet-300/20 bg-violet-300/[0.085] text-violet-100',
+    }[tone];
+
+    return (
+      <div className={`rounded-2xl border p-4 ${toneClass}`}>
+        <p className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-300">{label}</p>
+        <div className="mt-2 text-2xl font-black text-white tabular-nums">{value}</div>
+        <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-400">{description}</p>
+      </div>
+    );
   };
 
   const renderSettingsQueryState = (tab: SettingsTabConfig) => {
@@ -1054,6 +1566,8 @@ export default function AdminSettings() {
     if (state) return state;
 
     const broadcastsPaused = truthySettingValue(settingsForm.watch('PAUSE_BROADCASTS'));
+    const maintenanceMode = truthySettingValue(settingsForm.watch('MAINTENANCE_MODE'));
+    const registrationsDisabled = truthySettingValue(settingsForm.watch('DISABLE_REGISTRATIONS'));
 
     return (
       <form
@@ -1063,18 +1577,40 @@ export default function AdminSettings() {
         onSubmit={settingsForm.handleSubmit(handleSettingsSubmit)}
         className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/42 p-4 shadow-glass backdrop-blur-xl sm:p-5"
       >
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {SWITCH_SETTINGS.map(renderSwitchToggle)}
-        </div>
+        <SettingsAccordionSection
+          id="switches-access"
+          title="Доступ и режимы"
+          subtitle="Maintenance mode и закрытый клуб для новых регистраций"
+          badge={`${Number(maintenanceMode) + Number(registrationsDisabled)}/2 on`}
+          Icon={ToggleLeft}
+          open={sectionIsOpen('switches', 'switches-access')}
+          onToggle={() => toggleAccordionSection('switches', 'switches-access')}
+          dirty={settingsFormDirty}
+        >
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {SWITCH_SETTINGS.map(renderSwitchToggle)}
+          </div>
+        </SettingsAccordionSection>
 
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(260px,360px)]">
+        <SettingsAccordionSection
+          id="switches-broadcasts"
+          title="Рассылки"
+          subtitle="Пауза массовых исходящих отправок и delivery outbox"
+          badge={broadcastsPaused ? 'paused' : 'active'}
+          Icon={BellRing}
+          tone={broadcastsPaused ? 'amber' : 'cyan'}
+          open={sectionIsOpen('switches', 'switches-broadcasts')}
+          onToggle={() => toggleAccordionSection('switches', 'switches-broadcasts')}
+          dirty={settingsFormDirty}
+          status={renderStatusBadge(broadcastsPaused ? 'warning' : 'ok', broadcastsPaused ? 'пауза' : 'активно')}
+        >
           <button
             type="button"
             onClick={() => settingsForm.setValue('PAUSE_BROADCASTS', !broadcastsPaused, {
               shouldDirty: true,
               shouldTouch: true,
             })}
-            className={`smooth-pressable flex min-h-[116px] items-center gap-4 rounded-2xl border p-4 text-left transition-all ${
+            className={`smooth-pressable flex min-h-[116px] w-full items-center gap-4 rounded-2xl border p-4 text-left transition-all ${
               broadcastsPaused
                 ? 'border-amber-300/45 bg-amber-300/[0.14] text-amber-50 shadow-[0_0_28px_rgba(251,191,36,0.13)]'
                 : 'border-white/10 bg-white/[0.035] text-slate-300 hover:border-amber-300/25 hover:bg-amber-300/[0.07]'
@@ -1087,17 +1623,28 @@ export default function AdminSettings() {
               <span className="block text-sm font-black text-white">Экстренная пауза рассылок</span>
               <span className="mt-1 block text-xs font-semibold leading-relaxed text-slate-400">
                 {broadcastsPaused
-                  ? 'Рассылки поставлены на паузу до следующего сохранения.'
+                  ? 'После сохранения новые массовые отправки и delivery-очередь будут блокироваться.'
                   : 'Остановить исходящие массовые отправки одним рубильником.'}
               </span>
             </span>
           </button>
+        </SettingsAccordionSection>
 
+        <SettingsAccordionSection
+          id="switches-sessions"
+          title="Сессии и безопасность"
+          subtitle="Опасные операции с auth-сессиями пользователей"
+          badge="danger"
+          Icon={ShieldAlert}
+          tone="rose"
+          open={sectionIsOpen('switches', 'switches-sessions')}
+          onToggle={() => toggleAccordionSection('switches', 'switches-sessions')}
+        >
           <button
             type="button"
             onClick={() => void handleResetUserSessions()}
             disabled={resetSessionsMutation.isPending}
-            className="smooth-pressable flex min-h-[116px] items-center gap-4 rounded-2xl border border-rose-400/35 bg-rose-500/[0.12] p-4 text-left text-rose-50 shadow-[0_0_28px_rgba(244,63,94,0.13)] transition-all hover:bg-rose-500/[0.17] active:scale-[0.99] disabled:opacity-60"
+            className="smooth-pressable flex min-h-[116px] w-full items-center gap-4 rounded-2xl border border-rose-400/35 bg-rose-500/[0.12] p-4 text-left text-rose-50 shadow-[0_0_28px_rgba(244,63,94,0.13)] transition-all hover:bg-rose-500/[0.17] active:scale-[0.99] disabled:opacity-60"
           >
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-rose-300/30 bg-rose-300/10 text-rose-100">
               {resetSessionsMutation.isPending ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldAlert className="h-5 w-5" />}
@@ -1105,11 +1652,28 @@ export default function AdminSettings() {
             <span className="min-w-0">
               <span className="block text-sm font-black text-white">Сбросить все сессии пользователей</span>
               <span className="mt-1 block text-xs font-semibold leading-relaxed text-rose-100/75">
-                Опасное действие: очистка временных auth-сессий в Redis.
+                Опасное действие: очистка временных auth-сессий в Redis. Пользователям потребуется войти заново.
               </span>
             </span>
           </button>
-        </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="switches-audit"
+          title="Аудит действий"
+          subtitle="Быстрый снимок текущих флагов перед сохранением"
+          badge="read"
+          Icon={Activity}
+          tone="violet"
+          open={sectionIsOpen('switches', 'switches-audit')}
+          onToggle={() => toggleAccordionSection('switches', 'switches-audit')}
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            {renderMetricCard('Maintenance', maintenanceMode ? 'ON' : 'OFF', 'Ограничение пользовательских сценариев.', maintenanceMode ? 'amber' : 'emerald')}
+            {renderMetricCard('Регистрации', registrationsDisabled ? 'Закрыты' : 'Открыты', 'Контроль входа новых пользователей.', registrationsDisabled ? 'amber' : 'emerald')}
+            {renderMetricCard('Рассылки', broadcastsPaused ? 'Пауза' : 'Активны', 'Контроль массовой доставки.', broadcastsPaused ? 'amber' : 'emerald')}
+          </div>
+        </SettingsAccordionSection>
 
         {renderSettingsSaveFooter()}
       </form>
@@ -1122,6 +1686,7 @@ export default function AdminSettings() {
     const isSecret = field.kind === 'secret';
     const isBoolean = field.kind === 'boolean';
     const FieldIcon = isSecret ? KeyRound : field.kind === 'url' ? Link2 : Database;
+    const helpText = INTEGRATION_FIELD_HELP[field.key] || field.description;
 
     if (isBoolean) {
       const enabled = truthySettingValue(settingsForm.watch(field.key));
@@ -1143,7 +1708,10 @@ export default function AdminSettings() {
             }`} />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-xs font-black text-white">{field.label}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="block text-xs font-black text-white">{field.label}</span>
+              <IntegrationFieldHelp text={helpText} />
+            </span>
             <span className="mt-1 block text-[10px] font-semibold leading-relaxed text-slate-500">{field.description}</span>
           </span>
         </label>
@@ -1163,7 +1731,10 @@ export default function AdminSettings() {
             <FieldIcon className="h-4 w-4" />
           </span>
           <span className="min-w-0">
-            <span className="block text-xs font-black text-white">{field.label}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="block text-xs font-black text-white">{field.label}</span>
+              <IntegrationFieldHelp text={helpText} />
+            </span>
             <span className="mt-1 block text-[10px] font-semibold leading-relaxed text-slate-500">{field.description}</span>
           </span>
         </span>
@@ -1262,22 +1833,68 @@ export default function AdminSettings() {
         </div>
 
         {INTEGRATION_GROUPS.map(group => {
-          const GroupIcon = group.Icon;
+          const groupDiagnostic = integrationDiagnostics[group.id];
+          const configuredCount = group.fields.filter(field => (
+            Boolean(adminSettingsByKey.get(field.key)?.is_configured || settingsForm.watch(field.key))
+          )).length;
+          const groupStatus = groupDiagnostic?.status || (
+            configuredCount === 0
+              ? 'missing'
+              : configuredCount === group.fields.length
+                ? 'ok'
+                : 'warning'
+          );
+
           return (
-            <section key={group.id} className="space-y-3 rounded-2xl border border-white/10 bg-white/[0.025] p-3 sm:p-4">
-              <div className="flex items-start gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-black/20 text-cyan-100">
-                  <GroupIcon className="h-4 w-4" />
-                </span>
+            <SettingsAccordionSection
+              key={group.id}
+              id={`integrations-${group.id}`}
+              title={group.title}
+              subtitle={group.subtitle}
+              badge={`${configuredCount}/${group.fields.length}`}
+              Icon={group.Icon}
+              tone={groupStatus === 'error' ? 'rose' : groupStatus === 'warning' ? 'amber' : groupStatus === 'ok' ? 'emerald' : 'cyan'}
+              open={sectionIsOpen('integrations', `integrations-${group.id}`)}
+              onToggle={() => toggleAccordionSection('integrations', `integrations-${group.id}`)}
+              dirty={settingsFormDirty}
+              status={renderStatusBadge(groupStatus)}
+            >
+              <div className="mb-3 flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/20 p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <h3 className="text-sm font-black text-white">{group.title}</h3>
-                  <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-500">{group.subtitle}</p>
+                  <p className="text-xs font-black text-white">Read-only диагностика</p>
+                  <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-500">
+                    Проверяет наличие обязательных ключей и базовые URL-форматы без отправки сообщений, платежей и внешних действий.
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => handleRunIntegrationDiagnostics(group.id)}
+                  disabled={integrationDiagnosticsMutation.isPending}
+                  className="smooth-pressable flex min-h-[40px] shrink-0 items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.1] px-3 text-[9px] font-black uppercase tracking-wider text-cyan-50 transition-all hover:bg-cyan-300/[0.16] active:scale-[0.98] disabled:opacity-50"
+                >
+                  {integrationDiagnosticsMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
+                  <span>Проверить</span>
+                </button>
               </div>
+
+              {groupDiagnostic && (
+                <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                  {groupDiagnostic.checks.map(check => (
+                    <div key={`${group.id}-${check.key}`} className="flex min-w-0 items-start justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.035] px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-[10px] font-black text-white">{check.label}</p>
+                        <p className="mt-1 line-clamp-2 text-[9px] font-semibold text-slate-500">{check.message}</p>
+                      </div>
+                      {renderStatusBadge(check.status)}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
                 {group.fields.map(renderIntegrationField)}
               </div>
-            </section>
+            </SettingsAccordionSection>
           );
         })}
 
@@ -1339,11 +1956,90 @@ export default function AdminSettings() {
     );
   };
 
+  const renderThemeTextField = (field: ThemeTextFieldConfig) => (
+    <label key={field.key} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+      <span className="mb-3 flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-100">
+          <Link2 className="h-4 w-4" />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-xs font-black text-white">{field.label}</span>
+          <span className="mt-1 block text-[10px] font-semibold leading-relaxed text-slate-500">{field.description}</span>
+        </span>
+      </span>
+      <input
+        type="url"
+        {...settingsForm.register(field.key)}
+        placeholder={field.placeholder}
+        className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-[16px] font-semibold text-white outline-none transition-all placeholder:text-slate-600 focus:border-emerald-300/45 focus:ring-2 focus:ring-emerald-300/10 sm:text-sm"
+      />
+    </label>
+  );
+
+  const renderThemeNumberField = (field: ThemeNumberFieldConfig) => {
+    const fallback = {
+      [THEME_GLASS_OPACITY_KEY]: DEFAULT_THEME_SETTINGS.glass_opacity,
+      [THEME_GLASS_BLUR_PX_KEY]: DEFAULT_THEME_SETTINGS.glass_blur_px,
+      [THEME_RADIUS_SCALE_KEY]: DEFAULT_THEME_SETTINGS.radius_scale,
+      [THEME_FONT_SCALE_KEY]: DEFAULT_THEME_SETTINGS.font_scale,
+      [THEME_GLOW_STRENGTH_KEY]: DEFAULT_THEME_SETTINGS.glow_strength,
+    }[field.key];
+    const rawValue = settingsForm.watch(field.key);
+    const numberValue = Number(rawValue || fallback);
+    const safeValue = Number.isFinite(numberValue)
+      ? Math.min(field.max, Math.max(field.min, numberValue))
+      : fallback;
+    const setValue = (value: string) => {
+      settingsForm.setValue(field.key, value, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+      });
+    };
+
+    return (
+      <label key={field.key} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+        <span className="mb-3 flex min-w-0 items-start justify-between gap-3">
+          <span className="min-w-0">
+            <span className="block text-xs font-black text-white">{field.label}</span>
+            <span className="mt-1 block text-[10px] font-semibold leading-relaxed text-slate-500">{field.description}</span>
+          </span>
+          <span className="shrink-0 rounded-xl border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-100">
+            {safeValue}{field.suffix || ''}
+          </span>
+        </span>
+        <input
+          type="range"
+          min={field.min}
+          max={field.max}
+          step={field.step}
+          value={safeValue}
+          onChange={(event) => setValue(event.target.value)}
+          className="w-full accent-cyan-300"
+        />
+        <input
+          type="number"
+          min={field.min}
+          max={field.max}
+          step={field.step}
+          value={String(rawValue ?? fallback)}
+          onChange={(event) => setValue(event.target.value)}
+          className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[16px] font-semibold text-white outline-none transition-all focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/10 sm:text-sm"
+        />
+      </label>
+    );
+  };
+
   const renderThemeTab = () => {
     const state = renderSettingsQueryState(SETTINGS_TABS[3]);
     if (state) return state;
 
     const performanceMode = truthySettingValue(settingsForm.watch(GLOBAL_PERFORMANCE_MODE_KEY));
+    const density = String(settingsForm.watch(THEME_DENSITY_KEY) || DEFAULT_THEME_SETTINGS.theme_density);
+    const primaryColor = normalizeHexColor(settingsForm.watch(THEME_PRIMARY_COLOR_KEY), DEFAULT_THEME_SETTINGS.primary_color);
+    const secondaryColor = normalizeHexColor(settingsForm.watch(THEME_SECONDARY_COLOR_KEY), DEFAULT_THEME_SETTINGS.secondary_color);
+    const logoUrl = String(settingsForm.watch(BRAND_LOGO_URL_KEY) || '').trim();
+    const backgroundUrl = String(settingsForm.watch(BRAND_BACKGROUND_URL_KEY) || '').trim();
 
     return (
       <form
@@ -1353,60 +2049,163 @@ export default function AdminSettings() {
         onSubmit={settingsForm.handleSubmit(handleSettingsSubmit)}
         className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/42 p-4 shadow-glass backdrop-blur-xl sm:p-5"
       >
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {THEME_COLOR_FIELDS.map(renderThemeColorField)}
-        </div>
+        <SettingsAccordionSection
+          id="theme-colors"
+          title="Цвета и пресеты"
+          subtitle="Основной и дополнительный неон интерфейса"
+          badge="colors"
+          Icon={Palette}
+          open={sectionIsOpen('theme', 'theme-colors')}
+          onToggle={() => toggleAccordionSection('theme', 'theme-colors')}
+          dirty={settingsFormDirty}
+        >
+          <div className="mb-3 flex flex-wrap gap-2">
+            {THEME_PRESETS.map(preset => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => handleApplyThemePreset(preset)}
+                className="smooth-pressable flex min-h-[38px] items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-[9px] font-black uppercase tracking-wider text-slate-200 transition-all hover:border-cyan-300/30 hover:bg-cyan-300/[0.08]"
+              >
+                <span className="h-4 w-4 rounded-full border border-white/20" style={{ backgroundColor: preset.primary }} />
+                <span className="h-4 w-4 rounded-full border border-white/20" style={{ backgroundColor: preset.secondary }} />
+                <span>{preset.label}</span>
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {THEME_COLOR_FIELDS.map(renderThemeColorField)}
+          </div>
+        </SettingsAccordionSection>
 
-        <label className={`group flex cursor-pointer items-center gap-4 rounded-2xl border p-4 transition-all ${
-          performanceMode
-            ? 'border-emerald-300/35 bg-emerald-300/[0.12] shadow-[0_0_24px_rgba(52,211,153,0.13)]'
-            : 'border-white/10 bg-white/[0.035] hover:border-white/20'
-        }`}>
-          <input
-            type="checkbox"
-            {...settingsForm.register(GLOBAL_PERFORMANCE_MODE_KEY)}
-            className="sr-only"
-          />
-          <span className={`relative h-7 w-12 shrink-0 rounded-full border transition-all ${
-            performanceMode
-              ? 'border-emerald-200/45 bg-emerald-300/30'
-              : 'border-white/10 bg-black/30'
-          }`}>
-            <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-lg transition-transform ${
-              performanceMode ? 'translate-x-5' : 'translate-x-1'
-            }`} />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-black text-white">Глобальный Performance Mode</span>
-              <span className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-emerald-100">
-                effects
-              </span>
-            </span>
-            <span className="mt-1 block text-xs font-semibold leading-relaxed text-slate-400">
-              Отключает тяжелые ambient/glass/nav-анимации и снижает стоимость переходов для всего приложения.
-            </span>
-          </span>
-        </label>
+        <SettingsAccordionSection
+          id="theme-brand"
+          title="Бренд-кит"
+          subtitle="Логотип и фон задаются только URL-полями"
+          badge="url"
+          Icon={Globe2}
+          tone="emerald"
+          open={sectionIsOpen('theme', 'theme-brand')}
+          onToggle={() => toggleAccordionSection('theme', 'theme-brand')}
+          dirty={settingsFormDirty}
+        >
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {THEME_TEXT_FIELDS.map(renderThemeTextField)}
+          </div>
+        </SettingsAccordionSection>
 
-        <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <span
-              className="h-8 w-8 rounded-full border border-white/20 shadow-neon-cyan"
-              style={{ backgroundColor: normalizeHexColor(settingsForm.watch(THEME_PRIMARY_COLOR_KEY), DEFAULT_THEME_SETTINGS.primary_color) }}
-            />
-            <span
-              className="h-8 w-8 rounded-full border border-white/20 shadow-[0_0_18px_rgba(217,70,239,0.22)]"
-              style={{ backgroundColor: normalizeHexColor(settingsForm.watch(THEME_SECONDARY_COLOR_KEY), DEFAULT_THEME_SETTINGS.secondary_color) }}
-            />
-            <div className="min-w-0">
-              <p className="text-xs font-black text-white">Живой предпросмотр темы</p>
-              <p className="mt-1 text-[10px] font-semibold text-slate-500">
-                После сохранения цвета применятся к CSS variables без перезагрузки страницы.
+        <SettingsAccordionSection
+          id="theme-effects"
+          title="Стекло и производительность"
+          subtitle="Opacity, blur, радиусы, шрифт, плотность и glow"
+          badge={performanceMode ? 'perf on' : density}
+          Icon={MonitorSmartphone}
+          tone={performanceMode ? 'emerald' : 'cyan'}
+          open={sectionIsOpen('theme', 'theme-effects')}
+          onToggle={() => toggleAccordionSection('theme', 'theme-effects')}
+          dirty={settingsFormDirty}
+          status={renderStatusBadge(performanceMode ? 'ok' : 'missing', performanceMode ? 'perf' : 'fx')}
+        >
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {THEME_NUMBER_FIELDS.map(renderThemeNumberField)}
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs font-black text-white">Плотность интерфейса</p>
+              <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-500">
+                Управляет общей компактностью рабочих экранов.
               </p>
+              <div className="mt-3 grid grid-cols-3 gap-2">
+                {(['compact', 'cozy', 'comfortable'] as const).map(item => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => settingsForm.setValue(THEME_DENSITY_KEY, item, {
+                      shouldDirty: true,
+                      shouldTouch: true,
+                    })}
+                    className={`min-h-[38px] rounded-xl border px-2 text-[9px] font-black uppercase tracking-wider transition-all ${
+                      density === item
+                        ? 'border-cyan-300/35 bg-cyan-300/[0.13] text-white shadow-neon-cyan'
+                        : 'border-white/10 bg-white/[0.04] text-slate-300 hover:border-white/20'
+                    }`}
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className={`group flex cursor-pointer items-center gap-4 rounded-2xl border p-4 transition-all ${
+              performanceMode
+                ? 'border-emerald-300/35 bg-emerald-300/[0.12] shadow-[0_0_24px_rgba(52,211,153,0.13)]'
+                : 'border-white/10 bg-white/[0.035] hover:border-white/20'
+            }`}>
+              <input
+                type="checkbox"
+                {...settingsForm.register(GLOBAL_PERFORMANCE_MODE_KEY)}
+                className="sr-only"
+              />
+              <span className={`relative h-7 w-12 shrink-0 rounded-full border transition-all ${
+                performanceMode
+                  ? 'border-emerald-200/45 bg-emerald-300/30'
+                  : 'border-white/10 bg-black/30'
+              }`}>
+                <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-lg transition-transform ${
+                  performanceMode ? 'translate-x-5' : 'translate-x-1'
+                }`} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-black text-white">Глобальный Performance Mode</span>
+                  <span className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-emerald-100">
+                    effects
+                  </span>
+                </span>
+                <span className="mt-1 block text-xs font-semibold leading-relaxed text-slate-400">
+                  Отключает тяжелые ambient/glass/nav-анимации и снижает стоимость переходов для всего приложения.
+                </span>
+              </span>
+            </label>
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="theme-preview"
+          title="Live preview"
+          subtitle="Как текущие значения будут выглядеть после сохранения"
+          badge="preview"
+          Icon={Sparkles}
+          tone="violet"
+          open={sectionIsOpen('theme', 'theme-preview')}
+          onToggle={() => toggleAccordionSection('theme', 'theme-preview')}
+        >
+          <div
+            className="relative overflow-hidden rounded-3xl border border-white/10 bg-black/30 p-5"
+            style={{
+              backgroundImage: backgroundUrl ? `linear-gradient(rgba(2,6,23,0.72), rgba(2,6,23,0.72)), url("${backgroundUrl.replace(/"/g, '%22')}")` : undefined,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+            }}
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <span
+                className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/20 bg-white/10 text-xs font-black text-white shadow-neon-cyan"
+                style={{ boxShadow: `0 0 24px ${primaryColor}44` }}
+              >
+                {logoUrl ? <img src={logoUrl} alt="" className="h-full w-full rounded-2xl object-cover" /> : 'S'}
+              </span>
+              <span className="h-8 w-8 rounded-full border border-white/20" style={{ backgroundColor: primaryColor }} />
+              <span className="h-8 w-8 rounded-full border border-white/20" style={{ backgroundColor: secondaryColor }} />
+              <div className="min-w-0">
+                <p className="text-xs font-black text-white">Shamrai Analytics Hub</p>
+                <p className="mt-1 text-[10px] font-semibold text-slate-300">
+                  После сохранения тема применится через CSS variables без перезагрузки страницы.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        </SettingsAccordionSection>
 
         {renderSettingsSaveFooter()}
       </form>
@@ -1414,13 +2213,24 @@ export default function AdminSettings() {
   };
 
   const renderMonitoringTab = () => {
-    const onlineUsers = onlineQuery.data?.online_users ?? 0;
-    const parserStatus = parserStatusQuery.data?.status || 'error';
+    const summary = monitoringSummaryQuery.data;
+    const onlineUsers = summary?.online?.online_users ?? onlineQuery.data?.online_users ?? 0;
+    const parserStatus = summary?.parser?.status || parserStatusQuery.data?.status || 'error';
     const parserActive = parserStatus === 'active' && !parserStatusQuery.isError;
-    const parserLastSync = parserStatusQuery.data?.last_sync
-      ? new Date(parserStatusQuery.data.last_sync).toLocaleString('ru-RU')
+    const parserLastSyncRaw = summary?.parser?.last_sync || parserStatusQuery.data?.last_sync;
+    const parserLastSync = parserLastSyncRaw
+      ? new Date(parserLastSyncRaw).toLocaleString('ru-RU')
       : 'нет данных';
     const logs = monitoringLogsQuery.data?.logs || [];
+    const healthEntries = Object.entries(summary?.health || {});
+    const deliveryEntries = Object.entries(summary?.delivery_outbox || {});
+    const rateLimitEntries = Object.entries(summary?.rate_limit || {});
+    const auditEntries = summary?.audit || [];
+    const formatMonitoringValue = (value: unknown) => {
+      if (value === null || value === undefined || value === '') return 'none';
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    };
 
     return (
       <section
@@ -1429,77 +2239,168 @@ export default function AdminSettings() {
         aria-labelledby="settings-tab-monitoring"
         className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/42 p-4 shadow-glass backdrop-blur-xl sm:p-5"
       >
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(280px,420px)]">
-          <div className="rounded-3xl border border-cyan-300/20 bg-cyan-300/[0.075] p-5 shadow-neon-cyan">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-100">Онлайн статистика</p>
-                <div className="mt-3 text-5xl font-black leading-none text-white tabular-nums sm:text-6xl">
-                  {onlineQuery.isLoading ? '...' : onlineUsers}
+        <SettingsAccordionSection
+          id="monitoring-overview"
+          title="Онлайн и parser"
+          subtitle="Redis presence и синтетический статус парсера"
+          badge={monitoringSummaryQuery.isFetching ? 'sync' : 'live'}
+          Icon={Activity}
+          open={sectionIsOpen('monitoring', 'monitoring-overview')}
+          onToggle={() => toggleAccordionSection('monitoring', 'monitoring-overview')}
+          status={renderStatusBadge(parserActive ? 'active' : 'error')}
+        >
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(280px,420px)]">
+            <div className="rounded-3xl border border-cyan-300/20 bg-cyan-300/[0.075] p-5 shadow-neon-cyan">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-100">Онлайн статистика</p>
+                  <div className="mt-3 text-5xl font-black leading-none text-white tabular-nums sm:text-6xl">
+                    {onlineQuery.isLoading && !summary ? '...' : onlineUsers}
+                  </div>
+                  <p className="mt-2 text-xs font-semibold text-cyan-100/75">
+                    активных пользователей по Redis heartbeat
+                  </p>
                 </div>
-                <p className="mt-2 text-xs font-semibold text-cyan-100/75">
-                  активных пользователей по Redis heartbeat
-                </p>
+                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/25 bg-cyan-300/10 text-cyan-100">
+                  {onlineQuery.isFetching || monitoringSummaryQuery.isFetching ? <Loader2 className="h-5 w-5 animate-spin" /> : <Activity className="h-5 w-5" />}
+                </span>
               </div>
-              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-cyan-300/25 bg-cyan-300/10 text-cyan-100">
-                {onlineQuery.isFetching ? <Loader2 className="h-5 w-5 animate-spin" /> : <Activity className="h-5 w-5" />}
-              </span>
             </div>
-          </div>
 
-          <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
-            <div className="flex items-start gap-4">
-              <span className={`mt-1 h-4 w-4 shrink-0 rounded-full ${
-                parserActive ? 'animate-pulse bg-green-500 shadow-[0_0_18px_rgba(34,197,94,0.45)]' : 'bg-rose-500 shadow-[0_0_18px_rgba(244,63,94,0.35)]'
-              }`} />
-              <div className="min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Статус парсера</p>
-                <h3 className="mt-2 text-xl font-black text-white">
-                  {parserActive ? 'Active' : 'Error'}
-                </h3>
-                <p className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-400">
-                  <Clock3 className="h-4 w-4 text-slate-500" />
-                  <span>{parserLastSync}</span>
-                </p>
+            <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
+              <div className="flex items-start gap-4">
+                <span className={`mt-1 h-4 w-4 shrink-0 rounded-full ${
+                  parserActive ? 'animate-pulse bg-green-500 shadow-[0_0_18px_rgba(34,197,94,0.45)]' : 'bg-rose-500 shadow-[0_0_18px_rgba(244,63,94,0.35)]'
+                }`} />
+                <div className="min-w-0">
+                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Статус парсера</p>
+                  <h3 className="mt-2 text-xl font-black text-white">
+                    {parserActive ? 'Active' : 'Error'}
+                  </h3>
+                  <p className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-400">
+                    <Clock3 className="h-4 w-4 text-slate-500" />
+                    <span>{parserLastSync}</span>
+                  </p>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </SettingsAccordionSection>
 
-        <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-4">
+        <SettingsAccordionSection
+          id="monitoring-health"
+          title="Health и rate-limit"
+          subtitle="API, база данных и лимиты безопасности"
+          badge="health"
+          Icon={Database}
+          tone="emerald"
+          open={sectionIsOpen('monitoring', 'monitoring-health')}
+          onToggle={() => toggleAccordionSection('monitoring', 'monitoring-health')}
+        >
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs font-black text-white">Системное здоровье</p>
+              {(healthEntries.length ? healthEntries : [['api', 'loading']]).map(([key, value]) => (
+                <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">{key}</span>
+                  {renderStatusBadge(String(value || 'none'))}
+                </div>
+              ))}
+            </div>
+            <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs font-black text-white">Rate-limit metrics</p>
+              {(rateLimitEntries.length ? rateLimitEntries : [['status', 'empty']]).map(([key, value]) => (
+                <div key={key} className="flex min-w-0 items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2">
+                  <span className="truncate text-[10px] font-black uppercase tracking-wider text-slate-400">{key}</span>
+                  <span className="max-w-[60%] truncate text-right text-[10px] font-semibold text-slate-200">{formatMonitoringValue(value)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="monitoring-delivery"
+          title="Delivery outbox"
+          subtitle="Метрики очереди исходящей доставки"
+          badge={`${deliveryEntries.length} метрик`}
+          Icon={BellRing}
+          tone="amber"
+          open={sectionIsOpen('monitoring', 'monitoring-delivery')}
+          onToggle={() => toggleAccordionSection('monitoring', 'monitoring-delivery')}
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {(deliveryEntries.length ? deliveryEntries : [['status', 'empty']]).map(([key, value]) => (
+              <div key={key} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+                <p className="truncate text-[10px] font-black uppercase tracking-wider text-slate-400">{key}</p>
+                <p className="mt-2 truncate text-xl font-black text-white tabular-nums">{formatMonitoringValue(value)}</p>
+              </div>
+            ))}
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="monitoring-logs"
+          title="Recent backend logs"
+          subtitle="Последние строки логов без секретов и env-значений"
+          badge={monitoringLogsQuery.isFetching ? 'sync' : `${logs.length} lines`}
+          Icon={Download}
+          tone="violet"
+          open={sectionIsOpen('monitoring', 'monitoring-logs')}
+          onToggle={() => toggleAccordionSection('monitoring', 'monitoring-logs')}
+        >
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-black text-white">Живой лог ошибок</p>
-              <p className="mt-1 text-[10px] font-semibold text-slate-500">Последние события мониторинга</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleDownloadMonitoringLog}
-                className="smooth-pressable flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.1] px-3 text-[9px] font-black uppercase tracking-wider text-cyan-50 transition-all hover:bg-cyan-300/[0.16] active:scale-[0.98]"
-              >
-                <Download className="h-4 w-4" />
-                <span>Скачать лог</span>
-              </button>
-              <span className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[9px] font-black uppercase tracking-wider text-slate-300">
-                {monitoringLogsQuery.isFetching ? 'sync' : `${logs.length} lines`}
-              </span>
-            </div>
+            <p className="text-[10px] font-semibold leading-relaxed text-slate-500">
+              Этот файл можно прислать для разбора ошибки: отчет не содержит токены, пароли, DB URL и `.env`.
+            </p>
+            <button
+              type="button"
+                onClick={() => void handleDownloadMonitoringLog()}
+              className="smooth-pressable flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.1] px-3 text-[9px] font-black uppercase tracking-wider text-cyan-50 transition-all hover:bg-cyan-300/[0.16] active:scale-[0.98]"
+            >
+              <Download className="h-4 w-4" />
+              <span>Скачать отчет</span>
+            </button>
           </div>
           <div className="max-h-[320px] overflow-y-auto rounded-2xl border border-white/10 bg-[#020617] p-4 font-mono text-[11px] leading-relaxed text-emerald-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            {logs.length ? (
-              logs.map((line, index) => (
-                <div key={`${line}-${index}`} className="break-words">
-                  <span className="text-cyan-300">$</span> {line}
-                </div>
-              ))
-            ) : (
+            {logs.length ? logs.map((line, index) => (
+              <div key={`${line}-${index}`} className="break-words">
+                <span className="text-cyan-300">$</span> {line}
+              </div>
+            )) : (
               <div className="text-slate-500">
                 {monitoringLogsQuery.isLoading ? 'Загрузка логов...' : 'Логи пока пустые'}
               </div>
             )}
           </div>
-        </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="monitoring-audit"
+          title="Audit trail"
+          subtitle="Последние админские действия из backend-аудита"
+          badge={`${auditEntries.length} rows`}
+          Icon={ShieldAlert}
+          tone="rose"
+          open={sectionIsOpen('monitoring', 'monitoring-audit')}
+          onToggle={() => toggleAccordionSection('monitoring', 'monitoring-audit')}
+        >
+          <div className="space-y-2">
+            {auditEntries.length ? auditEntries.map((entry, index) => (
+              <div key={`${entry.id || index}-${entry.action || 'audit'}`} className="grid grid-cols-1 gap-2 rounded-2xl border border-white/10 bg-white/[0.035] p-3 text-[10px] font-semibold text-slate-300 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <p className="truncate font-black text-white">{formatMonitoringValue(entry.action)}</p>
+                  <p className="mt-1 truncate text-slate-500">actor: {formatMonitoringValue(entry.actor_id)}</p>
+                </div>
+                <span className="text-slate-500">{formatMonitoringValue(entry.created_at)}</span>
+              </div>
+            )) : (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-[10px] font-semibold text-slate-500">
+                Аудит пока пуст или еще не загружен.
+              </div>
+            )}
+          </div>
+        </SettingsAccordionSection>
       </section>
     );
   };
@@ -1635,6 +2536,10 @@ export default function AdminSettings() {
           </div>
           <div className="pointer-events-none absolute right-0 top-0 h-[calc(100%-0.5rem)] w-8 rounded-r-2xl bg-gradient-to-l from-slate-950/80 to-transparent" aria-hidden="true" />
         </div>
+
+        <div className="mt-2 flex justify-end">
+          {renderSectionControls()}
+        </div>
       </div>
 
       {renderActiveTab()}
@@ -1673,7 +2578,7 @@ export default function AdminSettings() {
             {groupedTemplates.map(group => {
               const tone = GROUP_TONE[group.id];
               const hasSearch = Boolean(searchTerm.trim());
-              const open = hasSearch || expandedGroups[group.id];
+              const open = hasSearch ? group.templates.length > 0 : expandedGroups[group.id];
               const dirtyCount = group.templates.filter(template => (
                 (drafts[template.key] ?? template.body) !== template.body
               )).length;
@@ -1767,83 +2672,103 @@ export default function AdminSettings() {
 
         {activeTemplate && (
           <section ref={editorPanelRef} className="scroll-mt-4 grid min-w-0 grid-cols-1 gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
-            <div className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/38 p-3 shadow-glass backdrop-blur-xl sm:p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <h3 className="text-base font-black leading-snug text-white sm:truncate">{activeTemplate.title}</h3>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                    <span className="flex items-center gap-1">
-                      <Clock3 className="h-3.5 w-3.5" />
-                      {formatTemplateDate(activeTemplate.updated_at)}
-                    </span>
-                    {isDirty && <span className="text-amber-200">есть несохраненные правки</span>}
+            <div className="space-y-4">
+              <SettingsAccordionSection
+                id="texts-editor"
+                title={activeTemplate.title}
+                subtitle={`Обновлено: ${formatTemplateDate(activeTemplate.updated_at)}`}
+                badge={isDirty ? 'черновик' : 'готово'}
+                Icon={Braces}
+                tone={isDirty ? 'amber' : 'cyan'}
+                open={sectionIsOpen('texts', 'texts-editor')}
+                onToggle={() => toggleAccordionSection('texts', 'texts-editor')}
+                dirty={isDirty}
+                status={renderStatusBadge(isDirty ? 'warning' : 'ok', isDirty ? 'правки' : 'ok')}
+              >
+                <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <h3 className="text-base font-black leading-snug text-white sm:truncate">{activeTemplate.title}</h3>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      <span className="flex items-center gap-1">
+                        <Clock3 className="h-3.5 w-3.5" />
+                        {formatTemplateDate(activeTemplate.updated_at)}
+                      </span>
+                      {isDirty && <span className="text-amber-200">есть несохраненные правки</span>}
+                    </div>
                   </div>
+
+                  {renderTemplateActions(activeTemplate, 'grid grid-cols-2 gap-2 sm:flex')}
                 </div>
 
-                {renderTemplateActions(activeTemplate, 'grid grid-cols-2 gap-2 sm:flex')}
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-black uppercase tracking-wider text-slate-400">
-                  <span>Текст сообщения</span>
-                  <span className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.07] px-2 py-1 text-cyan-100">
-                    {activeTemplate.variables.length} поля защищены
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-start gap-2 rounded-2xl border border-cyan-300/20 bg-[#07111f] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_18px_48px_rgba(0,0,0,0.25)]">
-                  {editorTokens.map((token, index) => {
-                    if (token.type === 'markup') return null;
-                    if (token.type === 'variable') {
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                    <span>Текст сообщения</span>
+                    <span className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.07] px-2 py-1 text-cyan-100">
+                      {activeTemplate.variables.length} поля защищены
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-start gap-2 rounded-2xl border border-cyan-300/20 bg-[#07111f] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_18px_48px_rgba(0,0,0,0.25)]">
+                    {editorTokens.map((token, index) => {
+                      if (token.type === 'markup') return null;
+                      if (token.type === 'variable') {
+                        return (
+                          <div
+                            key={`${token.type}-${index}-${token.key}`}
+                            className="inline-flex max-w-full items-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.11] px-3 py-2 text-[11px] font-black text-cyan-50 shadow-[0_0_18px_rgba(34,211,238,0.08)]"
+                          >
+                            <Braces className="h-3.5 w-3.5 shrink-0 text-cyan-200" />
+                            <span className="truncate">{token.label}</span>
+                            {token.example && (
+                              <span className="hidden max-w-[140px] truncate rounded-lg bg-black/20 px-2 py-1 text-[9px] font-bold text-cyan-100/70 sm:inline">
+                                {token.example}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      }
+                      if (!token.value.trim()) return null;
+                      const compactText = !token.value.includes('\n') && token.value.trim().length <= 18;
+                      if (compactText) {
+                        return (
+                          <input
+                            key={`${token.type}-${index}`}
+                            value={token.value}
+                            onChange={(event) => handleTextTokenChange(index, event.target.value)}
+                            spellCheck={false}
+                            aria-label={`Редактируемый текст ${index + 1}`}
+                            style={{ '--editor-token-width': `${Math.max(4, Math.min(22, token.value.length + 2))}ch` } as React.CSSProperties}
+                            className="min-h-[42px] w-full max-w-full rounded-xl border border-slate-600/70 bg-[#0b1728] px-3 text-[16px] font-semibold text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:w-[var(--editor-token-width)] sm:text-[13px]"
+                          />
+                        );
+                      }
                       return (
-                        <div
-                          key={`${token.type}-${index}-${token.key}`}
-                          className="inline-flex max-w-full items-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.11] px-3 py-2 text-[11px] font-black text-cyan-50 shadow-[0_0_18px_rgba(34,211,238,0.08)]"
-                        >
-                          <Braces className="h-3.5 w-3.5 shrink-0 text-cyan-200" />
-                          <span className="truncate">{token.label}</span>
-                          {token.example && (
-                            <span className="hidden max-w-[140px] truncate rounded-lg bg-black/20 px-2 py-1 text-[9px] font-bold text-cyan-100/70 sm:inline">
-                              {token.example}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    }
-                    if (!token.value.trim()) return null;
-                    const compactText = !token.value.includes('\n') && token.value.trim().length <= 18;
-                    if (compactText) {
-                      return (
-                        <input
+                        <textarea
                           key={`${token.type}-${index}`}
                           value={token.value}
                           onChange={(event) => handleTextTokenChange(index, event.target.value)}
+                          rows={rowsForEditableText(token.value)}
                           spellCheck={false}
                           aria-label={`Редактируемый текст ${index + 1}`}
-                          style={{ '--editor-token-width': `${Math.max(4, Math.min(22, token.value.length + 2))}ch` } as React.CSSProperties}
-                          className="min-h-[42px] w-full max-w-full rounded-xl border border-slate-600/70 bg-[#0b1728] px-3 text-[16px] font-semibold text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:w-[var(--editor-token-width)] sm:text-[13px]"
+                          className="w-full basis-full resize-y rounded-xl border border-slate-600/70 bg-[#0b1728] px-3.5 py-3 text-[16px] font-semibold leading-relaxed text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 placeholder:text-slate-500 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:text-[13px]"
                         />
                       );
-                    }
-                    return (
-                      <textarea
-                        key={`${token.type}-${index}`}
-                        value={token.value}
-                        onChange={(event) => handleTextTokenChange(index, event.target.value)}
-                        rows={rowsForEditableText(token.value)}
-                        spellCheck={false}
-                        aria-label={`Редактируемый текст ${index + 1}`}
-                        className="w-full basis-full resize-y rounded-xl border border-slate-600/70 bg-[#0b1728] px-3.5 py-3 text-[16px] font-semibold leading-relaxed text-[#e8f3ff] shadow-inner outline-none transition-all [color-scheme:dark] selection:bg-cyan-300/25 placeholder:text-slate-500 focus:border-cyan-300/65 focus:bg-[#0d1b30] focus:ring-2 focus:ring-cyan-300/15 sm:text-[13px]"
-                      />
-                    );
-                  })}
+                    })}
+                  </div>
                 </div>
-              </div>
 
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-slate-400">
-                  <Braces className="h-4 w-4 text-cyan-200" />
-                  <span>Поля</span>
-                </div>
+                {renderTemplateActions(activeTemplate, 'mt-3 grid grid-cols-2 gap-2 border-t border-white/10 pt-3 sm:hidden')}
+              </SettingsAccordionSection>
+
+              <SettingsAccordionSection
+                id="texts-variables"
+                title="Переменные шаблона"
+                subtitle="Защищенные поля, которые подставляет система"
+                badge={`${activeTemplate.variables.length} fields`}
+                Icon={Braces}
+                tone="violet"
+                open={sectionIsOpen('texts', 'texts-variables')}
+                onToggle={() => toggleAccordionSection('texts', 'texts-variables')}
+              >
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {activeTemplate.variables.map(variable => (
                     <div
@@ -1857,23 +2782,24 @@ export default function AdminSettings() {
                     </div>
                   ))}
                 </div>
-              </div>
-
-              {renderTemplateActions(activeTemplate, 'grid grid-cols-2 gap-2 border-t border-white/10 pt-3 sm:hidden')}
+              </SettingsAccordionSection>
             </div>
 
             <div className="space-y-4">
-              <div className="rounded-3xl border border-white/10 bg-slate-950/45 p-3 shadow-glass backdrop-blur-xl sm:p-4">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Предпросмотр</p>
-                  <span className="rounded-lg bg-slate-800 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-slate-400">
-                    итог
-                  </span>
-                </div>
+              <SettingsAccordionSection
+                id="texts-preview"
+                title="Предпросмотр"
+                subtitle="Итоговый текст с примерными значениями"
+                badge="итог"
+                Icon={MessageCircle}
+                tone="emerald"
+                open={sectionIsOpen('texts', 'texts-preview')}
+                onToggle={() => toggleAccordionSection('texts', 'texts-preview')}
+              >
                 <pre className="max-h-[42dvh] whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-[#07111f] p-3 text-[12px] font-semibold leading-relaxed text-slate-100 sm:max-h-[520px] sm:p-4">
                   {activePreview || 'Пустой предпросмотр'}
                 </pre>
-              </div>
+              </SettingsAccordionSection>
             </div>
           </section>
         )}

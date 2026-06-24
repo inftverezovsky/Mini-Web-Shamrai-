@@ -134,6 +134,14 @@ const DEFAULT_MOCK_SYSTEM_SETTINGS = [
     value: 'false',
     description: 'Глобальный режим сниженной анимации и эффектов.',
   },
+  { key: 'BRAND_LOGO_URL', value: '', description: 'URL логотипа бренда.' },
+  { key: 'BRAND_BACKGROUND_URL', value: '', description: 'URL фонового изображения бренда.' },
+  { key: 'THEME_GLASS_OPACITY', value: '0.42', description: 'Прозрачность glass-панелей.' },
+  { key: 'THEME_GLASS_BLUR_PX', value: '18', description: 'Blur glass-панелей в пикселях.' },
+  { key: 'THEME_RADIUS_SCALE', value: '1', description: 'Множитель скруглений интерфейса.' },
+  { key: 'THEME_FONT_SCALE', value: '1', description: 'Множитель размера шрифта.' },
+  { key: 'THEME_DENSITY', value: 'compact', description: 'Плотность интерфейса.' },
+  { key: 'THEME_GLOW_STRENGTH', value: '1', description: 'Интенсивность свечения.' },
 ];
 
 function getMockPreferences() {
@@ -216,6 +224,14 @@ function getMockPublicThemeSettings() {
     primary_color: settingByKey.get('THEME_PRIMARY_COLOR')?.value || '#00d2ff',
     secondary_color: settingByKey.get('THEME_SECONDARY_COLOR')?.value || '#d946ef',
     global_performance_mode: settingByKey.get('GLOBAL_PERFORMANCE_MODE')?.value === 'true',
+    brand_logo_url: settingByKey.get('BRAND_LOGO_URL')?.value || '',
+    brand_background_url: settingByKey.get('BRAND_BACKGROUND_URL')?.value || '',
+    glass_opacity: Number(settingByKey.get('THEME_GLASS_OPACITY')?.value || 0.42),
+    glass_blur_px: Number(settingByKey.get('THEME_GLASS_BLUR_PX')?.value || 18),
+    radius_scale: Number(settingByKey.get('THEME_RADIUS_SCALE')?.value || 1),
+    font_scale: Number(settingByKey.get('THEME_FONT_SCALE')?.value || 1),
+    theme_density: settingByKey.get('THEME_DENSITY')?.value || 'compact',
+    glow_strength: Number(settingByKey.get('THEME_GLOW_STRENGTH')?.value || 1),
   };
 }
 
@@ -2629,13 +2645,83 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       ],
     };
   }
+  if (endpoint === '/admin/monitoring/summary') {
+    const now = nowIso();
+    return {
+      generated_at: now,
+      online: { online_users: 14 },
+      health: { api: 'ok', database: 'ok', redis: 'ok' },
+      delivery_outbox: { pending: 2, sent: 128, failed: 1, cancelled: 0 },
+      rate_limit: { active_windows: 3, blocked_keys: 0, last_reset_at: now },
+      parser: { status: 'active', last_sync: now },
+      audit: [
+        { id: 3, actor_id: 987654321, action: 'system_settings_updated', created_at: now },
+        { id: 2, actor_id: 987654321, action: 'message_template_updated', created_at: now },
+      ],
+    };
+  }
+  if (endpoint.startsWith('/admin/monitoring/diagnostic-report')) {
+    return {
+      summary: {
+        generated_at: nowIso(),
+        health: { api: 'ok', database: 'ok', redis: 'ok' },
+      },
+      logs: ['mock sanitized report line'],
+    };
+  }
   if (endpoint === '/admin/settings/reset-sessions' && options.method === 'POST') {
     return { status: 'success', deleted: 2 };
   }
   if (endpoint === '/admin/settings/integrations/unlock' && options.method === 'POST') {
     const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
     if (!String(body.password || '').trim()) throw new Error('Введите пароль интеграций');
-    return getMockSystemSettings({ revealSecrets: true });
+    return {
+      ...getMockSystemSettings({ revealSecrets: true }),
+      unlock_token: 'mock-integration-unlock-token',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    };
+  }
+  if (endpoint === '/admin/settings/integrations/diagnostics' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
+    if (!String(body.unlock_token || '').trim()) throw new Error('Сейф интеграций закрыт');
+    const requestedGroup = String(body.group || '');
+    const mockGroups: Record<string, string[]> = {
+      telegram: ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET_TOKEN', 'TELEGRAM_VIP_CHAT_ID'],
+      vk: ['VK_ACCESS_TOKEN', 'VK_CALLBACK_SECRET', 'VK_GROUP_ID'],
+      payments: ['YOOKASSA_SHOP_ID', 'YOOKASSA_SECRET_KEY', 'TEGRO_SHOP_ID', 'TEGRO_API_KEY'],
+      webpush: ['WEB_PUSH_VAPID_PUBLIC_KEY', 'WEB_PUSH_VAPID_PRIVATE_KEY'],
+      google: ['GOOGLE_DRIVE_AUTH_MODE', 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_SERVICE_ACCOUNT_JSON_B64'],
+      urls: ['API_BASE_URL', 'FRONTEND_BASE_URL', 'SUPPORT_URL', 'VIP_CHANNEL_URL'],
+    };
+    const settings = getMockSystemSettings({ revealSecrets: true }).settings;
+    const byKey = new Map(settings.map((setting: any) => [setting.key, setting]));
+    const groups = Object.entries(mockGroups)
+      .filter(([group]) => !requestedGroup || group === requestedGroup)
+      .map(([group, keys]) => {
+        const checks = keys.map((key) => {
+          const setting: any = byKey.get(key);
+          const configured = Boolean(setting?.is_configured || String(setting?.value || '').trim());
+          return {
+            key,
+            label: key,
+            status: configured ? 'ok' : 'missing',
+            configured,
+            is_secret: MOCK_SECRET_SETTING_KEYS.has(key),
+            message: configured ? 'Значение найдено, секрет не раскрывается.' : 'Значение не задано.',
+          };
+        });
+        const missing = checks.filter(check => check.status === 'missing').length;
+        return {
+          group,
+          status: missing === 0 ? 'ok' : missing === checks.length ? 'missing' : 'warning',
+          checks,
+        };
+      });
+    return {
+      overall_status: groups.every(group => group.status === 'ok') ? 'ok' : 'warning',
+      generated_at: nowIso(),
+      groups,
+    };
   }
   if (endpoint === '/admin/settings') {
     if (options.method === 'PUT') {

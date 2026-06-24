@@ -66,6 +66,7 @@ from src.services.telegram_auth import (
 )
 from src.services.vk_auth_flow import consume_vk_auth_flow, store_vk_auth_flow
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
+from src.services.system_settings import is_system_setting_enabled
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = logging.getLogger("uvicorn")
@@ -855,6 +856,12 @@ async def _upsert_telegram_user(
     role = "owner" if is_owner else (
         requested_role if allow_role_from_payload and is_valid_role(requested_role) else "user"
     )
+    if await is_system_setting_enabled(db, "DISABLE_REGISTRATIONS"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Регистрация временно закрыта",
+        )
+
     user = User(
         telegram_id=tg_id,
         username=tg_data.get("username"),
@@ -892,6 +899,12 @@ async def _create_vk_only_user(
     display_name: Optional[str],
     photo_url: Optional[str] = None,
 ) -> User:
+    if await is_system_setting_enabled(db, "DISABLE_REGISTRATIONS"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Регистрация временно закрыта",
+        )
+
     name = (display_name or "VK клиент").strip()
     first_name, _, last_name = name.partition(" ")
     user = User(

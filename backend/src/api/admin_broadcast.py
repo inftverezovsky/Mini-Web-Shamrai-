@@ -62,6 +62,7 @@ from src.services.forecast_delivery import (
 from src.services.telegram_bot import call_telegram_api
 from src.services.match_access import revoke_user_bet_access
 from src.services.signals import broadcast_personal_signals
+from src.services.system_settings import is_system_setting_enabled
 from src.services.coupon_uploads import store_coupon_image
 from src.services.admin_broadcast_helpers import (
     _decode_forecast_request_cursor,
@@ -86,6 +87,14 @@ from src.services.vk_delivery import (
 router = APIRouter(tags=["Admin Broadcast"])
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "coupons")
+
+
+async def _ensure_broadcasts_are_not_paused(db: AsyncSession) -> None:
+    if await is_system_setting_enabled(db, "PAUSE_BROADCASTS"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Рассылки временно поставлены на паузу в настройках",
+        )
 
 class ForecastBulkSendResponse(BaseModel):
     status: str
@@ -948,6 +957,7 @@ async def create_forecast_broadcast(
     Creates a private forecast and sends only a teaser with Telegram buttons to matching users.
     The full forecast is delivered later by the sales manager.
     """
+    await _ensure_broadcasts_are_not_paused(db)
     form_data = await request.form()
     selected_bookmaker_ids = _merge_bookmaker_ids(
         bookmaker_id,
@@ -1044,6 +1054,7 @@ async def create_paid_set_broadcast(
     Creates a paid set teaser with a "take" button. The client cannot buy inside the app:
     the request goes to the sales manager for a personal dialogue.
     """
+    await _ensure_broadcasts_are_not_paused(db)
     clean_title = (title or PAID_SET_PLACEHOLDER_EVENT_NAME).strip() or PAID_SET_PLACEHOLDER_EVENT_NAME
     clean_event_name = (event_name or "").strip()
     clean_outcome = (outcome or "").strip()

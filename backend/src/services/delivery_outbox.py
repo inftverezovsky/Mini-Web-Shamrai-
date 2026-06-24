@@ -13,6 +13,7 @@ from src.core.config import settings
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.models.database import AsyncSessionLocal
 from src.models.models import DeliveryOutbox, User
+from src.services.system_settings import is_system_setting_enabled
 from src.services.telegram_bot import call_telegram_api_async
 from src.services.vk_delivery import send_vk_message_to_user
 
@@ -30,6 +31,12 @@ CHANNEL_VK_MESSAGE = "vk_message"
 CHANNEL_WEB_PUSH_SIGNAL = "web_push_signal"
 CHANNEL_FORECAST_AUTO_DELIVERY = "forecast_auto_delivery"
 CHANNEL_FORECAST_FULL_DELIVERY = "forecast_full_delivery"
+PAUSABLE_DELIVERY_CHANNELS = {
+    CHANNEL_TELEGRAM_MESSAGE,
+    CHANNEL_VK_MESSAGE,
+    CHANNEL_FORECAST_AUTO_DELIVERY,
+    CHANNEL_FORECAST_FULL_DELIVERY,
+}
 
 
 def _now() -> datetime:
@@ -95,6 +102,7 @@ async def enqueue_delivery(
 ) -> DeliveryOutbox:
     next_attempt_at = run_after or _now()
     max_attempts_value = max(1, int(max_attempts or 1))
+    broadcasts_paused = channel in PAUSABLE_DELIVERY_CHANNELS and await is_system_setting_enabled(db, "PAUSE_BROADCASTS")
 
     if dedupe_key and hasattr(db, "execute"):
         existing_result = await db.execute(
@@ -120,7 +128,7 @@ async def enqueue_delivery(
                 .values(
                     id=delivery_id,
                     channel=channel,
-                    status=STATUS_PENDING,
+                    status=STATUS_CANCELLED if broadcasts_paused else STATUS_PENDING,
                     user_id=user_id,
                     personal_signal_id=personal_signal_id,
                     forecast_request_id=forecast_request_id,
@@ -129,6 +137,7 @@ async def enqueue_delivery(
                     attempt_count=0,
                     max_attempts=max_attempts_value,
                     next_attempt_at=next_attempt_at,
+                    last_error="Broadcast delivery paused by admin setting" if broadcasts_paused else None,
                 )
                 .on_conflict_do_nothing(index_elements=["dedupe_key"])
             )
@@ -142,7 +151,7 @@ async def enqueue_delivery(
 
     delivery = DeliveryOutbox(
         channel=channel,
-        status=STATUS_PENDING,
+        status=STATUS_CANCELLED if broadcasts_paused else STATUS_PENDING,
         user_id=user_id,
         personal_signal_id=personal_signal_id,
         forecast_request_id=forecast_request_id,
@@ -150,6 +159,7 @@ async def enqueue_delivery(
         dedupe_key=dedupe_key,
         max_attempts=max_attempts_value,
         next_attempt_at=next_attempt_at,
+        last_error="Broadcast delivery paused by admin setting" if broadcasts_paused else None,
     )
     db.add(delivery)
     return delivery

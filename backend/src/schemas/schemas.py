@@ -646,6 +646,16 @@ class IntegrationSettingsUnlockRequest(BaseModel):
     password: str = Field(min_length=1, max_length=120)
 
 
+class IntegrationSettingsUnlockResponse(SystemSettingsResponse):
+    unlock_token: str
+    expires_at: datetime
+
+
+class IntegrationDiagnosticsRequest(BaseModel):
+    unlock_token: str = Field(min_length=16, max_length=256)
+    group: Optional[str] = Field(default=None, max_length=40)
+
+
 class ResetSessionsResponse(BaseModel):
     status: str
     deleted: int = 0
@@ -655,6 +665,14 @@ class PublicThemeSettingsResponse(BaseModel):
     primary_color: str
     secondary_color: str
     global_performance_mode: bool = False
+    brand_logo_url: str = ""
+    brand_background_url: str = ""
+    glass_opacity: float = 0.42
+    glass_blur_px: int = 18
+    radius_scale: float = 1.0
+    font_scale: float = 1.0
+    theme_density: str = "compact"
+    glow_strength: float = 1.0
 
 
 class PresenceHeartbeatResponse(BaseModel):

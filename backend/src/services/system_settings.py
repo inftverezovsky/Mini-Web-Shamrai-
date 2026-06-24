@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import re
 import hmac
+import hashlib
+import secrets
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -21,9 +25,30 @@ MAX_SETTING_VALUE_LENGTH = 65536
 THEME_PRIMARY_COLOR_KEY = "THEME_PRIMARY_COLOR"
 THEME_SECONDARY_COLOR_KEY = "THEME_SECONDARY_COLOR"
 GLOBAL_PERFORMANCE_MODE_KEY = "GLOBAL_PERFORMANCE_MODE"
+BRAND_LOGO_URL_KEY = "BRAND_LOGO_URL"
+BRAND_BACKGROUND_URL_KEY = "BRAND_BACKGROUND_URL"
+THEME_GLASS_OPACITY_KEY = "THEME_GLASS_OPACITY"
+THEME_GLASS_BLUR_PX_KEY = "THEME_GLASS_BLUR_PX"
+THEME_RADIUS_SCALE_KEY = "THEME_RADIUS_SCALE"
+THEME_FONT_SCALE_KEY = "THEME_FONT_SCALE"
+THEME_DENSITY_KEY = "THEME_DENSITY"
+THEME_GLOW_STRENGTH_KEY = "THEME_GLOW_STRENGTH"
 DEFAULT_THEME_PRIMARY_COLOR = "#00d2ff"
 DEFAULT_THEME_SECONDARY_COLOR = "#d946ef"
+DEFAULT_THEME_DENSITY = "compact"
+INTEGRATION_UNLOCK_CACHE_PREFIX = "admin:integration_unlock:v1"
+INTEGRATION_UNLOCK_TTL_SECONDS = 15 * 60
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+_THEME_DENSITY_VALUES = {"compact", "cozy", "comfortable"}
+_IN_MEMORY_UNLOCK_TOKENS: dict[str, datetime] = {}
+
+_THEME_NUMBER_RANGES: dict[str, tuple[float, float]] = {
+    THEME_GLASS_OPACITY_KEY: (0.15, 0.9),
+    THEME_GLASS_BLUR_PX_KEY: (0, 36),
+    THEME_RADIUS_SCALE_KEY: (0.75, 1.5),
+    THEME_FONT_SCALE_KEY: (0.85, 1.2),
+    THEME_GLOW_STRENGTH_KEY: (0, 1.6),
+}
 
 
 @dataclass(frozen=True)
@@ -391,6 +416,54 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
         description="Глобальный режим сниженной анимации и эффектов.",
         value_kind="boolean",
     ),
+    SystemSettingDefinition(
+        key=BRAND_LOGO_URL_KEY,
+        default_value="",
+        description="URL логотипа бренда для интерфейса.",
+        value_kind="url",
+    ),
+    SystemSettingDefinition(
+        key=BRAND_BACKGROUND_URL_KEY,
+        default_value="",
+        description="URL фонового изображения бренда.",
+        value_kind="url",
+    ),
+    SystemSettingDefinition(
+        key=THEME_GLASS_OPACITY_KEY,
+        default_value="0.42",
+        description="Прозрачность glass-панелей.",
+        value_kind="number",
+    ),
+    SystemSettingDefinition(
+        key=THEME_GLASS_BLUR_PX_KEY,
+        default_value="18",
+        description="Интенсивность blur glass-панелей в пикселях.",
+        value_kind="number",
+    ),
+    SystemSettingDefinition(
+        key=THEME_RADIUS_SCALE_KEY,
+        default_value="1",
+        description="Множитель радиусов интерфейса.",
+        value_kind="number",
+    ),
+    SystemSettingDefinition(
+        key=THEME_FONT_SCALE_KEY,
+        default_value="1",
+        description="Множитель размера шрифтов интерфейса.",
+        value_kind="number",
+    ),
+    SystemSettingDefinition(
+        key=THEME_DENSITY_KEY,
+        default_value=DEFAULT_THEME_DENSITY,
+        description="Плотность интерфейса настроек и админ-панели.",
+        value_kind="enum:theme_density",
+    ),
+    SystemSettingDefinition(
+        key=THEME_GLOW_STRENGTH_KEY,
+        default_value="1",
+        description="Интенсивность фирменного неонового свечения.",
+        value_kind="number",
+    ),
 )
 
 _DEFINITIONS_BY_KEY = {definition.key: definition for definition in SYSTEM_SETTING_DEFINITIONS}
@@ -401,6 +474,27 @@ _SESSION_CACHE_PATTERNS = (
     f"{TELEGRAM_AUTH_SESSION_CACHE_PREFIX}:*",
     f"{VK_AUTH_FLOW_CACHE_PREFIX}:*",
 )
+_PUBLIC_THEME_KEYS = (
+    THEME_PRIMARY_COLOR_KEY,
+    THEME_SECONDARY_COLOR_KEY,
+    GLOBAL_PERFORMANCE_MODE_KEY,
+    BRAND_LOGO_URL_KEY,
+    BRAND_BACKGROUND_URL_KEY,
+    THEME_GLASS_OPACITY_KEY,
+    THEME_GLASS_BLUR_PX_KEY,
+    THEME_RADIUS_SCALE_KEY,
+    THEME_FONT_SCALE_KEY,
+    THEME_DENSITY_KEY,
+    THEME_GLOW_STRENGTH_KEY,
+)
+_INTEGRATION_GROUP_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET_TOKEN", "TELEGRAM_BOT_USERNAME"),
+    "vk": ("VK_ACCESS_TOKEN", "VK_CALLBACK_CONFIRMATION_CODE", "VK_CALLBACK_SECRET", "VK_GROUP_ID"),
+    "payments": ("YOOKASSA_SHOP_ID", "YOOKASSA_SECRET_KEY", "TEGRO_SHOP_ID", "TEGRO_SECRET_KEY"),
+    "webpush": ("WEB_PUSH_VAPID_PUBLIC_KEY", "WEB_PUSH_VAPID_PRIVATE_KEY", "WEB_PUSH_VAPID_SUBJECT"),
+    "google": ("GOOGLE_DRIVE_STATS_ENABLED", "GOOGLE_DRIVE_STATS_FOLDER_ID", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_SERVICE_ACCOUNT_JSON_B64"),
+    "urls": ("API_BASE_URL", "FRONTEND_BASE_URL", "SUPPORT_URL", "VIP_CHANNEL_URL"),
+}
 
 
 def _coerce_boolean_value(value: Any) -> str:
@@ -420,6 +514,28 @@ def _normalize_setting_value(definition: SystemSettingDefinition, value: Any) ->
         if not _HEX_COLOR_PATTERN.fullmatch(clean_value):
             raise ValueError(f"Значение {definition.key} должно быть HEX-цветом формата #RRGGBB")
         return clean_value.lower()
+    if definition.value_kind == "url":
+        if not clean_value:
+            return ""
+        parsed = urlparse(clean_value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError(f"Значение {definition.key} должно быть безопасной http(s)-ссылкой без логина и пароля")
+        return clean_value
+    if definition.value_kind == "number":
+        try:
+            numeric_value = float(clean_value)
+        except ValueError as exc:
+            raise ValueError(f"Значение {definition.key} должно быть числом") from exc
+        min_value, max_value = _THEME_NUMBER_RANGES.get(definition.key, (0.0, 1_000_000.0))
+        if numeric_value < min_value or numeric_value > max_value:
+            raise ValueError(f"Значение {definition.key} должно быть в диапазоне {min_value:g}-{max_value:g}")
+        normalized = f"{numeric_value:.2f}".rstrip("0").rstrip(".")
+        return normalized or "0"
+    if definition.value_kind == "enum:theme_density":
+        normalized = clean_value.lower() or definition.default_value
+        if normalized not in _THEME_DENSITY_VALUES:
+            raise ValueError(f"Значение {definition.key} должно быть одним из: {', '.join(sorted(_THEME_DENSITY_VALUES))}")
+        return normalized
     return clean_value
 
 
@@ -498,6 +614,51 @@ def verify_integrations_password(password: str) -> bool:
     return hmac.compare_digest(password.strip(), expected_password)
 
 
+def _unlock_cache_key(token: str) -> str:
+    token_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"{INTEGRATION_UNLOCK_CACHE_PREFIX}:{token_digest}"
+
+
+async def create_integration_unlock_token(admin_id: int | None = None) -> dict[str, str]:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=INTEGRATION_UNLOCK_TTL_SECONDS)
+    token_payload = {
+        "token_type": "integration_unlock",
+        "admin_id": admin_id,
+        "expires_at": expires_at.isoformat(),
+    }
+    await cache_set_json(_unlock_cache_key(token), token_payload, ttl_seconds=INTEGRATION_UNLOCK_TTL_SECONDS)
+    _IN_MEMORY_UNLOCK_TOKENS[_unlock_cache_key(token)] = expires_at
+    return {
+        "token_type": "integration_unlock",
+        "unlock_token": token,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+async def validate_integration_unlock_token(unlock_token: str) -> bool:
+    token = str(unlock_token or "").strip()
+    if not token:
+        return False
+    cache_key = _unlock_cache_key(token)
+    payload = await cache_get_json(cache_key)
+    if isinstance(payload, dict):
+        raw_expires_at = payload.get("expires_at")
+        try:
+            expires_at = datetime.fromisoformat(str(raw_expires_at))
+        except ValueError:
+            return False
+        return expires_at > datetime.now(timezone.utc)
+
+    expires_at = _IN_MEMORY_UNLOCK_TOKENS.get(cache_key)
+    if expires_at is None:
+        return False
+    if expires_at <= datetime.now(timezone.utc):
+        _IN_MEMORY_UNLOCK_TOKENS.pop(cache_key, None)
+        return False
+    return True
+
+
 async def get_unlocked_integration_settings(db: AsyncSession) -> dict[str, list[dict[str, Any]]]:
     stored_settings = await _load_settings_by_key(db, _INTEGRATION_SETTING_KEYS)
     serialized_settings: list[dict[str, Any]] = []
@@ -513,6 +674,61 @@ async def get_unlocked_integration_settings(db: AsyncSession) -> dict[str, list[
             )
         )
     return {"settings": serialized_settings}
+
+
+async def run_integration_diagnostics(
+    db: AsyncSession,
+    *,
+    unlock_token: str,
+    group: str | None = None,
+) -> dict[str, Any]:
+    if not await validate_integration_unlock_token(unlock_token):
+        raise ValueError("Неверный или истекший unlock token интеграций")
+
+    requested_groups = [group] if group else list(_INTEGRATION_GROUP_REQUIRED_KEYS)
+    unknown_groups = [item for item in requested_groups if item not in _INTEGRATION_GROUP_REQUIRED_KEYS]
+    if unknown_groups:
+        raise ValueError(f"Неизвестная группа интеграций: {', '.join(unknown_groups)}")
+
+    stored_settings = await _load_settings_by_key(db, _INTEGRATION_SETTING_KEYS)
+    group_payloads: list[dict[str, Any]] = []
+    for group_id in requested_groups:
+        checks: list[dict[str, Any]] = []
+        required_keys = _INTEGRATION_GROUP_REQUIRED_KEYS[group_id]
+        for key in required_keys:
+            definition = _DEFINITIONS_BY_KEY[key]
+            value = _setting_value_for_definition(definition, stored_settings.get(key))
+            configured = bool(str(value or "").strip())
+            status_value = "ok" if configured else "missing"
+            if definition.value_kind == "url" and configured:
+                try:
+                    _normalize_setting_value(definition, value)
+                except ValueError:
+                    status_value = "error"
+            checks.append({
+                "key": key,
+                "label": definition.description,
+                "status": status_value,
+                "configured": configured,
+                "is_secret": definition.is_secret,
+                "message": "задано" if configured else "не задано",
+            })
+
+        statuses = {check["status"] for check in checks}
+        group_status = "error" if "error" in statuses else "missing" if statuses == {"missing"} else "warning" if "missing" in statuses else "ok"
+        group_payloads.append({
+            "group": group_id,
+            "status": group_status,
+            "checks": checks,
+        })
+
+    group_statuses = {item["status"] for item in group_payloads}
+    overall_status = "error" if "error" in group_statuses else "missing" if group_statuses == {"missing"} else "warning" if "warning" in group_statuses or "missing" in group_statuses else "ok"
+    return {
+        "overall_status": overall_status,
+        "groups": group_payloads,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 async def update_admin_system_settings(
@@ -565,18 +781,44 @@ def _theme_value(stored_settings: dict[str, SystemSetting], key: str) -> str:
         return definition.default_value
 
 
-async def get_public_theme_settings(db: AsyncSession) -> dict[str, str | bool]:
-    stored_settings = await _load_settings_by_key(
-        db,
-        [THEME_PRIMARY_COLOR_KEY, THEME_SECONDARY_COLOR_KEY, GLOBAL_PERFORMANCE_MODE_KEY],
-    )
+def _theme_number_value(stored_settings: dict[str, SystemSetting], key: str) -> float:
+    value = _theme_value(stored_settings, key)
+    try:
+        return float(value)
+    except ValueError:
+        return float(_DEFINITIONS_BY_KEY[key].default_value)
+
+
+async def get_public_theme_settings(db: AsyncSession) -> dict[str, str | bool | float | int]:
+    stored_settings = await _load_settings_by_key(db, _PUBLIC_THEME_KEYS)
     return {
         "primary_color": _theme_value(stored_settings, THEME_PRIMARY_COLOR_KEY),
         "secondary_color": _theme_value(stored_settings, THEME_SECONDARY_COLOR_KEY),
         "global_performance_mode": _coerce_boolean_value(
             _theme_value(stored_settings, GLOBAL_PERFORMANCE_MODE_KEY)
         ) == "true",
+        "brand_logo_url": _theme_value(stored_settings, BRAND_LOGO_URL_KEY),
+        "brand_background_url": _theme_value(stored_settings, BRAND_BACKGROUND_URL_KEY),
+        "glass_opacity": _theme_number_value(stored_settings, THEME_GLASS_OPACITY_KEY),
+        "glass_blur_px": int(round(_theme_number_value(stored_settings, THEME_GLASS_BLUR_PX_KEY))),
+        "radius_scale": _theme_number_value(stored_settings, THEME_RADIUS_SCALE_KEY),
+        "font_scale": _theme_number_value(stored_settings, THEME_FONT_SCALE_KEY),
+        "theme_density": _theme_value(stored_settings, THEME_DENSITY_KEY),
+        "glow_strength": _theme_number_value(stored_settings, THEME_GLOW_STRENGTH_KEY),
     }
+
+
+async def is_system_setting_enabled(db: AsyncSession, key: str) -> bool:
+    definition = _DEFINITIONS_BY_KEY.get(key)
+    if definition is None or definition.value_kind != "boolean":
+        return False
+    if not hasattr(db, "execute"):
+        return False
+    try:
+        stored_settings = await _load_settings_by_key(db, [key])
+    except AttributeError:
+        return False
+    return _coerce_boolean_value(_setting_value_for_definition(definition, stored_settings.get(key))) == "true"
 
 
 async def reset_user_session_cache() -> dict[str, int | str]:

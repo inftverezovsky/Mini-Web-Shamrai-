@@ -1,13 +1,30 @@
 import unittest
 from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
 
-from src.api import admin as admin_api
+from src.api import admin as admin_api, auth as auth_api
+from src.main import is_maintenance_exempt_path
 from src.models.database import Base
 from src.models.models import SystemSetting
 from src.services import presence, system_settings
+
+
+class MaintenanceModeRoutingTests(unittest.TestCase):
+    def test_maintenance_mode_keeps_service_routes_open_and_blocks_user_api(self):
+        self.assertTrue(is_maintenance_exempt_path("/api/admin/settings"))
+        self.assertTrue(is_maintenance_exempt_path("/api/health"))
+        self.assertTrue(is_maintenance_exempt_path("/api/payments/yookassa/webhook"))
+        self.assertTrue(is_maintenance_exempt_path("/api/payments/tegro/webhook"))
+        self.assertTrue(is_maintenance_exempt_path("/api/payments/telegram-webhook"))
+        self.assertTrue(is_maintenance_exempt_path("/api/settings/theme"))
+        self.assertTrue(is_maintenance_exempt_path("/api/vk/callback"))
+        self.assertFalse(is_maintenance_exempt_path("/api/bets"))
+        self.assertFalse(is_maintenance_exempt_path("/api/payments/invoice"))
 
 
 class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -140,6 +157,43 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
                     [{"key": "THEME_PRIMARY_COLOR", "value": "cyan"}],
                 )
 
+    async def test_brand_kit_settings_are_validated_and_public(self):
+        async with self.Session() as session:
+            with patch.object(system_settings, "cache_delete", new=AsyncMock()):
+                await system_settings.update_admin_system_settings(
+                    session,
+                    [
+                        {"key": "BRAND_LOGO_URL", "value": " https://cdn.example.com/logo.png "},
+                        {"key": "BRAND_BACKGROUND_URL", "value": "https://cdn.example.com/bg.webp"},
+                        {"key": "THEME_GLASS_OPACITY", "value": "0.58"},
+                        {"key": "THEME_GLASS_BLUR_PX", "value": "22"},
+                        {"key": "THEME_RADIUS_SCALE", "value": "1.15"},
+                        {"key": "THEME_FONT_SCALE", "value": "0.96"},
+                        {"key": "THEME_DENSITY", "value": "compact"},
+                        {"key": "THEME_GLOW_STRENGTH", "value": "1.2"},
+                    ],
+                )
+
+                with self.assertRaises(ValueError):
+                    await system_settings.update_admin_system_settings(
+                        session,
+                        [{"key": "THEME_DENSITY", "value": "huge"}],
+                    )
+                with self.assertRaises(ValueError):
+                    await system_settings.update_admin_system_settings(
+                        session,
+                        [{"key": "BRAND_LOGO_URL", "value": "javascript:alert(1)"}],
+                    )
+
+            payload = await system_settings.get_public_theme_settings(session)
+
+        self.assertEqual(payload["brand_logo_url"], "https://cdn.example.com/logo.png")
+        self.assertEqual(payload["brand_background_url"], "https://cdn.example.com/bg.webp")
+        self.assertEqual(payload["theme_density"], "compact")
+        self.assertEqual(payload["glass_blur_px"], 22)
+        self.assertAlmostEqual(payload["glass_opacity"], 0.58)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", payload)
+
     async def test_public_theme_payload_is_sanitized(self):
         async with self.Session() as session:
             session.add_all([
@@ -152,11 +206,57 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
 
             payload = await system_settings.get_public_theme_settings(session)
 
-        self.assertEqual(payload, {
-            "primary_color": "#112233",
-            "secondary_color": "#445566",
-            "global_performance_mode": True,
-        })
+        self.assertEqual(payload["primary_color"], "#112233")
+        self.assertEqual(payload["secondary_color"], "#445566")
+        self.assertTrue(payload["global_performance_mode"])
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", payload)
+
+    async def test_unlock_token_is_cached_without_exposing_secret_values(self):
+        with patch.object(system_settings, "cache_set_json", new=AsyncMock()) as cache_set:
+            payload = await system_settings.create_integration_unlock_token(admin_id=900)
+
+        self.assertEqual(payload["token_type"], "integration_unlock")
+        self.assertTrue(payload["unlock_token"])
+        self.assertTrue(payload["expires_at"])
+        cache_set.assert_awaited_once()
+        cache_key = cache_set.await_args.args[0]
+        cached_payload = cache_set.await_args.args[1]
+        self.assertNotIn(payload["unlock_token"], cache_key)
+        self.assertNotIn(payload["unlock_token"], str(cached_payload))
+
+    async def test_integration_diagnostics_require_unlock_token_and_redact_values(self):
+        async with self.Session() as session:
+            session.add(SystemSetting(key="TELEGRAM_BOT_TOKEN", value="123456:real-secret", is_secret=True))
+            await session.flush()
+
+            with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=False)):
+                with self.assertRaises(ValueError):
+                    await system_settings.run_integration_diagnostics(session, unlock_token="bad", group="telegram")
+
+            with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=True)):
+                payload = await system_settings.run_integration_diagnostics(
+                    session,
+                    unlock_token="valid-token",
+                    group="telegram",
+                )
+
+        self.assertEqual(payload["overall_status"], "ok")
+        self.assertEqual(payload["groups"][0]["group"], "telegram")
+        self.assertNotIn("real-secret", str(payload))
+
+    async def test_registration_disabled_blocks_new_telegram_users(self):
+        async with self.Session() as session:
+            session.add(SystemSetting(key="DISABLE_REGISTRATIONS", value="true"))
+            await session.flush()
+
+            with self.assertRaises(HTTPException) as ctx:
+                await auth_api._upsert_telegram_user(
+                    session,
+                    {"id": 424242, "username": "new_user"},
+                    "Telegram",
+                )
+
+        self.assertEqual(ctx.exception.status_code, 403)
 
     async def test_presence_online_count_scans_redis_keys(self):
         class FakeRedis:
@@ -185,6 +285,45 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["status"], "active")
         self.assertIsNotNone(payload["last_sync"].tzinfo)
+
+    async def test_monitoring_summary_combines_safe_operational_metrics(self):
+        async with self.Session() as session:
+            with (
+                patch.object(admin_api, "count_online_users", new=AsyncMock(return_value=5)),
+                patch.object(admin_api, "get_delivery_outbox_metrics", new=AsyncMock(return_value={"queue_depth": 2})),
+                patch.object(admin_api, "get_security_rate_limit_metrics", return_value={"tracked_keys": 3}),
+            ):
+                payload = await admin_api.admin_monitoring_summary(admin=object(), db=session)
+
+        self.assertEqual(payload["online"]["online_users"], 5)
+        self.assertEqual(payload["delivery_outbox"]["queue_depth"], 2)
+        self.assertEqual(payload["rate_limit"]["tracked_keys"], 3)
+        self.assertEqual(payload["health"]["database"], "ok")
+
+    async def test_monitoring_logs_and_report_are_sanitized(self):
+        with TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "backend.log"
+            log_path.write_text(
+                "2026-06-24 error token=123456:SECRET database_url=postgresql://user:pass@db/app\n",
+                encoding="utf-8",
+            )
+            with patch.object(admin_api, "_monitoring_log_candidates", return_value=[log_path]):
+                logs_payload = await admin_api.admin_monitoring_logs(admin=object())
+
+            with (
+                patch.object(admin_api, "admin_monitoring_summary", new=AsyncMock(return_value={"health": {"database": "ok"}})),
+                patch.object(admin_api, "admin_monitoring_logs", new=AsyncMock(return_value=logs_payload)),
+            ):
+                report = await admin_api.admin_monitoring_diagnostic_report(
+                    format="txt",
+                    admin=object(),
+                    db=object(),
+                )
+
+        self.assertNotIn("SECRET", str(logs_payload))
+        self.assertNotIn("postgresql://user:pass", str(logs_payload))
+        self.assertEqual(report.media_type, "text/plain")
+        self.assertNotIn("SECRET", report.body.decode("utf-8"))
 
 
 if __name__ == "__main__":
