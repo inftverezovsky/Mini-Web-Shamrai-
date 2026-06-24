@@ -4,12 +4,14 @@ import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import { UserResponse } from '../schemas/schemas';
 import { apiFetch } from '../utils/api';
 import { isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
+import TelegramAuthAssist from './TelegramAuthAssist';
 
 export default function IdentityLinkGate() {
   const user = useAuthSelector((state) => state.user);
   const { loginWithTelegramBot, setUser } = useAuthActions();
   const [busyProvider, setBusyProvider] = useState<'telegram' | 'vk' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [telegramBotUrl, setTelegramBotUrl] = useState<string | null>(null);
 
   const missingProviders = useMemo(() => new Set(user?.missing_identity_providers || []), [user]);
   const needsTelegram = Boolean(user && (missingProviders.has('telegram') || user.telegram_id < 0));
@@ -24,7 +26,10 @@ export default function IdentityLinkGate() {
     try {
       setBusyProvider('telegram');
       setError(null);
-      await loginWithTelegramBot();
+      setTelegramBotUrl(null);
+      await loginWithTelegramBot({
+        onSessionStarted: (session) => setTelegramBotUrl(session.botUrl),
+      });
       await refreshProfile();
     } catch (err: any) {
       setError(err?.message || 'Не удалось привязать Telegram. Попробуйте еще раз.');
@@ -64,15 +69,18 @@ export default function IdentityLinkGate() {
 
         <div className="mt-4 grid gap-2.5">
           {needsTelegram && (
-            <button
-              type="button"
-              onClick={handleTelegramLink}
-              disabled={busyProvider !== null}
-              className="shamrai-glass-button flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
-            >
-              {busyProvider === 'telegram' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              <span>{busyProvider === 'telegram' ? 'Ждем Telegram...' : 'Привязать Telegram'}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleTelegramLink}
+                disabled={busyProvider !== null}
+                className="shamrai-glass-button flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {busyProvider === 'telegram' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                <span>{busyProvider === 'telegram' ? 'Ожидаем Start в Telegram' : 'Привязать Telegram'}</span>
+              </button>
+              {busyProvider === 'telegram' && <TelegramAuthAssist botUrl={telegramBotUrl} />}
+            </>
           )}
 
           {needsVk && (

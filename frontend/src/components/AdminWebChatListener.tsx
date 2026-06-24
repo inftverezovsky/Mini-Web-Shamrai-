@@ -10,6 +10,7 @@ import {
   isServiceWorkerNotificationMessage,
   rememberWebNotificationEvent,
 } from '../utils/webNotificationEvents';
+import { rememberRecentId } from '../utils/realtimeLimits';
 
 interface AdminWebChatListenerProps {
   enabled: boolean;
@@ -85,7 +86,7 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
 
     const emitMessage = (payload: AdminWebChatMessageEventPayload) => {
       if (!payload?.message?.id || seenMessageIdsRef.current.has(payload.message.id)) return;
-      seenMessageIdsRef.current.add(payload.message.id);
+      rememberRecentId(seenMessageIdsRef.current, payload.message.id);
       window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_MESSAGE_EVENT, { detail: payload }));
       if (payload.message.direction !== 'client') return;
       const title = payload.conversation?.owner_user?.display_name || 'Клиент Shamrai';

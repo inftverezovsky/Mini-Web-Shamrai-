@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SmilePlus } from 'lucide-react';
+import { useGlassOverlayGuard } from '../hooks/useGlassOverlayGuard';
 
 type TextTarget = HTMLInputElement | HTMLTextAreaElement;
 
@@ -42,6 +43,13 @@ export default function EmojiTextField(props: EmojiTextFieldProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<TextTarget>(null);
+  const focusFrameRef = useRef<number | undefined>();
+
+  useGlassOverlayGuard(open);
+
+  useEffect(() => () => {
+    if (focusFrameRef.current !== undefined) window.cancelAnimationFrame(focusFrameRef.current);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -66,7 +74,9 @@ export default function EmojiTextField(props: EmojiTextFieldProps) {
     onValueChange(nextValue);
     setOpen(false);
 
-    window.requestAnimationFrame(() => {
+    if (focusFrameRef.current !== undefined) window.cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = window.requestAnimationFrame(() => {
+      focusFrameRef.current = undefined;
       field?.focus();
       field?.setSelectionRange(cursorPosition, cursorPosition);
     });
@@ -105,7 +115,7 @@ export default function EmojiTextField(props: EmojiTextFieldProps) {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 grid w-[216px] grid-cols-8 gap-1 rounded-xl border border-white/10 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-xl">
+        <div className="glass-modal-layer absolute right-0 top-full z-50 mt-2 grid w-[216px] grid-cols-8 gap-1 rounded-xl border border-white/10 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-xl">
           {emojis.map((emoji) => (
             <button
               key={emoji}

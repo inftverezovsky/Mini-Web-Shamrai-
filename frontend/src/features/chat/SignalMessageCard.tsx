@@ -206,13 +206,13 @@ function SignalMessageCard({
       initial={{ opacity: 0, y: 12, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.22, delay: Math.min(index, 8) * 0.015 }}
-      className="flex min-w-0 transform-gpu items-start gap-2 will-change-transform sm:gap-3"
+      className="flex min-w-0 items-start gap-2 sm:gap-3"
     >
       <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/70 text-emerald-200">
         {signal.type === 'live_signal' ? <Zap className="h-4 w-4 text-rose-200" /> : <Bot className="h-4 w-4" />}
       </div>
 
-      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] transform-gpu rounded-2xl rounded-bl-md border px-3 py-3 will-change-transform sm:max-w-[86%] sm:px-3.5 ${signalAccent(signal.type)}`}>
+      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] rounded-2xl rounded-bl-md border px-3 py-3 sm:max-w-[86%] sm:px-3.5 ${signalAccent(signal.type)}`}>
         {couponUrl && (
           <div className="mb-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/50">
             <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-2 text-[10px] font-black uppercase tracking-[0.12em] text-white/60">

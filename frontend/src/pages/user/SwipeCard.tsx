@@ -3,6 +3,7 @@ import { motion, AnimatePresence, PanInfo } from 'framer-motion';
 import { Brain, Loader2, Sparkles, X } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
 import { SwipeCandidateResponse, SwipeResponse } from '../../schemas/schemas';
+import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 
 const SWIPE_THRESHOLD = 82;
 
@@ -12,6 +13,8 @@ export default function SwipeCard() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useGlassOverlayGuard(Boolean(result));
 
   useEffect(() => {
     async function loadCandidate() {
@@ -75,7 +78,7 @@ export default function SwipeCard() {
   }
 
   return (
-    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] p-4 shadow-glass backdrop-blur-xl">
+    <div className={`relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] p-4 shadow-glass ${result ? 'backdrop-blur-none' : 'backdrop-blur-xl'}`}>
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(0,210,255,0.18),transparent_34%),radial-gradient(circle_at_85%_30%,rgba(255,0,127,0.18),transparent_36%)]" />
       <div className="relative z-10 mb-3 flex items-center justify-between">
         <div>

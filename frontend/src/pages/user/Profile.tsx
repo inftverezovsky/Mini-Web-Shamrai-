@@ -18,6 +18,7 @@ import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import SmoothCollapse from '../../components/SmoothCollapse';
+import TelegramAuthAssist from '../../components/TelegramAuthAssist';
 import WebPushSettingsCard from '../../components/WebPushSettingsCard';
 import AdminPlans from '../admin/AdminPlans';
 import AdminAccess from '../admin/AdminAccess';
@@ -285,6 +286,7 @@ export default function Profile() {
   const [vkMiniAppRuntime, setVkMiniAppRuntime] = useState(() => isVkMiniAppRuntime());
   const vkDialogOpenedRef = useRef(false);
   const [linkingTelegram, setLinkingTelegram] = useState(false);
+  const [telegramBotUrl, setTelegramBotUrl] = useState<string | null>(null);
   const [telegramLinkError, setTelegramLinkError] = useState<string | null>(null);
 
   /* ── Admin Tabs ── */
@@ -577,7 +579,10 @@ export default function Profile() {
     try {
       setLinkingTelegram(true);
       setTelegramLinkError(null);
-      await loginWithTelegramBot();
+      setTelegramBotUrl(null);
+      await loginWithTelegramBot({
+        onSessionStarted: (session) => setTelegramBotUrl(session.botUrl),
+      });
       apiFetch('/users/me')
         .then(setUser)
         .catch(() => undefined);
@@ -890,10 +895,12 @@ export default function Profile() {
                 >
                   <span className="inline-flex items-center justify-center gap-1.5">
                     {linkingTelegram ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
-                    {linkingTelegram ? 'Ждем подтверждение...' : 'Привязать Telegram'}
+                    {linkingTelegram ? 'Ожидаем Start в Telegram' : 'Привязать Telegram'}
                   </span>
                 </button>
               )}
+
+              {linkingTelegram && <TelegramAuthAssist botUrl={telegramBotUrl} />}
 
               {telegramLinkError && (
                 <p className="rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">

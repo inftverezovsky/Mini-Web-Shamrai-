@@ -6,6 +6,7 @@ import {
   subscribeConfirm,
   subscribeNotice,
 } from '../utils/notify';
+import { useGlassOverlayGuard } from '../hooks/useGlassOverlayGuard';
 
 type NoticeItem = Required<Pick<NoticePayload, 'id' | 'duration'>> & NoticePayload;
 
@@ -35,16 +36,26 @@ const toneMap = {
 export default function NotificationCenter() {
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const [confirm, setConfirm] = useState<ConfirmPayload | null>(null);
+  const timeoutIdsRef = React.useRef<Set<number>>(new Set());
+
+  useGlassOverlayGuard(Boolean(confirm));
 
   useEffect(() => {
+    const timeoutIds = timeoutIdsRef.current;
+    const scheduleDismiss = (id: string, duration: number) => {
+      const timeoutId = window.setTimeout(() => {
+        timeoutIds.delete(timeoutId);
+        setNotices((items) => items.filter((item) => item.id !== id));
+      }, duration);
+      timeoutIds.add(timeoutId);
+    };
+
     const unsubscribeNotice = subscribeNotice((payload) => {
       const id = payload.id || crypto.randomUUID();
       const duration = payload.duration ?? 4200;
       const notice = { ...payload, id, duration };
       setNotices((items) => [notice, ...items].slice(0, 4));
-      window.setTimeout(() => {
-        setNotices((items) => items.filter((item) => item.id !== id));
-      }, duration);
+      scheduleDismiss(id, duration);
     });
 
     const unsubscribeConfirm = subscribeConfirm((payload) => setConfirm(payload));
@@ -63,11 +74,14 @@ export default function NotificationCenter() {
         alertNotice,
         ...items,
       ].slice(0, 4));
+      scheduleDismiss(alertNotice.id, alertNotice.duration);
     };
 
     return () => {
       unsubscribeNotice();
       unsubscribeConfirm();
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      timeoutIds.clear();
       window.alert = originalAlert;
     };
   }, []);
@@ -121,7 +135,7 @@ export default function NotificationCenter() {
       </div>
 
       {confirm && (
-        <div className="fixed inset-0 z-[1250] flex items-center justify-center bg-slate-950/72 p-4 backdrop-blur-md">
+        <div className="glass-modal-layer fixed inset-0 z-[1250] flex items-center justify-center bg-slate-950/72 p-4 backdrop-blur-md">
           <div className={`w-full max-w-sm rounded-3xl border p-5 shadow-2xl ${confirmTone}`}>
             <div className="flex items-start gap-3">
               <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-rose-300">

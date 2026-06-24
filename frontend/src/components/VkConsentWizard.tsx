@@ -20,6 +20,7 @@ import {
   requestVkMessagesPermission,
 } from '../utils/vkDelivery';
 import type { VkConsentStepResult, VkDeliveryStatus, VkGroupInfo } from '../utils/vkDelivery';
+import { useGlassOverlayGuard } from '../hooks/useGlassOverlayGuard';
 
 const SESSION_PREFIX = 'shamrai_vk_consent_wizard_shown:';
 
@@ -50,6 +51,9 @@ export default function VkConsentWizard() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const sessionKey = user?.vk_user_id ? `${SESSION_PREFIX}${user.vk_user_id}` : '';
+  const overlayVisible = visible && Boolean(user?.vk_user_id && status);
+
+  useGlassOverlayGuard(overlayVisible);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,7 +159,7 @@ export default function VkConsentWizard() {
     }
   }, [applyStatusToUser, checking]);
 
-  if (!visible || !user?.vk_user_id || !status) return null;
+  if (!overlayVisible || !user?.vk_user_id || !status) return null;
 
   const steps = [
     {
@@ -170,7 +174,7 @@ export default function VkConsentWizard() {
   const showFallback = !complete && (fallbackVisible || !vkRuntime);
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-slate-950/68 px-4 py-4 backdrop-blur-xl sm:items-center">
+    <div className="glass-modal-layer fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-slate-950/68 px-4 py-4 backdrop-blur-xl sm:items-center">
       <div className="relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-3xl border border-white/10 bg-[#070B19]/95 p-5 text-slate-50 shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
         <button
           type="button"

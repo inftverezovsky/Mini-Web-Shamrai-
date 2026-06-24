@@ -26,6 +26,7 @@ import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
 import { rememberWebNotificationEvent } from '../../utils/webNotificationEvents';
+import { MAX_REALTIME_ITEMS, limitRecent, rememberRecentId } from '../../utils/realtimeLimits';
 import MessageComposer, { ChatComposerAttachment } from './MessageComposer';
 import MessageList from './MessageList';
 import SignalMessageCard, { signalActionNotice } from './SignalMessageCard';
@@ -85,10 +86,10 @@ function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMes
     if (merged.id > 0) byId.set(merged.id, merged);
   });
 
-  return Array.from(byClientId.values()).sort((left, right) => {
+  return limitRecent(Array.from(byClientId.values()).sort((left, right) => {
     const timeDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
     return timeDelta || left.id - right.id;
-  });
+  }), MAX_REALTIME_ITEMS);
 }
 
 function mergeConversations(
@@ -180,7 +181,11 @@ function ErrorRetryCard({
   );
 }
 
-export default function WebMessenger() {
+interface WebMessengerProps {
+  active?: boolean;
+}
+
+export default function WebMessenger({ active = true }: WebMessengerProps) {
   const [conversations, setConversations] = useState<ChatConversationResponse[]>([]);
   const [activeConversation, setActiveConversation] = useState<ActiveConversationKey>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -210,7 +215,10 @@ export default function WebMessenger() {
     updater: ChatSignalMessageResponse[] | ((current: ChatSignalMessageResponse[]) => ChatSignalMessageResponse[]),
   ) => {
     setSignalsState((current) => {
-      const nextSignals = typeof updater === 'function' ? updater(current) : updater;
+      const nextSignals = limitRecent(
+        typeof updater === 'function' ? updater(current) : updater,
+        MAX_REALTIME_ITEMS,
+      );
       signalsRef.current = nextSignals;
       return nextSignals;
     });
@@ -222,7 +230,7 @@ export default function WebMessenger() {
     signalMergeQueueRef.current = signalMergeQueueRef.current
       .catch(() => undefined)
       .then(async () => {
-        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, 160);
+        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, MAX_REALTIME_ITEMS);
         setSignals(nextSignals);
       });
 
@@ -262,7 +270,7 @@ export default function WebMessenger() {
     try {
       const response = await apiFetch<ChatSignalMessagePageResponse>('/chat/conversations/signals/messages?limit=100');
       const nextSignals = response.items;
-      nextSignals.forEach((signal) => seenSignalIdsRef.current.add(signal.id));
+      nextSignals.forEach((signal) => rememberRecentId(seenSignalIdsRef.current, signal.id));
       await mergeSignalsIntoState(nextSignals);
       setSignalsError(null);
     } catch {
@@ -277,7 +285,7 @@ export default function WebMessenger() {
     try {
       const response = await apiFetch<ChatMessagePageResponse>('/chat/conversations/support/messages?limit=100');
       const nextMessages = response.items.map((message) => ({ ...message, delivery_state: 'sent' as const }));
-      nextMessages.forEach((message) => seenSupportMessageIdsRef.current.add(message.id));
+      nextMessages.forEach((message) => rememberRecentId(seenSupportMessageIdsRef.current, message.id));
       setSupportMessages((current) => mergeSupportMessages(current, nextMessages));
       setSupportError(null);
     } catch {
@@ -309,12 +317,12 @@ export default function WebMessenger() {
   }, 500);
 
   useEffect(() => {
-    if (isTma) return;
+    if (!active || isTma) return;
     void refreshAll();
-  }, [isTma, refreshAll]);
+  }, [active, isTma, refreshAll]);
 
   useEffect(() => {
-    if (isTma) return;
+    if (!active || isTma) return;
     let disposed = false;
     const unlock = () => {
       void unlockIncomingSignalSound().then((unlocked) => {
@@ -335,10 +343,10 @@ export default function WebMessenger() {
       window.removeEventListener('keydown', unlock);
       window.removeEventListener('touchstart', unlock);
     };
-  }, [isTma]);
+  }, [active, isTma]);
 
   useEffect(() => {
-    if (isTma) return;
+    if (!active || isTma) return;
 
     const handleStatus = (event: Event) => {
       const state = (event as CustomEvent<{ state?: 'connecting' | 'online' | 'offline' }>).detail?.state;
@@ -348,7 +356,7 @@ export default function WebMessenger() {
       const signal = (event as CustomEvent<ChatSignalMessageResponse>).detail;
       if (!signal || seenSignalIdsRef.current.has(signal.id)) return;
       if (signal.type.startsWith('support_')) return;
-      seenSignalIdsRef.current.add(signal.id);
+      rememberRecentId(seenSignalIdsRef.current, signal.id);
       enqueueSignalStreamMessage(signal);
     };
 
@@ -358,10 +366,10 @@ export default function WebMessenger() {
       window.removeEventListener(WEB_SIGNAL_STATUS_EVENT, handleStatus);
       window.removeEventListener(WEB_SIGNAL_EVENT, handleSignal as EventListener);
     };
-  }, [enqueueSignalStreamMessage, isTma]);
+  }, [active, enqueueSignalStreamMessage, isTma]);
 
   useEffect(() => {
-    if (isTma) return;
+    if (!active || isTma) return;
     const token = getStoredAuthToken();
     if (token === MOCK_DEBUG_AUTH_TOKEN) {
       setSupportStreamState('online');
@@ -384,7 +392,7 @@ export default function WebMessenger() {
 
     const handleMessageCreated = (payload: ChatStreamMessageCreatedEvent) => {
       if (!payload.message || seenSupportMessageIdsRef.current.has(payload.message.id)) return;
-      seenSupportMessageIdsRef.current.add(payload.message.id);
+      rememberRecentId(seenSupportMessageIdsRef.current, payload.message.id);
       const nextMessage = { ...payload.message, delivery_state: 'sent' as const };
       enqueueSupportStreamMessage(nextMessage);
       if (payload.conversation) {
@@ -468,6 +476,7 @@ export default function WebMessenger() {
       socket?.close();
     };
   }, [
+    active,
     enqueueStreamConversation,
     enqueueSupportStreamMessage,
     isTma,
@@ -544,7 +553,7 @@ export default function WebMessenger() {
         method: 'POST',
         body: JSON.stringify({ client_message_id: clientMessageId, text: cleanText }),
       });
-      seenSupportMessageIdsRef.current.add(response.id);
+      rememberRecentId(seenSupportMessageIdsRef.current, response.id);
       setSupportMessages((current) => mergeSupportMessages(
         current.filter((message) => message.client_message_id !== clientMessageId || message.id > 0),
         [{ ...response, delivery_state: 'sent' }],
@@ -592,7 +601,7 @@ export default function WebMessenger() {
         method: 'POST',
         body: formData,
       });
-      seenSupportMessageIdsRef.current.add(response.id);
+      rememberRecentId(seenSupportMessageIdsRef.current, response.id);
       setSupportMessages((current) => mergeSupportMessages(
         current.filter((message) => message.client_message_id !== clientMessageId || message.id > 0),
         [{ ...response, delivery_state: 'sent' }],
@@ -659,8 +668,9 @@ export default function WebMessenger() {
   }, [activeConversation, clearConversationUnread, signals, supportMessages]);
 
   useEffect(() => {
+    if (!active) return;
     markActiveRead();
-  }, [markActiveRead]);
+  }, [active, markActiveRead]);
 
   const handleForecastAction = useCallback((nextSignal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
     void answerForecastRequest(nextSignal, action);
@@ -705,7 +715,7 @@ export default function WebMessenger() {
   return (
     <section
       id="web-bot-chat"
-      className="web-bot-chat mb-0 flex min-w-0 transform-gpu overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl will-change-transform"
+      className="web-bot-chat mb-0 flex min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
     >
       <div className="border-b border-white/10 bg-slate-950/35 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
@@ -737,7 +747,7 @@ export default function WebMessenger() {
                 key={key}
                 type="button"
                 onClick={() => setActiveConversation(key)}
-                className={`min-w-0 transform-gpu rounded-2xl border px-3 py-2 text-left transition-all will-change-transform active:scale-[0.99] ${
+                className={`min-w-0 rounded-2xl border px-3 py-2 text-left transition-all active:scale-[0.99] ${
                   active
                     ? 'border-cyan-300/35 bg-cyan-300/12 text-white'
                     : 'border-white/10 bg-white/[0.035] text-slate-300 hover:border-cyan-300/20'
@@ -764,6 +774,7 @@ export default function WebMessenger() {
         <MessageList
           items={signalItems}
           loading={loadingSignals}
+          active={active}
           empty={(
             <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {signalsError ? (
@@ -781,6 +792,7 @@ export default function WebMessenger() {
         <MessageList
           items={supportItems}
           loading={loadingSupport}
+          active={active}
           empty={(
             <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {supportError || conversationError ? (
@@ -807,6 +819,7 @@ export default function WebMessenger() {
             draft={draft}
             onDraftChange={setDraft}
             sending={sendingClientIds.size > 0}
+            active={active}
             placeholder="Написать Shamrai..."
             submitTitle="Отправить сообщение Shamrai"
             onSendText={sendSupportText}

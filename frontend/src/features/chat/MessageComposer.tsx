@@ -14,6 +14,7 @@ interface MessageComposerProps {
   draft: string;
   onDraftChange: (value: string) => void;
   disabled?: boolean;
+  active?: boolean;
   sending?: boolean;
   placeholder: string;
   submitTitle: string;
@@ -56,6 +57,7 @@ export default function MessageComposer({
   draft,
   onDraftChange,
   disabled = false,
+  active = true,
   sending = false,
   placeholder,
   submitTitle,
@@ -69,27 +71,53 @@ export default function MessageComposer({
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const recordingStartedAtRef = useRef(0);
+  const focusTimerRef = useRef<number | undefined>();
+  const recordingDurationRef = useRef<HTMLSpanElement | null>(null);
+  const recordingFrameRef = useRef<number | undefined>();
   const [attachment, setAttachment] = useState<ChatComposerAttachment | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
 
   useEffect(() => () => {
+    if (focusTimerRef.current !== undefined) window.clearTimeout(focusTimerRef.current);
+    if (recordingFrameRef.current !== undefined) window.cancelAnimationFrame(recordingFrameRef.current);
     if (attachment?.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, [attachment]);
 
   useEffect(() => {
     if (!recording) return undefined;
+    const updateDuration = () => {
+      if (recordingFrameRef.current !== undefined) window.cancelAnimationFrame(recordingFrameRef.current);
+      recordingFrameRef.current = window.requestAnimationFrame(() => {
+        recordingFrameRef.current = undefined;
+        if (recordingDurationRef.current) {
+          recordingDurationRef.current.textContent = formatDuration(Date.now() - recordingStartedAtRef.current);
+        }
+      });
+    };
+
+    updateDuration();
     const timer = window.setInterval(() => {
       const elapsed = Date.now() - recordingStartedAtRef.current;
-      setRecordingElapsedMs(elapsed);
+      updateDuration();
       if (elapsed >= VOICE_MAX_DURATION_MS) {
         recorderRef.current?.stop();
       }
     }, 250);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      if (recordingFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(recordingFrameRef.current);
+        recordingFrameRef.current = undefined;
+      }
+    };
   }, [recording]);
+
+  useEffect(() => {
+    if (active || !recording) return;
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+  }, [active, recording]);
 
   const clearAttachment = () => {
     if (attachment?.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
@@ -111,7 +139,9 @@ export default function MessageComposer({
     const end = textarea.selectionEnd;
     const nextDraft = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`;
     onDraftChange(nextDraft);
-    window.setTimeout(() => {
+    if (focusTimerRef.current !== undefined) window.clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = window.setTimeout(() => {
+      focusTimerRef.current = undefined;
       textarea.focus();
       const cursor = start + emoji.length;
       textarea.setSelectionRange(cursor, cursor);
@@ -141,7 +171,7 @@ export default function MessageComposer({
   };
 
   const startRecording = async () => {
-    if (disabled || sending || recording) return;
+    if (!active || disabled || sending || recording) return;
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       onError('Браузер не поддерживает запись голосовых сообщений');
       return;
@@ -158,7 +188,6 @@ export default function MessageComposer({
       recorderRef.current = recorder;
       chunksRef.current = [];
       recordingStartedAtRef.current = Date.now();
-      setRecordingElapsedMs(0);
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chunksRef.current.push(event.data);
@@ -201,7 +230,7 @@ export default function MessageComposer({
 
   const handleSubmit = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
-    if (disabled || sending || recording) return;
+    if (!active || disabled || sending || recording) return;
     const cleanText = draft.trim();
     let sent = false;
     if (attachment) {
@@ -221,7 +250,7 @@ export default function MessageComposer({
     void handleSubmit();
   };
 
-  const canSend = !disabled && !sending && !recording && Boolean(draft.trim() || attachment);
+  const canSend = active && !disabled && !sending && !recording && Boolean(draft.trim() || attachment);
 
   return (
     <form onSubmit={(event) => void handleSubmit(event)} className="min-w-0 border-t border-white/10 bg-slate-950/55 px-3 py-3">
@@ -256,7 +285,7 @@ export default function MessageComposer({
         <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl border border-rose-300/25 bg-rose-400/10 px-3 py-2 text-rose-100">
           <div className="flex items-center gap-2 text-xs font-black">
             <span className="h-2.5 w-2.5 rounded-full bg-rose-300" />
-            <span>{formatDuration(recordingElapsedMs)}</span>
+            <span ref={recordingDurationRef}>0:01</span>
           </div>
           <button
             type="button"

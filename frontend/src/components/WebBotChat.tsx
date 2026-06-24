@@ -1,5 +1,9 @@
 import WebMessenger from '../features/chat/WebMessenger';
 
-export default function WebBotChat() {
-  return <WebMessenger />;
+interface WebBotChatProps {
+  active?: boolean;
+}
+
+export default function WebBotChat({ active = true }: WebBotChatProps) {
+  return <WebMessenger active={active} />;
 }

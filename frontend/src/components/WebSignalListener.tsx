@@ -10,6 +10,7 @@ import {
   rememberWebNotificationEvent,
   type WebNotificationEvent,
 } from '../utils/webNotificationEvents';
+import { MAX_REALTIME_ITEMS, limitRecent, rememberRecentId } from '../utils/realtimeLimits';
 
 interface PersonalSignal {
   id: number;
@@ -118,8 +119,11 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
 
     const emitSignal = (signal: PersonalSignal, options: { notify: boolean }) => {
       if (!signal?.id || seenSignalIdsRef.current.has(signal.id)) return;
-      seenSignalIdsRef.current.add(signal.id);
-      bufferedSignalsRef.current = mergeSignalsById(bufferedSignalsRef.current, [signal]).slice(-200);
+      rememberRecentId(seenSignalIdsRef.current, signal.id);
+      bufferedSignalsRef.current = limitRecent(
+        mergeSignalsById(bufferedSignalsRef.current, [signal]),
+        MAX_REALTIME_ITEMS,
+      );
       window.dispatchEvent(new CustomEvent(WEB_SIGNAL_EVENT, { detail: signal }));
       if (!options.notify) return;
       if (!rememberWebNotificationEvent(signalToNotificationEvent(signal, 'websocket'))) return;
@@ -129,10 +133,13 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
 
     const catchUpMissedSignals = async (options: { notify: boolean }) => {
       try {
-        const history = await apiFetch<PersonalSignal[]>('/signals/history?limit=200');
+        const history = await apiFetch<PersonalSignal[]>(`/signals/history?limit=${MAX_REALTIME_ITEMS}`);
         if (closedByUnmount) return;
-        const mergedSignals = mergeSignalsById(bufferedSignalsRef.current, history);
-        bufferedSignalsRef.current = mergedSignals.slice(-200);
+        const mergedSignals = limitRecent(
+          mergeSignalsById(bufferedSignalsRef.current, history),
+          MAX_REALTIME_ITEMS,
+        );
+        bufferedSignalsRef.current = mergedSignals;
         const shouldNotify = options.notify && initialHistoryLoaded;
         mergedSignals.forEach((signal) => emitSignal(signal, { notify: shouldNotify }));
         initialHistoryLoaded = true;

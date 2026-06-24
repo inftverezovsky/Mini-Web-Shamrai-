@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { BrainCircuit, CheckCircle2, Loader2, X } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
 import { QuizActiveResponse, QuizSubmitResponse } from '../../schemas/schemas';
+import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 
 export default function QuizWidget() {
   const [quiz, setQuiz] = useState<QuizActiveResponse | null>(null);
@@ -11,6 +12,8 @@ export default function QuizWidget() {
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<QuizSubmitResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useGlassOverlayGuard(open && Boolean(quiz));
 
   useEffect(() => {
     async function loadQuiz() {
@@ -74,7 +77,7 @@ export default function QuizWidget() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/78 px-4 backdrop-blur-md"
+            className="glass-modal-layer fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/78 px-4 backdrop-blur-md"
           >
             <motion.div
               initial={{ opacity: 0, y: 24, scale: 0.96 }}

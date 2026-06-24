@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect, useSyncExternalStore } from 'react';
+import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
@@ -54,71 +54,58 @@ function getBookmakerLinkUrl(bet: BetResponse, bookmakerId: number) {
   return link?.url?.trim() || null;
 }
 
-let liveNowSnapshot = Date.now();
-let liveNowTimer: number | undefined;
-const liveNowSubscribers = new Set<() => void>();
-
-function notifyLiveNowSubscribers() {
-  liveNowSnapshot = Date.now();
-  liveNowSubscribers.forEach((listener) => listener());
-}
-
-function stopLiveNowTimer() {
-  if (!liveNowTimer) return;
-  window.clearInterval(liveNowTimer);
-  liveNowTimer = undefined;
-}
-
-function startLiveNowTimer() {
-  if (liveNowTimer || liveNowSubscribers.size === 0 || document.visibilityState !== 'visible') return;
-  liveNowTimer = window.setInterval(notifyLiveNowSubscribers, 1000);
-}
-
-function subscribeLiveNow(listener: () => void) {
-  liveNowSubscribers.add(listener);
-  startLiveNowTimer();
-
-  const syncOnVisible = () => {
-    if (document.visibilityState === 'visible') {
-      notifyLiveNowSubscribers();
-      startLiveNowTimer();
-    } else {
-      stopLiveNowTimer();
-    }
-  };
-
-  document.addEventListener('visibilitychange', syncOnVisible);
-  return () => {
-    liveNowSubscribers.delete(listener);
-    document.removeEventListener('visibilitychange', syncOnVisible);
-    if (liveNowSubscribers.size === 0) stopLiveNowTimer();
-  };
-}
-
-function getLiveNowSnapshot() {
-  return liveNowSnapshot;
-}
-
-function useVisibleNowTick() {
-  return useSyncExternalStore(subscribeLiveNow, getLiveNowSnapshot, getLiveNowSnapshot);
-}
-
-// Shared ticking countdown timer for Live forecasts. The tick stays inside this
-// tiny leaf so the whole feed does not re-render every second.
-const LiveTimer = memo(function LiveTimer({ endsAt }: { endsAt: string }) {
-  const now = useVisibleNowTick();
+function formatLiveTimeLeft(endsAt: string, now = Date.now()) {
   const difference = +new Date(endsAt) - now;
   const minutes = Math.max(0, Math.floor((difference / 1000 / 60) % 60));
   const seconds = Math.max(0, Math.floor((difference / 1000) % 60));
-  const timeLeft = difference <= 0
+  return difference <= 0
     ? '00:00'
     : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// Countdown text is intentionally mutated outside React. A 1s state update in a
+// blurred feed card makes iOS Safari re-run glass painting; this touches one text node.
+const LiveTimer = memo(function LiveTimer({ endsAt, active = true }: { endsAt: string; active?: boolean }) {
+  const textRef = useRef<HTMLSpanElement | null>(null);
+  const frameRef = useRef<number | undefined>();
+
+  const updateText = useCallback(() => {
+    if (frameRef.current !== undefined) window.cancelAnimationFrame(frameRef.current);
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = undefined;
+      if (textRef.current) textRef.current.textContent = formatLiveTimeLeft(endsAt);
+    });
+  }, [endsAt]);
+
+  useEffect(() => {
+    if (!active) return undefined;
+
+    updateText();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') updateText();
+    }, 1000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') updateText();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (frameRef.current !== undefined) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = undefined;
+      }
+    };
+  }, [active, updateText]);
 
   return (
-    <span className="shimmer-border relative flex shrink-0 transform-gpu select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose will-change-transform animate-pulse">
+    <span className="shimmer-border relative flex shrink-0 select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose animate-pulse">
       <Flame className="w-3 h-3 fill-rose-500 text-rose-500 animate-bounce" />
       <span>Live</span>
-      <span className="ml-1 font-mono text-[9px]">{timeLeft}</span>
+      <span ref={textRef} className="ml-1 font-mono text-[9px]">
+        {formatLiveTimeLeft(endsAt)}
+      </span>
     </span>
   );
 });
@@ -144,6 +131,7 @@ interface BetFeedCardProps {
   isActionLoading: boolean;
   onTakeBet: (betId: string) => void;
   onBuyBet: (betId: string) => void;
+  active?: boolean;
 }
 
 const BetFeedCard = memo(function BetFeedCard({
@@ -153,6 +141,7 @@ const BetFeedCard = memo(function BetFeedCard({
   isActionLoading,
   onTakeBet,
   onBuyBet,
+  active = true,
 }: BetFeedCardProps) {
   const unlocked = bet.is_unlocked;
   const isLive = bet.category === 'live';
@@ -165,7 +154,7 @@ const BetFeedCard = memo(function BetFeedCard({
 
   return (
     <div
-      className="bet-feed-card motion-card shimmer-border relative min-w-0 transform-gpu animate-fade-in space-y-2.5 overflow-hidden rounded-2xl border border-white/15 bg-white/[0.04] p-3.5 shadow-glass backdrop-blur-md transition-all duration-300 will-change-transform hover:border-cyan-400/30 hover:scale-[1.01] hover:-translate-y-0.5"
+      className="bet-feed-card motion-card shimmer-border relative min-w-0 animate-fade-in space-y-2.5 overflow-hidden rounded-2xl border border-white/15 bg-white/[0.04] p-3.5 shadow-glass backdrop-blur-md transition-all duration-300 hover:border-cyan-400/30 hover:scale-[1.01] hover:-translate-y-0.5"
       style={{ animationDelay: `${Math.min(index * 70, 420)}ms` }}
     >
       <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 text-[9px] text-slate-400">
@@ -182,7 +171,7 @@ const BetFeedCard = memo(function BetFeedCard({
             </span>
           )}
           {isLive && bet.live_ends_at ? (
-            <LiveTimer endsAt={bet.live_ends_at} />
+            <LiveTimer endsAt={bet.live_ends_at} active={active} />
           ) : (
             <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
               Ожидает
@@ -269,7 +258,7 @@ const BetFeedCard = memo(function BetFeedCard({
         {unlocked && isLive && bet.api_match_id && (
           <div className="mt-2">
             <PromoBoundary>
-              <LiveTracker apiMatchId={bet.api_match_id} />
+              <LiveTracker apiMatchId={bet.api_match_id} active={active} />
             </PromoBoundary>
           </div>
         )}
@@ -350,6 +339,7 @@ interface BetFeedListProps {
   actionLoadingId: string | null;
   onTakeBet: (betId: string) => void;
   onBuyBet: (betId: string) => void;
+  active?: boolean;
 }
 
 const BetFeedGridList = memo(function BetFeedGridList({
@@ -358,6 +348,7 @@ const BetFeedGridList = memo(function BetFeedGridList({
   actionLoadingId,
   onTakeBet,
   onBuyBet,
+  active = true,
 }: BetFeedListProps) {
   return (
     <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
@@ -372,6 +363,7 @@ const BetFeedGridList = memo(function BetFeedGridList({
             isActionLoading={actionLoadingId === bet.id}
             onTakeBet={onTakeBet}
             onBuyBet={onBuyBet}
+            active={active}
           />
         );
       })}
@@ -385,6 +377,7 @@ const VirtualBetFeedList = memo(function VirtualBetFeedList({
   actionLoadingId,
   onTakeBet,
   onBuyBet,
+  active = true,
 }: BetFeedListProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const [scrollMargin, setScrollMargin] = useState(0);
@@ -420,9 +413,9 @@ const VirtualBetFeedList = memo(function VirtualBetFeedList({
               key={bet.id}
               ref={virtualizer.measureElement}
               data-index={virtualItem.index}
-              className="virtual-bet-feed-row absolute left-0 top-0 w-full transform-gpu pb-3 will-change-transform"
+              className="virtual-bet-feed-row absolute left-0 top-0 w-full pb-3"
               style={{
-                transform: `translate3d(0, ${virtualItem.start - scrollMargin}px, 0)`,
+                transform: `translateY(${virtualItem.start - scrollMargin}px)`,
               }}
             >
               <BetFeedCard
@@ -432,6 +425,7 @@ const VirtualBetFeedList = memo(function VirtualBetFeedList({
                 isActionLoading={actionLoadingId === bet.id}
                 onTakeBet={onTakeBet}
                 onBuyBet={onBuyBet}
+                active={active}
               />
             </div>
           );
@@ -443,9 +437,10 @@ const VirtualBetFeedList = memo(function VirtualBetFeedList({
 
 interface BetFeedProps {
   onNavigateToBilling?: () => void;
+  active?: boolean;
 }
 
-export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
+export default function BetFeed({ onNavigateToBilling, active: feedActive = true }: BetFeedProps) {
   const queryClient = useQueryClient();
   const userProfile = useAuthSelector((state) => state.user);
   const { isCompact } = useLayoutMode();
@@ -660,7 +655,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
   }
 
   return (
-    <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} transform-gpu pb-8 will-change-transform animate-slide-up`}>
+    <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} pb-8 animate-slide-up`}>
       
       {promoFlags.marathon && (
         <PromoBoundary>
@@ -695,7 +690,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 2. Account Access Banner */}
       {!active && (
-        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex transform-gpu flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md will-change-transform sm:flex-row sm:items-center sm:justify-between">
+        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-0.5">
             <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
               <Sparkles className="iridescent-icon w-3.5 h-3.5 mr-1.5 shrink-0" />
@@ -721,7 +716,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
 
       {/* 3. Bets Feed Grid list */}
       {bets.length === 0 ? (
-        <div className="motion-card shimmer-border relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 text-center shadow-glass backdrop-blur-md transform-gpu will-change-transform">
+        <div className="motion-card shimmer-border relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 text-center shadow-glass backdrop-blur-md">
           <Trophy className="iridescent-icon w-8 h-8 mx-auto mb-2" />
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
           <p className="text-slate-400 text-[10px] mt-1 leading-relaxed">
@@ -736,6 +731,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
             actionLoadingId={actionLoadingId}
             onTakeBet={handleTakeBet}
             onBuyBet={handleBuyBet}
+            active={feedActive}
           />
         ) : (
           <BetFeedGridList
@@ -744,6 +740,7 @@ export default function BetFeed({ onNavigateToBilling }: BetFeedProps) {
             actionLoadingId={actionLoadingId}
             onTakeBet={handleTakeBet}
             onBuyBet={handleBuyBet}
+            active={feedActive}
           />
         )
       )}

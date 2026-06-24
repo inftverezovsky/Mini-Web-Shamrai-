@@ -76,7 +76,7 @@ interface ChoiceOption<TValue extends string> {
   icon: LucideIcon;
 }
 
-const GLASS_SURFACE = 'bg-white/5 backdrop-blur-xl border border-white/10 transform-gpu will-change-transform';
+const GLASS_SURFACE = 'bg-white/5 backdrop-blur-xl border border-white/10';
 const PINK = '#ff007f';
 const CYAN = '#00d2ff';
 const GOLD = '#f6c453';
@@ -508,14 +508,14 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       style={{ boxShadow: glow }}
     >
       <div
-        className="pointer-events-none absolute inset-0 z-0 transform-gpu transition duration-500 will-change-transform"
+        className="pointer-events-none absolute inset-0 z-0 transition duration-500"
         style={{
           background: proMode
             ? 'radial-gradient(circle at 18% 10%, rgba(246,196,83,0.24), transparent 32%), radial-gradient(circle at 84% 18%, rgba(0,210,255,0.14), transparent 34%), linear-gradient(180deg, rgba(2,6,23,0.06), rgba(2,6,23,0.58))'
             : 'radial-gradient(circle at 18% 10%, rgba(255,0,127,0.28), transparent 32%), radial-gradient(circle at 84% 18%, rgba(0,210,255,0.24), transparent 34%), linear-gradient(180deg, rgba(2,6,23,0.06), rgba(2,6,23,0.58))',
         }}
       />
-      <div className="pointer-events-none absolute inset-0 z-0 transform-gpu opacity-45 will-change-transform [background-image:linear-gradient(rgba(255,255,255,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:30px_30px] [mask-image:linear-gradient(to_bottom,black,transparent_88%)]" />
+      <div className="pointer-events-none absolute inset-0 z-0 opacity-45 [background-image:linear-gradient(rgba(255,255,255,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:30px_30px] [mask-image:linear-gradient(to_bottom,black,transparent_88%)]" />
 
       <AnimatePresence>
         {flashActive && (

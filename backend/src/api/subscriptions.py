@@ -20,6 +20,7 @@ from src.schemas.schemas import (
 from src.api.deps import get_current_user, get_current_admin, get_current_privileged_admin, get_optional_user_read
 from src.core.roles import is_staff_role
 from src.core.config import settings
+from src.services import subscription_notifications
 from src.services.match_access import activate_match_subscription
 from src.services.telegram_bot import call_telegram_api_async
 
@@ -267,6 +268,14 @@ async def manually_assign_subscription(
         action="subscription_assigned",
         target_user_id=user.telegram_id,
         details={"plan_id": plan.id, "matches_added": plan.match_count},
+    )
+    await subscription_notifications.enqueue_subscription_credit_notifications(
+        db,
+        user=user,
+        plan=plan,
+        subscription=subscription,
+        actor=admin,
+        source="admin_manual",
     )
     
     db.add(subscription)

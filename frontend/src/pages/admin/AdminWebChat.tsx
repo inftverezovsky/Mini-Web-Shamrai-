@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   BellRing,
   Loader2,
@@ -23,6 +24,7 @@ import { notifyError, notifySuccess } from '../../utils/notify';
 import { registerWebPushSubscription } from '../../utils/webPush';
 import MessageComposer, { ChatComposerAttachment } from '../../features/chat/MessageComposer';
 import SupportMessageBubble, { SupportMessageView } from '../../features/chat/SupportMessageBubble';
+import { MAX_REALTIME_ITEMS, limitRecent } from '../../utils/realtimeLimits';
 import {
   ADMIN_WEB_CHAT_CONVERSATION_EVENT,
   ADMIN_WEB_CHAT_MESSAGE_EVENT,
@@ -31,6 +33,12 @@ import {
 } from '../../components/AdminWebChatListener';
 
 const ADMIN_CHAT_MESSAGES_PAGE_LIMIT = 100;
+const ADMIN_CHAT_CONVERSATION_LIMIT = 80;
+const ADMIN_CHAT_BACKGROUND_STYLE = {
+  backgroundImage: "linear-gradient(180deg, rgba(2, 6, 23, 0.74), rgba(2, 6, 23, 0.86)), url('/images/admin-chat-bg.jpg')",
+  backgroundPosition: 'center',
+  backgroundSize: 'cover',
+};
 
 function messageTime(value?: string | null) {
   if (!value) return '';
@@ -57,17 +65,17 @@ function mergeConversation(
     const leftTime = left.last_message_at ? new Date(left.last_message_at).getTime() : 0;
     const rightTime = right.last_message_at ? new Date(right.last_message_at).getTime() : 0;
     return rightTime - leftTime;
-  });
+  }).slice(0, ADMIN_CHAT_CONVERSATION_LIMIT);
 }
 
 function appendMessage(messages: SupportMessageView[], nextMessage: SupportMessageView) {
   if (messages.some((message) => message.id > 0 && message.id === nextMessage.id)) return messages;
   const withoutOptimisticDuplicate = messages.filter((message) => message.client_message_id !== nextMessage.client_message_id || message.id > 0);
-  return [...withoutOptimisticDuplicate, nextMessage].sort((left, right) => {
+  return limitRecent([...withoutOptimisticDuplicate, nextMessage].sort((left, right) => {
     const leftTime = new Date(left.created_at).getTime();
     const rightTime = new Date(right.created_at).getTime();
     return (leftTime - rightTime) || (left.id - right.id);
-  });
+  }), MAX_REALTIME_ITEMS);
 }
 
 function matchesSearch(conversation: ChatConversationResponse, cleanSearch: string) {
@@ -145,7 +153,203 @@ function syncConversationForStatus(
   return mergeConversation(conversations, nextConversation);
 }
 
-export default function AdminWebChat() {
+interface VirtualConversationListProps {
+  conversations: ChatConversationResponse[];
+  selectedConversationId: string | null;
+  loading: boolean;
+  onSelectConversation: (conversationId: string | null) => void;
+}
+
+function VirtualConversationList({
+  conversations,
+  selectedConversationId,
+  loading,
+  onSelectConversation,
+}: VirtualConversationListProps) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: conversations.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 126,
+    overscan: 4,
+    getItemKey: (index) => conversations[index]?.id || conversations[index]?.owner_user.telegram_id || index,
+  });
+
+  return (
+    <div ref={parentRef} className="admin-chat-conversation-list max-h-[calc(100dvh-20rem)] min-h-[240px] overflow-y-auto p-2">
+      {loading && (
+        <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span>Загружаем...</span>
+        </div>
+      )}
+
+      {!loading && conversations.length === 0 && (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-center text-xs font-bold text-slate-500">
+          Диалогов пока нет.
+        </div>
+      )}
+
+      {conversations.length > 0 && (
+        <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const conversation = conversations[virtualItem.index];
+            if (!conversation) return null;
+            const active = selectedConversationId === conversation.id;
+            const needsReply = conversation.last_message && 'direction' in conversation.last_message
+              ? conversation.last_message.direction === 'client'
+              : false;
+
+            return (
+              <div
+                key={conversation.id || conversation.owner_user.telegram_id}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
+                className="admin-chat-conversation-row absolute left-0 top-0 w-full pb-2"
+                style={{ transform: `translateY(${virtualItem.start}px)` }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelectConversation(conversation.id)}
+                  className={`w-full rounded-2xl border p-3 text-left transition-all active:scale-[0.99] ${
+                    active
+                      ? 'border-cyan-300/35 bg-cyan-300/12 text-white'
+                      : 'border-white/10 bg-white/[0.035] text-slate-200 hover:border-cyan-300/20'
+                  }`}
+                >
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black">{conversation.owner_user.display_name}</p>
+                      <p className="mt-0.5 truncate text-[10px] font-bold text-slate-500">
+                        {conversation.owner_user.username ? `@${conversation.owner_user.username}` : `ID ${conversation.owner_user.telegram_id}`}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {conversation.unread_count > 0 && (
+                        <span className="grid h-5 min-w-5 place-items-center rounded-full bg-rose-400 px-1.5 text-[10px] font-black text-white">
+                          {conversation.unread_count}
+                        </span>
+                      )}
+                      {needsReply && (
+                        <span className="rounded-lg border border-amber-300/25 bg-amber-300/12 px-2 py-1 text-[9px] font-black uppercase tracking-[0.1em] text-amber-200">
+                          ответ
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-xs font-semibold leading-relaxed text-slate-400">
+                    {textPreview(conversation.last_message_text)}
+                  </p>
+                  <p className="mt-2 text-[9px] font-black uppercase tracking-[0.12em] text-white/35">
+                    {messageTime(conversation.last_message_at)}
+                  </p>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface VirtualAdminMessageListProps {
+  active: boolean;
+  messages: SupportMessageView[];
+  selectedConversation: ChatConversationResponse | null;
+  loading: boolean;
+  error: string | null;
+  onRetry: (message: SupportMessageView) => void;
+}
+
+function VirtualAdminMessageList({
+  active,
+  messages,
+  selectedConversation,
+  loading,
+  error,
+  onRetry,
+}: VirtualAdminMessageListProps) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 118,
+    overscan: 3,
+    getItemKey: (index) => `${messages[index]?.client_message_id}:${messages[index]?.id}`,
+  });
+
+  useEffect(() => {
+    const scrollElement = parentRef.current;
+    if (!active || !scrollElement || messages.length === 0) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'auto' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, messages.length]);
+
+  return (
+    <div
+      ref={parentRef}
+      className="admin-chat-message-list min-h-0 flex-1 overflow-y-auto bg-slate-950 px-4 py-4"
+      style={ADMIN_CHAT_BACKGROUND_STYLE}
+    >
+      {loading && (
+        <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span>Синхронизация...</span>
+        </div>
+      )}
+
+      {!selectedConversation && !loading && (
+        <div className="grid min-h-[260px] place-items-center text-center">
+          <div className="space-y-2 text-slate-500">
+            <MessageCircle className="mx-auto h-8 w-8 text-cyan-200/60" />
+            <p className="text-sm font-black text-white">Чат Shamrai</p>
+          </div>
+        </div>
+      )}
+
+      {selectedConversation && !loading && messages.length === 0 && (
+        <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-center text-xs font-bold text-slate-300 shadow-lg shadow-black/20 backdrop-blur-md">
+          {error || 'История пуста.'}
+        </div>
+      )}
+
+      {messages.length > 0 && (
+        <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const message = messages[virtualItem.index];
+            if (!message) return null;
+
+            return (
+              <div
+                key={`${message.client_message_id}:${message.id}`}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
+                className="admin-chat-message-row absolute left-0 top-0 w-full pb-3"
+                style={{ transform: `translateY(${virtualItem.start}px)` }}
+              >
+                <SupportMessageBubble
+                  message={message}
+                  ownerLabel={selectedConversation?.owner_user.display_name || 'Клиент'}
+                  staffSide="right"
+                  onRetry={onRetry}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface AdminWebChatProps {
+  active?: boolean;
+}
+
+export default function AdminWebChat({ active = true }: AdminWebChatProps) {
   const [conversations, setConversations] = useState<ChatConversationResponse[]>([]);
   const [statusFilter, setStatusFilter] = useState<ChatConversationStatus>('open');
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
@@ -194,7 +398,7 @@ export default function AdminWebChat() {
     try {
       const params = new URLSearchParams({ limit: '80', status: statusFilter });
       const response = await apiFetch<ChatConversationListResponse>(`/chat/admin/conversations?${params.toString()}`);
-      setConversations(response.items);
+      setConversations(response.items.slice(0, ADMIN_CHAT_CONVERSATION_LIMIT));
       setSelectedConversationId((current) => {
         if (current && response.items.some((conversation) => conversation.id === current)) return current;
         if (initialConversationId && response.items.some((conversation) => conversation.id === initialConversationId)) return initialConversationId;
@@ -208,10 +412,12 @@ export default function AdminWebChat() {
   }, [initialConversationId, statusFilter]);
 
   useEffect(() => {
+    if (!active) return;
     void loadConversations();
-  }, [loadConversations]);
+  }, [active, loadConversations]);
 
   useEffect(() => {
+    if (!active) return;
     if (!selectedConversationId) {
       setMessages([]);
       setMessagesError(null);
@@ -229,7 +435,10 @@ export default function AdminWebChat() {
           `/chat/admin/conversations/${conversationId}/messages?limit=${ADMIN_CHAT_MESSAGES_PAGE_LIMIT}`,
         );
         if (!cancelled) {
-          setMessages(response.items.map((message) => ({ ...message, delivery_state: 'sent' as const })));
+          setMessages(limitRecent(
+            response.items.map((message) => ({ ...message, delivery_state: 'sent' as const })),
+            MAX_REALTIME_ITEMS,
+          ));
           const lastMessage = response.items[response.items.length - 1];
           if (lastMessage) {
             void apiFetch(`/chat/admin/conversations/${conversationId}/read`, {
@@ -255,9 +464,10 @@ export default function AdminWebChat() {
     return () => {
       cancelled = true;
     };
-  }, [clearConversationUnread, selectedConversationId]);
+  }, [active, clearConversationUnread, selectedConversationId]);
 
   useEffect(() => {
+    if (!active) return;
     const handleMessage = (event: Event) => {
       const payload = (event as CustomEvent<AdminWebChatMessageEventPayload>).detail;
       if (!payload?.message || !payload.conversation) return;
@@ -295,7 +505,7 @@ export default function AdminWebChat() {
       window.removeEventListener(ADMIN_WEB_CHAT_CONVERSATION_EVENT, handleConversation);
       window.removeEventListener(ADMIN_WEB_CHAT_STATUS_EVENT, handleStatus);
     };
-  }, [clearConversationUnread, selectedConversationId, statusFilter]);
+  }, [active, clearConversationUnread, selectedConversationId, statusFilter]);
 
   const updateConversationAfterStaffReply = useCallback((response: ChatMessageResponse) => {
     if (!selectedConversation) return;
@@ -442,7 +652,7 @@ export default function AdminWebChat() {
   };
 
   return (
-    <div className="grid min-h-[calc(100dvh-8.5rem)] min-w-0 gap-3 pb-8 xl:grid-cols-[minmax(270px,360px)_minmax(0,1fr)]">
+    <div className="admin-web-chat-shell grid min-h-[calc(100dvh-8.5rem)] min-w-0 gap-3 pb-8 xl:grid-cols-[minmax(270px,360px)_minmax(0,1fr)]">
       <section className="min-h-[320px] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
         <div className="border-b border-white/10 px-3 py-3">
           <div className="flex min-w-0 items-center justify-between gap-2">
@@ -495,66 +705,12 @@ export default function AdminWebChat() {
           </label>
         </div>
 
-        <div className="max-h-[calc(100dvh-20rem)] min-h-[240px] space-y-2 overflow-y-auto p-2">
-          {threadsLoading && (
-            <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Загружаем...</span>
-            </div>
-          )}
-
-          {!threadsLoading && visibleConversations.length === 0 && (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-center text-xs font-bold text-slate-500">
-              Диалогов пока нет.
-            </div>
-          )}
-
-          {visibleConversations.map((conversation) => {
-            const active = selectedConversationId === conversation.id;
-            const needsReply = conversation.last_message && 'direction' in conversation.last_message
-              ? conversation.last_message.direction === 'client'
-              : false;
-            return (
-              <button
-                key={conversation.id || conversation.owner_user.telegram_id}
-                type="button"
-                onClick={() => setSelectedConversationId(conversation.id)}
-                className={`w-full rounded-2xl border p-3 text-left transition-all active:scale-[0.99] ${
-                  active
-                    ? 'border-cyan-300/35 bg-cyan-300/12 text-white'
-                    : 'border-white/10 bg-white/[0.035] text-slate-200 hover:border-cyan-300/20'
-                }`}
-              >
-                <div className="flex min-w-0 items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-black">{conversation.owner_user.display_name}</p>
-                    <p className="mt-0.5 truncate text-[10px] font-bold text-slate-500">
-                      {conversation.owner_user.username ? `@${conversation.owner_user.username}` : `ID ${conversation.owner_user.telegram_id}`}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    {conversation.unread_count > 0 && (
-                      <span className="grid h-5 min-w-5 place-items-center rounded-full bg-rose-400 px-1.5 text-[10px] font-black text-white">
-                        {conversation.unread_count}
-                      </span>
-                    )}
-                    {needsReply && (
-                      <span className="rounded-lg border border-amber-300/25 bg-amber-300/12 px-2 py-1 text-[9px] font-black uppercase tracking-[0.1em] text-amber-200">
-                        ответ
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <p className="mt-2 line-clamp-2 text-xs font-semibold leading-relaxed text-slate-400">
-                  {textPreview(conversation.last_message_text)}
-                </p>
-                <p className="mt-2 text-[9px] font-black uppercase tracking-[0.12em] text-white/35">
-                  {messageTime(conversation.last_message_at)}
-                </p>
-              </button>
-            );
-          })}
-        </div>
+        <VirtualConversationList
+          conversations={visibleConversations}
+          selectedConversationId={selectedConversationId}
+          loading={threadsLoading}
+          onSelectConversation={setSelectedConversationId}
+        />
       </section>
 
       <section className="flex min-h-[520px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
@@ -593,46 +749,14 @@ export default function AdminWebChat() {
           </div>
         </div>
 
-        <div
-          className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-slate-950 px-4 py-4"
-          style={{
-            backgroundImage: "linear-gradient(180deg, rgba(2, 6, 23, 0.74), rgba(2, 6, 23, 0.86)), url('/images/admin-chat-bg.jpg')",
-            backgroundPosition: 'center',
-            backgroundSize: 'cover',
-          }}
-        >
-          {messagesLoading && (
-            <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Синхронизация...</span>
-            </div>
-          )}
-
-          {!selectedConversation && !messagesLoading && (
-            <div className="grid min-h-[260px] place-items-center text-center">
-              <div className="space-y-2 text-slate-500">
-                <MessageCircle className="mx-auto h-8 w-8 text-cyan-200/60" />
-                <p className="text-sm font-black text-white">Чат Shamrai</p>
-              </div>
-            </div>
-          )}
-
-          {selectedConversation && !messagesLoading && messages.length === 0 && (
-            <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-center text-xs font-bold text-slate-300 shadow-lg shadow-black/20 backdrop-blur-md">
-              {messagesError || 'История пуста.'}
-            </div>
-          )}
-
-          {messages.map((message) => (
-            <SupportMessageBubble
-              key={`${message.client_message_id}:${message.id}`}
-              message={message}
-              ownerLabel={selectedConversation?.owner_user.display_name || 'Клиент'}
-              staffSide="right"
-              onRetry={handleRetry}
-            />
-          ))}
-        </div>
+        <VirtualAdminMessageList
+          active={active}
+          messages={messages}
+          selectedConversation={selectedConversation}
+          loading={messagesLoading}
+          error={messagesError}
+          onRetry={handleRetry}
+        />
 
         <MessageComposer
           draft={draft}
@@ -644,6 +768,7 @@ export default function AdminWebChat() {
           onSendText={sendAdminText}
           onSendAttachment={sendAdminAttachment}
           onError={notifyError}
+          active={active}
         />
       </section>
     </div>

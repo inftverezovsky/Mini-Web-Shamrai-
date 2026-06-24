@@ -3,8 +3,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import { motion, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
 import { useAuthActions, useAuthSelector } from './context/AuthContext';
+import type { TelegramBotAuthSessionStarted } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
 import { usePerformanceProfile } from './hooks/usePerformanceProfile';
+import { useGlassOverlayActive } from './hooks/useGlassOverlayGuard';
 
 import BottomNavigation from './components/BottomNavigation';
 import type { AdminShellTabId, UserTabId } from './components/BottomNavigation';
@@ -19,6 +21,7 @@ import WebSignalListener from './components/WebSignalListener';
 import AdminWebChatListener from './components/AdminWebChatListener';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import LogoText from './components/LogoText';
+import TelegramAuthAssist from './components/TelegramAuthAssist';
 
 import { isStaffRole, roleLabel } from './utils/roles';
 import { buildTabPath, trackEvent, trackPageView } from './utils/analytics';
@@ -169,7 +172,7 @@ function AnimatedPagePanel({
 interface TelegramLinkPromptProps {
   userId: number;
   vkUserId: string | null;
-  onLinkTelegram: () => Promise<void>;
+  onLinkTelegram: (options?: { onSessionStarted?: (session: TelegramBotAuthSessionStarted) => void }) => Promise<void>;
 }
 
 function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPromptProps) {
@@ -177,6 +180,7 @@ function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPr
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(storageKey) === '1');
   const [linking, setLinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [telegramBotUrl, setTelegramBotUrl] = useState<string | null>(null);
 
   useEffect(() => {
     setDismissed(localStorage.getItem(storageKey) === '1');
@@ -195,8 +199,11 @@ function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPr
     try {
       setLinking(true);
       setError(null);
+      setTelegramBotUrl(null);
       trackEvent('Telegram Link Started', { source: 'vk_web_only_banner' });
-      await onLinkTelegram();
+      await onLinkTelegram({
+        onSessionStarted: (session) => setTelegramBotUrl(session.botUrl),
+      });
       trackEvent('Telegram Link Confirmed', { source: 'vk_web_only_banner' });
     } catch (err: any) {
       setError(err?.message || 'Не удалось привязать Telegram. Попробуйте еще раз.');
@@ -238,8 +245,10 @@ function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPr
         className="shamrai-glass-button mt-3 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
       >
         {linking ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-        <span>{linking ? 'Ждем подтверждение...' : 'Привязать Telegram'}</span>
+        <span>{linking ? 'Ожидаем Start в Telegram' : 'Привязать Telegram'}</span>
       </button>
+
+      {linking && <TelegramAuthAssist botUrl={telegramBotUrl} className="mt-3" />}
 
       {error && (
         <p className="mt-3 rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
@@ -262,6 +271,7 @@ export default function App() {
   } = useAuthActions();
   const { isCompact } = useLayoutMode();
   const performanceProfile = usePerformanceProfile();
+  const glassOverlayActive = useGlassOverlayActive();
   const reduceMotion = useReducedMotion();
   const reducePageMotion = reduceMotion || performanceProfile.shouldReduceMotion;
   const motionReducedMode = performanceProfile.shouldReduceMotion ? 'always' : 'user';
@@ -503,10 +513,12 @@ export default function App() {
       <MotionConfig reducedMotion={motionReducedMode}>
         <div
           className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
+            glassOverlayActive ? 'glass-overlay-active' : ''
+          } ${
             isCompact ? 'mobile-app-shell w-full max-w-none min-w-0 px-3 pt-3' : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
           }`}
         >
-          <div className="ambient-field z-0 isolate transform-gpu will-change-transform" aria-hidden="true">
+          <div className="ambient-field z-0 isolate" aria-hidden="true">
             <div className="ambient-field__grid" />
             <div className="ambient-field__rings" />
           </div>
@@ -602,18 +614,20 @@ export default function App() {
   ) : null;
 
   const renderUserPage = (tab: UserTabId) => {
-    if (tab === 'feed') return <BetFeed onNavigateToBilling={handleNavigateToBilling} />;
-    if (tab === 'chat') return <WebBotChat />;
+    const active = safeActiveUserTab === tab && !showAdminInterface;
+    if (tab === 'feed') return <BetFeed onNavigateToBilling={handleNavigateToBilling} active={active} />;
+    if (tab === 'chat') return <WebBotChat active={active} />;
     if (tab === 'stats' || tab === 'my_bets') return <MyBets />;
     if (tab === 'billing') return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
     return <Profile />;
   };
 
   const renderAdminPage = (tab: AdminShellTabId) => {
+    const active = showAdminInterface && activeAdminTab === tab;
     if (tab === 'manage_bets') return <AdminDashboard />;
     if (tab === 'stats') return <AdminStats />;
     if (tab === 'clients') return <AdminCRM />;
-    if (tab === 'chats') return <AdminWebChat />;
+    if (tab === 'chats') return <AdminWebChat active={active} />;
     if (tab === 'settings') return <AdminSettings />;
     return <Profile />;
   };
@@ -670,6 +684,8 @@ export default function App() {
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
         className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
+          glassOverlayActive ? 'glass-overlay-active' : ''
+        } ${
           isCompact
             ? 'mobile-app-shell flex w-full max-w-none min-w-0 flex-col justify-between px-3 pt-3'
             : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
@@ -685,7 +701,7 @@ export default function App() {
         <AdminWebChatListener enabled={showAdminInterface} />
         <VkConsentWizard />
       </AppErrorBoundary>
-      <div className="ambient-field z-0 isolate transform-gpu will-change-transform" aria-hidden="true">
+      <div className="ambient-field z-0 isolate" aria-hidden="true">
         <div className="ambient-field__grid" />
         <div className="ambient-field__rings" />
       </div>
@@ -712,14 +728,14 @@ export default function App() {
           <>
             <div className="z-10 flex w-full flex-grow flex-col justify-between">
               {isAdmin && (
-                <div className="shamrai-glass-panel z-10 mb-3 flex transform-gpu items-center justify-between rounded-xl p-2 text-[11px] will-change-transform">
+                <div className="dashboard-blur-root shamrai-glass-panel z-10 mb-3 flex items-center justify-between rounded-xl p-2 text-[11px]">
                   <span className="flex items-center text-slate-300">
                     <KeyRound className="mr-1.5 h-4 w-4 shrink-0 text-rose-400" />
                     Вы вошли как <strong className="ml-1 text-rose-400">{roleLabel(userProfile.role)}</strong>
                   </span>
                   <button
                     onClick={handleToggleAdminPreviewMode}
-                    className="shamrai-glass-button flex transform-gpu items-center space-x-1 rounded-xl px-2.5 py-1 text-[10px] text-white transition-all will-change-transform active:scale-95"
+                    className="shamrai-glass-button flex items-center space-x-1 rounded-xl px-2.5 py-1 text-[10px] text-white transition-all active:scale-95"
                   >
                     <Eye className="h-3.5 w-3.5 text-indigo-400" />
                     <span>{adminPreviewMode ? 'Админка' : 'Кабинет юзера'}</span>
@@ -753,7 +769,7 @@ export default function App() {
             />
 
             <div className="min-w-0 flex-1">
-              <header className="shamrai-glass-panel mb-4 flex transform-gpu items-center justify-between gap-3 rounded-2xl px-3 py-2.5 will-change-transform">
+              <header className="dashboard-blur-root shamrai-glass-panel mb-4 flex items-center justify-between gap-3 rounded-2xl px-3 py-2.5">
                 <div className="min-w-0">
                   <LogoText className="h-7 w-28" ariaLabel="Shamrai" width={140} height={42} />
                   <h1 className="mt-0.5 truncate text-lg font-black text-white">{displayName}</h1>
@@ -761,7 +777,7 @@ export default function App() {
               </header>
 
               {telegramLinkPrompt}
-              <main className="app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] transform-gpu overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 will-change-transform sm:p-3 xl:p-4">
+              <main className="dashboard-blur-root app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 sm:p-3 xl:p-4">
                 {renderCurrentPage()}
               </main>
             </div>

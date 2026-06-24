@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ExternalLink, Loader2, LogIn, MessageCircle, ShieldCheck } from 'lucide-react';
 import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import LogoText from './LogoText';
+import TelegramAuthAssist from './TelegramAuthAssist';
 import { getVkAuthCooldownStatus, getVkIdConfig } from '../utils/vkId';
 import { trackEvent, trackPageView } from '../utils/analytics';
 
@@ -13,6 +14,7 @@ export default function BrowserAuthScreen() {
   const [vkCooldown, setVkCooldown] = useState(() => getVkAuthCooldownStatus());
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [telegramError, setTelegramError] = useState<string | null>(null);
+  const [telegramAuthBotUrl, setTelegramAuthBotUrl] = useState<string | null>(null);
   const vkConfig = getVkIdConfig();
   const botUsername = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'Shamra1_bot';
   const cleanBotUsername = botUsername.replace(/^@/, '');
@@ -57,8 +59,11 @@ export default function BrowserAuthScreen() {
     try {
       setTelegramBusy(true);
       setTelegramError(null);
+      setTelegramAuthBotUrl(null);
       trackEvent('Auth Started', { provider: 'telegram' });
-      await loginWithTelegramBot();
+      await loginWithTelegramBot({
+        onSessionStarted: (session) => setTelegramAuthBotUrl(session.botUrl),
+      });
     } catch (err: any) {
       setTelegramError(err?.message || 'Не удалось войти через Telegram');
       trackEvent('Auth Failed', { provider: 'telegram' });
@@ -124,8 +129,10 @@ export default function BrowserAuthScreen() {
                   className="auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   {telegramBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-                  <span>Войти или создать через Telegram</span>
+                  <span>{telegramBusy ? 'Ожидаем Start в Telegram' : 'Войти или создать через Telegram'}</span>
                 </button>
+
+                {telegramBusy && <TelegramAuthAssist botUrl={telegramAuthBotUrl} />}
 
                 <a
                   href={telegramBotUrl}

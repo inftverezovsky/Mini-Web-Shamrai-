@@ -11,6 +11,7 @@ interface MessageListProps {
   loading?: boolean;
   empty?: React.ReactNode;
   className?: string;
+  active?: boolean;
 }
 
 function MessageList({
@@ -18,6 +19,7 @@ function MessageList({
   loading = false,
   empty,
   className = '',
+  active = true,
 }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const virtualizer = useVirtualizer({
@@ -29,14 +31,15 @@ function MessageList({
 
   useEffect(() => {
     const scrollElement = parentRef.current;
-    if (!scrollElement || items.length === 0) return;
-    window.requestAnimationFrame(() => {
-      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'smooth' });
+    if (!active || !scrollElement || items.length === 0) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'auto' });
     });
-  }, [items.length]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, items.length]);
 
   return (
-    <div ref={parentRef} className={`web-bot-chat__list min-h-0 min-w-0 flex-1 transform-gpu overflow-y-auto px-3 py-3 will-change-transform sm:px-4 sm:py-4 ${className}`}>
+    <div ref={parentRef} className={`web-bot-chat__list min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4 ${className}`}>
       {loading && (
         <div className="flex min-h-[118px] w-full items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-200" />
@@ -62,7 +65,7 @@ function MessageList({
                 key={item.key}
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
-                className="web-bot-chat__virtual-row absolute left-0 top-0 w-full transform-gpu pb-3 will-change-transform"
+                className="web-bot-chat__virtual-row absolute left-0 top-0 w-full pb-3"
                 style={{ transform: `translateY(${virtualItem.start}px)` }}
               >
                 {item.element}

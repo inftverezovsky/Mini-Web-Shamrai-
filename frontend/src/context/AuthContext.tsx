@@ -52,6 +52,15 @@ interface TelegramBotAuthStatusResponse {
   user?: UserResponse;
 }
 
+export interface TelegramBotAuthSessionStarted {
+  botUrl: string;
+  expiresAt: string;
+}
+
+interface TelegramBotAuthOptions {
+  onSessionStarted?: (session: TelegramBotAuthSessionStarted) => void;
+}
+
 interface AuthState {
   token: string | null;
   user: UserResponse | null;
@@ -63,7 +72,7 @@ interface AuthActions {
   login: () => Promise<void>;
   loginWithVk: () => Promise<void>;
   loginWithTelegramWidget: (payload: TelegramWidgetPayload) => Promise<void>;
-  loginWithTelegramBot: () => Promise<void>;
+  loginWithTelegramBot: (options?: TelegramBotAuthOptions) => Promise<void>;
   logout: () => void;
   setUser: React.Dispatch<React.SetStateAction<UserResponse | null>>;
 }
@@ -444,7 +453,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [API_URL, applyLoginResponse, setError, setLoading]);
 
-  const loginWithTelegramBot = useCallback(async () => {
+  const loginWithTelegramBot = useCallback(async (options: TelegramBotAuthOptions = {}) => {
     try {
       setError(null);
       const session = await apiFetch<TelegramBotAuthStartResponse>('/auth/telegram/bot-session', {
@@ -452,6 +461,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
 
       window.open(session.bot_url, '_blank', 'noopener,noreferrer');
+      options.onSessionStarted?.({
+        botUrl: session.bot_url,
+        expiresAt: session.expires_at,
+      });
 
       const expiresAt = new Date(session.expires_at).getTime();
       while (Date.now() < expiresAt) {

@@ -38,6 +38,7 @@ import {
   IconActionButton,
   StatTile,
 } from '../../features/performance/performanceUi';
+import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 
 type ActivityFilter = 'all' | 'active' | 'empty' | 'guarantee';
 
@@ -333,6 +334,8 @@ export default function AdminCRM() {
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
   const canDeleteClients = isPrivilegedRole(currentAdmin?.role);
+
+  useGlassOverlayGuard(Boolean(selectedUser));
 
   const bookmakersQuery = useQuery<BookmakerResponse[]>({
     queryKey: BOOKMAKERS_QUERY_KEY,
@@ -828,7 +831,7 @@ export default function AdminCRM() {
       )}
 
       {selectedUser && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/72 p-3 backdrop-blur-sm animate-fade-in sm:items-center lg:justify-end lg:p-4">
+        <div className="glass-modal-layer fixed inset-0 z-50 flex items-end justify-center bg-slate-950/72 p-3 backdrop-blur-sm animate-fade-in sm:items-center lg:justify-end lg:p-4">
           <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[28px] border border-white/10 bg-[#0C1226]/95 p-4 shadow-2xl animate-scale-up lg:h-[calc(100dvh-2rem)] lg:max-h-none lg:max-w-xl lg:p-5">
             <button
               type="button"

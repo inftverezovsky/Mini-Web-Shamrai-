@@ -31,6 +31,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
+import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 import {
   FORECAST_REQUEST_TABS,
   type BetCategory,
@@ -1016,6 +1017,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
   const fullForecastIsEditing = fullForecastMode === 'edit';
   const fullForecastIsBulkSending = fullForecastMode === 'bulkSend';
   const fullForecastModalOpen = Boolean(fullForecastRequest || fullForecastPreparedBetId);
+  useGlassOverlayGuard(fullForecastModalOpen);
   const fullForecastActionKey = fullForecastIsPreparing && fullForecastPreparedBetId
     ? `prepare:${fullForecastPreparedBetId}`
     : fullForecastIsEditing && fullForecastPreparedBetId
@@ -1756,7 +1758,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       )}
 
       {fullForecastModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm px-3 py-4">
+        <div className="glass-modal-layer fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm px-3 py-4">
           <form
             onSubmit={handleFullForecastSubmit}
             className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl border border-emerald-500/25 bg-slate-950 shadow-[0_0_45px_rgba(16,185,129,0.18)] p-5 space-y-4"

@@ -28,17 +28,20 @@ from src.models.models import (
     Subscription,
     User,
 )
+from src.services import telegram_auth
 from src.services.telegram_auth import confirm_telegram_bot_auth_session, create_telegram_bot_auth_session
 
 
 class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        telegram_auth._sessions.clear()
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         self.Session = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def asyncTearDown(self):
+        telegram_auth._sessions.clear()
         await self.engine.dispose()
 
     def test_vk_oauth_urlopen_bypasses_process_proxy_environment(self):
@@ -417,6 +420,51 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(users), 1)
             self.assertEqual(users[0].telegram_id, 123456789)
             self.assertEqual(users[0].vk_user_id, "741852963")
+
+    async def test_bot_auth_session_restores_from_cache_after_memory_reset(self):
+        cached_sessions = {}
+
+        async def fake_cache_set_json(key, value, ttl_seconds=None):
+            cached_sessions[key] = value
+
+        async def fake_cache_get_json(key):
+            return cached_sessions.get(key)
+
+        async def fake_cache_delete(*keys):
+            for key in keys:
+                cached_sessions.pop(key, None)
+
+        with (
+            patch.object(telegram_auth, "cache_set_json", new=AsyncMock(side_effect=fake_cache_set_json)),
+            patch.object(telegram_auth, "cache_get_json", new=AsyncMock(side_effect=fake_cache_get_json)),
+            patch.object(telegram_auth, "cache_delete", new=AsyncMock(side_effect=fake_cache_delete)),
+        ):
+            session = await telegram_auth.create_telegram_bot_auth_session(source_user_id=-1001)
+            telegram_auth._sessions.clear()
+
+            restored = await telegram_auth.get_telegram_bot_auth_session(session.auth_token)
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored.source_user_id, -1001)
+            self.assertEqual(restored.status, "pending")
+
+            confirmed = await telegram_auth.confirm_telegram_bot_auth_session(
+                session.auth_token,
+                {
+                    "id": 123456789,
+                    "first_name": "Telegram",
+                    "username": "tg_user",
+                },
+            )
+            self.assertTrue(confirmed)
+
+            telegram_auth._sessions.clear()
+            restored_confirmed = await telegram_auth.get_telegram_bot_auth_session(session.auth_token)
+            self.assertIsNotNone(restored_confirmed)
+            self.assertEqual(restored_confirmed.status, "confirmed")
+            self.assertEqual(restored_confirmed.telegram_user["id"], 123456789)
+
+            await telegram_auth.consume_telegram_bot_auth_session(session.auth_token)
+            self.assertEqual(cached_sessions, {})
 
     async def test_vk_first_then_telegram_same_device_merges_into_one_user(self):
         device_id = "550e8400-e29b-41d4-a716-446655440000"

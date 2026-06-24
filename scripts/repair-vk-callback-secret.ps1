@@ -4,7 +4,8 @@ param(
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
   [string]$VkGroupId = "239419819",
-  [string]$ExpectedVkCallbackSecret = $env:SHAMRAI_EXPECTED_VK_CALLBACK_SECRET
+  [string]$ExpectedVkCallbackSecret = $env:SHAMRAI_EXPECTED_VK_CALLBACK_SECRET,
+  [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,14 +44,30 @@ function Invoke-NativeChecked {
   }
 }
 
-$plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
-if (-not $plink) {
-  throw "PuTTY plink not found."
+$defaultSshKeyPath = Join-Path $env:USERPROFILE ".ssh\codex_deploy_ed25519"
+if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and (Test-Path -LiteralPath $defaultSshKeyPath)) {
+  $SshKeyPath = $defaultSshKeyPath
 }
 
-$password = $env:SHAMRAI_SSH_PASSWORD
-if ([string]::IsNullOrWhiteSpace($password)) {
-  throw "Set SHAMRAI_SSH_PASSWORD for this run. Do not store it in files."
+$ssh = Find-Tool @("ssh.exe", "ssh")
+$useSshKey = (-not [string]::IsNullOrWhiteSpace($SshKeyPath)) -and (Test-Path -LiteralPath $SshKeyPath)
+$plink = $null
+$password = $null
+
+if ($useSshKey) {
+  if (-not $ssh) {
+    throw "OpenSSH ssh not found. Install OpenSSH Client or use SHAMRAI_SSH_PASSWORD with PuTTY plink."
+  }
+} else {
+  $plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
+  if (-not $plink) {
+    throw "PuTTY plink not found and no SSH key was available."
+  }
+
+  $password = $env:SHAMRAI_SSH_PASSWORD
+  if ([string]::IsNullOrWhiteSpace($password)) {
+    throw "Set SHAMRAI_SSH_PASSWORD for this run or provide SHAMRAI_SSH_KEY_PATH. Do not store credentials in files."
+  }
 }
 
 if ([string]::IsNullOrWhiteSpace($ExpectedVkCallbackSecret)) {
@@ -147,6 +164,13 @@ print(
 PY
 
 docker compose -p "`$CANON_PROJECT" up -d --force-recreate backend
+for i in `$(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:`$CANON_PORT/api/health" >/dev/null 2>&1; then
+    echo "shamrai_health_ok attempt=`$i"
+    break
+  fi
+  sleep 2
+done
 curl -fsS "http://127.0.0.1:`$CANON_PORT/api/health" >/dev/null
 docker compose -p "`$CANON_PROJECT" exec -T backend python - <<'PY'
 from src.core.config import settings
@@ -194,4 +218,14 @@ echo "vk_callback_secret_mask `$(mask_value "`$NEXT_VK_CALLBACK_SECRET")"
 $normalizedRemote = ((($remote -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
 $encodedRemote = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedRemote))
 $remoteCommand = "printf '%s' '$encodedRemote' | base64 -d | sh"
-Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
+if ($useSshKey) {
+  Invoke-NativeChecked $ssh `
+    "-i" $SshKeyPath `
+    "-o" "BatchMode=yes" `
+    "-o" "IdentitiesOnly=yes" `
+    "-o" "StrictHostKeyChecking=accept-new" `
+    $Server `
+    $remoteCommand
+} else {
+  Invoke-NativeChecked $plink -ssh $Server -pw $password -batch -no-antispoof -hostkey $HostKey $remoteCommand
+}

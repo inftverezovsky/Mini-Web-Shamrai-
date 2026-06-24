@@ -817,7 +817,7 @@ if [ -n "`$expected_vk_callback_confirmation" ]; then
   fi
   echo 'vk_callback_dashboard_confirmation_ok'
 else
-  echo 'WARNING: VK dashboard confirmation was not verified because expected code was not provided.' >&2
+  echo 'vk_callback_dashboard_confirmation_skipped expected_code_not_provided'
 fi
 curl -I -fsS http://shamra1.pro/ | head -n 8
 curl -I -fsS https://shamra1.pro/ | head -n 8

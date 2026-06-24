@@ -241,6 +241,7 @@ export default function AdminSettings() {
     site: false,
   });
   const editorPanelRef = useRef<HTMLElement | null>(null);
+  const editorScrollFrameRef = useRef<number | undefined>();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -266,6 +267,10 @@ export default function AdminSettings() {
 
   useEffect(() => {
     void loadTemplates();
+  }, []);
+
+  useEffect(() => () => {
+    if (editorScrollFrameRef.current !== undefined) window.cancelAnimationFrame(editorScrollFrameRef.current);
   }, []);
 
   const templateByKey = useMemo(() => (
@@ -326,7 +331,9 @@ export default function AdminSettings() {
     setActiveKey(templateKey);
     if (typeof window === 'undefined' || !window.matchMedia('(max-width: 1023px)').matches) return;
 
-    window.requestAnimationFrame(() => {
+    if (editorScrollFrameRef.current !== undefined) window.cancelAnimationFrame(editorScrollFrameRef.current);
+    editorScrollFrameRef.current = window.requestAnimationFrame(() => {
+      editorScrollFrameRef.current = undefined;
       editorPanelRef.current?.scrollIntoView({
         behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
         block: 'start',

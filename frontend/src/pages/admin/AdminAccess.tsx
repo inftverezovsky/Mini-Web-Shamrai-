@@ -24,6 +24,7 @@ import {
 } from '../../utils/roles';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import SmoothCollapse from '../../components/SmoothCollapse';
+import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 
 interface StaffUser {
   telegram_id: number;
@@ -97,6 +98,8 @@ export default function AdminAccess() {
   const [auditLogOpen, setAuditLogOpen] = useState(false);
   const [auditActionFilter, setAuditActionFilter] = useState<string>(ALL_AUDIT_ACTIONS);
   const [pendingRoleChange, setPendingRoleChange] = useState<PendingRoleChange | null>(null);
+
+  useGlassOverlayGuard(Boolean(pendingRoleChange));
 
   const canManageAccess = isPrivilegedRole(currentAdmin?.role);
   const ownerExists = admins.some(admin => admin.role === 'owner');
@@ -447,7 +450,7 @@ export default function AdminAccess() {
       </div>
 
       {pendingRoleChange && (
-        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+        <div className="glass-modal-layer fixed inset-0 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
           <div className="bg-[#0C1226]/95 border border-white/10 max-w-sm w-full p-5 rounded-3xl space-y-4 shadow-2xl animate-scale-up">
             <div className="flex items-start gap-3">
               <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center shrink-0">

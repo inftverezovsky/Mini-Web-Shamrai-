@@ -4,6 +4,7 @@ import { Activity, Clock } from 'lucide-react';
 
 interface LiveTrackerProps {
   apiMatchId: string;
+  active?: boolean;
 }
 
 interface MatchScoreData {
@@ -16,32 +17,40 @@ interface MatchScoreData {
   status: string;
 }
 
-export default function LiveTracker({ apiMatchId }: LiveTrackerProps) {
+export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerProps) {
   const [matchData, setMatchData] = useState<MatchScoreData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!active) return undefined;
+    let cancelled = false;
+
     async function fetchLiveScore() {
+      if (document.visibilityState !== 'visible') return;
       try {
         const data = await apiFetch(`/bets/match/${apiMatchId}`);
-        setMatchData(data);
+        if (!cancelled) setMatchData(data);
       } catch (err) {
         console.error('Failed to fetch live match score for tracker:', err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
-    // Initial fetch
-    fetchLiveScore();
+    void fetchLiveScore();
 
-    // Set polling interval every 5 seconds
     const intervalId = setInterval(fetchLiveScore, 5000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchLiveScore();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
+      cancelled = true;
       clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [apiMatchId]);
+  }, [active, apiMatchId]);
 
   if (loading) {
     return (

@@ -1,6 +1,6 @@
 import React from 'react';
 import { PanelLeft } from 'lucide-react';
-import { adminTabs, type AdminShellTabId, userTabs, type UserTabId } from './BottomNavigation';
+import { adminTabs, type AdminShellTabId, visibleUserTabs, type UserTabId } from './BottomNavigation';
 import OptimizedImage from './OptimizedImage';
 
 type DesktopTabId = UserTabId | AdminShellTabId;
@@ -28,10 +28,10 @@ export default function DesktopNavigation({
 }: DesktopNavigationProps) {
   const tabs = role === 'admin'
     ? adminTabs
-    : userTabs.filter((tab) => showWebChat || tab.id !== 'chat');
+    : visibleUserTabs.filter((tab) => showWebChat || tab.id !== 'chat');
 
   return (
-    <aside className="shamrai-glass-panel flex h-auto w-full shrink-0 flex-col justify-between rounded-2xl p-3 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:w-72">
+    <aside className="dashboard-blur-root desktop-navigation-panel shamrai-glass-panel flex h-auto w-full shrink-0 flex-col justify-between rounded-2xl p-3 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:w-72">
       <div className="space-y-3.5">
         <div className="shamrai-glass-card flex items-center gap-2.5 rounded-xl p-2.5">
           <div className="relative grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-cyan-200/20 text-cyan-200">

@@ -38,6 +38,8 @@ export const userTabs: TabConfig<UserTabId>[] = [
   { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'violet' },
 ];
 
+export const visibleUserTabs = userTabs.filter((tab) => tab.id !== 'billing');
+
 export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'manage_bets', label: 'Панель', Icon: Settings2, tone: 'emerald' },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
@@ -49,7 +51,7 @@ export const adminTabs: TabConfig<AdminShellTabId>[] = [
 
 export default function BottomNavigation({ role, activeTab, onChangeTab, onPreloadTab, showWebChat = false }: BottomNavigationProps) {
   const tabs = role === 'user'
-    ? userTabs.filter((tab) => showWebChat || tab.id !== 'chat')
+    ? visibleUserTabs.filter((tab) => showWebChat || tab.id !== 'chat')
     : adminTabs;
 
   const getTabStyles = (isActive: boolean) => {
@@ -67,7 +69,7 @@ export default function BottomNavigation({ role, activeTab, onChangeTab, onPrelo
 
   return (
     <nav
-      className={`bottom-nav-aurora bottom-nav-aurora--${role} shimmer-border isolate flex min-w-0 transform-gpu items-center justify-around gap-1 rounded-2xl border border-white/10 px-2 py-2 shadow-glass backdrop-blur-xl transition-all duration-300 will-change-transform`}
+      className={`dashboard-blur-root bottom-nav-aurora bottom-nav-aurora--${role} shimmer-border isolate flex min-w-0 items-center justify-around gap-1 rounded-2xl border border-white/10 px-2 py-2 shadow-glass backdrop-blur-xl transition-all duration-300`}
       aria-label={role === 'admin' ? 'Навигация администратора' : 'Навигация приложения'}
     >
       {tabs.map(({ id, label, Icon, tone = 'cyan' }) => {
@@ -83,7 +85,7 @@ export default function BottomNavigation({ role, activeTab, onChangeTab, onPrelo
             onFocus={() => onPreloadTab?.(id)}
             onTouchStart={() => onPreloadTab?.(id)}
             aria-current={isActive ? 'page' : undefined}
-            className={`bottom-nav-aurora__item bottom-nav-aurora__item--${tone} group smooth-pressable relative flex min-w-0 flex-1 transform-gpu flex-col items-center overflow-hidden rounded-xl px-1.5 py-1.5 transition-all duration-200 will-change-transform ${
+            className={`bottom-nav-aurora__item bottom-nav-aurora__item--${tone} group smooth-pressable relative flex min-w-0 flex-1 flex-col items-center overflow-hidden rounded-xl px-1.5 py-1.5 transition-all duration-200 ${
               isActive ? 'bottom-nav-aurora__item--active' : ''
             }`}
             style={getTabStyles(isActive)}

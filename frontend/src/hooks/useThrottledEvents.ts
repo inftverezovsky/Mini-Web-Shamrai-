@@ -89,6 +89,8 @@ export function useThrottledCallback<TArgs extends unknown[]>(
 
   useEffect(() => () => {
     if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
+    timerRef.current = undefined;
+    trailingArgsRef.current = null;
   }, []);
 
   return throttled;
@@ -97,6 +99,7 @@ export function useThrottledCallback<TArgs extends unknown[]>(
 export function useThrottledEventBuffer<TEvent>(
   onFlush: (events: TEvent[]) => void,
   delayMs = 400,
+  maxBufferSize = 100,
 ) {
   const flushRef = useLatestCallback(onFlush);
   const bufferRef = useRef<TEvent[]>([]);
@@ -115,10 +118,11 @@ export function useThrottledEventBuffer<TEvent>(
   }, [flushRef]);
 
   const enqueue = useCallback((event: TEvent) => {
-    bufferRef.current = [...bufferRef.current, event];
+    const nextBuffer = [...bufferRef.current, event];
+    bufferRef.current = nextBuffer.length > maxBufferSize ? nextBuffer.slice(-maxBufferSize) : nextBuffer;
     if (timerRef.current !== undefined) return;
     timerRef.current = window.setTimeout(flushNow, delayMs);
-  }, [delayMs, flushNow]);
+  }, [delayMs, flushNow, maxBufferSize]);
 
   const clear = useCallback(() => {
     if (timerRef.current !== undefined) {

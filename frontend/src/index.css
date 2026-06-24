@@ -308,8 +308,6 @@
   background-size: auto, auto, 34px 34px, 34px 34px;
   background-position: 0 0, 0 0, 0 0, 0 0;
   mask-image: linear-gradient(to bottom, black, transparent 86%);
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
   contain: paint;
   animation: appGridDrift 18s linear infinite;
 }
@@ -332,7 +330,6 @@
   mix-blend-mode: screen;
   mask-image: radial-gradient(circle at 50% 46%, black 0 52%, transparent 78%);
   transform-origin: 52% 48%;
-  will-change: transform, opacity;
   contain: paint;
   animation: emblemDrift 15s ease-in-out infinite alternate;
 }
@@ -352,8 +349,6 @@
   pointer-events: none;
   z-index: 0;
   isolation: isolate;
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
   contain: layout paint;
 }
 
@@ -363,7 +358,6 @@
   position: absolute;
   pointer-events: none;
   mix-blend-mode: screen;
-  will-change: transform, opacity;
 }
 
 .ambient-field::before {
@@ -401,7 +395,6 @@
   background:
     conic-gradient(from 180deg at 50% 38%, rgba(0, 210, 255, 0.3), rgba(16, 185, 129, 0.16), rgba(217, 70, 239, 0.08), rgba(0, 210, 255, 0.26));
   filter: blur(72px);
-  will-change: transform, opacity;
   animation: auraDrift 12s ease-in-out infinite alternate, auraColorShift 9s ease-in-out infinite;
 }
 
@@ -414,8 +407,7 @@
   opacity: 0.7;
   background: linear-gradient(90deg, transparent, rgba(0, 210, 255, 0.92), rgba(16, 185, 129, 0.62), transparent);
   box-shadow: 0 0 26px rgba(0, 210, 255, 0.45);
-  transform: translate3d(0, 0, 0) rotate(-8deg);
-  will-change: transform, opacity;
+  transform: rotate(-8deg);
   animation: fieldSweep 6.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
 }
 
@@ -430,8 +422,6 @@
   box-shadow:
     inset 0 0 40px rgba(124, 58, 237, 0.12),
     0 0 70px rgba(255, 0, 127, 0.08);
-  transform: translate3d(0, 0, 0);
-  will-change: transform, opacity;
   animation: haloSpin 18s linear infinite, ringGlowPulse 5.2s ease-in-out infinite;
 }
 
@@ -468,9 +458,6 @@
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
     0 18px 52px rgba(0, 0, 0, 0.28),
     0 0 34px rgba(0, 210, 255, 0.045);
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
-  backface-visibility: hidden;
   contain: paint;
 }
 
@@ -484,9 +471,6 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
     0 14px 36px rgba(0, 0, 0, 0.24);
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
-  backface-visibility: hidden;
   contain: paint;
 }
 
@@ -520,9 +504,6 @@
     0 0 30px rgba(0, 210, 255, 0.045);
   backdrop-filter: blur(26px) saturate(172%) contrast(1.05);
   -webkit-backdrop-filter: blur(26px) saturate(172%) contrast(1.05);
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
-  backface-visibility: hidden;
   contain: paint;
   transition:
     border-color 0.24s ease,
@@ -941,7 +922,6 @@
   place-items: center;
   overflow: visible;
   color: var(--sport-accent);
-  transform: translateZ(0);
 }
 
 .sport-emblem::before {
@@ -1065,7 +1045,6 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 8px 20px rgba(0, 0, 0, 0.14);
-  transform: translateZ(0);
   transition:
     border-color 0.3s cubic-bezier(0.16, 1, 0.3, 1),
     background 0.3s cubic-bezier(0.16, 1, 0.3, 1),
@@ -1233,7 +1212,6 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.055),
     0 8px 22px rgba(0, 0, 0, 0.13);
-  transform: translateZ(0);
   transition:
     border-color 0.28s cubic-bezier(0.16, 1, 0.3, 1),
     background 0.28s cubic-bezier(0.16, 1, 0.3, 1),
@@ -1353,19 +1331,15 @@
 .motion-card {
   position: relative;
   isolation: isolate;
-  transform: translateZ(0);
 }
 
 .page-transition-layer {
   width: 100%;
   min-width: 0;
   transform-origin: 50% 16%;
-  will-change: opacity, transform, filter;
 }
 
 .smooth-surface {
-  transform: translate3d(0, 0, 0);
-  backface-visibility: hidden;
   contain: layout paint;
 }
 
@@ -1377,18 +1351,17 @@
 }
 
 .smooth-pressable {
-  transform: translate3d(0, 0, 0);
   transition:
     background-color 0.14s ease,
     border-color 0.14s ease,
     box-shadow 0.14s ease,
     filter 0.14s ease,
     transform 0.14s cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform, filter;
 }
 
 .smooth-pressable:active {
-  transform: translate3d(0, 1px, 0) scale(0.988);
+  transform: translateY(1px) scale(0.988);
+  will-change: transform;
 }
 
 .app-shell :is(
@@ -2413,10 +2386,9 @@
   --bottom-nav-gap: 0.6rem;
 }
 
-/* Optimize transitions and hover states for UI acceleration */
-.glass-panel, .glass-card, .motion-card, .bottom-nav-aurora__item, .logo-frame, button, input, textarea {
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
+/* Keep compositing hints transient: Safari keeps permanent will-change layers in VRAM. */
+#root .app-shell :is(button, a[class*="rounded"], .smooth-pressable):active {
+  will-change: transform;
 }
 
 .bet-feed-card {
@@ -2503,7 +2475,7 @@
   .app-shell :is(.motion-card, .glass-panel, .glass-card):hover,
   .bet-feed-card:hover,
   .glass-card-hover:hover {
-    transform: translate3d(0, 0, 0);
+    transform: none;
   }
 }
 
@@ -2618,8 +2590,6 @@
   background-position: 0 0, 28px 34px;
   background-size: 72px 72px, 116px 116px;
   mask-image: linear-gradient(to bottom, black, transparent 74%);
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
   animation: starDrift 14s linear infinite;
 }
 
@@ -2688,7 +2658,6 @@
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.1) 0 1px, transparent 1px 42px);
   transform: perspective(520px) rotateX(62deg);
   transform-origin: center top;
-  will-change: transform;
   animation: floorRun 2.8s linear infinite;
 }
 
@@ -2832,7 +2801,7 @@
   backdrop-filter: blur(28px) saturate(180%) contrast(1.06);
   -webkit-backdrop-filter: blur(28px) saturate(180%) contrast(1.06);
   animation: navFloat 4.8s ease-in-out infinite, navGlassGlow 6.5s ease-in-out infinite;
-  transform: translateZ(0) scale(calc(1 / var(--shamrai-ui-scale)));
+  transform: scale(calc(1 / var(--shamrai-ui-scale)));
   transform-origin: bottom center;
 }
 
@@ -4313,11 +4282,10 @@
   text-transform: none !important;
 }
 
-/* Performance pass: keep the premium glass look, but remove idle animation work
-   from repeated app surfaces so inputs, scrolling, and tab switches stay crisp. */
+/* Performance pass: keep the premium glass look while avoiding permanent GPU
+   layers. Containment is cheap; blanket will-change is toxic on iOS Safari. */
 #root .app-shell :is(
   .page-transition-layer,
-  .smooth-pressable,
   .glass-panel,
   .glass-card,
   .shamrai-glass-panel,
@@ -4338,9 +4306,7 @@
   [class*="blur-3xl"],
   [class*="filter"]
 ) {
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
-  backface-visibility: hidden;
+  contain: paint;
 }
 
 #root .app-shell :is(
@@ -4359,8 +4325,6 @@
 ) {
   isolation: isolate;
   contain: paint;
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
 }
 
 #root .app-shell .ambient-field::before,
@@ -4377,14 +4341,32 @@
 #root .app-shell .welcome-splash__gate,
 #root .app-shell .welcome-splash__scan,
 #root .app-shell .welcome-splash__floor {
-  transform: translate3d(0, 0, 0);
-  will-change: transform, opacity;
-  backface-visibility: hidden;
+  contain: paint;
 }
 
 #root .app-shell .smooth-surface {
   contain: layout paint style;
-  transform: translate3d(0, 0, 0);
+}
+
+#root .app-shell.glass-overlay-active .dashboard-blur-root,
+#root .app-shell.glass-overlay-active .dashboard-blur-root::before,
+#root .app-shell.glass-overlay-active .dashboard-blur-root::after,
+#root .app-shell.glass-overlay-active .app-scroll-panel,
+#root .app-shell.glass-overlay-active .bottom-nav-aurora,
+#root .app-shell.glass-overlay-active .desktop-navigation-panel {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+#root .app-shell.glass-overlay-active .ambient-field::before,
+#root .app-shell.glass-overlay-active .ambient-field::after,
+#root .app-shell.glass-overlay-active .ambient-field__grid,
+#root .app-shell.glass-overlay-active .ambient-field__sweep,
+#root .app-shell.glass-overlay-active .ambient-field__rings,
+#root .app-shell.glass-overlay-active .spark-field::before,
+#root .app-shell.glass-overlay-active .spark-field::after {
+  animation-play-state: paused !important;
+  filter: none !important;
 }
 
 #root .app-shell :is(.shamrai-glass-panel, .shamrai-glass-card),
@@ -4407,15 +4389,36 @@
   animation: none !important;
 }
 
-#root .app-shell :is(.shamrai-glass-card, .glass-card, .motion-card, .bet-feed-card) {
+#root .app-shell :is(
+  .content-auto-section,
+  .page-transition-layer,
+  .admin-web-chat-shell,
+  .web-bot-chat,
+  .shamrai-glass-card,
+  .glass-card,
+  .motion-card,
+  .bet-feed-card
+) {
   content-visibility: auto;
   contain-intrinsic-size: auto 280px;
 }
 
-#root .app-shell :is(.virtual-bet-feed-row, .web-bot-chat__virtual-row) {
+#root .app-shell :is(
+  .virtual-bet-feed-row,
+  .web-bot-chat__virtual-row,
+  .admin-chat-conversation-row,
+  .admin-chat-message-row
+) {
   content-visibility: auto;
   contain: layout paint style;
   contain-intrinsic-size: auto 360px;
+}
+
+#root .app-shell :is(.admin-chat-conversation-list, .admin-chat-message-list) {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  contain: layout paint style;
 }
 
 :root[data-shamrai-app-visible="false"] #root *,
