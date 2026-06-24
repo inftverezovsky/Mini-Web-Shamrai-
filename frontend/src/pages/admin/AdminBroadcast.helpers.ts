@@ -99,6 +99,24 @@ export function getForecastRequestUserIdLabel(request: ForecastRequestResponse) 
   return request.user.is_web_only ? 'Web/VK клиент' : `ID ${request.user.telegram_id}`;
 }
 
+export function forecastRequestWebChatUrl(request: ForecastRequestResponse) {
+  return `/app?open=admin-web-chat&user_id=${encodeURIComponent(String(request.user.telegram_id))}`;
+}
+
+export function forecastRequestTelegramDialogUrl(request: ForecastRequestResponse) {
+  const username = (request.user.username || '').trim().replace(/^@/, '');
+  if (/^[A-Za-z0-9_]{5,32}$/.test(username)) return `https://t.me/${username}`;
+  if (request.user.telegram_id > 0) return `tg://user?id=${request.user.telegram_id}`;
+  return '';
+}
+
+export function forecastRequestVkDialogUrl(request: ForecastRequestResponse) {
+  const rawVkUserId = (request.user.vk_user_id || '').trim();
+  const match = rawVkUserId.match(/^(?:vk[-_]?|id)?(\d+)$/i);
+  if (!match) return '';
+  return `https://vk.com/im?sel=${match[1]}`;
+}
+
 export function requestHasFullForecastAccess(request: ForecastRequestResponse) {
   return isPaidSetRequest(request) || request.user.matches_remaining > 0 || request.user.guarantee_active;
 }

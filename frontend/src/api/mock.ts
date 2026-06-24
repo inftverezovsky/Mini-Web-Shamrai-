@@ -649,6 +649,9 @@ function buildMockUsers() {
     {
       ...baseUser,
       telegram_id: 123456789,
+      vk_user_id: 'vk-123456789',
+      vk_messages_allowed: true,
+      web_push_enabled: false,
       username: 'debug_user',
       first_name: 'Иван',
       last_name: 'Подписчик',
@@ -666,6 +669,9 @@ function buildMockUsers() {
     {
       ...baseUser,
       telegram_id: 223344556,
+      vk_user_id: null,
+      vk_messages_allowed: false,
+      web_push_enabled: false,
       username: 'Gold_ForzaJuve',
       first_name: 'Тимур',
       last_name: 'Голдобин',
@@ -684,6 +690,9 @@ function buildMockUsers() {
     {
       ...baseUser,
       telegram_id: 223344557,
+      vk_user_id: 'vk-223344557',
+      vk_messages_allowed: false,
+      web_push_enabled: false,
       username: 'new_client',
       first_name: 'Мария',
       last_name: 'Новикова',
@@ -701,6 +710,9 @@ function buildMockUsers() {
     {
       ...baseUser,
       telegram_id: 334455667,
+      vk_user_id: 'vk-334455667',
+      vk_messages_allowed: true,
+      web_push_enabled: true,
       username: 'guarantee_client',
       first_name: 'Олег',
       last_name: 'Гарантия',
@@ -726,7 +738,7 @@ function buildMockUsers() {
       subscription_end_date: null,
       bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [1, 4].includes(bookmaker.id)),
     },
-  ];
+  ].map((user) => withMockIdentityFields(user));
 }
 
 function getMockUsers() {
@@ -737,7 +749,14 @@ function getMockUsers() {
       if (
         Array.isArray(users) &&
         users.some((user: any) => user.role === 'user') &&
-        users.every((user: any) => 'client_group' in user && 'client_tag' in user && 'recent_match_results' in user)
+        users.every((user: any) => (
+          'client_group' in user
+          && 'client_tag' in user
+          && 'recent_match_results' in user
+          && 'telegram_connected' in user
+          && 'vk_connected' in user
+          && 'web_push_enabled' in user
+        ))
       ) {
         return users;
       }
@@ -935,11 +954,17 @@ function withMockIdentityFields<T extends { telegram_id: number; vk_user_id: str
     ...(user.vk_user_id ? ['vk'] : []),
   ];
   const missingIdentityProviders = ['telegram', 'vk'].filter((provider) => !identityProviders.includes(provider));
+  const webPushEnabled = Boolean((user as any).web_push_enabled);
   return {
     ...user,
     identity_complete: missingIdentityProviders.length === 0,
     identity_providers: identityProviders,
     missing_identity_providers: missingIdentityProviders,
+    telegram_connected: user.telegram_id > 0,
+    telegram_delivery_enabled: user.telegram_id > 0 && Boolean((user as any).tg_chat_joined),
+    vk_connected: Boolean(user.vk_user_id),
+    vk_delivery_enabled: Boolean(user.vk_user_id) && Boolean((user as any).vk_messages_allowed),
+    web_push_enabled: webPushEnabled,
   };
 }
 
@@ -973,6 +998,7 @@ function getMockUser() {
     vk_group_member: localStorage.getItem('bet_tma_mock_vk_group_member') === 'true',
     vk_messages_allowed: localStorage.getItem('bet_tma_mock_vk_messages_allowed') === 'true',
     vk_notifications_allowed: localStorage.getItem('bet_tma_mock_vk_notifications_allowed') === 'true',
+    web_push_enabled: localStorage.getItem('bet_tma_mock_web_push_enabled') === 'true',
     currency_preference: 'RUB',
     purchased_bets_balance: 12,
     free_bets_available: 0,
@@ -1455,6 +1481,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const priceRub = Number(body?.get('price_rub') || 1500);
     const sportType = body?.get('sport_type') || 'Футбол';
     const teaserText = String(body?.get('teaser_text') || 'Реальный КФ не выше 1.9!');
+    const couponImage = body?.get('coupon_image');
     const selectedBookmakerIds = body
       ? body.getAll('bookmaker_ids')
         .map((value) => Number(value))
@@ -1473,7 +1500,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       sport_type: sportType,
       outcome,
       description: teaserText,
-      coupon_image_url: null,
+      coupon_image_url: couponImage ? '/static/coupons/mock-paid-set-coupon.png' : null,
       match_link: null,
       delivery_mode: 'paid_set',
       price_stars: priceRub,
@@ -2235,6 +2262,16 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       .slice(0, limit);
     return { items, next_before: null, has_more: false };
   }
+  const chatAdminByUserMatch = endpoint.match(/^\/chat\/admin\/conversations\/by-user\/(-?\d+)$/);
+  if (chatAdminByUserMatch && options.method === 'POST') {
+    const userId = Number(chatAdminByUserMatch[1]);
+    const user = getMockUsers().find((item: any) => item.telegram_id === userId);
+    if (!user) throw new Error('Клиент не найден');
+    const latestMessage = getMockSupportMessages()
+      .filter((message: any) => message.user_id === user.telegram_id)
+      .sort((left: any, right: any) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())[0] || null;
+    return mockConversationFromUser(user, latestMessage);
+  }
   const chatAdminMessagesMatch = endpoint.match(/^\/chat\/admin\/conversations\/([^/]+)\/messages$/);
   if (chatAdminMessagesMatch && (!options.method || options.method === 'GET')) {
     const conversationId = chatAdminMessagesMatch[1];
@@ -2319,6 +2356,43 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const messages = [...getMockSupportMessages(), message];
     saveMockSupportMessages(messages);
     return message;
+  }
+  if (endpoint === '/admin/users-page') {
+    const cleanQ = String(queryParams.get('q') || '').trim().toLowerCase();
+    const activity = queryParams.get('activity') || 'all';
+    const group = queryParams.get('group') || 'all';
+    const tag = queryParams.get('tag') || 'all';
+    const limit = Math.max(1, Number(queryParams.get('limit')) || 50);
+    const items = getMockUsers().filter((user: any) => {
+      if (user.role !== 'user') return false;
+      const balance = (user.purchased_bets_balance || 0) !== 0
+        ? user.purchased_bets_balance
+        : user.matches_remaining || 0;
+      const searchable = [
+        user.first_name,
+        user.last_name,
+        user.username,
+        user.telegram_id,
+        user.client_group,
+        user.client_tag,
+        user.other_bookmaker_name,
+      ].join(' ').toLowerCase();
+      const matchesSearch = !cleanQ || searchable.includes(cleanQ);
+      const matchesActivity = activity === 'all'
+        || (activity === 'active' && user.has_active_subscription)
+        || (activity === 'empty' && !user.guarantee_active && balance <= 0)
+        || (activity === 'guarantee' && user.guarantee_active);
+      const matchesGroup = group === 'all' || user.client_group === group;
+      const matchesTag = tag === 'all' || user.client_tag === tag;
+      return matchesSearch && matchesActivity && matchesGroup && matchesTag;
+    });
+    return {
+      items: items.slice(0, limit),
+      next_cursor: null,
+      has_more: false,
+      total: getMockUsers().filter((user: any) => user.role === 'user').length,
+      filtered_total: items.length,
+    };
   }
   if (endpoint === '/admin/users') return getMockUsers().filter((user: any) => user.role === 'user');
   if (endpoint === '/admin/admins') return getMockUsers().filter((user: any) => user.role !== 'user');

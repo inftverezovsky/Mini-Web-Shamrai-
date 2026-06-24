@@ -4417,8 +4417,51 @@
 #root .app-shell :is(.admin-chat-conversation-list, .admin-chat-message-list) {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.48) rgba(2, 6, 23, 0.58);
   -webkit-overflow-scrolling: touch;
   contain: layout paint style;
+}
+
+#root .app-shell :is(.web-bot-chat__list, .admin-chat-conversation-list, .admin-chat-message-list) {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.48) rgba(2, 6, 23, 0.58);
+}
+
+#root .app-shell :is(.web-bot-chat__list, .admin-chat-conversation-list, .admin-chat-message-list)::-webkit-scrollbar {
+  width: 0.58rem;
+  height: 0.58rem;
+}
+
+#root .app-shell :is(.web-bot-chat__list, .admin-chat-conversation-list, .admin-chat-message-list)::-webkit-scrollbar-track {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.42), rgba(2, 6, 23, 0.76)),
+    rgba(2, 6, 23, 0.62);
+}
+
+#root .app-shell :is(.web-bot-chat__list, .admin-chat-conversation-list, .admin-chat-message-list)::-webkit-scrollbar-thumb {
+  min-height: 2.75rem;
+  border: 2px solid rgba(2, 6, 23, 0.86);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(103, 232, 249, 0.84), rgba(34, 211, 238, 0.42)),
+    rgba(34, 211, 238, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 0 16px rgba(34, 211, 238, 0.18);
+}
+
+#root .app-shell :is(.web-bot-chat__list, .admin-chat-conversation-list, .admin-chat-message-list)::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(180deg, rgba(165, 243, 252, 0.96), rgba(34, 211, 238, 0.58)),
+    rgba(34, 211, 238, 0.5);
+}
+
+#root .app-shell .chat-cover-backdrop {
+  background:
+    linear-gradient(180deg, rgba(2, 6, 23, 0.74), rgba(2, 6, 23, 0.86)),
+    url("/images/admin-chat-bg.jpg") center / cover no-repeat,
+    #020617;
 }
 
 :root[data-shamrai-app-visible="false"] #root *,
@@ -4560,6 +4603,8 @@
 #root .app-shell .web-bot-chat__list {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.48) rgba(2, 6, 23, 0.58);
   -webkit-overflow-scrolling: touch;
 }
 

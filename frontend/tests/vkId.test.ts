@@ -21,6 +21,7 @@ function memoryStorage() {
 
 function setBrowserEnv(search = '') {
   const assign = vi.fn();
+  const open = vi.fn();
   const replaceState = vi.fn();
   const localStorage = memoryStorage();
   const sessionStorage = memoryStorage();
@@ -40,11 +41,12 @@ function setBrowserEnv(search = '') {
       href: `https://shamra1.pro/${search}`,
       assign,
     },
+    open,
     history: {
       replaceState,
     },
   });
-  return { assign, replaceState, localStorage, sessionStorage };
+  return { assign, open, replaceState, localStorage, sessionStorage };
 }
 
 describe('VK ID auth helper', () => {
@@ -78,6 +80,38 @@ describe('VK ID auth helper', () => {
     expect(assign).toHaveBeenCalledWith('https://id.vk.ru/authorize?response_type=code&state=server-state');
     expect(getVkAuthCooldownStatus().active).toBe(false);
     expect(localStorage.setItem).not.toHaveBeenCalledWith('shamrai_vk_auth_retry_after', expect.any(String));
+  });
+
+  it('opens VK redirect externally inside Telegram runtime', async () => {
+    const { assign, open } = setBrowserEnv('?tgWebAppData=signed');
+    const openLink = vi.fn();
+    (window as any).Telegram = {
+      WebApp: {
+        initData: 'signed',
+        openLink,
+      },
+    };
+    apiFetchMock.mockResolvedValue({
+      authorize_url: 'https://id.vk.ru/authorize?response_type=code&state=server-state',
+      state: 'server-state',
+      expires_in: 600,
+    });
+    const { startVkRedirectFlow, isVkRedirectStartedError, getVkRedirectMode } = await import('../src/utils/vkId');
+
+    try {
+      await startVkRedirectFlow('link');
+      throw new Error('redirect should interrupt control flow');
+    } catch (error) {
+      expect(isVkRedirectStartedError(error)).toBe(true);
+      expect(getVkRedirectMode(error)).toBe('external');
+    }
+
+    expect(openLink).toHaveBeenCalledWith(
+      'https://id.vk.ru/authorize?response_type=code&state=server-state',
+      { try_instant_view: false },
+    );
+    expect(assign).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it('consumes VK redirect callback without local flow storage', async () => {

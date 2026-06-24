@@ -4,6 +4,7 @@ import {
   AlertCircle,
   BarChart3,
   RefreshCw,
+  Sparkles,
   Trophy,
 } from 'lucide-react';
 
@@ -215,11 +216,17 @@ export default function MyBets() {
           <StatsKpiGrid summary={summary} valueMode="flats" showProfit={false} />
 
           <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Макс. серия побед" value={summary.max_win_streak} tone="text-emerald-200" />
+            <StatTile
+              label="Макс. серия побед"
+              value={summary.max_win_streak}
+              tone="text-emerald-200"
+              icon={<Trophy className="h-4 w-4 text-emerald-300" />}
+            />
             <StatTile
               label="Текущая серия"
               value={summary.current_streak ? streakLabel(summary) : '-'}
               tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
+              icon={<Sparkles className="h-4 w-4 text-amber-200" />}
             />
           </div>
 

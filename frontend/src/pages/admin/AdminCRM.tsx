@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   BadgeCheck,
   Calendar,
+  CheckCircle2,
   CheckSquare,
   ChevronDown,
   Clock,
@@ -30,6 +31,7 @@ import {
   TrendingDown,
   Users,
   X,
+  XCircle,
 } from 'lucide-react';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import {
@@ -61,6 +63,17 @@ interface CRMUser {
   client_group: string | null;
   client_tag: string | null;
   ab_group: string | null;
+  identity_providers?: string[];
+  missing_identity_providers?: string[];
+  telegram_connected?: boolean;
+  telegram_delivery_enabled?: boolean;
+  vk_user_id?: string | null;
+  vk_group_member?: boolean;
+  vk_messages_allowed?: boolean;
+  vk_notifications_allowed?: boolean;
+  vk_connected?: boolean;
+  vk_delivery_enabled?: boolean;
+  web_push_enabled?: boolean;
   tg_chat_joined: boolean;
   badges: Array<{ id: number; title: string; icon_type: string }>;
   recent_match_results: ClientRecentMatchResult[];
@@ -216,6 +229,91 @@ function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) 
   );
 }
 
+function ConnectionMark({ enabled, label }: { enabled: boolean; label: string }) {
+  const Icon = enabled ? CheckCircle2 : XCircle;
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 rounded-md px-1 py-0.5 ${
+        enabled ? 'bg-emerald-300/10 text-emerald-100' : 'bg-rose-300/10 text-rose-100'
+      }`}
+      title={label}
+      aria-label={`${label}: ${enabled ? 'да' : 'нет'}`}
+    >
+      <Icon className="h-3 w-3" />
+    </span>
+  );
+}
+
+function ClientConnectionBadges({ user }: { user: CRMUser }) {
+  const telegramConnected = user.telegram_connected ?? user.telegram_id > 0;
+  const telegramSynced = user.telegram_delivery_enabled ?? Boolean(user.tg_chat_joined);
+  const vkConnected = user.vk_connected ?? Boolean(user.vk_user_id);
+  const vkSynced = user.vk_delivery_enabled ?? Boolean(user.vk_messages_allowed);
+  const webPushEnabled = Boolean(user.web_push_enabled);
+  const channels = [
+    {
+      key: 'telegram',
+      label: 'TG',
+      auth: telegramConnected,
+      sync: telegramSynced,
+      title: `Telegram: вход ${telegramConnected ? 'есть' : 'нет'}, синхронизация ${telegramSynced ? 'есть' : 'нет'}`,
+    },
+    {
+      key: 'vk',
+      label: 'VK',
+      auth: vkConnected,
+      sync: vkSynced,
+      title: `VK: вход ${vkConnected ? 'есть' : 'нет'}, сообщения ${vkSynced ? 'разрешены' : 'не разрешены'}`,
+    },
+    {
+      key: 'web',
+      label: 'Web',
+      auth: webPushEnabled,
+      sync: webPushEnabled,
+      title: `Web Push: ${webPushEnabled ? 'подключен' : 'не подключен'}`,
+      pushOnly: true,
+    },
+  ];
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-label="Статусы авторизации и синхронизации клиента">
+      {channels.map((channel) => {
+        const ready = channel.pushOnly ? channel.sync : channel.auth && channel.sync;
+        const partiallyReady = !ready && channel.auth;
+        const toneClass = ready
+          ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
+          : partiallyReady
+            ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+            : 'border-rose-300/18 bg-rose-300/[0.08] text-rose-100';
+
+        return (
+          <span
+            key={channel.key}
+            className={`inline-flex min-h-[24px] items-center gap-1.5 rounded-lg border px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] ${toneClass}`}
+            title={channel.title}
+          >
+            <span>{channel.label}</span>
+            {channel.pushOnly ? (
+              <ConnectionMark enabled={channel.sync} label="Web Push" />
+            ) : (
+              <>
+                <span className="inline-flex items-center gap-0.5 text-[7px] text-current/80">
+                  Вход
+                  <ConnectionMark enabled={channel.auth} label={`${channel.label} авторизация`} />
+                </span>
+                <span className="inline-flex items-center gap-0.5 text-[7px] text-current/80">
+                  Синк
+                  <ConnectionMark enabled={channel.sync} label={`${channel.label} синхронизация`} />
+                </span>
+              </>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function ClientIntelligenceRow({
   user,
   onOpen,
@@ -264,6 +362,7 @@ function ClientIntelligenceRow({
                   A/B {user.ab_group || 'A'}
                 </span>
               </div>
+              <ClientConnectionBadges user={user} />
             </div>
           </div>
         </div>
@@ -852,6 +951,7 @@ export default function AdminCRM() {
               <p className="truncate text-[10px] font-bold uppercase tracking-[0.08em] text-slate-450">
                 {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
               </p>
+              <ClientConnectionBadges user={selectedUser} />
               <div className="grid grid-cols-3 gap-2 pt-2">
                 <StatTile
                   label="Баланс"

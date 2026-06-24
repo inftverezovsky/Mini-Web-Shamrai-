@@ -135,8 +135,13 @@ def chat_user_payload(user: User) -> dict[str, Any]:
     }
 
 
-def chat_message_payload(message: ChatMessage) -> dict[str, Any]:
+def chat_message_payload(
+    message: ChatMessage,
+    *,
+    read_at_by_message_id: Optional[dict[int, datetime]] = None,
+) -> dict[str, Any]:
     direction = "client" if message.sender_role == "user" else "staff"
+    read_at = (read_at_by_message_id or {}).get(int(message.id or 0))
     return {
         "id": message.id,
         "conversation_id": str(message.conversation_id),
@@ -152,6 +157,7 @@ def chat_message_payload(message: ChatMessage) -> dict[str, Any]:
         "created_at": message.created_at.isoformat() if message.created_at else utc_now().isoformat(),
         "edited_at": message.edited_at.isoformat() if message.edited_at else None,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
+        "read_at": read_at.isoformat() if read_at else None,
     }
 
 
@@ -231,6 +237,54 @@ async def get_read_cursor(
     )
     value = result.scalar()
     return int(value) if value is not None else None
+
+
+async def read_receipts_for_messages(
+    db: AsyncSession,
+    *,
+    conversation: ChatConversation,
+    messages: list[ChatMessage],
+) -> dict[int, datetime]:
+    if not messages:
+        return {}
+
+    read_at_by_message_id: dict[int, datetime] = {}
+    owner_cursor_result = await db.execute(
+        select(ChatReadCursor.last_read_message_id, ChatReadCursor.updated_at).filter(
+            ChatReadCursor.conversation_id == conversation.id,
+            ChatReadCursor.user_id == conversation.owner_user_id,
+        )
+    )
+    owner_cursor = owner_cursor_result.first()
+    if owner_cursor and owner_cursor.last_read_message_id:
+        owner_last_read = int(owner_cursor.last_read_message_id)
+        owner_read_at = owner_cursor.updated_at or utc_now()
+        for message in messages:
+            if message.sender_role != "user" and int(message.id) <= owner_last_read:
+                read_at_by_message_id[int(message.id)] = owner_read_at
+
+    staff_cursor_result = await db.execute(
+        select(ChatReadCursor.last_read_message_id, ChatReadCursor.updated_at)
+        .join(User, User.telegram_id == ChatReadCursor.user_id)
+        .filter(
+            ChatReadCursor.conversation_id == conversation.id,
+            User.role.in_(list(STAFF_ROLES)),
+        )
+    )
+    staff_cursors = list(staff_cursor_result.all())
+    if staff_cursors:
+        for message in messages:
+            if message.sender_role != "user":
+                continue
+            message_id = int(message.id)
+            for last_read_message_id, updated_at in staff_cursors:
+                if last_read_message_id and int(last_read_message_id) >= message_id:
+                    read_at = updated_at or utc_now()
+                    existing = read_at_by_message_id.get(message_id)
+                    if existing is None or read_at > existing:
+                        read_at_by_message_id[message_id] = read_at
+
+    return read_at_by_message_id
 
 
 async def advance_read_cursor(
@@ -411,8 +465,16 @@ async def paginated_support_messages(
     has_more = len(messages) > safe_limit
     page_messages = list(reversed(messages[:safe_limit]))
     next_before_id = page_messages[0].id if has_more and page_messages else None
+    read_at_by_message_id = await read_receipts_for_messages(
+        db,
+        conversation=conversation,
+        messages=page_messages,
+    )
     return {
-        "items": [chat_message_payload(message) for message in page_messages],
+        "items": [
+            chat_message_payload(message, read_at_by_message_id=read_at_by_message_id)
+            for message in page_messages
+        ],
         "next_before_id": next_before_id,
         "has_more": has_more,
     }
@@ -624,6 +686,33 @@ chat_stream_hub = ChatStreamHub()
 async def staff_users(db: AsyncSession) -> list[User]:
     result = await db.execute(select(User).filter(User.role.in_(list(STAFF_ROLES))))
     return list(result.scalars().all())
+
+
+def chat_read_updated_payload(*, conversation: ChatConversation, reader: User, cursor: ChatReadCursor) -> dict[str, Any]:
+    return {
+        "event": "chat.read.updated",
+        "conversation_id": str(conversation.id),
+        "user_id": reader.telegram_id,
+        "reader_user_id": reader.telegram_id,
+        "reader_role": reader.role,
+        "reader_direction": "client" if reader.role == "user" else "staff",
+        "last_read_message_id": cursor.last_read_message_id,
+        "updated_at": cursor.updated_at.isoformat() if cursor.updated_at else None,
+    }
+
+
+async def emit_read_cursor_updated(
+    db: AsyncSession,
+    *,
+    conversation: ChatConversation,
+    reader: User,
+    cursor: ChatReadCursor,
+) -> None:
+    staff_user_ids = [staff_user.telegram_id for staff_user in await staff_users(db)]
+    await chat_stream_hub.send_to_users(
+        [conversation.owner_user_id, *staff_user_ids],
+        chat_read_updated_payload(conversation=conversation, reader=reader, cursor=cursor),
+    )
 
 
 async def emit_message_created(db: AsyncSession, *, conversation: ChatConversation, message: ChatMessage) -> None:

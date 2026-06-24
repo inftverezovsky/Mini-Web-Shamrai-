@@ -4,7 +4,10 @@ import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import LogoText from './LogoText';
 import TelegramAuthAssist from './TelegramAuthAssist';
 import { getVkAuthCooldownStatus, getVkIdConfig } from '../utils/vkId';
+import { pickPrimaryAuthProvider, type IdentityProvider } from '../utils/identityAccess';
 import { trackEvent, trackPageView } from '../utils/analytics';
+import { hasTelegramLaunchParams, isTelegramMiniApp } from '../utils/telegramSdk';
+import { isVkMiniAppRuntime } from '../utils/vkDelivery';
 
 export default function BrowserAuthScreen() {
   const error = useAuthSelector((state) => state.error);
@@ -22,6 +25,15 @@ export default function BrowserAuthScreen() {
   const showVkLogin = vkConfig.ready && vkConfig.originCompatible;
   const secureAppUrl = vkConfig.canonicalAppUrl || 'https://shamra1.pro/app/';
   const vkLoginDisabled = vkBusy || loading || vkCooldown.active;
+  const primaryProvider = pickPrimaryAuthProvider({
+    runsInTelegramMiniApp: isTelegramMiniApp(),
+    hasTelegramLaunchParams: hasTelegramLaunchParams(),
+    runsInVkApp: isVkMiniAppRuntime(),
+    vkReady: showVkLogin,
+    vkOriginCompatible: vkConfig.originCompatible,
+    telegramAvailable: Boolean(botUsername),
+  });
+  const secondaryProvider: IdentityProvider = primaryProvider === 'telegram' ? 'vk' : 'telegram';
 
   React.useEffect(() => {
     trackPageView('/auth', {
@@ -72,6 +84,87 @@ export default function BrowserAuthScreen() {
     }
   };
 
+  const handlePrimaryLogin = () => (
+    primaryProvider === 'vk' ? handleVkLogin() : handleTelegramLogin()
+  );
+
+  const renderVkAction = (variant: 'primary' | 'secondary') => {
+    const content = (
+      <>
+        {vkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
+        <span>
+          {variant === 'primary'
+            ? (vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Начать')
+            : (vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Войти через VK ID')}
+        </span>
+      </>
+    );
+
+    if (showVkLogin) {
+      return (
+        <button
+          type="button"
+          onClick={variant === 'primary' ? handlePrimaryLogin : handleVkLogin}
+          disabled={vkLoginDisabled}
+          className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 ${
+            variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
+          }`}
+        >
+          {content}
+        </button>
+      );
+    }
+
+    if (vkConfig.configured) {
+      return (
+        <a
+          href={secureAppUrl}
+          className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] ${
+            variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
+          }`}
+        >
+          <ExternalLink className="h-4 w-4" />
+          <span>{variant === 'primary' ? 'Начать' : 'Открыть защищенный вход'}</span>
+        </a>
+      );
+    }
+
+    if (variant === 'secondary') return null;
+
+    return (
+      <button
+        type="button"
+        disabled
+        className="auth-readable-action shamrai-glass-button group relative flex min-h-[54px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white opacity-55"
+      >
+        <LogIn className="h-4 w-4" />
+        <span>Начать</span>
+      </button>
+    );
+  };
+
+  const renderTelegramAction = (variant: 'primary' | 'secondary') => {
+    if (!botUsername) return null;
+
+    return (
+      <button
+        type="button"
+        onClick={variant === 'primary' ? handlePrimaryLogin : handleTelegramLogin}
+        disabled={telegramBusy || loading}
+        className={`auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden px-4 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 ${
+          variant === 'primary' ? 'min-h-[54px] rounded-2xl py-3.5' : 'min-h-[46px] rounded-xl py-2.5'
+        }`}
+      >
+        {telegramBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
+        <span>
+          {telegramBusy
+            ? 'Ожидаем Start в Telegram'
+            : variant === 'primary' ? 'Начать' : 'Войти через Telegram'}
+        </span>
+      </button>
+    );
+  };
+
   return (
     <div className="app-shell start-screen compact-ui relative z-10 flex min-h-screen items-center justify-center px-4 py-8 text-slate-50">
       <div className="ambient-field" aria-hidden="true">
@@ -96,54 +189,29 @@ export default function BrowserAuthScreen() {
           </div>
 
           <div className="space-y-4">
-            {showVkLogin ? (
-              <button
-                type="button"
-                onClick={handleVkLogin}
-                disabled={vkLoginDisabled}
-                className="auth-readable-action shamrai-glass-button group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                {vkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-                <span>{vkCooldown.active ? `VK ID через ${Math.ceil(vkCooldown.remainingSeconds / 60)} мин.` : 'Войти или создать через VK ID'}</span>
-              </button>
-            ) : vkConfig.configured ? (
-              <a
-                href={secureAppUrl}
-                className="auth-readable-action shamrai-glass-button group relative flex min-h-[50px] w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3 text-sm font-black text-white transition-all active:scale-[0.98]"
-              >
-                <ExternalLink className="h-4 w-4" />
-                <span>Открыть защищенный вход</span>
-              </a>
-            ) : (
-              <p className="rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] font-semibold text-amber-200">
-                VK ID не настроен для этой сборки.
-              </p>
-            )}
+            {primaryProvider === 'vk' ? renderVkAction('primary') : renderTelegramAction('primary')}
+
+            {telegramBusy && <TelegramAuthAssist botUrl={telegramAuthBotUrl} />}
+
+            <div className="grid gap-2">
+              {secondaryProvider === 'vk' ? renderVkAction('secondary') : renderTelegramAction('secondary')}
+              {secondaryProvider === 'vk' && !showVkLogin && !vkConfig.configured && (
+                <p className="rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] font-semibold text-amber-200">
+                  VK ID не настроен для этой сборки.
+                </p>
+              )}
+            </div>
 
             {botUsername ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleTelegramLogin}
-                  disabled={telegramBusy || loading}
-                  className="auth-readable-action shamrai-glass-button group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-2xl px-4 py-3.5 text-sm font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
-                >
-                  {telegramBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-                  <span>{telegramBusy ? 'Ожидаем Start в Telegram' : 'Войти или создать через Telegram'}</span>
-                </button>
-
-                {telegramBusy && <TelegramAuthAssist botUrl={telegramAuthBotUrl} />}
-
-                <a
-                  href={telegramBotUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mx-auto flex w-fit items-center justify-center gap-1.5 px-2 text-[11px] font-bold text-slate-400 transition hover:text-cyan-100"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  <span>Открыть бота без входа</span>
-                </a>
-              </>
+              <a
+                href={telegramBotUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mx-auto flex w-fit items-center justify-center gap-1.5 px-2 text-[11px] font-bold text-slate-400 transition hover:text-cyan-100"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                <span>Открыть бота без входа</span>
+              </a>
             ) : (
               <p className="text-[11px] font-semibold text-amber-200">
                 Не указан `VITE_TELEGRAM_BOT_USERNAME`.

@@ -1,5 +1,6 @@
 import { DEBUG_AUTH_ENABLED } from '../config/api';
 import { ApiRequestError, apiFetch } from './api';
+import { getTelegramWebApp, hasTelegramLaunchParams, isTelegramMiniApp } from './telegramSdk';
 
 export interface VkLinkResponse {
   status: string;
@@ -14,6 +15,7 @@ export interface VkLoginResponse {
 }
 
 export type VkRedirectAction = 'login' | 'link';
+export type VkRedirectMode = 'same-window' | 'external';
 
 export interface VkRedirectResult {
   payload: {
@@ -42,15 +44,30 @@ const VK_AUTH_COOLDOWN_STORAGE_KEY = 'shamrai_vk_auth_retry_after';
 const VK_AUTH_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 export class VkRedirectStartedError extends Error {
-  constructor() {
+  mode: VkRedirectMode;
+  authorizeUrl?: string;
+
+  constructor(mode: VkRedirectMode = 'same-window', authorizeUrl?: string) {
     super('VK redirect authorization started');
     this.name = 'VkRedirectStartedError';
+    this.mode = mode;
+    this.authorizeUrl = authorizeUrl;
   }
 }
 
 export function isVkRedirectStartedError(error: unknown) {
   return error instanceof VkRedirectStartedError
     || (typeof error === 'object' && error !== null && (error as { name?: string }).name === 'VkRedirectStartedError');
+}
+
+export function getVkRedirectMode(error: unknown): VkRedirectMode {
+  return (
+    typeof error === 'object'
+    && error !== null
+    && (error as { mode?: VkRedirectMode }).mode === 'external'
+  )
+    ? 'external'
+    : 'same-window';
 }
 
 function safeStorageSet(storage: Storage | undefined, key: string, value: string) {
@@ -204,6 +221,30 @@ export function isVkIdReady() {
   return getVkIdConfig().ready;
 }
 
+function shouldOpenVkAuthExternally() {
+  return isTelegramMiniApp() || hasTelegramLaunchParams();
+}
+
+function openVkAuthorizeUrl(authorizeUrl: string): never {
+  if (shouldOpenVkAuthExternally()) {
+    const telegramWebApp = getTelegramWebApp<{
+      openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+    }>();
+    if (telegramWebApp?.openLink) {
+      telegramWebApp.openLink(authorizeUrl, { try_instant_view: false });
+      throw new VkRedirectStartedError('external', authorizeUrl);
+    }
+
+    const openedWindow = window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+    if (openedWindow) {
+      throw new VkRedirectStartedError('external', authorizeUrl);
+    }
+  }
+
+  window.location.assign(authorizeUrl);
+  throw new VkRedirectStartedError('same-window', authorizeUrl);
+}
+
 export async function startVkRedirectFlow(action: VkRedirectAction): Promise<never> {
   const { configured, originCompatible, canonicalAppUrl } = getVkIdConfig();
   const cooldown = getVkAuthCooldownStatus();
@@ -225,8 +266,7 @@ export async function startVkRedirectFlow(action: VkRedirectAction): Promise<nev
     method: 'POST',
     body: JSON.stringify({ action }),
   });
-  window.location.assign(start.authorize_url);
-  throw new VkRedirectStartedError();
+  openVkAuthorizeUrl(start.authorize_url);
 }
 
 function getDebugVkAuthPayload() {

@@ -345,7 +345,7 @@ def _normalized_target_value(value: Optional[object]) -> str:
 def _bookmaker_logo_path(bookmaker: Bookmaker) -> str:
     code = str(bookmaker.code or "other").strip().lower()
     if code == "other":
-        return "/bookmakers/other.svg"
+        return "/bookmakers/other.jpg"
     if code == "olimp":
         code = "olimpbet"
     return f"/bookmakers/transparent/{code}.png"
@@ -1036,6 +1036,7 @@ async def create_paid_set_broadcast(
     bookmaker_id: Optional[int] = Form(None),
     sport_type: Optional[str] = Form(None, max_length=120),
     teaser_text: Optional[str] = Form(None, max_length=4000),
+    coupon_image: Optional[UploadFile] = File(None),
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1075,6 +1076,7 @@ async def create_paid_set_broadcast(
         )
 
     selected_bookmakers = await _load_bookmakers(db, selected_bookmaker_ids)
+    coupon_url = await _store_coupon_image(coupon_image)
 
     bet = Bet(
         event_name=clean_event_name,
@@ -1088,6 +1090,7 @@ async def create_paid_set_broadcast(
         status="pending",
         delivery_mode=DELIVERY_MODE_PAID_SET,
         author_id=current_admin.telegram_id,
+        coupon_image_url=coupon_url,
     )
     bet.bookmakers = selected_bookmakers
     db.add(bet)

@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react';
-import { Bot, Check, Clock3, Image as ImageIcon, Mic, RefreshCw, User } from 'lucide-react';
+import { Bot, Check, CheckCheck, Clock3, Image as ImageIcon, Mic, RefreshCw, User } from 'lucide-react';
 
 import { ChatMessageResponse } from '../../schemas/schemas';
 import { API_BASE_URL } from '../../utils/api';
@@ -160,6 +160,8 @@ function SupportMessageBubble({
   const cornerClass = alignRight ? 'rounded-br-md' : 'rounded-bl-md';
   const avatarClass = staff ? 'text-cyan-100' : 'text-fuchsia-100';
   const AvatarIcon = staff ? Bot : User;
+  const showDeliveryReceipt = alignRight;
+  const receiptRead = Boolean(message.read_at);
   const messageBody = useMemo(() => renderMessageBody(message), [message]);
 
   return (
@@ -177,26 +179,29 @@ function SupportMessageBubble({
         {messageBody}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-black uppercase tracking-[0.14em] text-white/40">
           <span>{messageTime(message.created_at)}</span>
-          {deliveryState === 'sending' && (
-            <span className="inline-flex items-center gap-1 text-cyan-100/70">
+          {showDeliveryReceipt && deliveryState === 'sending' && (
+            <span className="inline-flex items-center text-cyan-100/70" title="Отправляем" aria-label="Отправляем">
               <Clock3 className="h-3 w-3" />
-              sending
             </span>
           )}
-          {deliveryState === 'sent' && (
-            <span className="inline-flex items-center gap-1">
-              <Check className="h-3 w-3" />
-              sent
+          {showDeliveryReceipt && deliveryState === 'sent' && (
+            <span
+              className={receiptRead ? 'inline-flex items-center text-emerald-300' : 'inline-flex items-center text-white/70'}
+              title={receiptRead ? 'Прочитано' : 'Доставлено'}
+              aria-label={receiptRead ? 'Прочитано' : 'Доставлено'}
+            >
+              {receiptRead ? <CheckCheck className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
             </span>
           )}
-          {deliveryState === 'failed' && onRetry && (
+          {showDeliveryReceipt && deliveryState === 'failed' && onRetry && (
             <button
               type="button"
               onClick={() => onRetry(message)}
+              title="Повторить отправку"
+              aria-label="Повторить отправку"
               className="inline-flex items-center gap-1 rounded-lg border border-rose-200/25 bg-rose-300/10 px-2 py-1 text-rose-100 transition hover:bg-rose-300/18"
             >
               <RefreshCw className="h-3 w-3" />
-              retry
             </button>
           )}
         </div>

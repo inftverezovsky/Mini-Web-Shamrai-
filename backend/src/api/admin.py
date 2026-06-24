@@ -160,6 +160,10 @@ def build_admin_user_response(
         if (user.purchased_bets_balance or 0) != 0
         else (user.matches_remaining or 0)
     )
+    web_push_subscription = getattr(user, "web_push_subscription", None)
+    web_push_enabled = isinstance(web_push_subscription, dict) and bool(web_push_subscription.get("endpoint"))
+    telegram_connected = user.telegram_id > 0
+    vk_connected = bool(user.vk_user_id)
     return {
         "telegram_id": user.telegram_id,
         "username": user.username,
@@ -167,6 +171,17 @@ def build_admin_user_response(
         "last_name": user.last_name,
         "photo_url": user.photo_url,
         "is_web_only": user.is_web_only,
+        "identity_providers": user.identity_providers,
+        "missing_identity_providers": user.missing_identity_providers,
+        "telegram_connected": telegram_connected,
+        "telegram_delivery_enabled": telegram_connected and bool(user.tg_chat_joined),
+        "vk_user_id": user.vk_user_id,
+        "vk_group_member": bool(user.vk_group_member),
+        "vk_messages_allowed": bool(user.vk_messages_allowed),
+        "vk_notifications_allowed": bool(user.vk_notifications_allowed),
+        "vk_connected": vk_connected,
+        "vk_delivery_enabled": vk_connected and bool(user.vk_messages_allowed),
+        "web_push_enabled": web_push_enabled,
         "role": user.role,
         "stats_display_mode": user.stats_display_mode,
         "has_active_subscription": match_balance > 0 or user.guarantee_active,

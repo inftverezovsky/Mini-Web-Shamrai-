@@ -546,6 +546,10 @@ if [ -d "$RemotePath" ]; then
   printf '%s\n' "`$backup_path" > "`$backup_marker"
 fi
 mv "`$stage_path" "$RemotePath"
+find "$RemotePath" -type d -exec chmod 0755 {} +
+find "$RemotePath" -type f -exec chmod 0644 {} +
+[ -f "$RemotePath/.env" ] && chmod 0600 "$RemotePath/.env"
+[ -f "$RemotePath/backend/.env" ] && chmod 0600 "$RemotePath/backend/.env"
 trap rollback_code ERR
 cd "$RemotePath"
 docker compose -p "$ComposeProject" up -d postgres
@@ -637,6 +641,8 @@ done
 printf '%s\n' "`$nginx_backup" > "`$nginx_backup_marker"
 
 mv "`$web_stage" "$PublicWebRoot"
+find "$PublicWebRoot" -type d -exec chmod 0755 {} +
+find "$PublicWebRoot" -type f -exec chmod 0644 {} +
 install -m 0644 /tmp/shamrai.conf /etc/nginx/sites-available/shamrai.conf
 for enabled in /etc/nginx/sites-enabled/*; do
   [ -e "`$enabled" ] || continue

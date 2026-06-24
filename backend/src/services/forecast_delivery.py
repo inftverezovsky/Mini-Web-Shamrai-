@@ -89,7 +89,7 @@ BOOKMAKER_LOGO_PATHS = {
     "olimp": "/bookmakers/transparent/olimpbet.png",
     "zenit": "/bookmakers/transparent/zenit.png",
     "bettery": "/bookmakers/transparent/bettery.png",
-    "other": "/bookmakers/other.svg",
+    "other": "/bookmakers/other.jpg",
 }
 
 
@@ -543,6 +543,60 @@ def _client_display(user: User) -> str:
     return display_name or f"ID {user.telegram_id}"
 
 
+def _telegram_client_dialog_url(user: User) -> Optional[str]:
+    username = str(getattr(user, "username", "") or "").strip().lstrip("@")
+    if username and re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        return f"https://t.me/{username}"
+    try:
+        telegram_id = int(getattr(user, "telegram_id", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if telegram_id <= 0:
+        return None
+    return f"tg://user?id={telegram_id}"
+
+
+def _vk_client_dialog_id(user: User) -> Optional[str]:
+    raw_vk_user_id = str(getattr(user, "vk_user_id", "") or "").strip()
+    match = re.fullmatch(r"(?:vk[-_]?|id)?(\d+)", raw_vk_user_id, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        vk_user_id = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return str(vk_user_id) if vk_user_id > 0 else None
+
+
+def _vk_client_dialog_url(user: User) -> Optional[str]:
+    vk_user_id = _vk_client_dialog_id(user)
+    return f"https://vk.com/im?sel={vk_user_id}" if vk_user_id else None
+
+
+def _admin_web_chat_url(user: User) -> Optional[str]:
+    base_url = settings.FRONTEND_BASE_URL.strip().rstrip("/") or "/app"
+    try:
+        user_id = int(getattr(user, "telegram_id", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}open=admin-web-chat&user_id={user_id}"
+
+
+def _paid_set_admin_dialog_buttons(user: User) -> list[dict[str, str]]:
+    buttons: list[dict[str, str]] = []
+    telegram_url = _telegram_client_dialog_url(user)
+    if telegram_url:
+        buttons.append({"text": "Продажа в диалоге", "url": telegram_url})
+    vk_url = _vk_client_dialog_url(user)
+    if vk_url:
+        buttons.append({"text": "VK диалог", "url": vk_url})
+    web_url = _admin_web_chat_url(user)
+    if web_url:
+        buttons.append({"text": "Web чат", "url": web_url})
+    return buttons
+
+
 def _already_taken_access_result(forecast_request: ForecastRequest) -> UserBetAccessResult:
     current_balance = user_match_balance(forecast_request.user)
     return UserBetAccessResult(
@@ -935,6 +989,173 @@ def build_web_paid_set_signal_data(
     }
 
 
+def build_paid_set_sale_message(forecast_request: ForecastRequest) -> str:
+    bet = forecast_request.bet
+    description = _trim_text(getattr(bet, "description", None), 1400)
+    lines = [
+        "✅ <b>Набор оформлен</b>",
+        f"Матч: <b>{_html(bet.event_name or PAID_SET_PLACEHOLDER_EVENT_NAME)}</b>",
+        f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>",
+        f"КФ: <b>{_html(_coefficient_text(bet))}</b>",
+        f"Стоимость: <b>{_html(_format_rub_price(getattr(bet, 'price_stars', None)))}</b>",
+        f"БК: {_bookmaker_labels_for_bet(bet)}",
+        f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>",
+    ]
+    if description:
+        lines.append(_html(description))
+    contact_footer = append_contact_footer("").strip()
+    if contact_footer:
+        lines.append(contact_footer)
+    return "\n\n".join(lines)
+
+
+def build_web_paid_set_sale_text(forecast_request: ForecastRequest) -> str:
+    return html_to_vk_text(build_paid_set_sale_message(forecast_request))
+
+
+def build_web_paid_set_sale_signal_data(
+    forecast_request: ForecastRequest,
+    *,
+    status_value: Optional[str] = None,
+) -> dict[str, object]:
+    bet = forecast_request.bet
+    message_html = build_paid_set_sale_message(forecast_request)
+    return {
+        "message_html": message_html,
+        "message_text": html_to_vk_text(message_html),
+        "coupon_image_url": bet.coupon_image_url,
+        "bookmakers": _bookmaker_web_items(bet),
+        "event_name": bet.event_name,
+        "outcome": bet.outcome,
+        "coefficient": _coefficient_text(bet),
+        "sport_type": bet.sport_type,
+        "description": bet.description,
+        "forecast_request_id": str(forecast_request.id),
+        "forecast_status": status_value or forecast_request.status,
+        "bet_id": str(getattr(forecast_request, "bet_id", None) or getattr(bet, "id", "")),
+        "request_kind": "paid_set",
+        "price_text": _format_rub_price(getattr(bet, "price_stars", None)),
+    }
+
+
+def send_paid_set_sale_to_client(
+    forecast_request: ForecastRequest,
+) -> dict:
+    if not is_personal_telegram_user_id(forecast_request.user_id):
+        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
+
+    bet = forecast_request.bet
+    message = build_paid_set_sale_message(forecast_request)
+    reply_markup = _bookmaker_link_reply_markup(bet)
+    coupon_file_path = _local_static_asset_path(bet.coupon_image_url)
+    coupon_url = None if coupon_file_path else _public_asset_url(bet.coupon_image_url)
+    use_full_caption = _fits_photo_caption(message)
+    coupon_caption = message if use_full_caption else _short_coupon_caption(bet.event_name)
+
+    if coupon_file_path:
+        filename = os.path.basename(coupon_file_path)
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        with open(coupon_file_path, "rb") as file_obj:
+            payload = {
+                "chat_id": forecast_request.user_id,
+                "caption": coupon_caption,
+            }
+            if use_full_caption:
+                payload["parse_mode"] = "HTML"
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            photo_result = call_telegram_api_multipart(
+                "sendPhoto",
+                payload,
+                {
+                    "photo": (filename, file_obj.read(), content_type),
+                },
+            )
+        if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
+            photo_result = _send_coupon_document_to_telegram(
+                chat_id=forecast_request.user_id,
+                coupon_caption=coupon_caption,
+                coupon_file_path=coupon_file_path,
+                coupon_url=None,
+                parse_mode="HTML" if use_full_caption else None,
+                reply_markup=reply_markup,
+            )
+        if not photo_result.get("ok"):
+            return photo_result
+        if use_full_caption:
+            return photo_result
+
+    elif coupon_url:
+        payload = {
+            "chat_id": forecast_request.user_id,
+            "photo": coupon_url,
+            "caption": coupon_caption,
+        }
+        if use_full_caption:
+            payload["parse_mode"] = "HTML"
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        photo_result = call_telegram_api("sendPhoto", payload)
+        if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
+            photo_result = _send_coupon_document_to_telegram(
+                chat_id=forecast_request.user_id,
+                coupon_caption=coupon_caption,
+                coupon_file_path=None,
+                coupon_url=coupon_url,
+                parse_mode="HTML" if use_full_caption else None,
+                reply_markup=reply_markup,
+            )
+        if not photo_result.get("ok"):
+            return photo_result
+        if use_full_caption:
+            return photo_result
+
+    return call_telegram_api("sendMessage", {
+        "chat_id": forecast_request.user_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+        **({"reply_markup": reply_markup} if reply_markup else {}),
+    })
+
+
+def send_paid_set_sale_to_vk_client(forecast_request: ForecastRequest) -> dict:
+    if not user_can_receive_vk_messages(forecast_request.user):
+        return {"ok": False, "description": "Client has not allowed VK messages"}
+
+    bet = forecast_request.bet
+    message = html_to_vk_text(build_paid_set_sale_message(forecast_request))
+    links_message = _bookmaker_links_plain_text(bet) or ""
+    coupon_file_path = vk_local_static_asset_path(bet.coupon_image_url)
+    coupon_url = None if coupon_file_path else _public_asset_url(bet.coupon_image_url)
+    message_parts = [message]
+    if links_message:
+        message_parts.append(links_message)
+    if coupon_url:
+        message_parts.append(f"Купон: {coupon_url}")
+
+    return send_vk_message_to_user(
+        forecast_request.user,
+        "\n\n".join(part for part in message_parts if part),
+        image_path=coupon_file_path,
+    )
+
+
+async def deliver_paid_set_sale_to_web_chat(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> None:
+    await deliver_personal_signal(
+        db,
+        user=forecast_request.user,
+        text=build_web_paid_set_sale_text(forecast_request),
+        signal_type="forecast_full",
+        data=build_web_paid_set_sale_signal_data(forecast_request),
+        send_telegram=False,
+        send_web_push=True,
+    )
+
+
 async def deliver_full_forecast_to_web_chat(
     db: AsyncSession,
     forecast_request: ForecastRequest,
@@ -958,6 +1179,33 @@ async def send_full_forecast_to_external_channels(
     delivery_method: str,
     db: Optional[AsyncSession] = None,
 ) -> dict:
+    if request_is_paid_set(forecast_request):
+        if delivery_method == "vk":
+            result = await asyncio.to_thread(send_paid_set_sale_to_vk_client, forecast_request)
+            return {"ok": bool(result.get("ok")), "channel": "vk", "result": result}
+
+        if delivery_method == "vk_bot":
+            vk_result = await asyncio.to_thread(send_paid_set_sale_to_vk_client, forecast_request)
+            if not vk_result.get("ok"):
+                return {"ok": False, "channel": "vk", "result": vk_result}
+            telegram_result = await asyncio.to_thread(send_paid_set_sale_to_client, forecast_request)
+            if not telegram_result.get("ok"):
+                logger.warning(
+                    "[ForecastDelivery] Telegram duplicate failed for paid set request %s after VK success: %s",
+                    forecast_request.id,
+                    telegram_result.get("description", "unknown error"),
+                )
+            return {"ok": True, "channel": "vk_bot", "result": vk_result, "telegram_result": telegram_result}
+
+        if delivery_method == "bot":
+            result = await asyncio.to_thread(send_paid_set_sale_to_client, forecast_request)
+            return {"ok": bool(result.get("ok")), "channel": "telegram", "result": result}
+
+        if delivery_method == "web":
+            return {"ok": True, "channel": "web", "result": {"ok": True}}
+
+        return {"ok": False, "channel": delivery_method, "result": {"description": "Unknown delivery method"}}
+
     template_body = (
         await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
         if db is not None
@@ -1089,26 +1337,32 @@ def _build_take_admin_notification_content(forecast_request: ForecastRequest) ->
             f"{warning}"
         )
 
-    reply_markup = {
-        "inline_keyboard": [
-            *([] if is_paid_set or delivery_blocked else [[
-                {
-                    "text": "Отправить прогноз",
-                    "callback_data": f"forecast:sales_send:{forecast_request.id}",
-                }
-            ]]),
-            [
-                {
-                    "text": "Продажа в диалоге" if is_paid_set else "Клиент взял вручную",
-                    "callback_data": f"forecast:sales_manual:{forecast_request.id}",
-                },
-                {
-                    "text": "Отменить",
-                    "callback_data": f"forecast:sales_cancel:{forecast_request.id}",
-                },
-            ],
-        ]
-    }
+    inline_keyboard = []
+    if is_paid_set:
+        dialog_buttons = _paid_set_admin_dialog_buttons(user)
+        inline_keyboard.extend(
+            [dialog_buttons[index:index + 2] for index in range(0, len(dialog_buttons), 2)]
+        )
+    elif not delivery_blocked:
+        inline_keyboard.append([
+            {
+                "text": "Отправить прогноз",
+                "callback_data": f"forecast:sales_send:{forecast_request.id}",
+            }
+        ])
+
+    inline_keyboard.append([
+        {
+            "text": "Взял" if is_paid_set else "Клиент взял вручную",
+            "callback_data": f"forecast:sales_manual:{forecast_request.id}",
+        },
+        {
+            "text": "Отменить",
+            "callback_data": f"forecast:sales_cancel:{forecast_request.id}",
+        },
+    ])
+
+    reply_markup = {"inline_keyboard": inline_keyboard}
     return message, reply_markup
 
 
@@ -1433,13 +1687,15 @@ async def dispatch_forecast_full_delivery_from_outbox(
                 "skipped": True,
                 "description": f"Forecast request is {forecast_request.status}, not delivered",
             }
+        payload_delivery_method = (
+            await refreshed_client_delivery_method(db, forecast_request.user)
+            if delivery_method == "auto"
+            else delivery_method
+        )
         resolved_delivery_method = (
-            forecast_request.delivery_method
-            or (
-                await refreshed_client_delivery_method(db, forecast_request.user)
-                if delivery_method == "auto"
-                else delivery_method
-            )
+            payload_delivery_method
+            if request_is_paid_set(forecast_request) and forecast_request.delivery_method == "manual"
+            else forecast_request.delivery_method or payload_delivery_method
         )
         if resolved_delivery_method == "manual":
             return {"ok": True, "skipped": True, "description": "Manual delivery has no client channel"}
@@ -1460,8 +1716,11 @@ async def dispatch_forecast_full_delivery_from_outbox(
                 "description": description or f"{resolved_delivery_method} did not deliver the forecast",
             }
 
-        template_body = await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
-        await deliver_full_forecast_to_web_chat(db, forecast_request, template_body=template_body)
+        if request_is_paid_set(forecast_request):
+            await deliver_paid_set_sale_to_web_chat(db, forecast_request)
+        else:
+            template_body = await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
+            await deliver_full_forecast_to_web_chat(db, forecast_request, template_body=template_body)
         await db.commit()
         return {"ok": True, "delivery_method": resolved_delivery_method}
 
@@ -1777,6 +2036,12 @@ async def deliver_forecast_request(
         forecast_request.balance_before = access_result.balance_before
         forecast_request.balance_after = access_result.balance_after
         forecast_request.no_balance_warning = False
+        delivery_method = await refreshed_client_delivery_method(db, forecast_request.user)
+        await enqueue_forecast_full_delivery(
+            db,
+            forecast_request,
+            delivery_method=delivery_method,
+        )
         if commit:
             await db.commit()
         else:
@@ -1945,7 +2210,7 @@ async def handle_sales_callback(
         if access_result.already_recorded:
             return forecast_request, "Ручная отправка уже была отмечена."
         if request_is_paid_set(forecast_request):
-            return forecast_request, "Продажа набора отмечена вручную."
+            return forecast_request, "Клиент отмечен, набор отправляем в доступные каналы."
         return forecast_request, "Клиент отмечен как взявший прогноз."
 
     if action == "sales_cancel":

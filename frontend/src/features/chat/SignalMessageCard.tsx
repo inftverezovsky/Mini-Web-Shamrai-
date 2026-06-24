@@ -13,6 +13,7 @@ import {
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import { ChatSignalMessageResponse } from '../../schemas/schemas';
 import { API_BASE_URL } from '../../utils/api';
+import { normalizeConnectionSetupActionUrl } from '../../utils/profileSetup';
 
 type ForecastSignalAction = 'take' | 'decline';
 
@@ -22,6 +23,12 @@ interface SignalBookmaker {
   code: string;
   logo_url?: string;
   url?: string;
+}
+
+interface SignalSetupAction {
+  id: string;
+  label: string;
+  url: string;
 }
 
 interface SignalMessageCardProps {
@@ -46,6 +53,8 @@ function signalAccent(type: string) {
   if (type === 'live_signal') return 'border-rose-400/30 bg-rose-500/10 text-rose-100';
   if (type === 'forecast_full') return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50';
   if (type === 'forecast_teaser' || type === 'announcement') return 'border-amber-300/25 bg-amber-400/10 text-amber-100';
+  if (type === 'connection_setup_guide') return 'border-cyan-300/25 bg-cyan-400/10 text-cyan-50';
+  if (type === 'connection_setup_complete') return 'border-emerald-300/30 bg-emerald-400/12 text-emerald-50';
   if (type === 'system') return 'border-cyan-300/25 bg-cyan-400/10 text-cyan-100';
   return 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100';
 }
@@ -99,6 +108,36 @@ function couponImageUrl(signal: ChatSignalMessageResponse) {
 function signalHasBookmakerItems(signal: ChatSignalMessageResponse) {
   const bookmakers = signal.data?.bookmakers;
   return Array.isArray(bookmakers) && bookmakers.length > 0;
+}
+
+function safeSetupActionUrl(url: string) {
+  const trimmedUrl = url.trim();
+  if (!trimmedUrl) return '';
+  if (trimmedUrl.startsWith('/')) return trimmedUrl;
+  try {
+    const baseUrl = typeof window === 'undefined' ? 'https://shamra1.pro' : window.location.origin;
+    const parsed = new URL(trimmedUrl, baseUrl);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? trimmedUrl : '';
+  } catch {
+    return '';
+  }
+}
+
+function setupActions(signal: ChatSignalMessageResponse): SignalSetupAction[] {
+  const actions = signal.data?.setup_actions;
+  if (!Array.isArray(actions)) return [];
+  return actions.flatMap((action, index) => {
+    const label = typeof action?.label === 'string' ? action.label.trim() : '';
+    const id = typeof action?.id === 'string' && action.id.trim() ? action.id.trim() : `setup-${index}`;
+    const rawUrl = typeof action?.url === 'string' ? action.url : '';
+    const url = safeSetupActionUrl(normalizeConnectionSetupActionUrl(id, rawUrl));
+    if (!label || !url) return [];
+    return [{
+      id,
+      label,
+      url,
+    }];
+  });
 }
 
 function cleanForecastText(
@@ -200,6 +239,7 @@ function SignalMessageCard({
   );
   const messageText = useMemo(() => signalText(signal), [signal]);
   const renderedMessage = useMemo(() => renderTextWithLinks(messageText), [messageText]);
+  const connectionSetupActions = useMemo(() => setupActions(signal), [signal]);
 
   return (
     <motion.div
@@ -232,6 +272,21 @@ function SignalMessageCard({
         <p className="whitespace-pre-wrap break-words text-sm font-semibold leading-relaxed">
           {renderedMessage}
         </p>
+
+        {connectionSetupActions.length > 0 && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {connectionSetupActions.map((action) => (
+              <a
+                key={action.id}
+                href={action.url}
+                className="inline-flex min-h-[42px] min-w-0 items-center justify-center gap-2 rounded-xl border border-cyan-200/25 bg-cyan-200/12 px-3 py-2 text-center text-xs font-black text-white transition-all hover:border-cyan-200/45 hover:bg-cyan-200/18 active:scale-[0.98]"
+              >
+                <span className="min-w-0 truncate">{action.label}</span>
+                <ExternalLink className="h-3.5 w-3.5 shrink-0 text-cyan-100/85" />
+              </a>
+            ))}
+          </div>
+        )}
 
         {bookmakers.length > 0 && (
           <div className="mt-3 grid gap-2 sm:grid-cols-2">

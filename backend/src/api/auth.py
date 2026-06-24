@@ -64,6 +64,7 @@ from src.services.telegram_auth import (
     get_telegram_bot_auth_session,
     telegram_auth_start_param,
 )
+from src.services.vk_auth_flow import consume_vk_auth_flow, store_vk_auth_flow
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -288,28 +289,20 @@ def _build_vk_authorize_url(*, state: str, code_verifier: str) -> str:
     return f"{VK_ID_AUTHORIZE_URL}?{query}"
 
 
-def _read_vk_flow_from_request(request: Request, response: Response) -> dict[str, Any]:
-    raw_cookie = (getattr(request, "cookies", {}) or {}).get(VK_FLOW_COOKIE_NAME)
-    if not raw_cookie:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Сессия VK ID устарела. Запустите вход еще раз.",
-        )
-
-    try:
-        flow = _decode_vk_flow_cookie(raw_cookie)
-    except ValueError:
-        _clear_vk_flow_cookie(response)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Сессия VK ID устарела. Запустите вход еще раз.",
-        )
-
+def _validate_vk_flow_payload(flow: dict[str, Any]) -> dict[str, Any]:
     expires_at = float(flow.get("expires_at") or 0)
     action = str(flow.get("action") or "")
     state_value = str(flow.get("state") or "")
     code_verifier = str(flow.get("code_verifier") or "")
     redirect_uri = str(flow.get("redirect_uri") or "")
+    raw_source_user_id = flow.get("source_user_id")
+    source_user_id = None
+    if raw_source_user_id is not None:
+        try:
+            source_user_id = int(raw_source_user_id)
+        except (TypeError, ValueError):
+            source_user_id = None
+
     if (
         expires_at < time.time()
         or action not in VK_AUTH_ACTIONS
@@ -317,13 +310,73 @@ def _read_vk_flow_from_request(request: Request, response: Response) -> dict[str
         or not VK_CODE_VERIFIER_RE.fullmatch(code_verifier)
         or redirect_uri != _vk_redirect_uri()
     ):
-        _clear_vk_flow_cookie(response)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Сессия VK ID устарела. Запустите вход еще раз.",
-        )
+        raise ValueError("invalid VK flow")
 
-    return flow
+    return {
+        "action": action,
+        "state": state_value,
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+        "expires_at": expires_at,
+        "source_user_id": source_user_id,
+    }
+
+
+def _read_vk_flow_cookie(request: Request, response: Response) -> Optional[dict[str, Any]]:
+    raw_cookie = (getattr(request, "cookies", {}) or {}).get(VK_FLOW_COOKIE_NAME)
+    if not raw_cookie:
+        return None
+
+    try:
+        flow = _decode_vk_flow_cookie(raw_cookie)
+    except ValueError:
+        _clear_vk_flow_cookie(response)
+        return None
+
+    try:
+        return _validate_vk_flow_payload(flow)
+    except (TypeError, ValueError):
+        _clear_vk_flow_cookie(response)
+        return None
+
+
+async def _read_vk_flow_from_request(
+    request: Request,
+    response: Response,
+    requested_state: str,
+) -> dict[str, Any]:
+    cookie_flow = _read_vk_flow_cookie(request, response)
+    cached_flow = await consume_vk_auth_flow(requested_state)
+    cached_payload = None
+    if cached_flow:
+        try:
+            cached_payload = _validate_vk_flow_payload(
+                {
+                    "action": cached_flow.action,
+                    "state": cached_flow.state,
+                    "code_verifier": cached_flow.code_verifier,
+                    "redirect_uri": cached_flow.redirect_uri,
+                    "expires_at": cached_flow.expires_at.timestamp(),
+                    "source_user_id": cached_flow.source_user_id,
+                }
+            )
+        except (TypeError, ValueError):
+            cached_payload = None
+
+    if cookie_flow and cookie_flow["state"] == requested_state:
+        if cached_payload and cached_payload["state"] == cookie_flow["state"]:
+            cookie_flow["source_user_id"] = cached_payload.get("source_user_id")
+        return cookie_flow
+    if cookie_flow:
+        _clear_vk_flow_cookie(response)
+
+    if cached_payload:
+        return cached_payload
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Сессия VK ID устарела. Запустите вход еще раз.",
+    )
 
 
 def _vk_oauth_client_error(error: VkOAuthError) -> tuple[int, str]:
@@ -1645,12 +1698,19 @@ async def poll_telegram_bot_auth_session(
 async def vk_id_start(
     request_data: VkAuthStartRequest,
     response: Response,
+    identity_device_id: Optional[str] = Header(None, alias=IDENTITY_DEVICE_HEADER),
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Starts a VK ID OAuth flow with server-owned PKCE state.
     The verifier is stored only in a short-lived signed HttpOnly cookie.
     """
     action = _validate_vk_auth_action(request_data.action)
+    source_user = _current_user_or_none(current_user)
+    if not source_user and isinstance(identity_device_id, str):
+        source_user = await _load_identity_device_user(db, identity_device_id)
+
     code_verifier = _generate_vk_code_verifier()
     state_value = _generate_vk_state(action)
     authorize_url = _build_vk_authorize_url(
@@ -1666,6 +1726,13 @@ async def vk_id_start(
             "redirect_uri": _vk_redirect_uri(),
             "expires_at": int(time.time() + VK_FLOW_TTL_SECONDS),
         },
+    )
+    await store_vk_auth_flow(
+        action=action,
+        state=state_value,
+        code_verifier=code_verifier,
+        redirect_uri=_vk_redirect_uri(),
+        source_user_id=source_user.telegram_id if source_user else None,
     )
     return VkAuthStartResponse(
         authorize_url=authorize_url,
@@ -1687,8 +1754,8 @@ async def vk_id_complete(
     Completes a server-owned VK ID flow. The action and PKCE verifier are
     recovered from the signed flow cookie instead of browser storage.
     """
-    flow = _read_vk_flow_from_request(request, response)
     requested_state = str(request_data.state or "").strip()
+    flow = await _read_vk_flow_from_request(request, response, requested_state)
     if requested_state != flow["state"]:
         _clear_vk_flow_cookie(response)
         raise HTTPException(
@@ -1708,15 +1775,20 @@ async def vk_id_complete(
     vk_profile = await _exchange_vk_or_502(payload)
 
     if flow["action"] == "login":
+        flow_user = current_user
+        if not flow_user and flow.get("source_user_id"):
+            flow_user = await _load_user_with_profile(db, int(flow["source_user_id"]))
         return await _finish_vk_login(
             db,
             vk_profile,
             response=response,
             identity_device_id=identity_device_id,
-            current_user=current_user,
+            current_user=flow_user,
         )
 
     current_profile = _current_user_or_none(current_user)
+    if not current_profile and flow.get("source_user_id"):
+        current_profile = await _load_user_with_profile(db, int(flow["source_user_id"]))
     if not current_profile:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

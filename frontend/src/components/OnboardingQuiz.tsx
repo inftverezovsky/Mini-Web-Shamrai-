@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion, type Variants } from 'framer-motion';
 import {
   Banknote,
@@ -31,6 +31,7 @@ import { useAuthSelector } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
 import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
 import { useDebouncedCallback } from '../hooks/useThrottledEvents';
+import { toggleBookmakerCodeSelection } from '../utils/bookmakerSelection';
 
 type ExperienceLevel = 'novice' | 'amateur' | 'pro';
 type BankrollSize = 'micro' | 'mid' | 'high';
@@ -227,7 +228,6 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const [bookmakersLoading, setBookmakersLoading] = useState(true);
   const [recommendation, setRecommendation] = useState<OnboardingRecommendation | null>(null);
   const [calibrationIndex, setCalibrationIndex] = useState(0);
-  const [pulseIndex, setPulseIndex] = useState(0);
   const [currency, setCurrency] = useState<CurrencyCode>('RUB');
   const [manifestAccepted, setManifestAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -302,13 +302,6 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setPulseIndex((current) => (current + 1) % pulseLogs.length);
-    }, 2400);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     if (stepIndex !== 4) return;
     setCalibrationIndex(0);
     const timer = window.setInterval(() => {
@@ -317,7 +310,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     return () => window.clearInterval(timer);
   }, [stepIndex]);
 
-  const togglePain = (pain: string) => {
+  const togglePain = useCallback((pain: string) => {
     setErrorMessage(null);
     setAnswers((current) => ({
       ...current,
@@ -325,30 +318,27 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         ? current.anti_capper_pains.filter((item) => item !== pain)
         : [...current.anti_capper_pains, pain],
     }));
-  };
+  }, []);
 
-  const updateAnswer = <TKey extends keyof OnboardingAnswers>(key: TKey, value: OnboardingAnswers[TKey]) => {
+  const updateAnswer = useCallback(<TKey extends keyof OnboardingAnswers,>(key: TKey, value: OnboardingAnswers[TKey]) => {
     setErrorMessage(null);
     setAnswers((current) => ({ ...current, [key]: value }));
-  };
+  }, []);
 
-  const toggleBookmaker = (bookmakerCode: string) => {
+  const toggleBookmaker = useCallback((bookmakerCode: string) => {
     setErrorMessage(null);
     setAnswers((current) => {
-      const selected = current.bookmaker_codes.includes(bookmakerCode);
       return {
         ...current,
-        bookmaker_codes: selected
-          ? current.bookmaker_codes.filter((code) => code !== bookmakerCode)
-          : [...current.bookmaker_codes, bookmakerCode],
+        bookmaker_codes: toggleBookmakerCodeSelection(current.bookmaker_codes, bookmakerCode),
       };
     });
-  };
+  }, []);
 
-  const handleOtherBookmakerName = (value: string) => {
+  const handleOtherBookmakerName = useCallback((value: string) => {
     setErrorMessage(null);
     setAnswers((current) => ({ ...current, other_bookmaker_name: value }));
-  };
+  }, []);
 
   const revealResults = () => {
     setDirection(1);
@@ -374,8 +364,9 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         currency,
       });
 
+      const onboardingEndpoint = userId && userId > 0 ? `/users/${userId}/onboard` : '/users/me/onboard';
       const [response] = await Promise.all([
-        apiFetch<OnboardingResponse>(userId ? `/users/${userId}/onboard` : '/users/me/onboard', {
+        apiFetch<OnboardingResponse>(onboardingEndpoint, {
           method: 'POST',
           body: JSON.stringify({
             anti_capper_pains: answers.anti_capper_pains,
@@ -650,7 +641,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
           ) : null}
         </div>
 
-        <PulseWidget message={pulseLogs[pulseIndex]} proMode={proMode} glow={proMode ? GOLD_GLOW : CYAN_GLOW} />
+        <PulseWidget proMode={proMode} glow={proMode ? GOLD_GLOW : CYAN_GLOW} />
       </div>
     </section>
   );
@@ -798,7 +789,11 @@ function RiskBookmakerStep({
   onBookmaker: (value: string) => void;
   onOtherBookmakerName: (value: string) => void;
 }) {
-  const otherSelected = selectedBookmakerCodes.includes('other');
+  const selectedBookmakerCodeSet = useMemo(
+    () => new Set(selectedBookmakerCodes),
+    [selectedBookmakerCodes],
+  );
+  const otherSelected = selectedBookmakerCodeSet.has('other');
   const [draftOtherBookmakerName, setDraftOtherBookmakerName] = useState(otherBookmakerName);
   const {
     run: debounceOtherBookmakerName,
@@ -827,10 +822,10 @@ function RiskBookmakerStep({
             <BookmakerChoiceCard
               key={bookmaker.code}
               bookmaker={bookmaker}
-              selected={selectedBookmakerCodes.includes(bookmaker.code)}
+              selected={selectedBookmakerCodeSet.has(bookmaker.code)}
               glow={glow}
               proMode={proMode}
-              onClick={() => onBookmaker(bookmaker.code)}
+              onSelect={onBookmaker}
             />
           ))}
         </div>
@@ -1068,32 +1063,36 @@ function ChoiceCard<TValue extends string>({
   );
 }
 
-function BookmakerChoiceCard({
-  bookmaker,
-  selected,
-  glow,
-  proMode,
-  onClick,
-}: {
+interface BookmakerChoiceCardProps {
   bookmaker: BookmakerResponse;
   selected: boolean;
   glow: string;
   proMode: boolean;
-  onClick: () => void;
-}) {
+  onSelect: (value: string) => void;
+}
+
+const BookmakerChoiceCard = React.memo(function BookmakerChoiceCard({
+  bookmaker,
+  selected,
+  glow,
+  proMode,
+  onSelect,
+}: BookmakerChoiceCardProps) {
+  const handleClick = useCallback(() => {
+    onSelect(bookmaker.code);
+  }, [bookmaker.code, onSelect]);
+
   return (
     <button
       type="button"
       aria-pressed={selected}
-      onClick={onClick}
+      onClick={handleClick}
       className={`group relative min-h-[82px] w-full overflow-hidden rounded-2xl ${GLASS_SURFACE} p-3 text-left text-white transition duration-300 active:scale-[0.98]`}
       style={selected ? { boxShadow: glow } : undefined}
     >
       <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.12),transparent)]" />
       <span className="relative z-10 flex h-full items-center gap-3">
-        {bookmaker.code !== 'other' && (
-          <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="h-10 w-12" />
-        )}
+        <BookmakerLogoFrame bookmaker={bookmaker} size="badge" active={selected} className="h-10 w-12" />
         <span className="min-w-0 flex-1">
           <span className="block break-words text-sm font-black leading-tight">{bookmaker.name}</span>
           {bookmaker.code !== 'other' && (
@@ -1108,7 +1107,7 @@ function BookmakerChoiceCard({
       </span>
     </button>
   );
-}
+});
 
 function CalibrationScreen({
   activeIndex,
@@ -1327,7 +1326,17 @@ function Metric({ label, value, caption }: { label: string; value: string; capti
   );
 }
 
-function PulseWidget({ message, proMode, glow }: { message: string; proMode: boolean; glow: string }) {
+const PulseWidget = React.memo(function PulseWidget({ proMode, glow }: { proMode: boolean; glow: string }) {
+  const [activeIndex, setActiveIndex] = useState(0);
+  const message = pulseLogs[activeIndex];
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setActiveIndex((current) => (current + 1) % pulseLogs.length);
+    }, 2400);
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
     <div className={`rounded-[1.35rem] ${GLASS_SURFACE} p-3 shadow-glass`} style={{ boxShadow: glow }}>
       <div className="flex items-center gap-3">
@@ -1352,7 +1361,7 @@ function PulseWidget({ message, proMode, glow }: { message: string; proMode: boo
       </div>
     </div>
   );
-}
+});
 
 function ElectricButton({
   label,

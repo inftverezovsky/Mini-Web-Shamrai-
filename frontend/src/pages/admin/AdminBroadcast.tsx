@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api';
-import { BetResponse, BookmakerResponse, ForecastRequestResponse, PaginatedResponse } from '../../schemas/schemas';
+import { BetResponse, BookmakerResponse, ChatConversationResponse, ForecastRequestResponse, PaginatedResponse } from '../../schemas/schemas';
 import { SPORT_FILTER_OPTIONS } from '../../constants/sports';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
 import EmojiTextField from '../../components/EmojiTextField';
@@ -16,11 +16,13 @@ import {
   ClipboardList,
   Clock3,
   Edit3,
+  ExternalLink,
   Handshake,
   Image,
   Inbox,
   Loader2,
   Megaphone,
+  MessageCircle,
   Radio,
   Send,
   Target,
@@ -49,6 +51,9 @@ import {
   canProcessForecastRequest,
   canRemoveForecastRequest,
   forecastGroupIsStopped,
+  forecastRequestTelegramDialogUrl,
+  forecastRequestVkDialogUrl,
+  forecastRequestWebChatUrl,
   formatForecastRequestCount,
   formatRequestDate,
   getBetBookmakers,
@@ -181,6 +186,10 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
   const [announcementBkIds, setAnnouncementBkIds] = useState<number[]>([]);
   const [announcementCoef, setAnnouncementCoef] = useState('3.90');
   const [announcementPriceRub, setAnnouncementPriceRub] = useState('1500');
+  const [announcementCouponFile, setAnnouncementCouponFile] = useState<File | null>(null);
+  const [announcementCouponPreview, setAnnouncementCouponPreview] = useState<string | null>(null);
+  const [announcementCouponDragging, setAnnouncementCouponDragging] = useState(false);
+  const announcementCouponInputRef = useRef<HTMLInputElement>(null);
 
   const [forecastCoef, setForecastCoef] = useState('');
   const [forecastFairCoef, setForecastFairCoef] = useState('');
@@ -395,6 +404,17 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     setFullForecastPreview,
     setFullForecastDragging,
   );
+  const announcementCouponFileHandlers = makeFileHandlers(
+    setAnnouncementCouponFile,
+    setAnnouncementCouponPreview,
+    setAnnouncementCouponDragging,
+  );
+
+  const clearAnnouncementCouponFile = () => {
+    setAnnouncementCouponFile(null);
+    setAnnouncementCouponPreview(null);
+    if (announcementCouponInputRef.current) announcementCouponInputRef.current.value = '';
+  };
 
   const clearFullForecastFile = () => {
     setFullForecastFile(null);
@@ -420,6 +440,28 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       await fetchForecastRequests();
     } catch (err: any) {
       notifyError(err.message || 'Не удалось обработать заявку');
+    } finally {
+      setRequestActionLoading(null);
+    }
+  };
+
+  const openPaidSetWebDialog = async (request: ForecastRequestResponse) => {
+    const fallbackUrl = forecastRequestWebChatUrl(request);
+    try {
+      setRequestActionLoading(`dialog:${request.id}`);
+      const conversation = await apiFetch<ChatConversationResponse>(
+        `/chat/admin/conversations/by-user/${encodeURIComponent(String(request.user.telegram_id))}`,
+        { method: 'POST' },
+      );
+      const conversationId = conversation.id;
+      window.location.assign(
+        conversationId
+          ? `/app?open=admin-web-chat&conversation_id=${encodeURIComponent(conversationId)}`
+          : fallbackUrl,
+      );
+    } catch (err: any) {
+      notifyInfo(err?.message ? `${err.message}. Открываем список чатов.` : 'Открываем список чатов');
+      window.location.assign(fallbackUrl);
     } finally {
       setRequestActionLoading(null);
     }
@@ -827,7 +869,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       const message = hasPaidSet && hasForecast
         ? `Заявки закрыты вручную: ${selectedProcessable.length}`
         : hasPaidSet
-          ? `Продажи наборов отмечены: ${selectedProcessable.length}`
+          ? `Клиенты отмечены, наборы отправляются: ${selectedProcessable.length}`
           : `Клиенты отмечены как взявшие: ${selectedProcessable.length}`;
       notifySuccess(message);
       await fetchForecastRequests();
@@ -879,6 +921,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       announcementBkIds.forEach((bookmakerId) => {
         formData.append('bookmaker_ids', String(bookmakerId));
       });
+      if (announcementCouponFile) formData.append('coupon_image', announcementCouponFile);
 
       const result = await apiFetch('/admin/paid-set-broadcast', {
         method: 'POST',
@@ -914,6 +957,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
         ? `Набор доставлен: ${sent}, не доставлено: ${failed}`
         : 'Набор отправлен выбранной аудитории';
       setSuccessMessage(successText);
+      clearAnnouncementCouponFile();
       fetchAudienceCount();
       fetchForecastRequests();
       if (failed > 0) {
@@ -1251,6 +1295,16 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
               selectAllLabel="Выбрать все БК"
             />
 
+            <UploadDropzone
+              file={announcementCouponFile}
+              preview={announcementCouponPreview}
+              dragging={announcementCouponDragging}
+              label="Скрин купона"
+              inputRef={announcementCouponInputRef}
+              onRemove={clearAnnouncementCouponFile}
+              {...announcementCouponFileHandlers}
+            />
+
             <div>
               <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
                 Описание набора
@@ -1569,6 +1623,8 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                           const balance = request.balance_after ?? request.user.matches_remaining;
                           const deliveryBlocked = requestDeliveryBlocked(request);
                           const canSendSavedForecast = processable && betHasSavedFullForecast(request.bet);
+                          const telegramDialogUrl = requestIsPaidSet ? forecastRequestTelegramDialogUrl(request) : '';
+                          const vkDialogUrl = requestIsPaidSet ? forecastRequestVkDialogUrl(request) : '';
                           return (
                             <div key={request.id} className="bg-slate-950/35 border border-white/10 rounded-xl p-3 space-y-3">
                               <div className="flex items-start gap-3">
@@ -1667,7 +1723,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                               </div>
 
                               {(processable || removable) && (
-                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2">
                                   {processable && (
                                     <>
                                       {!requestIsPaidSet && (
@@ -1691,18 +1747,55 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                           <span>{canSendSavedForecast ? 'Отправить' : 'Полная ставка'}</span>
                                         </button>
                                       )}
+                                      {requestIsPaidSet && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => openPaidSetWebDialog(request)}
+                                            disabled={requestActionLoading !== null}
+                                            className="px-3 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 disabled:opacity-50 text-cyan-100 border border-cyan-300/25 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                          >
+                                            {requestActionLoading === `dialog:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+                                            <span>Продажа в диалоге</span>
+                                          </button>
+                                          {telegramDialogUrl && (
+                                            <a
+                                              href={telegramDialogUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className={`px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-100 border border-sky-300/25 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5 ${requestActionLoading !== null ? 'pointer-events-none opacity-50' : ''}`}
+                                            >
+                                              <Send className="w-3.5 h-3.5" />
+                                              <span>TG</span>
+                                              <ExternalLink className="w-3 h-3" />
+                                            </a>
+                                          )}
+                                          {vkDialogUrl && (
+                                            <a
+                                              href={vkDialogUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className={`px-3 py-2 rounded-xl bg-[#4c8dff]/15 hover:bg-[#4c8dff]/25 text-[#b8d0ff] border border-[#4c8dff]/25 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5 ${requestActionLoading !== null ? 'pointer-events-none opacity-50' : ''}`}
+                                            >
+                                              <Radio className="w-3.5 h-3.5" />
+                                              <span>VK</span>
+                                              <ExternalLink className="w-3 h-3" />
+                                            </a>
+                                          )}
+                                        </>
+                                      )}
                                       <button
                                         type="button"
                                         onClick={() => runRequestAction(
                                           request.id,
                                           'mark-manual',
-                                          requestIsPaidSet ? 'Продажа набора отмечена' : 'Клиент отмечен как взявший прогноз',
+                                          requestIsPaidSet ? 'Клиент отмечен, набор отправляется' : 'Клиент отмечен как взявший прогноз',
                                         )}
                                         disabled={requestActionLoading !== null}
-                                        className={`${requestIsPaidSet ? 'sm:col-span-2' : ''} px-3 py-2 rounded-xl bg-[#00d2ff] hover:bg-[#00d2ff]/90 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5`}
+                                        className="px-3 py-2 rounded-xl bg-[#00d2ff] hover:bg-[#00d2ff]/90 disabled:opacity-50 text-slate-950 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
                                       >
                                         {requestActionLoading === `mark-manual:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Handshake className="w-3.5 h-3.5" />}
-                                        <span>{requestIsPaidSet ? 'Продажа в диалоге' : 'Взял вручную'}</span>
+                                        <span>{requestIsPaidSet ? 'Взял' : 'Взял вручную'}</span>
                                       </button>
                                       <button
                                         type="button"

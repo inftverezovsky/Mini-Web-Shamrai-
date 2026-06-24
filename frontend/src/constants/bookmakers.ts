@@ -18,7 +18,7 @@ const BOOKMAKER_LOGOS: Record<string, string> = {
   olimp: `${TRANSPARENT_LOGO_DIR}/olimpbet.png`,
   zenit: `${TRANSPARENT_LOGO_DIR}/zenit.png`,
   bettery: `${TRANSPARENT_LOGO_DIR}/bettery.png`,
-  [OTHER_BOOKMAKER_CODE]: '/bookmakers/other.svg',
+  [OTHER_BOOKMAKER_CODE]: '/bookmakers/other.jpg',
 };
 
 export function getBookmakerLogoSrc(bookmaker: Pick<BookmakerResponse, 'code'>) {

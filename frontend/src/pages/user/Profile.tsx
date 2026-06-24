@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
 import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
@@ -11,6 +11,9 @@ import {
   requestVkMessagesPermission,
 } from '../../utils/vkDelivery';
 import { getTelegramIdentityStatus } from '../../utils/identityStatus';
+import { isVkDeliveryReady } from '../../utils/identityAccess';
+import { syncConnectionOnboarding } from '../../utils/connectionOnboarding';
+import { resolveProfileSetupIntent } from '../../utils/profileSetup';
 import { buildProfileAvatarSources } from '../../utils/profileAvatar';
 import type { VkDeliveryStatus } from '../../utils/vkDelivery';
 import { useLayoutMode } from '../../context/LayoutModeContext';
@@ -20,6 +23,7 @@ import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import SmoothCollapse from '../../components/SmoothCollapse';
 import TelegramAuthAssist from '../../components/TelegramAuthAssist';
 import WebPushSettingsCard from '../../components/WebPushSettingsCard';
+import IdentityConnectPanel from '../../components/IdentityConnectPanel';
 import AdminPlans from '../admin/AdminPlans';
 import AdminAccess from '../admin/AdminAccess';
 import AdminMarketing from '../admin/AdminMarketing';
@@ -285,6 +289,7 @@ export default function Profile() {
   const [vkPermissionBusy, setVkPermissionBusy] = useState<'messages' | 'check' | null>(null);
   const [vkMiniAppRuntime, setVkMiniAppRuntime] = useState(() => isVkMiniAppRuntime());
   const vkDialogOpenedRef = useRef(false);
+  const profileSetupAutoStartedRef = useRef<string | null>(null);
   const [linkingTelegram, setLinkingTelegram] = useState(false);
   const [telegramBotUrl, setTelegramBotUrl] = useState<string | null>(null);
   const [telegramLinkError, setTelegramLinkError] = useState<string | null>(null);
@@ -307,16 +312,31 @@ export default function Profile() {
   const vkSecureAppUrl = vkConfig.canonicalAppUrl || 'https://shamra1.pro/app/';
   const vkMessagesAllowed = vkDeliveryStatus?.messages_allowed ?? Boolean(userProfile?.vk_messages_allowed);
   const vkMessagesUrl = getVkMessagesUrl(vkDeliveryStatus?.group_id);
-  const vkDeliveryReady = Boolean(userProfile?.vk_user_id && vkMessagesAllowed);
+  const vkDeliveryReady = Boolean(userProfile && isVkDeliveryReady({
+    ...userProfile,
+    vk_messages_allowed: vkMessagesAllowed,
+  }));
   const vkMissingPermissionsCount = vkDeliveryReady ? 0 : 1;
   const telegramIdentity = getTelegramIdentityStatus(userProfile);
   const telegramLinked = telegramIdentity.linked;
+  const profileSetupIntent = useMemo(
+    () => (typeof window === 'undefined'
+      ? resolveProfileSetupIntent('')
+      : resolveProfileSetupIntent(window.location.search, window.location.hash)),
+    [],
+  );
   const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
     queryKey: profileDashboardQueryKey(userProfile?.telegram_id),
     queryFn: fetchProfileDashboard,
     enabled: Boolean(userProfile && !isAdminProfile),
     staleTime: TAB_QUERY_STALE_TIME,
   });
+  const refetchProfileDashboard = profileDashboardQuery.refetch;
+
+  const handleIdentityProfileUpdated = useCallback(async () => {
+    await refetchProfileDashboard();
+    void syncConnectionOnboarding().catch(() => undefined);
+  }, [refetchProfileDashboard]);
 
   useEffect(() => {
     setAvatarSourceIndex(0);
@@ -520,6 +540,25 @@ export default function Profile() {
     }));
   };
 
+  useEffect(() => {
+    if (!profileSetupIntent.setup) return;
+
+    if (profileSetupIntent.section) {
+      setOpenSettingsSections((prev) => ({
+        ...prev,
+        [profileSetupIntent.section!]: true,
+      }));
+    }
+
+    const targetId = profileSetupIntent.targetId;
+    if (!targetId) return;
+
+    const timer = window.setTimeout(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [profileSetupIntent.section, profileSetupIntent.setup, profileSetupIntent.targetId]);
+
   const handleAlertMinCoefCommit = useCallback((nextValue: number) => {
     setPrefs((p) => ({
       ...p,
@@ -546,7 +585,7 @@ export default function Profile() {
     }
   };
 
-  const handleLinkVkProfile = async () => {
+  const handleLinkVkProfile = useCallback(async () => {
     if (!vkReady) {
       setVkLinkError('VK ID не настроен. Обратитесь к администратору Shamrai.');
       return;
@@ -567,15 +606,16 @@ export default function Profile() {
         vk_messages_allowed: status.messages_allowed,
         vk_notifications_allowed: status.notifications_allowed,
       } : current);
+      void syncConnectionOnboarding().catch(() => undefined);
     } catch (err: any) {
       if (isVkRedirectStartedError(err)) return;
       setVkLinkError(err?.message || 'Не удалось привязать VK. Попробуйте еще раз.');
     } finally {
       setLinkingVk(false);
     }
-  };
+  }, [setUser, vkReady]);
 
-  const handleLinkTelegramProfile = async () => {
+  const handleLinkTelegramProfile = useCallback(async () => {
     try {
       setLinkingTelegram(true);
       setTelegramLinkError(null);
@@ -584,16 +624,19 @@ export default function Profile() {
         onSessionStarted: (session) => setTelegramBotUrl(session.botUrl),
       });
       apiFetch('/users/me')
-        .then(setUser)
+        .then(async (profile) => {
+          setUser(profile);
+          void syncConnectionOnboarding().catch(() => undefined);
+        })
         .catch(() => undefined);
     } catch (err: any) {
       setTelegramLinkError(err?.message || 'Не удалось привязать Telegram. Попробуйте еще раз.');
     } finally {
       setLinkingTelegram(false);
     }
-  };
+  }, [loginWithTelegramBot, setUser]);
 
-  const handleAllowVkMessages = async () => {
+  const handleAllowVkMessages = useCallback(async () => {
     try {
       setVkPermissionBusy('messages');
       setVkLinkError(null);
@@ -604,20 +647,21 @@ export default function Profile() {
         vk_group_member: status.group_member,
         vk_messages_allowed: status.messages_allowed,
       } : current);
+      void syncConnectionOnboarding().catch(() => undefined);
     } catch (err: any) {
       setVkLinkError(err?.message || 'Не удалось включить сообщения VK.');
     } finally {
       setVkPermissionBusy(null);
     }
-  };
+  }, [setUser, vkDeliveryStatus?.group_id]);
 
-  const handleOpenVkDialog = () => {
+  const handleOpenVkDialog = useCallback(() => {
     if (!vkMessagesUrl) return;
     vkDialogOpenedRef.current = true;
     window.open(vkMessagesUrl, '_blank', 'noopener,noreferrer');
-  };
+  }, [vkMessagesUrl]);
 
-  const handleCheckVkDeliveryAccess = async () => {
+  const handleCheckVkDeliveryAccess = useCallback(async () => {
     try {
       setVkPermissionBusy('check');
       setVkLinkError(null);
@@ -629,6 +673,7 @@ export default function Profile() {
         vk_messages_allowed: status.messages_allowed,
         vk_notifications_allowed: status.notifications_allowed,
       } : current);
+      void syncConnectionOnboarding().catch(() => undefined);
       if (!status.messages_allowed) {
         setVkLinkError('VK пока не подтвердил доступ. Напишите любое сообщение в диалог и проверьте еще раз.');
       }
@@ -637,7 +682,78 @@ export default function Profile() {
     } finally {
       setVkPermissionBusy(null);
     }
-  };
+  }, [setUser]);
+
+  useEffect(() => {
+    const action = profileSetupIntent.autoAction;
+    if (!action) return;
+
+    const startKey = [
+      action,
+      profileSetupIntent.targetId,
+      userProfile?.telegram_id ?? 'anon',
+      userProfile?.vk_user_id ?? 'no-vk',
+      vkMessagesAllowed ? 'vk-messages-ready' : 'vk-messages-missing',
+    ].join(':');
+
+    if (profileSetupAutoStartedRef.current === startKey) return;
+
+    let timer: number | undefined;
+    const markStarted = () => {
+      profileSetupAutoStartedRef.current = startKey;
+    };
+
+    if (action === 'telegram') {
+      if (telegramLinked || linkingTelegram) return;
+      markStarted();
+      timer = window.setTimeout(() => {
+        void handleLinkTelegramProfile();
+      }, 520);
+    }
+
+    if (action === 'vk-link') {
+      if (userProfile?.vk_user_id || linkingVk) return;
+      markStarted();
+      timer = window.setTimeout(() => {
+        void handleLinkVkProfile();
+      }, 520);
+    }
+
+    if (action === 'vk-messages') {
+      if (!userProfile?.vk_user_id || vkMessagesAllowed || vkPermissionBusy || vkDeliveryLoading) return;
+      if (!vkMiniAppRuntime && !vkMessagesUrl) return;
+      markStarted();
+      timer = window.setTimeout(() => {
+        if (vkMiniAppRuntime) {
+          void handleAllowVkMessages();
+          return;
+        }
+        if (vkMessagesUrl) {
+          window.location.assign(vkMessagesUrl);
+        }
+      }, 520);
+    }
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [
+    handleAllowVkMessages,
+    handleLinkTelegramProfile,
+    handleLinkVkProfile,
+    linkingTelegram,
+    linkingVk,
+    profileSetupIntent.autoAction,
+    profileSetupIntent.targetId,
+    telegramLinked,
+    userProfile?.telegram_id,
+    userProfile?.vk_user_id,
+    vkDeliveryLoading,
+    vkMessagesAllowed,
+    vkMessagesUrl,
+    vkMiniAppRuntime,
+    vkPermissionBusy,
+  ]);
 
   /* ────────────────── Helpers ────────────────── */
   const isSubActive = () => {
@@ -711,6 +827,15 @@ export default function Profile() {
   /* ═══════════════════ RENDER ═══════════════════ */
   return (
     <div className={`${isCompact ? 'space-y-6' : 'grid grid-cols-1 gap-5 xl:grid-cols-2'} animate-slide-up pb-10`}>
+      {!isAdminProfile && (
+        <div id="connect-identity" className={isCompact ? '' : 'xl:col-span-2'}>
+          <IdentityConnectPanel
+            className="mb-0"
+            onProfileUpdated={handleIdentityProfileUpdated}
+          />
+        </div>
+      )}
+
       {/* ━━━━━━━━━━ BLOCK 1 — User Analytics Dashboard ━━━━━━━━━━ */}
       <div className={GLASS + ' p-5 space-y-4'} style={{ boxShadow: NEON_GLOW_PINK }}>
         {/* Заголовок секции */}
@@ -834,7 +959,7 @@ export default function Profile() {
           )}
         </div>
 
-        <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
+        <div id="connect-telegram" className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
           <button
             type="button"
             onClick={() => toggleSettingsSection('telegram')}
@@ -911,9 +1036,15 @@ export default function Profile() {
           )}
         </div>
 
-        {!isAdminProfile && <WebPushSettingsCard />}
+        {!isAdminProfile && (
+          <WebPushSettingsCard
+            sectionId="web-push"
+            initialOpen={profileSetupIntent.section === 'notifications'}
+            onReady={handleIdentityProfileUpdated}
+          />
+        )}
 
-        <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
+        <div id="connect-vk" className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
           <button
             type="button"
             onClick={() => toggleSettingsSection('vk')}
@@ -1395,8 +1526,6 @@ export default function Profile() {
                   {bookmakers.map((bk) => {
                     const isChecked = selectedBkIds.includes(bk.id);
                     const isSaving = savingBkId === bk.id;
-                    const isOther = isOtherBookmaker(bk);
-
                     return (
                       <label
                         key={bk.id}
@@ -1423,16 +1552,7 @@ export default function Profile() {
                           className="sr-only"
                           disabled={isSaving}
                         />
-                        {isOther ? (
-                          <span
-                            className="flex h-10 w-12 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.035] text-[10px] font-black uppercase tracking-[0.08em] text-cyan-100"
-                            aria-hidden="true"
-                          >
-                            ...
-                          </span>
-                        ) : (
-                          <BookmakerLogoFrame bookmaker={bk} active={isChecked} size="badge" className="h-10 w-12 shrink-0" />
-                        )}
+                        <BookmakerLogoFrame bookmaker={bk} active={isChecked} size="badge" className="h-10 w-12 shrink-0" />
                         <div className="min-w-0 flex-1">
                           <span className="block break-words leading-tight">{bk.name}</span>
                         </div>

@@ -3,7 +3,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import { motion, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useTelegram } from './hooks/useTelegram';
 import { useAuthActions, useAuthSelector } from './context/AuthContext';
-import type { TelegramBotAuthSessionStarted } from './context/AuthContext';
 import { useLayoutMode } from './context/LayoutModeContext';
 import { usePerformanceProfile } from './hooks/usePerformanceProfile';
 import { useGlassOverlayActive } from './hooks/useGlassOverlayGuard';
@@ -12,7 +11,6 @@ import BottomNavigation from './components/BottomNavigation';
 import type { AdminShellTabId, UserTabId } from './components/BottomNavigation';
 import BrowserAuthScreen from './components/BrowserAuthScreen';
 import DesktopNavigation from './components/DesktopNavigation';
-import IdentityLinkGate from './components/IdentityLinkGate';
 import NotificationCenter from './components/NotificationCenter';
 import PwaPushGate from './components/PwaPushGate';
 import VkConsentWizard from './components/VkConsentWizard';
@@ -21,21 +19,19 @@ import WebSignalListener from './components/WebSignalListener';
 import AdminWebChatListener from './components/AdminWebChatListener';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import LogoText from './components/LogoText';
-import TelegramAuthAssist from './components/TelegramAuthAssist';
 
 import { isStaffRole, roleLabel } from './utils/roles';
 import { buildTabPath, trackEvent, trackPageView } from './utils/analytics';
 import { hasTelegramLaunchParams, isTelegramMiniApp } from './utils/telegramSdk';
 import { registerPwaServiceWorker } from './utils/webPush';
 import { prefetchAdminTab, prefetchUserTab } from './utils/tabPrefetch';
+import { canEnterCabinet } from './utils/identityAccess';
+import { syncConnectionOnboarding } from './utils/connectionOnboarding';
 
 import {
   AlertTriangle,
   Eye,
   KeyRound,
-  Loader2,
-  MessageCircle,
-  X,
 } from 'lucide-react';
 
 const loadBetFeed = () => import('./pages/user/BetFeed');
@@ -169,94 +165,74 @@ function AnimatedPagePanel({
   );
 }
 
-interface TelegramLinkPromptProps {
-  userId: number;
-  vkUserId: string | null;
-  onLinkTelegram: (options?: { onSessionStarted?: (session: TelegramBotAuthSessionStarted) => void }) => Promise<void>;
+const WHEEL_LINE_HEIGHT_PX = 16;
+const SCROLLABLE_OVERFLOW_Y = /(auto|scroll|overlay)/;
+
+function normalizeWheelDeltaY(event: WheelEvent) {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * WHEEL_LINE_HEIGHT_PX;
+  }
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * window.innerHeight;
+  }
+  return event.deltaY;
 }
 
-function TelegramLinkPrompt({ userId, vkUserId, onLinkTelegram }: TelegramLinkPromptProps) {
-  const storageKey = `shamrai_telegram_link_prompt_dismissed:${userId}:${vkUserId || 'vk'}`;
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem(storageKey) === '1');
-  const [linking, setLinking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [telegramBotUrl, setTelegramBotUrl] = useState<string | null>(null);
+function canScrollVertically(element: HTMLElement, deltaY: number) {
+  const style = window.getComputedStyle(element);
+  if (!SCROLLABLE_OVERFLOW_Y.test(style.overflowY)) return false;
+  if (element.scrollHeight <= element.clientHeight + 1) return false;
+  return deltaY > 0
+    ? element.scrollTop + element.clientHeight < element.scrollHeight - 1
+    : element.scrollTop > 1;
+}
 
-  useEffect(() => {
-    setDismissed(localStorage.getItem(storageKey) === '1');
-    setError(null);
-  }, [storageKey]);
-
-  if (dismissed) return null;
-
-  const handleDismiss = () => {
-    localStorage.setItem(storageKey, '1');
-    setDismissed(true);
-    trackEvent('Telegram Link Prompt Dismissed', { source: 'vk_web_only_banner' });
-  };
-
-  const handleLink = async () => {
-    try {
-      setLinking(true);
-      setError(null);
-      setTelegramBotUrl(null);
-      trackEvent('Telegram Link Started', { source: 'vk_web_only_banner' });
-      await onLinkTelegram({
-        onSessionStarted: (session) => setTelegramBotUrl(session.botUrl),
-      });
-      trackEvent('Telegram Link Confirmed', { source: 'vk_web_only_banner' });
-    } catch (err: any) {
-      setError(err?.message || 'Не удалось привязать Telegram. Попробуйте еще раз.');
-      trackEvent('Telegram Link Failed', { source: 'vk_web_only_banner' });
-    } finally {
-      setLinking(false);
+function findWheelScrollTarget(target: EventTarget | null, deltaY: number) {
+  const startElement = target instanceof Element ? target : null;
+  for (let element = startElement; element; element = element.parentElement) {
+    if (element instanceof HTMLElement && canScrollVertically(element, deltaY)) {
+      return element;
     }
-  };
+  }
 
-  return (
-    <section className="shamrai-glass-card relative z-10 mb-3 rounded-2xl p-3.5">
-      <button
-        type="button"
-        onClick={handleDismiss}
-        className="absolute right-2.5 top-2.5 grid h-8 w-8 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10"
-        aria-label="Скрыть предложение привязать Telegram"
-      >
-        <X className="h-4 w-4" />
-      </button>
+  const appPanel = document.querySelector<HTMLElement>('.app-scroll-panel');
+  if (appPanel && canScrollVertically(appPanel, deltaY)) return appPanel;
 
-      <div className="flex items-start gap-3 pr-8">
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#24a1de]/35 bg-[#24a1de]/16 text-cyan-100">
-          <MessageCircle className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-black leading-tight text-white">
-            Подключите Telegram к этому кабинету
-          </h2>
-          <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
-            Вы вошли через VK ID. Telegram можно привязать сейчас, а баланс, тарифы и настройки останутся здесь.
-          </p>
-        </div>
-      </div>
+  const appShell = document.querySelector<HTMLElement>('.app-shell');
+  if (appShell && canScrollVertically(appShell, deltaY)) return appShell;
 
-      <button
-        type="button"
-        onClick={handleLink}
-        disabled={linking}
-        className="shamrai-glass-button mt-3 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-black text-white transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55"
-      >
-        {linking ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-        <span>{linking ? 'Ожидаем Start в Telegram' : 'Привязать Telegram'}</span>
-      </button>
+  const scrollingElement = document.scrollingElement;
+  if (scrollingElement instanceof HTMLElement && canScrollVertically(scrollingElement, deltaY)) {
+    return scrollingElement;
+  }
 
-      {linking && <TelegramAuthAssist botUrl={telegramBotUrl} className="mt-3" />}
+  return null;
+}
 
-      {error && (
-        <p className="mt-3 rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
-          {error}
-        </p>
-      )}
-    </section>
-  );
+function useWheelScrollBridge() {
+  useEffect(() => {
+    const root = document.getElementById('root');
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!root || !event.deltaY || event.ctrlKey || event.metaKey) return;
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+
+      const targetElement = event.target instanceof Element ? event.target : null;
+      if (!targetElement || !root.contains(targetElement)) return;
+      if (targetElement.closest('input, textarea, select, [contenteditable]')) return;
+
+      const deltaY = normalizeWheelDeltaY(event);
+      const scrollTarget = findWheelScrollTarget(event.target, deltaY);
+      if (!scrollTarget) return;
+
+      // Telegram Desktop occasionally drops native wheel bubbling across nested panels.
+      scrollTarget.scrollBy({ top: deltaY, behavior: 'auto' });
+      event.preventDefault();
+    };
+
+    window.addEventListener('wheel', handleWheel, { capture: true, passive: false });
+    return () => window.removeEventListener('wheel', handleWheel, true);
+  }, []);
 }
 
 export default function App() {
@@ -267,7 +243,6 @@ export default function App() {
   const error = useAuthSelector((state) => state.error);
   const {
     login: fetchUserProfile,
-    loginWithTelegramBot,
   } = useAuthActions();
   const { isCompact } = useLayoutMode();
   const performanceProfile = usePerformanceProfile();
@@ -284,6 +259,8 @@ export default function App() {
   const [adminPreviewMode, setAdminPreviewMode] = useState(false);
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [introComplete, setIntroComplete] = useState(false);
+
+  useWheelScrollBridge();
 
   useEffect(() => {
     if (!introComplete) return;
@@ -305,6 +282,14 @@ export default function App() {
       window.setTimeout(() => document.getElementById('web-bot-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250);
     } else if (params.get('open') === 'admin-web-chat') {
       setActiveAdminTab('chats');
+    } else if (params.get('open') === 'profile') {
+      setActiveUserTab('profile');
+      window.setTimeout(() => {
+        const targetId = window.location.hash.replace(/^#/, '');
+        if (targetId) {
+          document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 350);
     }
   }, [isReady, isTelegram]);
 
@@ -380,26 +365,37 @@ export default function App() {
   const isAdmin = userProfile ? isStaffRole(userProfile.role) : false;
   const showAdminInterface = isAdmin && !adminPreviewMode;
   const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
-  const requiresIdentityGate = Boolean(
-    userProfile
-    && !isStaffRole(userProfile.role)
-    && userProfile.identity_complete === false,
-  );
+  const hasCabinetAccess = Boolean(userProfile && (isAdmin || canEnterCabinet(userProfile)));
   const needsOnboarding = Boolean(
     userProfile
     && (forceOnboarding || userProfile.is_onboarded === false)
     && !isStaffRole(userProfile.role)
-    && !requiresIdentityGate,
+    && hasCabinetAccess,
   );
   const showWebChatTab = Boolean(userProfile)
     && !runsInTelegramMiniApp
     && !showAdminInterface
     && !needsOnboarding
-    && !requiresIdentityGate;
+    && hasCabinetAccess;
   const safeActiveUserTab = activeUserTab === 'chat' && !showWebChatTab ? 'feed' : activeUserTab;
 
   useEffect(() => {
-    if (!introComplete || !userProfile || needsOnboarding || requiresIdentityGate) return;
+    if (!introComplete || !userProfile || runsInTelegramMiniApp || showAdminInterface || needsOnboarding || !hasCabinetAccess) return;
+    void syncConnectionOnboarding().catch(() => undefined);
+  }, [
+    hasCabinetAccess,
+    introComplete,
+    needsOnboarding,
+    runsInTelegramMiniApp,
+    showAdminInterface,
+    userProfile,
+    userProfile?.telegram_id,
+    userProfile?.vk_messages_allowed,
+    userProfile?.vk_user_id,
+  ]);
+
+  useEffect(() => {
+    if (!introComplete || !userProfile || needsOnboarding || !hasCabinetAccess) return;
 
     if (showAdminInterface) {
       setMountedAdminTabs((current) => addUniqueTab(current, activeAdminTab));
@@ -408,26 +404,16 @@ export default function App() {
     }
   }, [
     activeAdminTab,
+    hasCabinetAccess,
     introComplete,
     needsOnboarding,
-    requiresIdentityGate,
     safeActiveUserTab,
     showAdminInterface,
     userProfile,
   ]);
 
   useEffect(() => {
-    if (!introComplete || !userProfile) return;
-
-    if (requiresIdentityGate) {
-      trackPageView('/app/user/identity', {
-        role: 'user',
-        tab: 'identity',
-        layout: isCompact ? 'compact' : 'full',
-        onboarded: userProfile.is_onboarded !== false,
-      });
-      return;
-    }
+    if (!introComplete || !userProfile || !hasCabinetAccess) return;
 
     if (needsOnboarding) {
       trackPageView('/app/user/onboarding', {
@@ -450,10 +436,10 @@ export default function App() {
     });
   }, [
     activeAdminTab,
+    hasCabinetAccess,
     introComplete,
     isCompact,
     needsOnboarding,
-    requiresIdentityGate,
     safeActiveUserTab,
     showAdminInterface,
     userProfile,
@@ -490,7 +476,7 @@ export default function App() {
     );
   }
 
-  if (error && !requiresIdentityGate) {
+  if (error) {
     return (
       <MotionConfig reducedMotion={motionReducedMode}>
         <div className="app-shell compact-ui flex min-h-[100dvh] flex-col items-center justify-center space-y-4 px-6 text-center text-slate-50">
@@ -503,26 +489,6 @@ export default function App() {
           >
             Повторить попытку
           </button>
-        </div>
-      </MotionConfig>
-    );
-  }
-
-  if (requiresIdentityGate) {
-    return (
-      <MotionConfig reducedMotion={motionReducedMode}>
-        <div
-          className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
-            glassOverlayActive ? 'glass-overlay-active' : ''
-          } ${
-            isCompact ? 'mobile-app-shell w-full max-w-none min-w-0 px-3 pt-3' : 'w-full px-3 py-3 sm:px-4 sm:py-4 xl:px-6'
-          }`}
-        >
-          <div className="ambient-field z-0 isolate" aria-hidden="true">
-            <div className="ambient-field__grid" />
-            <div className="ambient-field__rings" />
-          </div>
-          <IdentityLinkGate />
         </div>
       </MotionConfig>
     );
@@ -583,21 +549,6 @@ export default function App() {
   };
 
   const isWebOnlyClient = userProfile.telegram_id < 0;
-  const showTelegramLinkPrompt = Boolean(
-    isWebOnlyClient
-    && userProfile.is_web_only
-    && userProfile.vk_user_id
-    && !runsInTelegramMiniApp
-    && !isStaffRole(userProfile.role)
-    && !requiresIdentityGate,
-  );
-  const telegramLinkPrompt = showTelegramLinkPrompt ? (
-    <TelegramLinkPrompt
-      userId={userProfile.telegram_id}
-      vkUserId={userProfile.vk_user_id}
-      onLinkTelegram={loginWithTelegramBot}
-    />
-  ) : null;
   const displayName = [userProfile.first_name, userProfile.last_name].filter(Boolean).join(' ').trim()
     || (userProfile.username ? `@${userProfile.username}` : isWebOnlyClient ? 'Web/VK клиент' : `ID ${userProfile.telegram_id}`);
   const roleText = isWebOnlyClient ? 'Web/VK клиент' : roleLabel(userProfile.role);
@@ -713,7 +664,6 @@ export default function App() {
               isCompact ? 'w-full' : 'mx-auto min-h-[calc(100dvh-3rem)] w-full max-w-3xl'
             }`}
           >
-            {telegramLinkPrompt}
             <AppErrorBoundary
               resetKey="onboarding"
               title="Анкета временно недоступна"
@@ -743,7 +693,6 @@ export default function App() {
                 </div>
               )}
 
-              {telegramLinkPrompt}
               <main className="flex-grow">{renderCurrentPage()}</main>
             </div>
 
@@ -776,7 +725,6 @@ export default function App() {
                 </div>
               </header>
 
-              {telegramLinkPrompt}
               <main className="dashboard-blur-root app-scroll-panel shamrai-glass-panel min-h-[calc(100dvh-7rem)] max-h-[calc(100dvh-7rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl p-2.5 sm:p-3 xl:p-4">
                 {renderCurrentPage()}
               </main>

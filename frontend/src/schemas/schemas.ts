@@ -134,6 +134,7 @@ export interface ForecastRequestUserResponse {
   first_name: string | null;
   last_name: string | null;
   photo_url: string | null;
+  vk_user_id: string | null;
   is_web_only: boolean;
   matches_remaining: number;
   guarantee_active: boolean;
@@ -331,6 +332,7 @@ export interface ChatMessageResponse {
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;
+  read_at?: string | null;
 }
 
 export interface ChatSignalMessageResponse {
@@ -381,6 +383,17 @@ export interface ChatReadResponse {
   status: string;
   last_read_message_id: number | null;
   last_read_signal_id: number | null;
+}
+
+export interface ChatReadUpdatedEvent {
+  event: 'chat.read.updated';
+  conversation_id: string;
+  user_id?: number;
+  reader_user_id: number;
+  reader_role: string;
+  reader_direction: ChatSupportDirection;
+  last_read_message_id: number | null;
+  updated_at: string | null;
 }
 
 export type PeriodFilter = 'week' | 'month' | 'quarter' | 'all';

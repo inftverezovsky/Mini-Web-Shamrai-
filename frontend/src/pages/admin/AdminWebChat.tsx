@@ -18,27 +18,26 @@ import {
   ChatConversationStatus,
   ChatMessagePageResponse,
   ChatMessageResponse,
+  ChatReadUpdatedEvent,
 } from '../../schemas/schemas';
 import { apiFetch } from '../../utils/api';
 import { notifyError, notifySuccess } from '../../utils/notify';
 import { registerWebPushSubscription } from '../../utils/webPush';
 import MessageComposer, { ChatComposerAttachment } from '../../features/chat/MessageComposer';
 import SupportMessageBubble, { SupportMessageView } from '../../features/chat/SupportMessageBubble';
-import { MAX_REALTIME_ITEMS, limitRecent } from '../../utils/realtimeLimits';
+import { limitRecent } from '../../utils/realtimeLimits';
 import {
   ADMIN_WEB_CHAT_CONVERSATION_EVENT,
   ADMIN_WEB_CHAT_MESSAGE_EVENT,
+  ADMIN_WEB_CHAT_READ_EVENT,
   ADMIN_WEB_CHAT_STATUS_EVENT,
   AdminWebChatMessageEventPayload,
 } from '../../components/AdminWebChatListener';
+import { applyReadReceiptToMessages } from '../../features/chat/readReceipts';
 
 const ADMIN_CHAT_MESSAGES_PAGE_LIMIT = 100;
 const ADMIN_CHAT_CONVERSATION_LIMIT = 80;
-const ADMIN_CHAT_BACKGROUND_STYLE = {
-  backgroundImage: "linear-gradient(180deg, rgba(2, 6, 23, 0.74), rgba(2, 6, 23, 0.86)), url('/images/admin-chat-bg.jpg')",
-  backgroundPosition: 'center',
-  backgroundSize: 'cover',
-};
+const ADMIN_CHAT_HISTORY_ITEM_LIMIT = 500;
 
 function messageTime(value?: string | null) {
   if (!value) return '';
@@ -75,7 +74,7 @@ function appendMessage(messages: SupportMessageView[], nextMessage: SupportMessa
     const leftTime = new Date(left.created_at).getTime();
     const rightTime = new Date(right.created_at).getTime();
     return (leftTime - rightTime) || (left.id - right.id);
-  }), MAX_REALTIME_ITEMS);
+  }), ADMIN_CHAT_HISTORY_ITEM_LIMIT);
 }
 
 function matchesSearch(conversation: ChatConversationResponse, cleanSearch: string) {
@@ -136,6 +135,7 @@ function makeOptimisticStaffMessage(
     created_at: now,
     edited_at: null,
     deleted_at: null,
+    read_at: null,
     delivery_state: 'sending',
     retry_attachment: attachment,
   };
@@ -176,7 +176,7 @@ function VirtualConversationList({
   });
 
   return (
-    <div ref={parentRef} className="admin-chat-conversation-list max-h-[calc(100dvh-20rem)] min-h-[240px] overflow-y-auto p-2">
+    <div ref={parentRef} className="admin-chat-conversation-list min-h-[240px] flex-1 overflow-y-auto p-2 xl:min-h-0">
       {loading && (
         <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -259,6 +259,9 @@ interface VirtualAdminMessageListProps {
   selectedConversation: ChatConversationResponse | null;
   loading: boolean;
   error: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
   onRetry: (message: SupportMessageView) => void;
 }
 
@@ -268,9 +271,18 @@ function VirtualAdminMessageList({
   selectedConversation,
   loading,
   error,
+  hasMore,
+  loadingMore,
+  onLoadMore,
   onRetry,
 }: VirtualAdminMessageListProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const previousScrollRef = useRef<{
+    firstKey?: string;
+    lastKey?: string;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => parentRef.current,
@@ -279,21 +291,80 @@ function VirtualAdminMessageList({
     getItemKey: (index) => `${messages[index]?.client_message_id}:${messages[index]?.id}`,
   });
 
+  const requestOlderMessages = useCallback(() => {
+    if (!hasMore || loadingMore) return;
+    onLoadMore();
+  }, [hasMore, loadingMore, onLoadMore]);
+
+  const handleScroll = useCallback(() => {
+    const scrollElement = parentRef.current;
+    if (!scrollElement || scrollElement.scrollTop > 80) return;
+    if (messages.length > 0) {
+      previousScrollRef.current = {
+        firstKey: `${messages[0]?.client_message_id}:${messages[0]?.id}`,
+        lastKey: `${messages[messages.length - 1]?.client_message_id}:${messages[messages.length - 1]?.id}`,
+        scrollHeight: scrollElement.scrollHeight,
+        scrollTop: scrollElement.scrollTop,
+      };
+    }
+    requestOlderMessages();
+  }, [messages, requestOlderMessages]);
+
   useEffect(() => {
     const scrollElement = parentRef.current;
-    if (!active || !scrollElement || messages.length === 0) return undefined;
+    if (!scrollElement) return undefined;
+    if (!active) return undefined;
+    if (messages.length === 0) {
+      previousScrollRef.current = null;
+      return undefined;
+    }
+
+    const firstKey = `${messages[0]?.client_message_id}:${messages[0]?.id}`;
+    const lastKey = `${messages[messages.length - 1]?.client_message_id}:${messages[messages.length - 1]?.id}`;
+    const previousScroll = previousScrollRef.current;
+    const prependedMessages = Boolean(
+      previousScroll
+      && previousScroll.firstKey !== firstKey
+      && previousScroll.lastKey === lastKey,
+    );
+    const shouldStickToBottom = !previousScroll || previousScroll.lastKey !== lastKey;
+
     const frame = window.requestAnimationFrame(() => {
-      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'auto' });
+      if (prependedMessages && previousScroll) {
+        const scrollDelta = scrollElement.scrollHeight - previousScroll.scrollHeight;
+        scrollElement.scrollTop = previousScroll.scrollTop + scrollDelta;
+      } else if (shouldStickToBottom) {
+        scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior: 'auto' });
+      }
+      previousScrollRef.current = {
+        firstKey,
+        lastKey,
+        scrollHeight: scrollElement.scrollHeight,
+        scrollTop: scrollElement.scrollTop,
+      };
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active, messages.length]);
+  }, [active, messages]);
 
   return (
     <div
       ref={parentRef}
-      className="admin-chat-message-list min-h-0 flex-1 overflow-y-auto bg-slate-950 px-4 py-4"
-      style={ADMIN_CHAT_BACKGROUND_STYLE}
+      onScroll={handleScroll}
+      className="admin-chat-message-list chat-cover-backdrop min-h-0 flex-1 overflow-y-auto px-4 py-4"
     >
+      {(hasMore || loadingMore) && selectedConversation && (
+        <div className="mb-3 flex justify-center">
+          <button
+            type="button"
+            onClick={requestOlderMessages}
+            disabled={loadingMore}
+            className="min-h-[36px] rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-300/25 hover:bg-white/[0.07] disabled:cursor-wait disabled:opacity-60"
+          >
+            {loadingMore ? 'Загружаем историю...' : 'Показать раннюю историю'}
+          </button>
+        </div>
+      )}
+
       {loading && (
         <div className="flex items-center justify-center gap-2 py-8 text-xs font-bold text-slate-500">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -354,26 +425,41 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
   const [statusFilter, setStatusFilter] = useState<ChatConversationStatus>('open');
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<SupportMessageView[]>([]);
+  const [messagesNextBeforeId, setMessagesNextBeforeId] = useState<number | null>(null);
+  const [messagesHasMore, setMessagesHasMore] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [threadsLoading, setThreadsLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesLoadingMore, setMessagesLoadingMore] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [draft, setDraft] = useState('');
   const [streamState, setStreamState] = useState<'connecting' | 'online' | 'offline'>('connecting');
+  const selectedConversationIdRef = useRef<string | null>(null);
 
   const initialConversationId = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get('conversation_id') || null;
+  }, []);
+  const initialUserId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const rawUserId = params.get('user_id');
+    if (!rawUserId) return null;
+    const userId = Number(rawUserId);
+    return Number.isSafeInteger(userId) ? userId : null;
   }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearchTerm(searchTerm.trim().toLowerCase()), 250);
     return () => window.clearTimeout(timer);
   }, [searchTerm]);
+
+  useEffect(() => {
+    selectedConversationIdRef.current = selectedConversationId;
+  }, [selectedConversationId]);
 
   const visibleConversations = useMemo(
     () => conversations.filter((conversation) => matchesSearch(conversation, debouncedSearchTerm)),
@@ -396,20 +482,31 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
   const loadConversations = useCallback(async () => {
     setThreadsLoading(true);
     try {
+      let ensuredConversation: ChatConversationResponse | null = null;
+      if (initialUserId !== null) {
+        ensuredConversation = await apiFetch<ChatConversationResponse>(
+          `/chat/admin/conversations/by-user/${encodeURIComponent(String(initialUserId))}`,
+          { method: 'POST' },
+        );
+      }
       const params = new URLSearchParams({ limit: '80', status: statusFilter });
       const response = await apiFetch<ChatConversationListResponse>(`/chat/admin/conversations?${params.toString()}`);
-      setConversations(response.items.slice(0, ADMIN_CHAT_CONVERSATION_LIMIT));
+      const items = ensuredConversation
+        ? mergeConversation(response.items, ensuredConversation)
+        : response.items.slice(0, ADMIN_CHAT_CONVERSATION_LIMIT);
+      setConversations(items);
       setSelectedConversationId((current) => {
-        if (current && response.items.some((conversation) => conversation.id === current)) return current;
-        if (initialConversationId && response.items.some((conversation) => conversation.id === initialConversationId)) return initialConversationId;
-        return response.items[0]?.id ?? null;
+        if (initialUserId !== null && ensuredConversation?.id) return ensuredConversation.id;
+        if (current && items.some((conversation) => conversation.id === current)) return current;
+        if (initialConversationId && items.some((conversation) => conversation.id === initialConversationId)) return initialConversationId;
+        return items[0]?.id ?? null;
       });
     } catch (error: any) {
       notifyError(error?.message || 'Не удалось загрузить чаты клиентов');
     } finally {
       setThreadsLoading(false);
     }
-  }, [initialConversationId, statusFilter]);
+  }, [initialConversationId, initialUserId, statusFilter]);
 
   useEffect(() => {
     if (!active) return;
@@ -421,6 +518,9 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
     if (!selectedConversationId) {
       setMessages([]);
       setMessagesError(null);
+      setMessagesNextBeforeId(null);
+      setMessagesHasMore(false);
+      setMessagesLoadingMore(false);
       return;
     }
 
@@ -429,6 +529,9 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
     async function loadMessages() {
       setMessagesLoading(true);
       setMessagesError(null);
+      setMessagesNextBeforeId(null);
+      setMessagesHasMore(false);
+      setMessagesLoadingMore(false);
       setMessages([]);
       try {
         const response = await apiFetch<ChatMessagePageResponse>(
@@ -437,8 +540,10 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
         if (!cancelled) {
           setMessages(limitRecent(
             response.items.map((message) => ({ ...message, delivery_state: 'sent' as const })),
-            MAX_REALTIME_ITEMS,
+            ADMIN_CHAT_HISTORY_ITEM_LIMIT,
           ));
+          setMessagesNextBeforeId(response.next_before_id);
+          setMessagesHasMore(response.has_more);
           const lastMessage = response.items[response.items.length - 1];
           if (lastMessage) {
             void apiFetch(`/chat/admin/conversations/${conversationId}/read`, {
@@ -465,6 +570,39 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
       cancelled = true;
     };
   }, [active, clearConversationUnread, selectedConversationId]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!selectedConversationId || !messagesNextBeforeId || messagesLoadingMore) return;
+    const conversationId = selectedConversationId;
+    setMessagesLoadingMore(true);
+    try {
+      const params = new URLSearchParams({
+        before_id: String(messagesNextBeforeId),
+        limit: String(ADMIN_CHAT_MESSAGES_PAGE_LIMIT),
+      });
+      const response = await apiFetch<ChatMessagePageResponse>(
+        `/chat/admin/conversations/${conversationId}/messages?${params.toString()}`,
+      );
+      if (selectedConversationIdRef.current !== conversationId) return;
+      const olderMessages = response.items.map((message) => ({ ...message, delivery_state: 'sent' as const }));
+      setMessages((current) => olderMessages.reduce(
+        (nextMessages, message) => appendMessage(nextMessages, message),
+        current,
+      ));
+      setMessagesNextBeforeId(response.next_before_id);
+      setMessagesHasMore(response.has_more);
+      setMessagesError(null);
+    } catch (error: any) {
+      if (selectedConversationIdRef.current !== conversationId) return;
+      const message = error?.message || 'Не удалось загрузить раннюю историю';
+      setMessagesError(message);
+      notifyError(message);
+    } finally {
+      if (selectedConversationIdRef.current === conversationId) {
+        setMessagesLoadingMore(false);
+      }
+    }
+  }, [messagesLoadingMore, messagesNextBeforeId, selectedConversationId]);
 
   useEffect(() => {
     if (!active) return;
@@ -496,14 +634,21 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
       const state = (event as CustomEvent<{ state?: 'connecting' | 'online' | 'offline' }>).detail?.state;
       if (state) setStreamState(state);
     };
+    const handleRead = (event: Event) => {
+      const payload = (event as CustomEvent<ChatReadUpdatedEvent>).detail;
+      if (!payload?.conversation_id || payload.conversation_id !== selectedConversationId) return;
+      setMessages((current) => applyReadReceiptToMessages(current, payload));
+    };
 
     window.addEventListener(ADMIN_WEB_CHAT_MESSAGE_EVENT, handleMessage);
     window.addEventListener(ADMIN_WEB_CHAT_CONVERSATION_EVENT, handleConversation);
     window.addEventListener(ADMIN_WEB_CHAT_STATUS_EVENT, handleStatus);
+    window.addEventListener(ADMIN_WEB_CHAT_READ_EVENT, handleRead);
     return () => {
       window.removeEventListener(ADMIN_WEB_CHAT_MESSAGE_EVENT, handleMessage);
       window.removeEventListener(ADMIN_WEB_CHAT_CONVERSATION_EVENT, handleConversation);
       window.removeEventListener(ADMIN_WEB_CHAT_STATUS_EVENT, handleStatus);
+      window.removeEventListener(ADMIN_WEB_CHAT_READ_EVENT, handleRead);
     };
   }, [active, clearConversationUnread, selectedConversationId, statusFilter]);
 
@@ -652,8 +797,8 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
   };
 
   return (
-    <div className="admin-web-chat-shell grid min-h-[calc(100dvh-8.5rem)] min-w-0 gap-3 pb-8 xl:grid-cols-[minmax(270px,360px)_minmax(0,1fr)]">
-      <section className="min-h-[320px] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
+    <div className="admin-web-chat-shell grid min-h-[calc(100dvh-8.5rem)] min-w-0 gap-3 pb-8 xl:h-[calc(100dvh-10rem)] xl:min-h-0 xl:grid-cols-[minmax(270px,360px)_minmax(0,1fr)] xl:overflow-hidden xl:pb-0">
+      <section className="flex min-h-[320px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl xl:min-h-0">
         <div className="border-b border-white/10 px-3 py-3">
           <div className="flex min-w-0 items-center justify-between gap-2">
             <div className="min-w-0">
@@ -713,7 +858,7 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
         />
       </section>
 
-      <section className="flex min-h-[520px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl">
+      <section className="flex min-h-[520px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/45 shadow-glass backdrop-blur-xl xl:min-h-0">
         <div className="flex min-w-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
           <div className="min-w-0">
             <p className="truncate text-base font-black text-white">
@@ -755,6 +900,9 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
           selectedConversation={selectedConversation}
           loading={messagesLoading}
           error={messagesError}
+          hasMore={messagesHasMore}
+          loadingMore={messagesLoadingMore}
+          onLoadMore={() => void loadOlderMessages()}
           onRetry={handleRetry}
         />
 

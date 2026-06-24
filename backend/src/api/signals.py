@@ -107,6 +107,12 @@ class WebPushSubscriptionResponse(BaseModel):
     configured: bool = False
 
 
+class ConnectionOnboardingResponse(BaseModel):
+    status: str = "ok"
+    checklist: dict[str, bool] = Field(default_factory=dict)
+    created_signal_types: list[str] = Field(default_factory=list)
+
+
 class WebPushPublicKeyResponse(BaseModel):
     public_key: str = ""
     configured: bool = False
@@ -255,6 +261,10 @@ async def save_web_push_subscription(
 ):
     current_user.web_push_subscription = subscription.model_dump()
     await db.flush()
+    if not is_staff_role(current_user.role):
+        from src.services.connection_onboarding import sync_connection_onboarding
+
+        await sync_connection_onboarding(db, current_user)
     return WebPushSubscriptionResponse(status="saved", configured=web_push_configured())
 
 
@@ -266,6 +276,19 @@ async def delete_web_push_subscription(
     current_user.web_push_subscription = None
     await db.flush()
     return WebPushSubscriptionResponse(status="deleted", configured=web_push_configured())
+
+
+@router.post("/connection-onboarding/sync", response_model=ConnectionOnboardingResponse)
+async def sync_connection_onboarding_state(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if is_staff_role(current_user.role):
+        return ConnectionOnboardingResponse(status="skipped", checklist={"complete": True})
+
+    from src.services.connection_onboarding import sync_connection_onboarding
+
+    return ConnectionOnboardingResponse(**await sync_connection_onboarding(db, current_user))
 
 
 @router.post("/stream-ticket", response_model=SignalStreamTicketResponse)

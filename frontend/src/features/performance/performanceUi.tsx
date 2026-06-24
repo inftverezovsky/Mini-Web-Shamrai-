@@ -205,17 +205,26 @@ export function StatTile({
   value,
   hint,
   tone = 'text-white',
+  icon,
   minHeightClass = 'min-h-[60px]',
 }: {
   label: string;
   value: React.ReactNode;
   hint?: string;
   tone?: string;
+  icon?: React.ReactNode;
   minHeightClass?: string;
 }) {
   return (
     <div className={`${minHeightClass} min-w-0 rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]`}>
-      <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 break-words text-[8px] font-black uppercase tracking-[0.12em] text-slate-500">{label}</div>
+        {icon ? (
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.045] text-slate-300">
+            {icon}
+          </span>
+        ) : null}
+      </div>
       <div className={`mt-0.5 min-w-0 break-words text-base font-black tabular-nums ${tone}`}>{value}</div>
       {hint && <div className="mt-0.5 min-w-0 break-words text-[8px] font-bold uppercase tracking-[0.06em] text-slate-600">{hint}</div>}
     </div>
@@ -453,13 +462,43 @@ export function StatsKpiGrid({
   const gridClass = showProfit ? 'grid-cols-2 gap-2 lg:grid-cols-5' : 'grid-cols-2 gap-2 lg:grid-cols-4';
   return (
     <div className={`grid ${gridClass}`}>
-      <StatTile label="Ставок" value={summary.bets} hint={`${resultCountLabel('win', summary.wins)} / ${resultCountLabel('loss', summary.losses)}`} minHeightClass="min-h-[62px]" />
+      <StatTile
+        label="Ставок"
+        value={summary.bets}
+        hint={`${resultCountLabel('win', summary.wins)} / ${resultCountLabel('loss', summary.losses)}`}
+        icon={<BarChart3 className="h-4 w-4 text-slate-300" />}
+        minHeightClass="min-h-[62px]"
+      />
       {showProfit ? (
-        <StatTile label="Прибыль" value={formatStatsValue(summary.profit_units, valueMode)} tone={summaryTone(summary)} minHeightClass="min-h-[62px]" />
+        <StatTile
+          label="Прибыль"
+          value={formatStatsValue(summary.profit_units, valueMode)}
+          tone={summaryTone(summary)}
+          icon={summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-rose-300" />}
+          minHeightClass="min-h-[62px]"
+        />
       ) : null}
-      <StatTile label="ROI" value={pct(summary.roi)} tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-rose-300'} minHeightClass="min-h-[62px]" />
-      <StatTile label="Проход" value={pct(summary.winrate)} tone="text-cyan-200" minHeightClass="min-h-[62px]" />
-      <StatTile label="Средний КФ" value={summary.average_coefficient.toFixed(2)} tone="text-indigo-200" minHeightClass="min-h-[62px]" />
+      <StatTile
+        label="ROI"
+        value={pct(summary.roi)}
+        tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-rose-300'}
+        icon={<Target className="h-4 w-4 text-cyan-200" />}
+        minHeightClass="min-h-[62px]"
+      />
+      <StatTile
+        label="Проход"
+        value={pct(summary.winrate)}
+        tone="text-cyan-200"
+        icon={<Activity className="h-4 w-4 text-cyan-200" />}
+        minHeightClass="min-h-[62px]"
+      />
+      <StatTile
+        label="Средний КФ"
+        value={summary.average_coefficient.toFixed(2)}
+        tone="text-indigo-200"
+        icon={<Sparkles className="h-4 w-4 text-indigo-200" />}
+        minHeightClass="min-h-[62px]"
+      />
     </div>
   );
 }

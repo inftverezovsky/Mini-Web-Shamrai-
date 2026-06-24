@@ -493,6 +493,8 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
             bookmaker_links=[
                 {"bookmaker_id": 1, "url": "https://fonbet.ru/sports/football/12313"},
             ],
+            delivery_mode=delivery.DELIVERY_MODE_SALES_PRIVATE,
+            price_stars=10_000,
         )
 
     def _user(
@@ -648,6 +650,40 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         keyboard_json = json.dumps(payload["reply_markup"], ensure_ascii=False)
         self.assertNotIn("Отправить прогноз", keyboard_json)
         self.assertNotIn("sales_send", keyboard_json)
+
+    def test_paid_set_admin_notification_opens_dialog_and_has_separate_taken_button(self):
+        user = self._user(vk_user_id="456")
+        forecast_request = self._forecast_request(user)
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+        forecast_request.bet.price_stars = 10_000
+
+        delivery_payload = delivery.build_admin_group_forecast_response_delivery(
+            forecast_request,
+            action="take",
+        )
+
+        self.assertIsNotNone(delivery_payload)
+        keyboard = delivery_payload["payload"]["reply_markup"]["inline_keyboard"]
+        flat_buttons = [button for row in keyboard for button in row]
+        dialog_button = next(button for button in flat_buttons if button["text"] == "Продажа в диалоге")
+        taken_button = next(button for button in flat_buttons if button["text"] == "Взял")
+        self.assertEqual(dialog_button["url"], "https://t.me/client")
+        self.assertNotIn("callback_data", dialog_button)
+        self.assertEqual(taken_button["callback_data"], f"forecast:sales_manual:{forecast_request.id}")
+        self.assertTrue(any(button.get("url") == "https://vk.com/im?sel=456" for button in flat_buttons))
+
+    def test_paid_set_sale_message_does_not_require_coupon(self):
+        forecast_request = self._forecast_request(self._user())
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+        forecast_request.bet.price_stars = 10_000
+        forecast_request.bet.coupon_image_url = None
+
+        message = delivery.build_paid_set_sale_message(forecast_request)
+
+        self.assertIn("Набор оформлен", message)
+        self.assertIn("France - Northern Ireland", message)
+        self.assertIn("Total over 3.5", message)
+        self.assertIn("10 000 ₽", message)
 
     async def test_admin_group_decline_notification_is_enqueued_without_buttons(self):
         class FakeDb:

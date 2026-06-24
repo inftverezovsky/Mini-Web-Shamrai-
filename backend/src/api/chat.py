@@ -21,6 +21,7 @@ from src.services.chat import (
     conversations_for_user,
     create_chat_message,
     emit_conversation_updated,
+    emit_read_cursor_updated,
     load_support_conversation_for_staff,
     mark_signals_read,
     notify_chat_message,
@@ -69,6 +70,7 @@ class ChatMessageResponse(BaseModel):
     created_at: str
     edited_at: Optional[str] = None
     deleted_at: Optional[str] = None
+    read_at: Optional[str] = None
 
 
 class ChatSignalMessagePage(BaseModel):
@@ -345,16 +347,7 @@ async def mark_support_read(
         user_id=current_user.telegram_id,
         last_read_message_id=payload.last_read_message_id,
     )
-    await chat_stream_hub.send_to_user(
-        current_user.telegram_id,
-        {
-            "event": "chat.read.updated",
-            "conversation_id": str(conversation.id),
-            "user_id": current_user.telegram_id,
-            "last_read_message_id": cursor.last_read_message_id,
-            "updated_at": cursor.updated_at.isoformat() if cursor.updated_at else None,
-        },
-    )
+    await emit_read_cursor_updated(db, conversation=conversation, reader=current_user, cursor=cursor)
     return ChatReadResponse(last_read_message_id=cursor.last_read_message_id)
 
 
@@ -386,6 +379,24 @@ async def list_admin_chat_conversations(
         before=before,
         limit=_safe_limit(limit),
     ))
+
+
+@router.post("/admin/conversations/by-user/{user_id}", response_model=ChatConversationResponse)
+async def ensure_admin_chat_conversation_for_user(
+    user_id: int,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_staff(admin)
+    result = await db.execute(select(User).filter(User.telegram_id == user_id))
+    client = result.scalars().first()
+    if not client:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Клиент не найден")
+    conversation = await support_conversation_for_user(db, client, create=True)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Диалог не найден")
+    await emit_conversation_updated(db, conversation=conversation)
+    return ChatConversationResponse(**await support_conversation_payload(db, conversation, viewer=admin, owner=client))
 
 
 @router.get("/admin/conversations/{conversation_id}/messages", response_model=ChatMessagePage)
@@ -470,16 +481,7 @@ async def mark_admin_chat_read(
         user_id=admin.telegram_id,
         last_read_message_id=payload.last_read_message_id,
     )
-    await chat_stream_hub.send_to_user(
-        admin.telegram_id,
-        {
-            "event": "chat.read.updated",
-            "conversation_id": str(conversation.id),
-            "user_id": admin.telegram_id,
-            "last_read_message_id": cursor.last_read_message_id,
-            "updated_at": cursor.updated_at.isoformat() if cursor.updated_at else None,
-        },
-    )
+    await emit_read_cursor_updated(db, conversation=conversation, reader=admin, cursor=cursor)
     return ChatReadResponse(last_read_message_id=cursor.last_read_message_id)
 
 

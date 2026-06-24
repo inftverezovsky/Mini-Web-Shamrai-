@@ -304,6 +304,7 @@ class ForecastRequestUserResponse(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     photo_url: Optional[str] = None
+    vk_user_id: Optional[str] = None
     is_web_only: bool = False
     matches_remaining: int = 0
     guarantee_active: bool = False
@@ -546,6 +547,17 @@ class AdminUserListResponse(BaseModel):
     last_name: Optional[str]
     photo_url: Optional[str] = None
     is_web_only: bool = False
+    identity_providers: List[str] = Field(default_factory=list)
+    missing_identity_providers: List[str] = Field(default_factory=list)
+    telegram_connected: bool = False
+    telegram_delivery_enabled: bool = False
+    vk_user_id: Optional[str] = None
+    vk_group_member: bool = False
+    vk_messages_allowed: bool = False
+    vk_notifications_allowed: bool = False
+    vk_connected: bool = False
+    vk_delivery_enabled: bool = False
+    web_push_enabled: bool = False
     role: str
     stats_display_mode: str
     has_active_subscription: bool

@@ -14,6 +14,7 @@ import {
   ChatConversationResponse,
   ChatMessagePageResponse,
   ChatMessageResponse,
+  ChatReadUpdatedEvent,
   ChatSignalMessagePageResponse,
   ChatSignalMessageResponse,
 } from '../../schemas/schemas';
@@ -26,14 +27,16 @@ import { notifyError, notifyInfo, notifySuccess } from '../../utils/notify';
 import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils/signalAudio';
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
 import { rememberWebNotificationEvent } from '../../utils/webNotificationEvents';
-import { MAX_REALTIME_ITEMS, limitRecent, rememberRecentId } from '../../utils/realtimeLimits';
+import { limitRecent, rememberRecentId } from '../../utils/realtimeLimits';
 import MessageComposer, { ChatComposerAttachment } from './MessageComposer';
 import MessageList from './MessageList';
+import { applyReadReceiptToMessages } from './readReceipts';
 import SignalMessageCard, { signalActionNotice } from './SignalMessageCard';
 import SupportMessageBubble, { SupportMessageView } from './SupportMessageBubble';
 
 type ActiveConversationKey = 'signals' | 'support';
 type ForecastSignalAction = 'take' | 'decline';
+const CHAT_HISTORY_ITEM_LIMIT = 500;
 
 interface ForecastSignalActionResponse {
   status: string;
@@ -65,7 +68,11 @@ interface ChatStreamConversationUpdatedEvent {
   conversation: ChatConversationResponse;
 }
 
-function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMessages: SupportMessageView[]) {
+function mergeSupportMessages(
+  currentMessages: SupportMessageView[],
+  incomingMessages: SupportMessageView[],
+  limit = CHAT_HISTORY_ITEM_LIMIT,
+) {
   const byClientId = new Map<string, SupportMessageView>();
   const byId = new Map<number, SupportMessageView>();
 
@@ -81,6 +88,7 @@ function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMes
       ...(existingByClientId || existingById || {}),
       ...message,
       delivery_state: message.delivery_state || 'sent',
+      read_at: message.read_at || existingByClientId?.read_at || existingById?.read_at || null,
     };
     byClientId.set(merged.client_message_id, merged);
     if (merged.id > 0) byId.set(merged.id, merged);
@@ -89,7 +97,7 @@ function mergeSupportMessages(currentMessages: SupportMessageView[], incomingMes
   return limitRecent(Array.from(byClientId.values()).sort((left, right) => {
     const timeDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
     return timeDelta || left.id - right.id;
-  }), MAX_REALTIME_ITEMS);
+  }), limit);
 }
 
 function mergeConversations(
@@ -153,6 +161,7 @@ function makeOptimisticMessage(
     created_at: now,
     edited_at: null,
     deleted_at: null,
+    read_at: null,
     delivery_state: 'sending',
     retry_attachment: attachment,
   };
@@ -193,6 +202,12 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   });
   const [signals, setSignalsState] = useState<ChatSignalMessageResponse[]>([]);
   const [supportMessages, setSupportMessages] = useState<SupportMessageView[]>([]);
+  const [signalsNextBeforeId, setSignalsNextBeforeId] = useState<number | null>(null);
+  const [signalsHasMore, setSignalsHasMore] = useState(false);
+  const [signalsLoadingMore, setSignalsLoadingMore] = useState(false);
+  const [supportNextBeforeId, setSupportNextBeforeId] = useState<number | null>(null);
+  const [supportHasMore, setSupportHasMore] = useState(false);
+  const [supportLoadingMore, setSupportLoadingMore] = useState(false);
   const [loadingSignals, setLoadingSignals] = useState(true);
   const [loadingSupport, setLoadingSupport] = useState(true);
   const [conversationError, setConversationError] = useState<string | null>(null);
@@ -217,7 +232,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     setSignalsState((current) => {
       const nextSignals = limitRecent(
         typeof updater === 'function' ? updater(current) : updater,
-        MAX_REALTIME_ITEMS,
+        CHAT_HISTORY_ITEM_LIMIT,
       );
       signalsRef.current = nextSignals;
       return nextSignals;
@@ -230,7 +245,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     signalMergeQueueRef.current = signalMergeQueueRef.current
       .catch(() => undefined)
       .then(async () => {
-        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, MAX_REALTIME_ITEMS);
+        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, CHAT_HISTORY_ITEM_LIMIT);
         setSignals(nextSignals);
       });
 
@@ -272,6 +287,8 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
       const nextSignals = response.items;
       nextSignals.forEach((signal) => rememberRecentId(seenSignalIdsRef.current, signal.id));
       await mergeSignalsIntoState(nextSignals);
+      setSignalsNextBeforeId(response.next_before_id);
+      setSignalsHasMore(response.has_more);
       setSignalsError(null);
     } catch {
       setSignalsError('Не удалось загрузить сообщения личного бота.');
@@ -287,6 +304,8 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
       const nextMessages = response.items.map((message) => ({ ...message, delivery_state: 'sent' as const }));
       nextMessages.forEach((message) => rememberRecentId(seenSupportMessageIdsRef.current, message.id));
       setSupportMessages((current) => mergeSupportMessages(current, nextMessages));
+      setSupportNextBeforeId(response.next_before_id);
+      setSupportHasMore(response.has_more);
       setSupportError(null);
     } catch {
       setSupportError('Не удалось загрузить историю поддержки.');
@@ -298,6 +317,49 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   const refreshAll = useCallback(async () => {
     await Promise.allSettled([loadConversations(), loadSignalMessages(), loadSupportMessages()]);
   }, [loadConversations, loadSignalMessages, loadSupportMessages]);
+
+  const loadOlderSignalMessages = useCallback(async () => {
+    if (!signalsNextBeforeId || signalsLoadingMore) return;
+    setSignalsLoadingMore(true);
+    try {
+      const params = new URLSearchParams({
+        before_id: String(signalsNextBeforeId),
+        limit: '100',
+      });
+      const response = await apiFetch<ChatSignalMessagePageResponse>(`/chat/conversations/signals/messages?${params.toString()}`);
+      response.items.forEach((signal) => rememberRecentId(seenSignalIdsRef.current, signal.id));
+      await mergeSignalsIntoState(response.items);
+      setSignalsNextBeforeId(response.next_before_id);
+      setSignalsHasMore(response.has_more);
+      setSignalsError(null);
+    } catch {
+      setSignalsError('Не удалось загрузить ранние сообщения личного бота.');
+    } finally {
+      setSignalsLoadingMore(false);
+    }
+  }, [mergeSignalsIntoState, signalsLoadingMore, signalsNextBeforeId]);
+
+  const loadOlderSupportMessages = useCallback(async () => {
+    if (!supportNextBeforeId || supportLoadingMore) return;
+    setSupportLoadingMore(true);
+    try {
+      const params = new URLSearchParams({
+        before_id: String(supportNextBeforeId),
+        limit: '100',
+      });
+      const response = await apiFetch<ChatMessagePageResponse>(`/chat/conversations/support/messages?${params.toString()}`);
+      const olderMessages = response.items.map((message) => ({ ...message, delivery_state: 'sent' as const }));
+      olderMessages.forEach((message) => rememberRecentId(seenSupportMessageIdsRef.current, message.id));
+      setSupportMessages((current) => mergeSupportMessages(current, olderMessages));
+      setSupportNextBeforeId(response.next_before_id);
+      setSupportHasMore(response.has_more);
+      setSupportError(null);
+    } catch {
+      setSupportError('Не удалось загрузить раннюю историю поддержки.');
+    } finally {
+      setSupportLoadingMore(false);
+    }
+  }, [supportLoadingMore, supportNextBeforeId]);
 
   const { enqueue: enqueueSignalStreamMessage } = useThrottledEventBuffer<ChatSignalMessageResponse>((incomingSignals) => {
     void mergeSignalsIntoState(incomingSignals);
@@ -421,6 +483,11 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
       enqueueStreamConversation(payload.conversation);
     };
 
+    const handleReadUpdated = (payload: ChatReadUpdatedEvent) => {
+      if (!payload?.conversation_id) return;
+      setSupportMessages((current) => applyReadReceiptToMessages(current, payload));
+    };
+
     async function connect() {
       setSupportStreamState('connecting');
       let ticket: string;
@@ -451,6 +518,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           if (payload?.event === 'pong') return;
           if (payload?.event === 'chat.message.created') handleMessageCreated(payload as ChatStreamMessageCreatedEvent);
           if (payload?.event === 'chat.conversation.updated') handleConversationUpdated(payload as ChatStreamConversationUpdatedEvent);
+          if (payload?.event === 'chat.read.updated') handleReadUpdated(payload as ChatReadUpdatedEvent);
         } catch {
           // Ignore malformed stream frames.
         }
@@ -715,7 +783,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   return (
     <section
       id="web-bot-chat"
-      className="web-bot-chat mb-0 flex min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
+      className="web-bot-chat mb-0 flex min-w-0 flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-glass backdrop-blur-xl"
     >
       <div className="border-b border-white/10 bg-slate-950/35 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
@@ -775,6 +843,10 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           items={signalItems}
           loading={loadingSignals}
           active={active}
+          hasMore={signalsHasMore}
+          loadingMore={signalsLoadingMore}
+          loadMoreLabel="Показать ранние сигналы"
+          onLoadMore={() => void loadOlderSignalMessages()}
           empty={(
             <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {signalsError ? (
@@ -793,6 +865,10 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           items={supportItems}
           loading={loadingSupport}
           active={active}
+          hasMore={supportHasMore}
+          loadingMore={supportLoadingMore}
+          loadMoreLabel="Показать раннюю историю"
+          onLoadMore={() => void loadOlderSupportMessages()}
           empty={(
             <div className="grid min-h-[92px] w-full max-w-[34rem] place-items-center rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-center">
               {supportError || conversationError ? (

@@ -29,12 +29,14 @@ from src.models.models import (
     User,
 )
 from src.services import telegram_auth
+from src.services import vk_auth_flow
 from src.services.telegram_auth import confirm_telegram_bot_auth_session, create_telegram_bot_auth_session
 
 
 class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         telegram_auth._sessions.clear()
+        vk_auth_flow._flows.clear()
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -42,6 +44,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         telegram_auth._sessions.clear()
+        vk_auth_flow._flows.clear()
         await self.engine.dispose()
 
     def test_vk_oauth_urlopen_bypasses_process_proxy_environment(self):
@@ -225,6 +228,55 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
                     request=SimpleNamespace(cookies={auth.VK_FLOW_COOKIE_NAME: cookie_value}),
                     response=Response(),
                     current_user=telegram_user,
+                    db=db,
+                )
+
+            self.assertEqual(result.status, "success")
+            refreshed = await db.get(User, telegram_user.telegram_id)
+            self.assertEqual(refreshed.vk_user_id, "741852963")
+
+    async def test_vk_complete_link_uses_server_flow_when_external_browser_has_no_cookie(self):
+        async with self.Session() as db:
+            telegram_user = User(
+                telegram_id=123456789,
+                first_name="Telegram",
+                role="user",
+                stats_display_mode="percent",
+                tg_chat_joined=False,
+            )
+            db.add(telegram_user)
+            await db.commit()
+
+            start_response = Response()
+            with (
+                patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+                patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+            ):
+                start = await auth.vk_id_start(
+                    auth.VkAuthStartRequest(action="link"),
+                    response=start_response,
+                    current_user=telegram_user,
+                    db=db,
+                )
+
+            with (
+                patch.object(auth.settings, "VK_ID_APP_ID", "54626979"),
+                patch.object(auth.settings, "VK_ID_REDIRECT_URI", "https://shamra1.pro"),
+                patch.object(
+                    auth,
+                    "_exchange_vk_or_502",
+                    new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
+                ),
+            ):
+                result = await auth.vk_id_complete(
+                    auth.VkAuthCompleteRequest(
+                        code="code",
+                        device_id="device",
+                        state=start.state,
+                    ),
+                    request=SimpleNamespace(cookies={}),
+                    response=Response(),
+                    current_user=None,
                     db=db,
                 )
 

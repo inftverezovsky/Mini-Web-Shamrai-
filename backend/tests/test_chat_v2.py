@@ -367,6 +367,58 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
             cursor = (await session.execute(select(ChatReadCursor))).scalars().one()
             self.assertEqual(cursor.last_read_message_id, second.id)
 
+    async def test_read_receipts_are_returned_for_messages_read_by_opposite_side(self):
+        async with self.Session() as session:
+            client = self._user(101)
+            admin = self._user(901, role="admin")
+            session.add_all([client, admin])
+            await session.commit()
+
+            client_message = await self._send_client_message(session, client, "Клиент пишет")
+            staff_message = await chat.create_admin_chat_message(
+                client_message.conversation_id,
+                chat.ChatMessageCreate(client_message_id=uuid4(), text="Ответ Shamrai"),
+                admin=admin,
+                db=session,
+            )
+
+            client_history_before = await chat.get_support_messages(current_user=client, db=session)
+            staff_message_before = next(message for message in client_history_before.items if message.id == staff_message.id)
+            self.assertIsNone(staff_message_before.read_at)
+
+            await chat.mark_support_read(
+                chat.ChatReadRequest(last_read_message_id=staff_message.id),
+                current_user=client,
+                db=session,
+            )
+
+            client_history_after = await chat.get_support_messages(current_user=client, db=session)
+            staff_message_after = next(message for message in client_history_after.items if message.id == staff_message.id)
+            self.assertIsNotNone(staff_message_after.read_at)
+
+            admin_history_before = await chat.get_admin_chat_messages(
+                client_message.conversation_id,
+                admin=admin,
+                db=session,
+            )
+            client_message_before = next(message for message in admin_history_before.items if message.id == client_message.id)
+            self.assertIsNone(client_message_before.read_at)
+
+            await chat.mark_admin_chat_read(
+                client_message.conversation_id,
+                chat.ChatReadRequest(last_read_message_id=client_message.id),
+                admin=admin,
+                db=session,
+            )
+
+            admin_history_after = await chat.get_admin_chat_messages(
+                client_message.conversation_id,
+                admin=admin,
+                db=session,
+            )
+            client_message_after = next(message for message in admin_history_after.items if message.id == client_message.id)
+            self.assertIsNotNone(client_message_after.read_at)
+
     async def test_signal_read_cursor_requires_existing_owned_non_support_signal(self):
         async with self.Session() as session:
             client = self._user(101)

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import { ChatConversationResponse, ChatMessageResponse } from '../schemas/schemas';
+import { ChatConversationResponse, ChatMessageResponse, ChatReadUpdatedEvent } from '../schemas/schemas';
 import { apiFetch, buildApiWebSocketUrl } from '../utils/api';
 import { MOCK_DEBUG_AUTH_TOKEN, getStoredAuthToken } from '../utils/authStorage';
 import { notifyInfo } from '../utils/notify';
@@ -30,6 +30,7 @@ export interface AdminWebChatMessageEventPayload {
 export const ADMIN_WEB_CHAT_MESSAGE_EVENT = 'shamrai:admin-web-chat-message';
 export const ADMIN_WEB_CHAT_CONVERSATION_EVENT = 'shamrai:admin-web-chat-conversation';
 export const ADMIN_WEB_CHAT_STATUS_EVENT = 'shamrai:admin-web-chat-status';
+export const ADMIN_WEB_CHAT_READ_EVENT = 'shamrai:admin-web-chat-read';
 
 function supportNoticeText(message: ChatMessageResponse) {
   const fallback = message.type === 'image'
@@ -144,6 +145,9 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
           if (payload?.event === 'chat.message.created') emitMessage(payload as AdminWebChatMessageEventPayload);
           if (payload?.event === 'chat.conversation.updated') {
             window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_CONVERSATION_EVENT, { detail: payload.conversation }));
+          }
+          if (payload?.event === 'chat.read.updated') {
+            window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_READ_EVENT, { detail: payload as ChatReadUpdatedEvent }));
           }
         } catch {
           // Ignore malformed stream frames.
