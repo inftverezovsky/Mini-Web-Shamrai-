@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-audit.txt
+
+pytest>=8.4,<9

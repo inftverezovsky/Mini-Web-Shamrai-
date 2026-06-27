@@ -1,6 +1,7 @@
-import { API_BASE_URL, AUTH_EXPIRED_EVENT } from '../config/api';
+import { API_BASE_URL, AUTH_EXPIRED_EVENT, BEARER_AUTH_COMPAT_ENABLED } from '../config/api';
 import { formatApiErrorMessage } from './errors';
 import { clearStoredAuthToken, getStoredAuthToken } from '../utils/authStorage';
+import { clearCsrfToken } from '../utils/csrf';
 
 function filenameFromDisposition(disposition: string | null, fallback: string) {
   if (!disposition) return fallback;
@@ -11,10 +12,12 @@ function filenameFromDisposition(disposition: string | null, fallback: string) {
 }
 
 export async function downloadApiFile(endpoint: string, fallbackFilename: string): Promise<void> {
-  const token = getStoredAuthToken();
+  const token = BEARER_AUTH_COMPAT_ENABLED ? getStoredAuthToken() : null;
+  const headers = new Headers();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(`${API_BASE_URL}/api${endpoint}`, {
     credentials: 'include',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers,
   });
 
   if (!response.ok) {
@@ -26,6 +29,7 @@ export async function downloadApiFile(endpoint: string, fallbackFilename: string
 
     if (response.status === 401) {
       clearStoredAuthToken();
+      clearCsrfToken();
       window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { endpoint, message } }));
     }
 

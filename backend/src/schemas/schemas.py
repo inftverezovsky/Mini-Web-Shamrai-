@@ -737,6 +737,40 @@ class PaymentTransactionResponse(BaseModel):
         from_attributes = True
 
 
+class PaymentReconciliationIssue(BaseModel):
+    code: str
+    severity: str
+    message: str
+    attempt_id: UUID
+    user_id: int
+    provider: str
+    provider_payment_id: Optional[str] = None
+    status: str
+    purchase_type: str
+    amount: str
+    currency: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    processing_started_at: Optional[datetime] = None
+    processed_at: Optional[datetime] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PaymentReconciliationSummary(BaseModel):
+    generated_at: datetime
+    window_hours: int
+    total_attempts_scanned: int
+    total_issues: int
+    provider_checks_included: bool
+    by_code: Dict[str, int] = Field(default_factory=dict)
+    by_severity: Dict[str, int] = Field(default_factory=dict)
+
+
+class PaymentReconciliationReport(BaseModel):
+    summary: PaymentReconciliationSummary
+    issues: List[PaymentReconciliationIssue] = Field(default_factory=list)
+
+
 # --- ANNOUNCEMENT SCHEMAS ---
 class AnnouncementCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)

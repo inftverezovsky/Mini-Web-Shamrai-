@@ -292,12 +292,20 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(admin_api, "count_online_users", new=AsyncMock(return_value=5)),
                 patch.object(admin_api, "get_delivery_outbox_metrics", new=AsyncMock(return_value={"queue_depth": 2})),
                 patch.object(admin_api, "get_security_rate_limit_metrics", return_value={"tracked_keys": 3}),
+                patch.object(
+                    admin_api,
+                    "build_observability_alert_payload",
+                    return_value={"overall_status": "ok", "alerts": []},
+                ),
             ):
                 payload = await admin_api.admin_monitoring_summary(admin=object(), db=session)
 
         self.assertEqual(payload["online"]["online_users"], 5)
         self.assertEqual(payload["delivery_outbox"]["queue_depth"], 2)
         self.assertEqual(payload["rate_limit"]["tracked_keys"], 3)
+        self.assertEqual(payload["alerts"]["overall_status"], "ok")
+        self.assertEqual(payload["payment_reconciliation"]["total_issues"], 0)
+        self.assertFalse(payload["payment_reconciliation"]["provider_checks_included"])
         self.assertEqual(payload["health"]["database"], "ok")
 
     async def test_monitoring_logs_and_report_are_sanitized(self):

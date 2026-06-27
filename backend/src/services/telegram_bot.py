@@ -51,15 +51,38 @@ def call_telegram_api(
                 description = error_payload.get("description") or f"HTTP {e.code}"
             except Exception:
                 description = f"HTTP {e.code}: {e.reason}"
-            print(f"Telegram Bot API call failed: {method}: {description}")
+            logger.warning(
+                "telegram_api_call_failed",
+                extra={
+                    "event": "telegram_api_call_failed",
+                    "telegram_method": method,
+                    "description": description,
+                },
+            )
             return {"ok": False, "description": description}
         except Exception as e:
             last_description = str(e)
             if attempt < attempts:
-                print(f"Telegram Bot API call retrying: {method}: attempt {attempt}/{attempts}: {e}")
+                logger.warning(
+                    "telegram_api_call_retrying",
+                    extra={
+                        "event": "telegram_api_call_retrying",
+                        "telegram_method": method,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "error_type": type(e).__name__,
+                    },
+                )
                 time.sleep(min(0.8 * attempt, 2.0))
                 continue
-            print(f"Telegram Bot API call failed: {method}: {e}")
+            logger.warning(
+                "telegram_api_call_failed",
+                extra={
+                    "event": "telegram_api_call_failed",
+                    "telegram_method": method,
+                    "error_type": type(e).__name__,
+                },
+            )
             return {"ok": False, "description": last_description}
 
     return {"ok": False, "description": last_description}
@@ -173,15 +196,38 @@ def call_telegram_api_multipart(
                 description = error_payload.get("description") or f"HTTP {e.code}"
             except Exception:
                 description = f"HTTP {e.code}: {e.reason}"
-            print(f"Telegram Bot API multipart call failed: {method}: {description}")
+            logger.warning(
+                "telegram_api_multipart_call_failed",
+                extra={
+                    "event": "telegram_api_multipart_call_failed",
+                    "telegram_method": method,
+                    "description": description,
+                },
+            )
             return {"ok": False, "description": description}
         except Exception as e:
             last_description = str(e)
             if attempt < attempts:
-                print(f"Telegram Bot API multipart call retrying: {method}: attempt {attempt}/{attempts}: {e}")
+                logger.warning(
+                    "telegram_api_multipart_call_retrying",
+                    extra={
+                        "event": "telegram_api_multipart_call_retrying",
+                        "telegram_method": method,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "error_type": type(e).__name__,
+                    },
+                )
                 time.sleep(min(0.8 * attempt, 2.0))
                 continue
-            print(f"Telegram Bot API multipart call failed: {method}: {e}")
+            logger.warning(
+                "telegram_api_multipart_call_failed",
+                extra={
+                    "event": "telegram_api_multipart_call_failed",
+                    "telegram_method": method,
+                    "error_type": type(e).__name__,
+                },
+            )
             return {"ok": False, "description": last_description}
 
     return {"ok": False, "description": last_description}

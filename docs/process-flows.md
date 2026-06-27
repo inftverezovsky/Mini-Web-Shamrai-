@@ -112,8 +112,8 @@ flowchart TD
   E --> F{"Deployment requested explicitly?"}
   F -- "нет" --> G["Stop with local report"]
   F -- "preview Shamrai VDS" --> H["Inventory Docker containers and ports first"]
-  H --> I["Use canonical /opt/shamrai-mini-app, compose shamrai, port 8082"]
-  I --> J["Health check http://127.0.0.1:8082/api/health"]
-  F -- "public shamra1.pro" --> K["Build frontend/dist and publish to /var/www/shamrai_web/dist"]
+  H --> I["Use canonical target from private runbook/project registry"]
+  I --> J["Health check the private canonical health URL"]
+  F -- "public shamra1.pro" --> K["Build frontend/dist and publish to private public web root"]
   K --> L["Verify public HTML references new assets"]
 ```

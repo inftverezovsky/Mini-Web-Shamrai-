@@ -1,0 +1,50 @@
+name: Restore drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 04:30 Europe/Moscow on Sundays, after the nightly backup window.
+    - cron: "30 1 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  restore-drill:
+    name: Weekly encrypted backup restore drill
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install age
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
+
+      - name: Prepare SSH and age identities
+        run: |
+          set -euo pipefail
+          install -m 0700 -d "$HOME/.ssh"
+          printf '%s\n' "${{ secrets.SHAMRAI_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/shamrai_restore_drill"
+          chmod 0600 "$HOME/.ssh/shamrai_restore_drill"
+          ssh-keyscan -p 22 -t ed25519 82.147.67.245 > "$HOME/.ssh/known_hosts"
+          ssh-keygen -lf "$HOME/.ssh/known_hosts" | grep -F "SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw"
+          printf '%s\n' "${{ secrets.SHAMRAI_BACKUP_AGE_IDENTITY }}" > "$RUNNER_TEMP/shamrai-backup-age-identity.txt"
+          chmod 0600 "$RUNNER_TEMP/shamrai-backup-age-identity.txt"
+
+      - name: Run restore drill
+        shell: pwsh
+        run: |
+          ./scripts/run-shamrai-restore-drill.ps1 `
+            -Workspace "$env:GITHUB_WORKSPACE" `
+            -SshKeyPath "$env:HOME/.ssh/shamrai_restore_drill" `
+            -KnownHostsPath "$env:HOME/.ssh/known_hosts" `
+            -NoHostKeyScan `
+            -AgeIdentityPath "$env:RUNNER_TEMP/shamrai-backup-age-identity.txt"
+
+      - name: Clean temporary secrets
+        if: always()
+        run: |
+          rm -f "$HOME/.ssh/shamrai_restore_drill" "$RUNNER_TEMP/shamrai-backup-age-identity.txt"

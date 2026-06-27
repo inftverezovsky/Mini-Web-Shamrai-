@@ -86,20 +86,49 @@ class SecurityRateLimitConfigTests(unittest.TestCase):
         )
 
 
-class SecurityRateLimiterTests(unittest.TestCase):
-    def _limiter(self, mode: str) -> SecurityRateLimiter:
+class FakeRedis:
+    def __init__(self) -> None:
+        self.sorted_sets = {}
+        self.expires = {}
+
+    async def eval(self, script, numkeys, *keys_and_args):
+        key = keys_and_args[0]
+        cutoff = float(keys_and_args[1])
+        now = float(keys_and_args[2])
+        member = str(keys_and_args[3])
+        ttl = int(keys_and_args[5])
+        values = {
+            item_member: score
+            for item_member, score in self.sorted_sets.get(key, {}).items()
+            if score > cutoff
+        }
+        values[member] = now
+        self.sorted_sets[key] = values
+        self.expires[key] = ttl
+        oldest = min(values.values()) if values else now
+        return [len(values), oldest]
+
+
+class FailingRedis:
+    async def eval(self, script, numkeys, *keys_and_args):
+        raise ConnectionError("redis unavailable")
+
+
+class SecurityRateLimiterTests(unittest.IsolatedAsyncioTestCase):
+    def _limiter(self, mode: str, **kwargs) -> SecurityRateLimiter:
         return SecurityRateLimiter(
             mode=mode,
             rules={"auth": RateLimitRule(limit=1, burst=0, window_seconds=60)},
             max_tracked_keys=100,
             cleanup_interval_seconds=60,
+            **kwargs,
         )
 
-    def test_monitor_mode_records_exceeded_without_blocking(self):
+    async def test_monitor_mode_records_exceeded_without_blocking(self):
         limiter = self._limiter("monitor")
 
-        first = limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
-        second = limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
+        first = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
+        second = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
 
         self.assertFalse(first.exceeded)
         self.assertFalse(first.blocked)
@@ -107,26 +136,55 @@ class SecurityRateLimiterTests(unittest.TestCase):
         self.assertFalse(second.blocked)
         self.assertEqual(limiter.snapshot()["groups"]["auth"]["exceeded"], 1)
 
-    def test_enforce_mode_blocks_after_threshold(self):
+    async def test_enforce_mode_blocks_after_threshold(self):
         limiter = self._limiter("enforce")
 
-        limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
-        second = limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
+        await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
+        second = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
 
         self.assertTrue(second.exceeded)
         self.assertTrue(second.blocked)
         self.assertGreater(second.retry_after, 0)
         self.assertEqual(limiter.snapshot()["groups"]["auth"]["blocked"], 1)
 
-    def test_off_mode_never_tracks_or_blocks(self):
+    async def test_off_mode_never_tracks_or_blocks(self):
         limiter = self._limiter("off")
 
         for offset in range(5):
-            decision = limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0 + offset)
+            decision = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0 + offset)
 
         self.assertFalse(decision.exceeded)
         self.assertFalse(decision.blocked)
         self.assertEqual(limiter.snapshot()["tracked_keys"], 0)
+
+    async def test_redis_storage_shares_limits_between_limiter_instances(self):
+        redis = FakeRedis()
+        first_limiter = self._limiter("enforce", storage="redis", redis_client=redis)
+        second_limiter = self._limiter("enforce", storage="redis", redis_client=redis)
+
+        first = await first_limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
+        second = await second_limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
+
+        self.assertFalse(first.blocked)
+        self.assertTrue(second.exceeded)
+        self.assertTrue(second.blocked)
+        self.assertEqual(first_limiter.snapshot()["storage"], "redis")
+        self.assertEqual(second_limiter.snapshot()["groups"]["auth"]["blocked"], 1)
+
+    async def test_redis_failure_falls_back_to_local_memory(self):
+        limiter = self._limiter("enforce", storage="redis", redis_client=FailingRedis())
+
+        first = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=100.0)
+        second = await limiter.check(group="auth", subjects=("ip:127.0.0.1",), now=101.0)
+        snapshot = limiter.snapshot()
+
+        self.assertFalse(first.blocked)
+        self.assertTrue(second.blocked)
+        self.assertEqual(snapshot["storage"], "memory")
+        self.assertTrue(snapshot["redis_fallback_active"])
+        self.assertEqual(snapshot["fallback_checks"], 2)
+        self.assertGreaterEqual(snapshot["redis_failures"], 1)
+        self.assertEqual(snapshot["tracked_keys"], 1)
 
 
 if __name__ == "__main__":

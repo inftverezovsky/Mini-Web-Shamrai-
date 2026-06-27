@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import mimetypes
 from typing import Optional
 import socket
@@ -17,11 +18,14 @@ from src.models.database import Base, engine, AsyncSessionLocal
 from src.models.models import Subscription, User
 from src.api.deps import get_optional_user_read
 from src.core.config import settings
+from src.core.csrf import CsrfProtectionMiddleware
+from src.core.observability import RequestObservabilityMiddleware, configure_observability_logging
 from src.core.roles import is_staff_role
 from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
 from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go, public_settings
-from src.services.delivery_outbox import delivery_outbox_daemon
+from src.services.delivery_outbox import delivery_outbox_daemon, get_delivery_outbox_metrics
+from src.services.observability_alerts import observability_alert_daemon
 from src.services.system_settings import is_system_setting_enabled
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
 from src.services.vk_delivery import (
@@ -32,6 +36,9 @@ from src.services.vk_delivery import (
     vk_delivery_configured,
     vk_group_id,
 )
+
+configure_observability_logging()
+logger = logging.getLogger("uvicorn")
 
 
 async def run_dev_schema_migrations(conn):
@@ -74,6 +81,7 @@ async def run_dev_schema_migrations(conn):
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS guarantee_opened_from_bet_id UUID",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS guarantee_closed_at TIMESTAMP WITH TIME ZONE",
             "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS match_count INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE payment_attempts ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP WITH TIME ZONE",
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS access_type VARCHAR NOT NULL DEFAULT 'paid_match'",
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS match_charged BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR NOT NULL DEFAULT 'feed'",
@@ -262,7 +270,7 @@ async def run_dev_schema_migrations(conn):
 
     if dialect == "sqlite":
         table_columns = {}
-        for table in ("users", "bets", "promo_codes", "subscription_plans", "user_bets"):
+        for table in ("users", "bets", "promo_codes", "subscription_plans", "payment_attempts", "user_bets"):
             result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
             table_columns[table] = {row[1] for row in result.fetchall()}
 
@@ -301,6 +309,9 @@ async def run_dev_schema_migrations(conn):
             ],
             "subscription_plans": [
                 ("match_count", "INTEGER NOT NULL DEFAULT 1"),
+            ],
+            "payment_attempts": [
+                ("processing_started_at", "DATETIME"),
             ],
             "user_bets": [
                 ("access_type", "VARCHAR NOT NULL DEFAULT 'paid_match'"),
@@ -649,11 +660,21 @@ async def check_abandoned_invoices(db):
         
     if abandoned_subs:
         await db.commit()
-        print(f"[Daemon] Cart Recovery: marked {len(abandoned_subs)} pending invoices as abandoned and sent push coupons.")
+        logger.info(
+            "cart_recovery_abandoned_invoices_marked",
+            extra={
+                "event": "cart_recovery_abandoned_invoices_marked",
+                "daemon": "cart_recovery",
+                "abandoned_count": len(abandoned_subs),
+            },
+        )
 
 async def abandoned_cart_recovery_daemon():
     """Background execution loop."""
-    print("[Daemon] Abandoned Cart Recovery daemon initialized.")
+    logger.info(
+        "abandoned_cart_recovery_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "cart_recovery"},
+    )
     while True:
         # Check every 60s in debug/dev, every 15 mins in production
         sleep_time = 60 if settings.DEBUG_MODE else 900
@@ -662,8 +683,15 @@ async def abandoned_cart_recovery_daemon():
         async with AsyncSessionLocal() as db:
             try:
                 await check_abandoned_invoices(db)
-            except Exception as e:
-                print(f"[Daemon] Error in cart recovery daemon tick: {e}")
+            except Exception as exc:
+                logger.exception(
+                    "cart_recovery_daemon_tick_failed",
+                    extra={
+                        "event": "daemon_tick_failed",
+                        "daemon": "cart_recovery",
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
 async def check_expired_vip_subscriptions(db):
     """
@@ -712,11 +740,21 @@ async def check_expired_vip_subscriptions(db):
             
     if kicked_count > 0:
         await db.commit()
-        print(f"[Daemon] VIP Auto-pilot: Kicked {kicked_count} expired members from chat.")
+        logger.info(
+            "vip_chat_expired_members_removed",
+            extra={
+                "event": "vip_chat_expired_members_removed",
+                "daemon": "vip_chat_expirations",
+                "removed_count": kicked_count,
+            },
+        )
 
 async def vip_chat_expirations_daemon():
     """VIP autopilot ban background loop."""
-    print("[Daemon] VIP Chat Expirations autopilot initialized.")
+    logger.info(
+        "vip_chat_expirations_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "vip_chat_expirations"},
+    )
     while True:
         # Check every 60s in debug/dev, every hour in production
         sleep_time = 60 if settings.DEBUG_MODE else 3600
@@ -725,8 +763,15 @@ async def vip_chat_expirations_daemon():
         async with AsyncSessionLocal() as db:
             try:
                 await check_expired_vip_subscriptions(db)
-            except Exception as e:
-                print(f"[Daemon] Error in VIP autopilot tick: {e}")
+            except Exception as exc:
+                logger.exception(
+                    "vip_chat_expirations_daemon_tick_failed",
+                    extra={
+                        "event": "daemon_tick_failed",
+                        "daemon": "vip_chat_expirations",
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
 
 TUNNEL_LOG_PATTERNS = [
@@ -749,8 +794,15 @@ def _active_tunnel_url_from_logs() -> str | None:
                 continue
             with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
                 tunnel_urls.extend(re.findall(pattern, log_file.read()))
-        except Exception as e:
-            print(f"[Webhook] Error reading tunnel log {log_path}: {e}")
+        except Exception as exc:
+            logger.warning(
+                "tunnel_log_read_failed",
+                extra={
+                    "event": "tunnel_log_read_failed",
+                    "path": log_path,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     latest_tunnel_url = tunnel_urls[-1] if tunnel_urls else None
 
@@ -760,8 +812,15 @@ def _active_tunnel_url_from_logs() -> str | None:
             with direct_opener.open(f"{tunnel_url.rstrip('/')}/api/health", timeout=4) as response:
                 if response.status < 500:
                     return tunnel_url
-        except Exception as e:
-            print(f"[Webhook] Tunnel health check failed for {tunnel_url}: {e}")
+        except Exception as exc:
+            logger.warning(
+                "tunnel_health_check_failed",
+                extra={
+                    "event": "tunnel_health_check_failed",
+                    "tunnel_url": tunnel_url,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     return latest_tunnel_url
 
@@ -805,7 +864,10 @@ async def tunnel_webhook_monitor_daemon():
     """
     Periodically keeps Telegram pointed at the latest live tunnel URL.
     """
-    print("[Daemon] Tunnel Webhook Monitor daemon initialized.")
+    logger.info(
+        "tunnel_webhook_monitor_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "tunnel_webhook_monitor"},
+    )
     webhook_payload_extra = _telegram_webhook_registration_payload()
 
     while True:
@@ -827,11 +889,36 @@ async def tunnel_webhook_monitor_daemon():
 
                 if current_url != webhook_url or allowed_updates_need_repair:
                     reason = "URL mismatch" if current_url != webhook_url else "allowed_updates missing callback_query"
-                    print(f"[Daemon] Webhook {reason}. Telegram has: '{current_url}', expected: '{webhook_url}'. Re-registering...")
+                    logger.warning(
+                        "telegram_webhook_mismatch_detected",
+                        extra={
+                            "event": "telegram_webhook_mismatch",
+                            "daemon": "tunnel_webhook_monitor",
+                            "reason": reason,
+                            "actual_webhook_url": current_url,
+                            "expected_webhook_url": webhook_url,
+                        },
+                    )
                     res = await call_telegram_api_async("setWebhook", {"url": webhook_url, **webhook_payload_extra})
-                    print(f"[Daemon] Webhook re-registration result: {res}")
-            except Exception as e:
-                print(f"[Daemon] Error in webhook monitor tick: {e}")
+                    logger.info(
+                        "telegram_webhook_reregistered",
+                        extra={
+                            "event": "telegram_webhook_reregistered",
+                            "daemon": "tunnel_webhook_monitor",
+                            "ok": bool(res.get("ok")),
+                            "error_code": res.get("error_code"),
+                            "has_description": bool(res.get("description")),
+                        },
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "tunnel_webhook_monitor_tick_failed",
+                    extra={
+                        "event": "daemon_tick_failed",
+                        "daemon": "tunnel_webhook_monitor",
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
 
 def _dispatch_polling_response(response: dict) -> bool:
@@ -859,10 +946,21 @@ def _dispatch_polling_response(response: dict) -> bool:
             if fallback_payload:
                 fallback_result = call_telegram_api(method, fallback_payload, timeout, retries)
                 if fallback_result.get("ok"):
-                    print("[Daemon] Telegram web_app button fallback delivered with url button")
+                    logger.info(
+                        "telegram_web_app_button_fallback_delivered",
+                        extra={"event": "telegram_web_app_button_fallback_delivered", "daemon": "telegram_polling"},
+                    )
                     return True
                 description = fallback_result.get("description", description)
-        print(f"[Daemon] Telegram response dispatch failed: {method}: {description}")
+        logger.warning(
+            "telegram_response_dispatch_failed",
+            extra={
+                "event": "telegram_response_dispatch_failed",
+                "daemon": "telegram_polling",
+                "telegram_method": method,
+                "description": description,
+            },
+        )
         if method == "answerCallbackQuery":
             return True
         return False
@@ -918,7 +1016,10 @@ async def telegram_polling_daemon():
     """
     Fallback update loop for servers that Telegram cannot reach reliably by webhook.
     """
-    print("[Daemon] Telegram polling daemon initialized.")
+    logger.info(
+        "telegram_polling_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "telegram_polling"},
+    )
     offset = None
     while True:
         if not settings.has_real_telegram_token:
@@ -942,7 +1043,14 @@ async def telegram_polling_daemon():
                 0,
             )
             if not updates_result.get("ok"):
-                print(f"[Daemon] Telegram getUpdates failed: {updates_result.get('description', 'unknown error')}")
+                logger.warning(
+                    "telegram_get_updates_failed",
+                    extra={
+                        "event": "telegram_get_updates_failed",
+                        "daemon": "telegram_polling",
+                        "description": updates_result.get("description", "unknown error"),
+                    },
+                )
                 await asyncio.sleep(1)
                 continue
 
@@ -957,15 +1065,37 @@ async def telegram_polling_daemon():
                     )
                     dispatched = await asyncio.to_thread(_dispatch_polling_response, response)
                     if not dispatched:
-                        print(f"[Daemon] Telegram polling response not delivered for update_id={update_id}; retrying later")
+                        logger.warning(
+                            "telegram_polling_response_not_delivered",
+                            extra={
+                                "event": "telegram_polling_response_not_delivered",
+                                "daemon": "telegram_polling",
+                                "telegram_update_id": update_id,
+                            },
+                        )
                         break
                     if update_id is not None:
                         offset = int(update_id) + 1
                 except Exception as exc:
-                    print(f"[Daemon] Telegram polling update failed: {exc}")
+                    logger.exception(
+                        "telegram_polling_update_failed",
+                        extra={
+                            "event": "telegram_polling_update_failed",
+                            "daemon": "telegram_polling",
+                            "telegram_update_id": update_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                     break
         except Exception as exc:
-            print(f"[Daemon] Telegram polling tick failed: {exc}")
+            logger.exception(
+                "telegram_polling_tick_failed",
+                extra={
+                    "event": "daemon_tick_failed",
+                    "daemon": "telegram_polling",
+                    "error_type": type(exc).__name__,
+                },
+            )
             await asyncio.sleep(3)
 
 
@@ -1003,7 +1133,10 @@ async def vk_dialog_polling_daemon():
     Fallback for VK communities where Callback API message_new events are not delivered.
     It reads unread dialogs with the group token and runs the same handler as callbacks.
     """
-    print("[Daemon] VK dialog polling daemon initialized.")
+    logger.info(
+        "vk_dialog_polling_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "vk_dialog_polling"},
+    )
 
     while True:
         interval = max(1.0, float(settings.VK_DIALOG_POLLING_INTERVAL_SECONDS or 4.0))
@@ -1020,7 +1153,14 @@ async def vk_dialog_polling_daemon():
                 settings.VK_DIALOG_POLLING_BATCH_SIZE,
             )
             if not result.get("ok"):
-                print(f"[Daemon] VK dialog polling failed: {result.get('description', 'unknown error')}")
+                logger.warning(
+                    "vk_dialog_polling_failed",
+                    extra={
+                        "event": "vk_dialog_polling_failed",
+                        "daemon": "vk_dialog_polling",
+                        "description": result.get("description", "unknown error"),
+                    },
+                )
                 await asyncio.sleep(interval)
                 continue
 
@@ -1036,12 +1176,23 @@ async def vk_dialog_polling_daemon():
                     event_object.get("peer_id"),
                 )
                 if not mark_result.get("ok"):
-                    print(
-                        "[Daemon] VK dialog markAsRead failed: "
-                        f"{mark_result.get('description', 'unknown error')}"
+                    logger.warning(
+                        "vk_dialog_mark_as_read_failed",
+                        extra={
+                            "event": "vk_dialog_mark_as_read_failed",
+                            "daemon": "vk_dialog_polling",
+                            "description": mark_result.get("description", "unknown error"),
+                        },
                     )
         except Exception as exc:
-            print(f"[Daemon] VK dialog polling tick failed: {exc}")
+            logger.exception(
+                "vk_dialog_polling_tick_failed",
+                extra={
+                    "event": "daemon_tick_failed",
+                    "daemon": "vk_dialog_polling",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
         await asyncio.sleep(interval)
 
@@ -1125,7 +1276,10 @@ async def configure_telegram_delivery_on_startup():
         webhook_url = _telegram_webhook_url()
 
         if settings.TELEGRAM_USE_POLLING:
-            print("[Lifespan] Telegram polling enabled. Scheduling webhook deletion without blocking startup.")
+            logger.info(
+                "telegram_polling_enabled_deleting_webhook",
+                extra={"event": "telegram_polling_enabled_deleting_webhook"},
+            )
             result = await asyncio.to_thread(
                 call_telegram_api,
                 "deleteWebhook",
@@ -1134,9 +1288,21 @@ async def configure_telegram_delivery_on_startup():
                 1,
             )
             if not result.get("ok"):
-                print(f"[Lifespan] Telegram deleteWebhook failed: {result.get('description', 'unknown error')}")
+                logger.warning(
+                    "telegram_delete_webhook_failed",
+                    extra={
+                        "event": "telegram_delete_webhook_failed",
+                        "description": result.get("description", "unknown error"),
+                    },
+                )
         else:
-            print(f"[Lifespan] Scheduling Telegram Webhook registration to {webhook_url}")
+            logger.info(
+                "telegram_webhook_registration_scheduled",
+                extra={
+                    "event": "telegram_webhook_registration_scheduled",
+                    "expected_webhook_url": webhook_url,
+                },
+            )
             webhook_payload = {
                 "url": webhook_url,
                 **_telegram_webhook_registration_payload(),
@@ -1149,10 +1315,22 @@ async def configure_telegram_delivery_on_startup():
                 1,
             )
             if not result.get("ok"):
-                print(f"[Lifespan] Telegram setWebhook failed: {result.get('description', 'unknown error')}")
+                logger.warning(
+                    "telegram_set_webhook_failed",
+                    extra={
+                        "event": "telegram_set_webhook_failed",
+                        "description": result.get("description", "unknown error"),
+                    },
+                )
 
         menu_base = settings.FRONTEND_BASE_URL.rstrip("/") if settings.FRONTEND_BASE_URL else webhook_base
-        print(f"[Lifespan] Scheduling Telegram Menu Button registration to {menu_base}")
+        logger.info(
+            "telegram_menu_button_registration_scheduled",
+            extra={
+                "event": "telegram_menu_button_registration_scheduled",
+                "menu_base_url": menu_base,
+            },
+        )
         menu_result = await asyncio.to_thread(
             call_telegram_api,
             "setChatMenuButton",
@@ -1169,9 +1347,34 @@ async def configure_telegram_delivery_on_startup():
             1,
         )
         if not menu_result.get("ok"):
-            print(f"[Lifespan] Telegram setChatMenuButton failed: {menu_result.get('description', 'unknown error')}")
+            logger.warning(
+                "telegram_set_chat_menu_button_failed",
+                extra={
+                    "event": "telegram_set_chat_menu_button_failed",
+                    "description": menu_result.get("description", "unknown error"),
+                },
+            )
     except Exception as exc:
-        print(f"[Lifespan] Telegram startup configuration failed: {exc}")
+        logger.exception(
+            "telegram_startup_configuration_failed",
+            extra={
+                "event": "telegram_startup_configuration_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+
+
+async def _observability_delivery_metrics_probe() -> dict:
+    async with AsyncSessionLocal() as db:
+        return await get_delivery_outbox_metrics(db)
+
+
+async def _observability_telegram_health_probe() -> dict:
+    return await telegram_health_check()
+
+
+async def _observability_vk_health_probe() -> dict:
+    return await vk_deep_health_check()
 
 
 @asynccontextmanager
@@ -1187,7 +1390,10 @@ async def lifespan(app: FastAPI):
         
     # Set proxy if configured
     if settings.HTTPS_PROXY:
-        print("[Lifespan] Setting global HTTPS proxy: configured")
+        logger.info(
+            "global_https_proxy_configured",
+            extra={"event": "global_https_proxy_configured"},
+        )
         os.environ["HTTPS_PROXY"] = settings.HTTPS_PROXY
         os.environ["https_proxy"] = settings.HTTPS_PROXY
  
@@ -1203,6 +1409,7 @@ async def lifespan(app: FastAPI):
     delivery_outbox_task = None
     webhook_monitor_task = None
     vk_dialog_polling_task = None
+    observability_alert_task = None
     if settings.VK_DIALOG_POLLING_ENABLED:
         vk_dialog_polling_task = asyncio.create_task(vk_dialog_polling_daemon())
 
@@ -1210,6 +1417,13 @@ async def lifespan(app: FastAPI):
         daemon_task = asyncio.create_task(abandoned_cart_recovery_daemon())
         vip_daemon_task = asyncio.create_task(vip_chat_expirations_daemon())
         delivery_outbox_task = asyncio.create_task(delivery_outbox_daemon())
+        observability_alert_task = asyncio.create_task(
+            observability_alert_daemon(
+                delivery_metrics_factory=_observability_delivery_metrics_probe,
+                telegram_health_factory=_observability_telegram_health_probe,
+                vk_health_factory=_observability_vk_health_probe,
+            )
+        )
         if settings.DEBUG_MODE:
             webhook_monitor_task = asyncio.create_task(tunnel_webhook_monitor_daemon())
     
@@ -1222,6 +1436,7 @@ async def lifespan(app: FastAPI):
         delivery_outbox_task,
         webhook_monitor_task,
         vk_dialog_polling_task,
+        observability_alert_task,
         polling_task,
         telegram_startup_task,
     ):
@@ -1246,6 +1461,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityRateLimitMiddleware, limiter=security_rate_limiter)
+app.add_middleware(CsrfProtectionMiddleware)
+app.add_middleware(RequestObservabilityMiddleware)
 
 MAINTENANCE_EXEMPT_PATH_PREFIXES = (
     "/api/admin",

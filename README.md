@@ -44,13 +44,13 @@ flowchart LR
     NGINX["frontend nginx"]
   end
 
-  NGINX -->|"127.0.0.1:8082"| HEALTH["/api/health"]
-  PUBLIC["https://shamra1.pro"] -->|"host nginx"| WEBROOT["/var/www/shamrai_web/dist"]
+  NGINX -->|"local preview port"| HEALTH["/api/health"]
+  PUBLIC["https://shamra1.pro"] -->|"host nginx"| WEBROOT["published frontend assets"]
 ```
 
 Backend принимает API под `/api`, проверяет cookie/JWT, работает с PostgreSQL через SQLAlchemy async и отдаёт статические coupon-файлы. Внешняя доставка вынесена в outbox, чтобы Telegram, VK и Web Push можно было ретраить без двойной выдачи доступа.
 
-Frontend собирается Vite. В production API вызывается same-origin через `/api`. Важно различать Docker preview и публичный сайт: здоровый контейнер `shamrai-frontend` на `8082` не означает, что `https://shamra1.pro/` обновился, потому что публичный домен обслуживается host nginx из `/var/www/shamrai_web/dist`.
+Frontend собирается Vite. В production API вызывается same-origin через `/api`. Важно различать Docker preview и публичный сайт: здоровый контейнер frontend preview не означает, что `https://shamra1.pro/` обновился, потому что публичный домен обслуживается host nginx из отдельного static web root, записанного в private runbook/project registry.
 
 ## Стек
 
@@ -103,7 +103,7 @@ Copy-Item .env.example .env
 Copy-Item backend\.env.example backend\.env
 docker compose -p shamrai up -d --build
 docker compose -p shamrai ps
-curl http://127.0.0.1:8082/api/health
+curl http://127.0.0.1:<frontend-port>/api/health
 ```
 
 ### Backend
@@ -111,7 +111,7 @@ curl http://127.0.0.1:8082/api/health
 ```powershell
 cd backend
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 .\.venv\Scripts\alembic.exe upgrade head
 .\.venv\Scripts\python.exe -m src.scripts.seed_defaults --demo
@@ -200,7 +200,8 @@ cd backend
 .\.venv\Scripts\python.exe -m compileall -q src alembic
 .\.venv\Scripts\alembic.exe heads
 .\.venv\Scripts\python.exe -c "import src.main; print('backend_import_ok')"
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\pip-audit.exe -r requirements.txt --strict
 ```
 
 Frontend:
@@ -220,25 +221,15 @@ Docker and scripts:
 docker compose config --quiet
 ```
 
-CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile, frontend lint/unit tests/build, Playwright prelaunch smoke, Compose config validation and PowerShell script parsing.
+CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile/Python dependency audit, frontend npm audit/lint/unit tests/build, Playwright prelaunch smoke, secret scanning, dependency review, Docker image builds, Alembic migration smoke on empty PostgreSQL, Compose config validation and PowerShell script parsing.
 
 ## Deployment
 
-Canonical Shamrai preview deployment:
-
-| Field | Value |
-| --- | --- |
-| Server | `root@82.147.67.245` |
-| App path | `/opt/shamrai-mini-app` |
-| Docker Compose project | `shamrai` |
-| Preview frontend port | `8082` |
-| Health URL | `http://127.0.0.1:8082/api/health` |
-| Public URL | `https://shamra1.pro/` |
-| Public web root | `/var/www/shamrai_web/dist` |
+Canonical Shamrai preview deployment coordinates are intentionally kept out of tracked docs. Use the private Codex project registry/runbook for the exact server, remote app path, Compose project, preview port, health URL and public web root.
 
 Before any VDS deploy, repair or inspection, inventory Docker containers and listening ports. Keep one canonical preview only: do not solve conflicts by creating another app directory, compose project or frontend port.
 
-Preview Docker deploy:
+Preview Docker deploy shape:
 
 ```bash
 cp .env.example .env
@@ -246,7 +237,7 @@ cp backend/.env.example backend/.env
 docker compose -p shamrai build
 docker compose -p shamrai up -d
 docker compose -p shamrai ps
-curl http://127.0.0.1:8082/api/health
+curl http://127.0.0.1:<frontend-port>/api/health
 ```
 
 Guarded public frontend deploy helper:
@@ -257,7 +248,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy-public-shamrai-web.ps1
 Remove-Item Env:\SHAMRAI_SSH_PASSWORD
 ```
 
-Public deploy is complete only after `frontend/dist` is published to `/var/www/shamrai_web/dist` and `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css`.
+Public deploy is complete only after `frontend/dist` is published to the private public web root and `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css`.
+
+Encrypted database backups and restore drills are documented in [docs/backup-restore.md](docs/backup-restore.md).
 
 Do not stop system nginx, unrelated containers, databases or ports `80/443` unless the task explicitly replaces the public production deployment and ownership is confirmed.
 
@@ -295,7 +288,6 @@ Evidence checked:
 High-value follow-ups:
 
 - Keep Playwright prelaunch smoke focused on non-payment launch paths: auth/session, profile setup, support chat and admin web-chat.
-- Install/use a pinned Python dependency scanner such as `pip-audit` in CI.
 - Add at least one Playwright smoke path for auth/session, feed, tariff/payment entry and admin login.
 - Replace production daemon `print(...)` calls with structured logging before incident-heavy usage.
 - Run a read-only VDS health audit before any public redeploy.
@@ -303,6 +295,7 @@ High-value follow-ups:
 ## Useful docs
 
 - [docs/developer-guide.md](docs/developer-guide.md) - backend, frontend, database, payments, delivery and deployment map.
+- [docs/backup-restore.md](docs/backup-restore.md) - encrypted Postgres backups, retention, restore drill and production restore runbook.
 - [docs/process-flows.md](docs/process-flows.md) - Mermaid process diagrams for auth, payments, delivery, forecast, chat and deploy.
 - [docs/vk-delivery.md](docs/vk-delivery.md) - required VK ID, Callback API and delivery rules.
 - [docs/functional-algorithms.md](docs/functional-algorithms.md) - step-by-step functional algorithms.

@@ -213,6 +213,7 @@ class PaymentAttempt(Base):
     currency = Column(String, default="XTR", nullable=False)
     promo_code = Column(String, nullable=True)
     metadata_json = Column(JSON, default=dict, nullable=False)
+    processing_started_at = Column(DateTime(timezone=True), nullable=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

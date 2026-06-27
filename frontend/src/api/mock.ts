@@ -2768,6 +2768,15 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       online: { online_users: 14 },
       health: { api: 'ok', database: 'ok', redis: 'ok' },
       delivery_outbox: { pending: 2, sent: 128, failed: 1, cancelled: 0 },
+      payment_reconciliation: {
+        generated_at: now,
+        window_hours: 48,
+        total_attempts_scanned: 24,
+        total_issues: 1,
+        provider_checks_included: false,
+        by_code: { pending_stale: 1 },
+        by_severity: { warning: 1 },
+      },
       rate_limit: { active_windows: 3, blocked_keys: 0, last_reset_at: now },
       parser: { status: 'active', last_sync: now },
       audit: [

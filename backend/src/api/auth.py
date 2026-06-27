@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user, get_optional_user
 from src.core.config import LOCAL_DEV_JWT_SECRET, settings
+from src.core.csrf import clear_csrf_cookie, set_csrf_cookie
 from src.core.roles import is_staff_role, is_valid_role, normalize_role
 from src.core.security import (
     ACCESS_TOKEN_EXPIRE_DAYS,
@@ -140,6 +141,10 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+class CsrfTokenResponse(BaseModel):
+    csrf_token: str
 
 
 class VkLinkResponse(BaseModel):
@@ -686,6 +691,7 @@ def _build_login_response(user: User, response: Optional[Response] = None) -> Lo
     access_token = create_access_token({"sub": str(user.telegram_id), "role": user.role})
     if response is not None:
         _set_auth_cookie(response, access_token)
+        set_csrf_cookie(response)
     return LoginResponse(access_token=access_token, user=user)
 
 
@@ -751,7 +757,13 @@ async def enqueue_user_registration_report(db: AsyncSession, user: User, source:
 @router.post("/logout")
 async def logout_user(response: Response):
     _clear_auth_cookie(response)
+    clear_csrf_cookie(response)
     return {"status": "ok"}
+
+
+@router.get("/csrf", response_model=CsrfTokenResponse)
+async def get_csrf_token(response: Response):
+    return CsrfTokenResponse(csrf_token=set_csrf_cookie(response))
 
 
 async def _resolve_referrer_id(db: AsyncSession, tg_id: int, start_param: Optional[str]) -> Optional[int]:

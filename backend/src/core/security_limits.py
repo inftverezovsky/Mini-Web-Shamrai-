@@ -3,16 +3,18 @@ from __future__ import annotations
 import logging
 import ipaddress
 import time
-from collections import Counter, defaultdict, deque
+import uuid
+from collections import Counter, deque
 from dataclasses import dataclass
 from threading import RLock
-from typing import Deque, Iterable, Mapping, Optional
+from typing import Any, Deque, Iterable, Mapping, Optional
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from src.core.config import settings
+from src.core.redis_cache import get_redis_client
 from src.core.security import verify_access_token
 
 logger = logging.getLogger("uvicorn")
@@ -58,6 +60,25 @@ UPLOAD_PATH_PREFIXES = (
     "/api/admin/forecast-requests/bulk-send",
     "/api/chat/conversations/support/attachments",
 )
+
+REDIS_RATE_LIMIT_SCRIPT = """
+local key = KEYS[1]
+local cutoff = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local member = ARGV[3]
+local ttl = tonumber(ARGV[5])
+
+redis.call("ZREMRANGEBYSCORE", key, "-inf", cutoff)
+redis.call("ZADD", key, now, member)
+local count = redis.call("ZCARD", key)
+local oldest = now
+local oldest_items = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
+if oldest_items[2] ~= nil then
+    oldest = tonumber(oldest_items[2])
+end
+redis.call("EXPIRE", key, ttl)
+return {count, tostring(oldest)}
+"""
 
 
 @dataclass(frozen=True)
@@ -222,6 +243,8 @@ def _prefer_authenticated_rate_limit_subject(group: str) -> bool:
 
 
 class SecurityRateLimiter:
+    _REDIS_FAILURE_BACKOFF_SECONDS = 5.0
+
     def __init__(
         self,
         *,
@@ -229,13 +252,28 @@ class SecurityRateLimiter:
         rules: Mapping[str, RateLimitRule],
         max_tracked_keys: int,
         cleanup_interval_seconds: int,
+        storage: str = "memory",
+        redis_prefix: str = "security:rate-limit:v1",
+        redis_client: Any | None = None,
+        redis_client_factory: Any | None = None,
     ) -> None:
         normalized_mode = (mode or "monitor").strip().lower()
         self.mode = normalized_mode if normalized_mode in {"off", "monitor", "enforce"} else "monitor"
+        normalized_storage = (storage or "memory").strip().lower()
+        self.storage = normalized_storage if normalized_storage in {"auto", "memory", "redis"} else "auto"
+        self.redis_prefix = self._normalize_redis_prefix(redis_prefix)
         self.rules = dict(rules)
         self.max_tracked_keys = max(100, int(max_tracked_keys or 10000))
         self.cleanup_interval_seconds = max(10, int(cleanup_interval_seconds or 60))
         self.started_at = time.time()
+        self._redis_client = redis_client
+        self._redis_client_factory = redis_client_factory
+        self._redis_suspended_until = 0.0
+        self._last_redis_error_log = 0.0
+        self._redis_failures = 0
+        self._redis_successes = 0
+        self._fallback_checks = 0
+        self._last_storage = "memory"
         self._events: dict[str, Deque[float]] = {}
         self._lock = RLock()
         self._last_cleanup = self.started_at
@@ -243,6 +281,11 @@ class SecurityRateLimiter:
         self._group_exceeded: Counter[str] = Counter()
         self._group_blocked: Counter[str] = Counter()
         self._offender_counts: Counter[str] = Counter()
+
+    @staticmethod
+    def _normalize_redis_prefix(raw_prefix: str) -> str:
+        prefix = (raw_prefix or "security:rate-limit:v1").strip().strip(":")
+        return prefix or "security:rate-limit:v1"
 
     @classmethod
     def from_settings(cls) -> "SecurityRateLimiter":
@@ -252,6 +295,8 @@ class SecurityRateLimiter:
             rules=parse_rate_limit_rules(settings.SECURITY_RATE_LIMIT_GROUP_RULES, window_seconds),
             max_tracked_keys=settings.SECURITY_RATE_LIMIT_MAX_TRACKED_KEYS,
             cleanup_interval_seconds=settings.SECURITY_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
+            storage=settings.SECURITY_RATE_LIMIT_STORAGE,
+            redis_prefix=settings.SECURITY_RATE_LIMIT_REDIS_PREFIX,
         )
 
     def _cleanup(self, now: float, force: bool = False) -> None:
@@ -280,7 +325,164 @@ class SecurityRateLimiter:
         except StopIteration:
             pass
 
-    def check(self, *, group: str, subjects: Iterable[str], now: Optional[float] = None) -> RateLimitDecision:
+    def _record_metrics_locked(self, *, group: str, exceeded_subjects: Iterable[str], blocked: bool) -> None:
+        exceeded_subject_tuple = tuple(exceeded_subjects)
+        self._group_totals[group] += 1
+        if exceeded_subject_tuple:
+            self._group_exceeded[group] += 1
+            if blocked:
+                self._group_blocked[group] += 1
+            for subject in exceeded_subject_tuple:
+                self._offender_counts[subject] += 1
+
+    def _check_memory(
+        self,
+        *,
+        group: str,
+        rule: RateLimitRule,
+        subjects: tuple[str, ...],
+        now: float,
+    ) -> RateLimitDecision:
+        cutoff = now - rule.window_seconds
+        exceeded_subjects: list[str] = []
+        min_remaining = rule.threshold
+        retry_after = 0
+
+        with self._lock:
+            self._cleanup(now)
+            for subject in subjects:
+                key = f"{group}:{subject}"
+                self._ensure_capacity(key, now)
+                events = self._events.setdefault(key, deque())
+                while events and events[0] <= cutoff:
+                    events.popleft()
+                events.append(now)
+                count = len(events)
+                remaining = max(0, rule.threshold - count)
+                min_remaining = min(min_remaining, remaining)
+                if count > rule.threshold:
+                    exceeded_subjects.append(subject)
+                    oldest = events[0] if events else now
+                    retry_after = max(retry_after, int(max(1, rule.window_seconds - (now - oldest))))
+
+            blocked = bool(exceeded_subjects) and self.mode == "enforce"
+            self._record_metrics_locked(group=group, exceeded_subjects=exceeded_subjects, blocked=blocked)
+            self._last_storage = "memory"
+
+        return RateLimitDecision(
+            group=group,
+            limit=rule.threshold,
+            remaining=min_remaining,
+            retry_after=retry_after,
+            exceeded=bool(exceeded_subjects),
+            blocked=blocked,
+            subjects=subjects,
+        )
+
+    def _redis_configured(self) -> bool:
+        if self.storage == "memory":
+            return False
+        if self._redis_client is not None or self._redis_client_factory is not None:
+            return True
+        return bool(settings.REDIS_CACHE_ENABLED and settings.REDIS_URL.strip())
+
+    def _get_redis_client(self) -> Any | None:
+        if self._redis_client is not None:
+            return self._redis_client
+        if self._redis_client_factory is not None:
+            return self._redis_client_factory()
+        return get_redis_client()
+
+    def _redis_client_for_check(self) -> Any | None:
+        if self.storage == "memory" or time.monotonic() < self._redis_suspended_until:
+            return None
+        return self._get_redis_client()
+
+    def _redis_key(self, *, group: str, subject: str) -> str:
+        return f"{self.redis_prefix}:{group}:{subject}"
+
+    async def _redis_hit(self, *, client: Any, key: str, rule: RateLimitRule, now: float) -> tuple[int, float]:
+        cutoff = now - rule.window_seconds
+        member = f"{now:.6f}:{uuid.uuid4().hex}"
+        ttl = max(1, rule.window_seconds + self.cleanup_interval_seconds)
+        result = await client.eval(
+            REDIS_RATE_LIMIT_SCRIPT,
+            1,
+            key,
+            cutoff,
+            now,
+            member,
+            rule.threshold,
+            ttl,
+        )
+        count = int(result[0])
+        oldest = result[1]
+        if isinstance(oldest, bytes):
+            oldest = oldest.decode("utf-8")
+        try:
+            oldest_score = float(oldest)
+        except (TypeError, ValueError):
+            oldest_score = now
+        return count, oldest_score
+
+    async def _check_redis(
+        self,
+        *,
+        client: Any,
+        group: str,
+        rule: RateLimitRule,
+        subjects: tuple[str, ...],
+        now: float,
+    ) -> RateLimitDecision:
+        exceeded_subjects: list[str] = []
+        min_remaining = rule.threshold
+        retry_after = 0
+
+        for subject in subjects:
+            count, oldest = await self._redis_hit(
+                client=client,
+                key=self._redis_key(group=group, subject=subject),
+                rule=rule,
+                now=now,
+            )
+            remaining = max(0, rule.threshold - count)
+            min_remaining = min(min_remaining, remaining)
+            if count > rule.threshold:
+                exceeded_subjects.append(subject)
+                retry_after = max(retry_after, int(max(1, rule.window_seconds - (now - oldest))))
+
+        blocked = bool(exceeded_subjects) and self.mode == "enforce"
+        with self._lock:
+            self._record_metrics_locked(group=group, exceeded_subjects=exceeded_subjects, blocked=blocked)
+            self._redis_successes += 1
+            self._last_storage = "redis"
+
+        return RateLimitDecision(
+            group=group,
+            limit=rule.threshold,
+            remaining=min_remaining,
+            retry_after=retry_after,
+            exceeded=bool(exceeded_subjects),
+            blocked=blocked,
+            subjects=subjects,
+        )
+
+    def _suspend_redis_temporarily(self, exc: Exception) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._redis_failures += 1
+            self._redis_suspended_until = now + self._REDIS_FAILURE_BACKOFF_SECONDS
+            should_log = now - self._last_redis_error_log >= self._REDIS_FAILURE_BACKOFF_SECONDS
+            if should_log:
+                self._last_redis_error_log = now
+        if should_log:
+            logger.warning(
+                "[Security] Redis rate limiter unavailable; using local fallback for %.1fs: %s",
+                self._REDIS_FAILURE_BACKOFF_SECONDS,
+                type(exc).__name__,
+            )
+
+    async def check(self, *, group: str, subjects: Iterable[str], now: Optional[float] = None) -> RateLimitDecision:
         group = group if group in self.rules else "default"
         rule = self.rules[group]
         now = now if now is not None else time.time()
@@ -297,51 +499,41 @@ class SecurityRateLimiter:
                 subjects=subject_tuple,
             )
 
-        cutoff = now - rule.window_seconds
-        exceeded = False
-        blocked = False
-        min_remaining = rule.threshold
-        retry_after = 0
+        client = self._redis_client_for_check()
+        if client is not None:
+            try:
+                return await self._check_redis(
+                    client=client,
+                    group=group,
+                    rule=rule,
+                    subjects=subject_tuple,
+                    now=now,
+                )
+            except Exception as exc:
+                self._suspend_redis_temporarily(exc)
 
-        with self._lock:
-            self._cleanup(now)
-            self._group_totals[group] += 1
-            for subject in subject_tuple:
-                key = f"{group}:{subject}"
-                self._ensure_capacity(key, now)
-                events = self._events.setdefault(key, deque())
-                while events and events[0] <= cutoff:
-                    events.popleft()
-                events.append(now)
-                count = len(events)
-                remaining = max(0, rule.threshold - count)
-                min_remaining = min(min_remaining, remaining)
-                if count > rule.threshold:
-                    exceeded = True
-                    oldest = events[0] if events else now
-                    retry_after = max(retry_after, int(max(1, rule.window_seconds - (now - oldest))))
-                    self._offender_counts[subject] += 1
+        if self._redis_configured():
+            with self._lock:
+                self._fallback_checks += 1
 
-            if exceeded:
-                self._group_exceeded[group] += 1
-                blocked = self.mode == "enforce"
-                if blocked:
-                    self._group_blocked[group] += 1
+        return self._check_memory(group=group, rule=rule, subjects=subject_tuple, now=now)
 
-        return RateLimitDecision(
-            group=group,
-            limit=rule.threshold,
-            remaining=min_remaining,
-            retry_after=retry_after,
-            exceeded=exceeded,
-            blocked=blocked,
-            subjects=subject_tuple,
-        )
+    def _redis_fallback_active(self) -> bool:
+        return self._redis_configured() and time.monotonic() < self._redis_suspended_until
 
     def snapshot(self) -> dict:
         with self._lock:
             return {
                 "mode": self.mode,
+                "storage": self._last_storage,
+                "configured_storage": self.storage,
+                "redis_prefix": self.redis_prefix,
+                "redis_configured": self._redis_configured(),
+                "redis_available": self._last_storage == "redis" and not self._redis_fallback_active(),
+                "redis_fallback_active": self._redis_fallback_active(),
+                "redis_failures": int(self._redis_failures),
+                "redis_successes": int(self._redis_successes),
+                "fallback_checks": int(self._fallback_checks),
                 "uptime_seconds": int(time.time() - self.started_at),
                 "tracked_keys": len(self._events),
                 "max_tracked_keys": self.max_tracked_keys,
@@ -441,7 +633,7 @@ class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
             request,
             prefer_authenticated_user=_prefer_authenticated_rate_limit_subject(group),
         )
-        decision = self.limiter.check(group=group, subjects=subjects)
+        decision = await self.limiter.check(group=group, subjects=subjects)
 
         if decision.exceeded:
             logger.warning(

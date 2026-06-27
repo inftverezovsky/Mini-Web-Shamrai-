@@ -2,13 +2,10 @@
 
 For deploy, redeploy, clean, reset, or VDS inspection work, keep one canonical preview deployment only:
 
-- Server: `root@82.147.67.245`
-- App path: `/opt/shamrai-mini-app`
-- Docker Compose project: `shamrai`
-- Preview frontend port: `8082`
-- Health URL: `http://127.0.0.1:8082/api/health`
+- Exact server, app path, Docker Compose project, preview port, health URL, and public web root live in the private Codex project registry/runbook outside this repository.
+- Use the `project-registry` skill and Shamrai private runbook to resolve deployment coordinates at runtime.
 
-Before touching the server, inventory Docker containers and listening ports. Do not solve conflicts by creating another app directory, another compose project, or another frontend port. If port `8082` or Shamrai-like containers are owned by stale deployments such as `sports-betting`, old `shamrai-*`, or `mini-web*`, repair those stale Shamrai deployments first and then continue with the canonical project.
+Before touching the server, inventory Docker containers and listening ports. Do not solve conflicts by creating another app directory, another compose project, or another frontend port. If the canonical preview port or Shamrai-like containers are owned by stale deployments such as `sports-betting`, old `shamrai-*`, or `mini-web*`, repair those stale Shamrai deployments first and then continue with the canonical project.
 
 Do not stop system nginx, unrelated apps, or ports `80/443` unless the user explicitly asks to replace the public production deployment. Never write SSH passwords, Telegram tokens, YooKassa keys, JWT secrets, VK tokens/secrets, or database passwords into files, docs, shell history, or chat responses.
 
@@ -20,7 +17,7 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\shamrai
 powershell -ExecutionPolicy Bypass -File ".\scripts\deploy-public-shamrai-web.ps1" -RepairShamraiConflicts
 ```
 
-Public `https://shamra1.pro/` is served by host nginx from `/var/www/shamrai_web/dist`, while the canonical Docker preview still listens on `127.0.0.1:8082`. Any frontend redeploy intended to be visible on the public domain must publish the built `frontend/dist` to that public web root and verify that `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css` files. Do not treat a healthy `shamrai-frontend` container alone as proof that the public site changed.
+Public `https://shamra1.pro/` is served by host nginx from the private static web root recorded in the Codex project registry/runbook, while the Docker preview is a separate surface. Any frontend redeploy intended to be visible on the public domain must publish the built `frontend/dist` to that public web root and verify that `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css` files. Do not treat a healthy `shamrai-frontend` container alone as proof that the public site changed.
 
 ## VK Callback And Delivery Guard
 

@@ -1044,7 +1044,7 @@
 1. Запускается `powershell -ExecutionPolicy Bypass -File .\scripts\verify-local.ps1`.
 2. Script проверяет наличие backend venv.
 3. Backend: Python version, dependency import, compileall, alembic heads, `import src.main`.
-4. Если не передан `-SkipBackendTests`, запускается `unittest discover`.
+4. Если не передан `-SkipBackendTests`, запускается `pytest -q`.
 5. Frontend: запускаются `npm run lint` и `npm run build`.
 6. При любом non-zero exit script падает.
 7. При успехе печатает `verify_local_ok`.
@@ -1057,12 +1057,12 @@
 Старт: пользователь явно попросил deploy/redeploy/check Shamrai VDS.
 1. Перед изменениями инвентаризируются Docker containers, compose projects,
    listening ports, disk и target path.
-2. Проверяется canonical target: `/opt/shamrai-mini-app`, project `shamrai`, port `8082`.
-3. Если stale Shamrai-like deployment владеет port 8082, сначала чинится конфликт.
+2. Проверяется canonical target from private runbook/project registry.
+3. Если stale Shamrai-like deployment владеет canonical preview port, сначала чинится конфликт.
 4. Не создаются новые app directories, compose projects или frontend ports.
 5. Docker compose build/up выполняется только в canonical project.
-6. Проверяется `http://127.0.0.1:8082/api/health`.
-7. Если нужен public frontend, `frontend/dist` публикуется в `/var/www/shamrai_web/dist`.
+6. Проверяется private canonical health URL.
+7. Если нужен public frontend, `frontend/dist` публикуется в private public web root.
 8. Public HTML проверяется на новые hashed `assets/*.js` и `assets/*.css`.
 Финиш: preview/public state проверен по правильной поверхности, без затрагивания unrelated nginx/apps.
 ```

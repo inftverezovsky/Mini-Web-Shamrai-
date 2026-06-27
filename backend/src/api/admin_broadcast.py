@@ -5,6 +5,7 @@ target audience filtering, and push notification dispatch.
 """
 import asyncio
 import html
+import logging
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -86,6 +87,7 @@ from src.services.vk_delivery import (
 )
 
 router = APIRouter(tags=["Admin Broadcast"])
+logger = logging.getLogger("uvicorn")
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "coupons")
 
@@ -180,13 +182,28 @@ async def _send_telegram_jobs(
                     fallback_payload["document"] = fallback_payload.pop("photo", None)
                     call_result = await asyncio.to_thread(call_telegram_api, "sendDocument", fallback_payload)
             except Exception as exc:
-                print(f"[{log_prefix}] Failed to send to {user_id}: {exc}")
+                logger.exception(
+                    "admin_broadcast_telegram_send_crashed",
+                    extra={
+                        "event": "admin_broadcast_send_failed",
+                        "channel": "telegram",
+                        "user_id": user_id,
+                        "log_prefix": log_prefix,
+                        "error_type": type(exc).__name__,
+                    },
+                )
                 return False, str(exc)
             if not call_result.get("ok"):
                 description = call_result.get("description", "unknown error")
-                print(
-                    f"[{log_prefix}] Telegram failed for {user_id}: "
-                    f"{description}"
+                logger.warning(
+                    "admin_broadcast_telegram_send_failed",
+                    extra={
+                        "event": "admin_broadcast_send_failed",
+                        "channel": "telegram",
+                        "user_id": user_id,
+                        "log_prefix": log_prefix,
+                        "description": description,
+                    },
                 )
                 return False, str(description)
             return True, None
@@ -228,7 +245,16 @@ async def _send_vk_jobs(
                     image_path=image_path,
                 )
             except Exception as exc:
-                print(f"[{log_prefix}] Failed to send VK to {user_id}: {exc}")
+                logger.exception(
+                    "admin_broadcast_vk_send_crashed",
+                    extra={
+                        "event": "admin_broadcast_send_failed",
+                        "channel": "vk",
+                        "user_id": user_id,
+                        "log_prefix": log_prefix,
+                        "error_type": type(exc).__name__,
+                    },
+                )
                 return False, str(exc), None
             if not call_result.get("ok"):
                 permission_error = is_vk_message_permission_error(call_result)
@@ -237,7 +263,16 @@ async def _send_vk_jobs(
                     if permission_error
                     else call_result.get("description", "unknown error")
                 )
-                print(f"[{log_prefix}] VK failed for {user_id}: {description}")
+                logger.warning(
+                    "admin_broadcast_vk_send_failed",
+                    extra={
+                        "event": "admin_broadcast_send_failed",
+                        "channel": "vk",
+                        "user_id": user_id,
+                        "log_prefix": log_prefix,
+                        "description": description,
+                    },
+                )
                 return False, str(description), user if permission_error else None
             return True, None, None
 

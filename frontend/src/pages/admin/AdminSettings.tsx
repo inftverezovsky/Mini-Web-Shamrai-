@@ -185,6 +185,15 @@ interface MonitoringSummaryResponse {
   online: { online_users: number };
   health: Record<string, string | null>;
   delivery_outbox: Record<string, any>;
+  payment_reconciliation?: {
+    generated_at: string;
+    window_hours: number;
+    total_attempts_scanned: number;
+    total_issues: number;
+    provider_checks_included: boolean;
+    by_code: Record<string, number>;
+    by_severity: Record<string, number>;
+  };
   rate_limit: Record<string, any>;
   parser: { status: string; last_sync: string };
   audit: Array<Record<string, any>>;
@@ -1371,6 +1380,9 @@ export default function AdminSettings() {
       'delivery_outbox:',
       JSON.stringify(summary?.delivery_outbox || {}, null, 2),
       '',
+      'payment_reconciliation:',
+      JSON.stringify(summary?.payment_reconciliation || {}, null, 2),
+      '',
       'rate_limit:',
       JSON.stringify(summary?.rate_limit || {}, null, 2),
       '',
@@ -2224,6 +2236,10 @@ export default function AdminSettings() {
     const logs = monitoringLogsQuery.data?.logs || [];
     const healthEntries = Object.entries(summary?.health || {});
     const deliveryEntries = Object.entries(summary?.delivery_outbox || {});
+    const paymentAudit = summary?.payment_reconciliation;
+    const paymentIssueCount = paymentAudit?.total_issues ?? 0;
+    const paymentAuditStatus = paymentIssueCount > 0 ? 'warning' : 'ok';
+    const paymentAuditCodes = Object.entries(paymentAudit?.by_code || {});
     const rateLimitEntries = Object.entries(summary?.rate_limit || {});
     const auditEntries = summary?.audit || [];
     const formatMonitoringValue = (value: unknown) => {
@@ -2297,7 +2313,7 @@ export default function AdminSettings() {
           open={sectionIsOpen('monitoring', 'monitoring-health')}
           onToggle={() => toggleAccordionSection('monitoring', 'monitoring-health')}
         >
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
             <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
               <p className="text-xs font-black text-white">Системное здоровье</p>
               {(healthEntries.length ? healthEntries : [['api', 'loading']]).map(([key, value]) => (
@@ -2306,6 +2322,31 @@ export default function AdminSettings() {
                   {renderStatusBadge(String(value || 'none'))}
                 </div>
               ))}
+            </div>
+            <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black text-white">Payment audit</p>
+                  <p className="mt-1 text-[10px] font-semibold text-slate-500">
+                    {paymentAudit?.total_attempts_scanned ?? 0} attempts / {paymentAudit?.window_hours ?? 48}h
+                  </p>
+                </div>
+                {renderStatusBadge(paymentAuditStatus)}
+              </div>
+              <div className="rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2">
+                <p className="text-2xl font-black text-white tabular-nums">{paymentIssueCount}</p>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">issues</p>
+              </div>
+              {paymentAuditCodes.length > 0 && (
+                <div className="space-y-1">
+                  {paymentAuditCodes.slice(0, 3).map(([key, value]) => (
+                    <div key={key} className="flex min-w-0 items-center justify-between gap-3 text-[10px] font-semibold text-slate-300">
+                      <span className="truncate">{key}</span>
+                      <span className="tabular-nums text-amber-200">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
               <p className="text-xs font-black text-white">Rate-limit metrics</p>

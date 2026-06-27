@@ -93,8 +93,8 @@ Runtime:
 - `docker-compose.yml` runs `postgres`, `backend`, `frontend`.
 - Backend listens on container port `8000`.
 - Frontend nginx listens on container port `8080`.
-- Canonical preview exposes `127.0.0.1:8082`.
-- Public domain `https://shamra1.pro/` is served by host nginx from `/var/www/shamrai_web/dist`.
+- Canonical preview host/port is recorded in the private Codex project registry/runbook.
+- Public domain `https://shamra1.pro/` is served by host nginx from a private static web root recorded outside the repository.
 
 ## 4. Backend Architecture
 
@@ -168,6 +168,7 @@ Production hard stops:
 - `TELEGRAM_WEBHOOK_SECRET_TOKEN` is required.
 - at least one ruble payment provider is required.
 - rate limiting must be in `enforce` mode.
+- `SECURITY_RATE_LIMIT_STORAGE=auto` uses Redis when available, so limits are shared across backend replicas; if Redis is temporarily unavailable, the backend falls back to local in-memory limiting and exposes that state in admin metrics.
 - VK callback/delivery secrets are required when VK is enabled.
 
 ### Database Model
@@ -446,7 +447,7 @@ Backend setup:
 ```powershell
 cd C:\Users\Sa1z1ngr0z\Desktop\Mini-Web(Shamrai)\backend
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 .\.venv\Scripts\alembic.exe upgrade head
 .\.venv\Scripts\python.exe -m src.scripts.seed_defaults --demo
@@ -496,7 +497,7 @@ Backend-only checks from `scripts/verify-local.ps1`:
 - `compileall` for `src` and `alembic`;
 - `alembic heads`;
 - `import src.main`;
-- `unittest discover -s tests -p 'test_*.py'`.
+- `pytest -q`.
 
 Frontend checks:
 
@@ -508,23 +509,16 @@ build/lint step. Before deploy or payment/delivery changes, run the full script.
 
 ## 8. Deployment Model
 
-Canonical Shamrai preview deployment:
-
-- server: `root@82.147.67.245`
-- app path: `/opt/shamrai-mini-app`
-- Docker Compose project: `shamrai`
-- preview frontend port: `8082`
-- health URL: `http://127.0.0.1:8082/api/health`
+Canonical Shamrai preview deployment coordinates are private operational data.
+Resolve the exact server, app path, Docker Compose project, preview port, health URL,
+and public web root from the private Codex project registry/runbook.
 
 Do not create alternate app directories, compose projects or ports to avoid conflicts.
 Before touching the server, inventory Docker containers and listening ports.
 
 Public `https://shamra1.pro/` is not the same as the Docker preview frontend. Public
-frontend is served by host nginx from:
-
-```text
-/var/www/shamrai_web/dist
-```
+frontend is served by host nginx from the private static web root recorded outside
+the repository.
 
 When deploying a public frontend change, build `frontend/dist`, publish it to that root,
 and verify that public HTML references the new `assets/*.js` and `assets/*.css` files.
@@ -582,8 +576,8 @@ New DB table/field:
 
 ## 10. Common Pitfalls
 
-- Healthy `shamrai-frontend` on port `8082` does not prove that `https://shamra1.pro/`
-  changed. Public frontend must be published to `/var/www/shamrai_web/dist`.
+- Healthy Docker preview frontend does not prove that `https://shamra1.pro/`
+  changed. Public frontend must be published to the private public web root.
 - VK linked profile is not the same as VK message permission.
 - VK confirmation callback must return plain text and must not require secret.
 - Global `HTTPS_PROXY` may be needed for Telegram but must not break VK API calls.

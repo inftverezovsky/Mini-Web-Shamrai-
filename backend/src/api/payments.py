@@ -29,6 +29,7 @@ from src.services.referrals import get_referral_discount_percent
 from src.services.match_access import activate_match_subscription
 from src.services.crowd_bets import apply_verified_crowd_contribution
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
+from src.services.observability_alerts import record_payment_mismatch
 from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -458,15 +459,19 @@ async def _process_payment_attempt(
         return {"status": "attempt_missing"}
 
     if attempt.provider != provider:
+        record_payment_mismatch(provider, "provider_mismatch", attempt_id=attempt.id, payment_id=provider_payment_id)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment provider mismatch")
 
     if attempt.provider_payment_id and attempt.provider_payment_id != provider_payment_id:
+        record_payment_mismatch(provider, "payment_id_mismatch", attempt_id=attempt.id, payment_id=provider_payment_id)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment id mismatch")
 
     if attempt.currency != currency:
+        record_payment_mismatch(provider, "currency_mismatch", attempt_id=attempt.id, payment_id=provider_payment_id)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment currency mismatch")
 
     if not _decimal_eq(Decimal(attempt.amount), amount):
+        record_payment_mismatch(provider, "amount_mismatch", attempt_id=attempt.id, payment_id=provider_payment_id)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment amount mismatch")
 
     if attempt.status == "succeeded":
@@ -499,6 +504,7 @@ async def _process_payment_attempt(
         return {"status": "attempt_has_no_item", "attempt_id": str(attempt.id)}
 
     attempt.status = "processing"
+    attempt.processing_started_at = datetime.now(timezone.utc)
     attempt.provider_payment_id = provider_payment_id
     await db.flush()
 
@@ -963,6 +969,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     verified_payment = await asyncio.to_thread(_request_yookassa_payment, payment_id)
     if verified_payment.get("id") != payment_id or verified_payment.get("status") != "succeeded":
+        record_payment_mismatch("yookassa", "verification_mismatch", payment_id=payment_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="YooKassa payment is not verified as succeeded",
@@ -1004,12 +1011,14 @@ async def tegro_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     try:
         notification = _verify_tegro_notification(dict(raw_fields))
     except TegroWebhookSignatureError as e:
+        record_payment_mismatch("tegro", e.code)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.code)
 
     if notification["is_test"]:
         return {"status": "test_ignored"}
 
     if settings.TEGRO_SHOP_ID.strip() and notification["shop_id"] and notification["shop_id"] != settings.TEGRO_SHOP_ID:
+        record_payment_mismatch("tegro", "shop_id_mismatch", payment_id=notification.get("order_id"))
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tegro shop id mismatch")
 
     try:
@@ -1124,6 +1133,7 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
         query_id = query["id"]
         is_valid = True
         error_message = "Платеж не найден или устарел"
+        attempt_id = None
 
         try:
             attempt_id = _invoice_attempt_id(query.get("invoice_payload"))
@@ -1142,6 +1152,9 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
             )
         except Exception:
             is_valid = False
+
+        if not is_valid:
+            record_payment_mismatch("telegram_stars", "pre_checkout_mismatch", attempt_id=attempt_id)
 
         await call_telegram_api_async(
             "answerPreCheckoutQuery",
@@ -1170,6 +1183,7 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
             amount = Decimal(str(payment.get("total_amount", 0)))
             currency = str(payment.get("currency") or "XTR")
         except Exception:
+            record_payment_mismatch("telegram_stars", "invalid_successful_payment_payload")
             return {"status": "ignored_invalid_payload"}
 
         payment_id = payment.get("telegram_payment_charge_id") or f"telegram_stars_{attempt_id}"

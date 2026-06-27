@@ -73,7 +73,7 @@ Never print real VK tokens, callback secrets, confirmation codes, database passw
 Useful checks:
 
 ```bash
-curl -fsS http://127.0.0.1:8082/api/health
+curl -fsS http://127.0.0.1:<frontend-port>/api/health
 docker compose -p shamrai logs --tail=200 backend
 ```
 
@@ -85,9 +85,9 @@ printing secret values.
 Safe callback shape checks should use placeholders, not real secrets:
 
 ```bash
-curl -i -X POST http://127.0.0.1:8082/api/vk/callback \
+curl -i -X POST http://127.0.0.1:<frontend-port>/api/vk/callback \
   -H 'Content-Type: application/json' \
-  -d '{"type":"confirmation","group_id":239419819}'
+  -d '{"type":"confirmation","group_id":0}'
 ```
 
 The response body must be the configured confirmation string, not JSON. Do not paste the real value into docs or chat.

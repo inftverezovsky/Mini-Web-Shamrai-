@@ -48,7 +48,7 @@ $BackendPython
 Create it before running backend checks:
   cd backend
   py -3.11 -m venv .venv
-  .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+  .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 "@
   }
 
@@ -59,7 +59,7 @@ Create it before running backend checks:
     Invoke-Checked $BackendPython @("-m", "alembic", "heads")
     Invoke-Checked $BackendPython @("-c", "import src.main; print('backend_import_ok')")
     if (-not $SkipBackendTests) {
-      Invoke-Checked $BackendPython @("-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py")
+      Invoke-Checked $BackendPython @("-m", "pytest", "-q")
     }
   }
 }

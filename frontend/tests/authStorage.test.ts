@@ -23,10 +23,26 @@ const validJwt = [
 describe('authStorage', () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
 
-  it('persists real website auth tokens in localStorage across page reloads', async () => {
+  it('keeps real website auth tokens out of storage when bearer compat is disabled', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'false');
+    const localStorage = memoryStorage();
+    const sessionStorage = memoryStorage();
+    vi.stubGlobal('window', { localStorage, sessionStorage });
+
+    const authStorage = await import('../src/utils/authStorage');
+    authStorage.setStoredAuthToken(validJwt);
+
+    expect(localStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
+    expect(sessionStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
+    expect(authStorage.getStoredAuthToken()).toBeNull();
+  });
+
+  it('persists real website auth tokens only when bearer compat is enabled', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
     const localStorage = memoryStorage();
     const sessionStorage = memoryStorage();
     vi.stubGlobal('window', { localStorage, sessionStorage });
@@ -35,7 +51,6 @@ describe('authStorage', () => {
     firstLoad.setStoredAuthToken(validJwt);
 
     expect(localStorage.setItem).toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
-    expect(sessionStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
 
     vi.resetModules();
 
@@ -44,6 +59,7 @@ describe('authStorage', () => {
   });
 
   it('keeps debug auth local and clears unsafe stored values', async () => {
+    vi.stubEnv('VITE_ENABLE_DEBUG_AUTH', 'true');
     const localStorage = memoryStorage();
     const sessionStorage = memoryStorage();
     vi.stubGlobal('window', { localStorage, sessionStorage });

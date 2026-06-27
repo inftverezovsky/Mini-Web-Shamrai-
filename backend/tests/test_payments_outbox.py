@@ -86,6 +86,7 @@ class PaymentOutboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(refreshed_user.matches_remaining, 5)
             self.assertEqual(refreshed_attempt.status, "succeeded")
             self.assertEqual(refreshed_attempt.provider_payment_id, "payment-1")
+            self.assertIsNotNone(refreshed_attempt.processing_started_at)
         finally:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.drop_all)

@@ -31,6 +31,7 @@ import {
   rememberVkAuthCooldownForError,
 } from '../utils/vkId';
 import { identityDeviceHeader } from '../utils/identityDevice';
+import { clearCsrfToken, csrfHeaderForRequest } from '../utils/csrf';
 import {
   createTelegramBotAuthCoordinator,
   type TelegramBotAuthOptions,
@@ -263,9 +264,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
     clearVkAuthCooldown();
-    setToken(data.access_token);
-    setUser(data.user);
     setStoredAuthToken(data.access_token);
+    setToken(getStoredAuthToken());
+    setUser(data.user);
+    clearCsrfToken();
     setError(null);
   }, [setError, setToken, setUser]);
 
@@ -293,12 +295,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [API_URL, setError, setToken, setUser]);
 
   const runTelegramMiniAppLogin = useCallback(async (initData: string) => {
+    const csrfHeaders = await csrfHeaderForRequest({ method: 'POST' });
     const response = await fetch(`${API_URL}/api/auth/login`, {
       method: 'POST',
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...identityDeviceHeader(),
+        ...csrfHeaders,
       },
       body: JSON.stringify({ initData }),
     });
@@ -439,12 +443,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setLoading(true);
       setError(null);
+      const csrfHeaders = await csrfHeaderForRequest({ method: 'POST' });
       const response = await fetch(`${API_URL}/api/auth/telegram-widget`, {
         method: 'POST',
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           ...identityDeviceHeader(),
+          ...csrfHeaders,
         },
         body: JSON.stringify(payload),
       });
@@ -533,13 +539,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [clearStoredAuth, login]);
 
   const logout = useCallback(() => {
-    void fetch(`${API_URL}/api/auth/logout`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: identityDeviceHeader(),
-      body: '',
-    }).catch(() => undefined);
+    void (async () => {
+      const csrfHeaders = await csrfHeaderForRequest({ method: 'POST' });
+      await fetch(`${API_URL}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          ...identityDeviceHeader(),
+          ...csrfHeaders,
+        },
+        body: '',
+      });
+    })().catch(() => undefined);
     clearStoredAuth();
+    clearCsrfToken();
   }, [API_URL, clearStoredAuth]);
 
   const actions = useMemo<AuthActions>(() => ({

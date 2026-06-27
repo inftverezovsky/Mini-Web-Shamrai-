@@ -1,4 +1,4 @@
-import { AUTH_TOKEN_STORAGE_KEY } from '../config/api';
+import { AUTH_TOKEN_STORAGE_KEY, BEARER_AUTH_COMPAT_ENABLED, DEBUG_AUTH_ENABLED } from '../config/api';
 
 export const MOCK_DEBUG_AUTH_TOKEN = 'mock_debug_access_token';
 
@@ -11,7 +11,8 @@ function looksLikeJwt(token: string): boolean {
 }
 
 function isAllowedStoredToken(token: string | null): token is string {
-  return token === MOCK_DEBUG_AUTH_TOKEN || Boolean(token && looksLikeJwt(token));
+  if (token === MOCK_DEBUG_AUTH_TOKEN) return DEBUG_AUTH_ENABLED;
+  return BEARER_AUTH_COMPAT_ENABLED && Boolean(token && looksLikeJwt(token));
 }
 
 function getBrowserStorage(type: 'local' | 'session'): Storage | null {

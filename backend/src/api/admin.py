@@ -53,6 +53,7 @@ from src.schemas.schemas import (
     MonitoringLogsResponse,
     OnlineUsersResponse,
     ParserStatusResponse,
+    PaymentReconciliationReport,
     ResetSessionsResponse,
     SystemSettingUpdate,
     SystemSettingsResponse,
@@ -69,7 +70,9 @@ from src.core.message_templates import (
 from src.core.security_limits import get_security_rate_limit_metrics
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
 from src.services.delivery_outbox import get_delivery_outbox_metrics
+from src.services.observability_alerts import build_observability_alert_payload
 from src.services.match_access import log_match_balance_event, revoke_user_bet_access
+from src.services.payment_reconciliation import build_payment_reconciliation_report, build_payment_reconciliation_summary
 from src.services.statistics import (
     build_performance_payload,
     client_situation,
@@ -447,6 +450,33 @@ async def admin_security_rate_limit_metrics(
     return get_security_rate_limit_metrics()
 
 
+@router.get("/monitoring/alerts")
+async def admin_monitoring_alerts(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Current safe operational alerts for the admin operations center."""
+    delivery_metrics = await get_delivery_outbox_metrics(db)
+    return build_observability_alert_payload(delivery_metrics=delivery_metrics)
+
+
+@router.post("/payment-reconciliation/run", response_model=PaymentReconciliationReport)
+async def admin_payment_reconciliation_run(
+    window_hours: int = Query(48, ge=1, le=336),
+    include_provider_checks: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> PaymentReconciliationReport:
+    """Read-only payment/access reconciliation report. Never applies fixes."""
+    return await build_payment_reconciliation_report(
+        db,
+        window_hours=window_hours,
+        include_provider_checks=include_provider_checks,
+        limit=limit,
+    )
+
+
 @router.get("/settings", response_model=SystemSettingsResponse)
 async def admin_list_system_settings(
     admin: User = Depends(get_current_admin_read),
@@ -612,6 +642,7 @@ async def admin_monitoring_summary(
         database_error = type(exc).__name__
 
     parser_status = await admin_monitoring_parser_status(admin=admin)
+    delivery_metrics = await get_delivery_outbox_metrics(db)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "online": {"online_users": await count_online_users()},
@@ -620,8 +651,12 @@ async def admin_monitoring_summary(
             "database": database_status,
             "database_error": database_error,
         },
-        "delivery_outbox": await get_delivery_outbox_metrics(db),
+        "delivery_outbox": delivery_metrics,
+        "payment_reconciliation": (
+            await build_payment_reconciliation_summary(db)
+        ).model_dump(mode="json"),
         "rate_limit": get_security_rate_limit_metrics(),
+        "alerts": build_observability_alert_payload(delivery_metrics=delivery_metrics),
         "parser": {
             "status": parser_status["status"],
             "last_sync": parser_status["last_sync"].isoformat()

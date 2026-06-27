@@ -4,6 +4,7 @@ from unittest.mock import patch
 from fastapi import Response
 
 from src.api import auth
+from src.core import csrf
 
 
 def _set_cookie_headers(response: Response) -> list[str]:
@@ -40,10 +41,22 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
         cookie = "; ".join(_set_cookie_headers(response)).lower()
         self.assertEqual(payload, {"status": "ok"})
         self.assertIn("shamrai_access_token=", cookie)
+        self.assertIn("shamrai_csrf_token=", cookie)
         self.assertIn("max-age=0", cookie)
+        self.assertIn("path=/api", cookie)
+
+    async def test_csrf_endpoint_issues_signed_http_only_cookie(self):
+        response = Response()
+
+        payload = await auth.get_csrf_token(response)
+
+        cookie = "; ".join(_set_cookie_headers(response)).lower()
+        self.assertTrue(csrf.verify_csrf_token(payload.csrf_token))
+        self.assertIn("shamrai_csrf_token=", cookie)
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=lax", cookie)
         self.assertIn("path=/api", cookie)
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -439,7 +439,10 @@ async def get_delivery_outbox_metrics(db: AsyncSession) -> dict[str, Any]:
 
 
 async def delivery_outbox_daemon() -> None:
-    print("[Daemon] Delivery outbox daemon initialized.")
+    logger.info(
+        "delivery_outbox_daemon_initialized",
+        extra={"event": "daemon_initialized", "daemon": "delivery_outbox"},
+    )
     while True:
         try:
             report = await process_delivery_outbox_batch()
