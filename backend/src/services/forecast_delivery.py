@@ -167,7 +167,12 @@ def _paid_set_bookmaker_line(bet: Bet) -> str:
     bookmakers = _bookmakers_for_bet(bet)
     if not bookmakers:
         return "<b>не указана</b>"
-    return " | ".join(f"<b>{_html(bookmaker.name.upper())}</b>" for bookmaker in bookmakers)
+    labels = []
+    for bookmaker in bookmakers:
+        emoji = _bookmaker_emoji(bookmaker)
+        prefix = f"{emoji} " if emoji else ""
+        labels.append(f"{prefix}<b>{_html(bookmaker.name.upper())}</b>")
+    return " | ".join(labels)
 
 
 def bet_is_paid_set(bet: Optional[Bet]) -> bool:

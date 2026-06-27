@@ -110,7 +110,7 @@ export default function BrowserAuthScreen() {
             )}
           </div>
 
-          {(error || telegramError) && (
+          {(telegramError || (!telegramBusy && error)) && (
             <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-3.5 py-3 text-xs font-semibold leading-relaxed text-rose-100">
               {telegramError || error}
             </div>

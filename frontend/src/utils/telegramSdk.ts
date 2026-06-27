@@ -18,6 +18,12 @@ export function hasTelegramLaunchParams(): boolean {
   return /(?:^|[&#?])tgWebApp(?:Data|Version|Platform|ThemeParams)=/i.test(source);
 }
 
+export function hasTelegramInitDataLaunchParam(): boolean {
+  if (typeof window === 'undefined') return false;
+  const source = `${window.location.search || ''}&${window.location.hash || ''}`;
+  return /(?:^|[&#?])tgWebAppData=/i.test(source);
+}
+
 export async function ensureTelegramSdk(timeoutMs = 2200): Promise<void> {
   if (getTelegramWebApp()) return;
   if (typeof document === 'undefined') return;

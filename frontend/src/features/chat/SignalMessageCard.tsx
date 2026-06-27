@@ -14,7 +14,7 @@ import {
   Zap,
 } from 'lucide-react';
 
-import { BookmakerLogoFrame } from '../../components/LogoFrame';
+import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import { ChatSignalMessageResponse } from '../../schemas/schemas';
 import { API_BASE_URL } from '../../utils/api';
 import { syncConnectionOnboarding } from '../../utils/connectionOnboarding';
@@ -298,6 +298,7 @@ function SignalMessageCard({
     () => (Array.isArray(signal.data?.bookmakers) ? signal.data.bookmakers as SignalBookmaker[] : []),
     [signal],
   );
+  const sportType = typeof signal.data?.sport_type === 'string' ? signal.data.sport_type.trim() : '';
   const messageText = useMemo(() => signalText(signal), [signal]);
   const renderedMessage = useMemo(() => renderTextWithLinks(messageText), [messageText]);
   const connectionSetupActions = useMemo(() => setupActions(signal), [signal]);
@@ -397,6 +398,26 @@ function SignalMessageCard({
               loading="lazy"
               decoding="async"
             />
+          </div>
+        )}
+
+        {(sportType || bookmakers.length > 0) && (
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            {sportType && (
+              <span className="inline-flex min-h-[30px] min-w-0 items-center gap-1.5 rounded-xl border border-cyan-200/20 bg-cyan-200/10 px-2 py-1 text-[11px] font-black text-cyan-50">
+                <SportIconFrame label={sportType} size="tiny" className="shrink-0 rounded-full" />
+                <span className="min-w-0 truncate">{sportType}</span>
+              </span>
+            )}
+            {bookmakers.map((bookmaker) => (
+              <span
+                key={`chip:${bookmaker.id}`}
+                className="inline-flex min-h-[30px] min-w-0 items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] px-2 py-1 text-[11px] font-black text-white/85"
+              >
+                <BookmakerLogoFrame bookmaker={bookmaker} size="tiny" className="shrink-0 rounded-full" />
+                <span className="min-w-0 truncate">{bookmaker.name}</span>
+              </span>
+            ))}
           </div>
         )}
 

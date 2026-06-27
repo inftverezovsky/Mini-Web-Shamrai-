@@ -50,6 +50,7 @@ from src.services.forecast_delivery import (
     build_teaser_message,
     build_web_paid_set_signal_data,
     build_web_teaser_signal_data,
+    bet_is_paid_set,
     cancel_forecast_request,
     count_client_bet_takers,
     deliver_forecast_request,
@@ -1279,7 +1280,8 @@ async def prepare_forecast_broadcast_full(
     Saves the full private forecast after the teaser has been broadcast.
     If enabled, automatically sends it to interested clients and keeps future "take" clicks automatic.
     """
-    bet = await _load_private_forecast_bet(db, bet_id)
+    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True)
+    is_paid_set_bet = bet_is_paid_set(bet)
     form_data = await request.form()
     fair_coefficient_provided = "fair_coefficient" in form_data or fair_coefficient is not None
     parsed_fair_coefficient = (
@@ -1315,7 +1317,7 @@ async def prepare_forecast_broadcast_full(
 
     auto_send_result = None
     reannounce_result = None
-    if reannounce_new_audience:
+    if reannounce_new_audience and not is_paid_set_bet:
         target_users = await _get_smart_target_users(
             db,
             sport_filter=bet.sport_type,
@@ -1391,7 +1393,7 @@ async def prepare_forecast_broadcast_full(
             errors=errors[:10],
         )
 
-    refreshed_bet = await _load_private_forecast_bet(db, bet_id)
+    refreshed_bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True)
     return ForecastBroadcastFullResponse(
         bet=refreshed_bet,
         auto_send_enabled=bool(refreshed_bet.auto_send_on_interest),

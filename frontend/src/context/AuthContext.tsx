@@ -16,7 +16,12 @@ import {
   getStoredAuthToken,
   setStoredAuthToken,
 } from '../utils/authStorage';
-import { ensureTelegramSdk, getTelegramWebApp, hasTelegramLaunchParams } from '../utils/telegramSdk';
+import { formatApiErrorMessage } from '../api/errors';
+import {
+  ensureTelegramSdk,
+  getTelegramWebApp,
+  hasTelegramInitDataLaunchParam,
+} from '../utils/telegramSdk';
 import {
   clearVkAuthCooldown,
   completeVkRedirect,
@@ -107,6 +112,11 @@ function authErrorMessage(error: unknown, fallback: string) {
   }
 
   return message || fallback;
+}
+
+async function responseErrorMessage(response: Response, fallback: string) {
+  const errorData = await response.json().catch(() => ({}));
+  return formatApiErrorMessage(response.status, errorData?.detail) || fallback;
 }
 
 function createAuthStore(initialState: AuthState): AuthStore {
@@ -294,7 +304,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     if (!response.ok) {
-      throw new Error('Авторизация Telegram на сервере не удалась');
+      throw new Error(await responseErrorMessage(response, 'Авторизация Telegram на сервере не удалась'));
     }
 
     applyLoginResponse(await response.json());
@@ -329,7 +339,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       let initData = '';
-      if (getTelegramWebApp() || hasTelegramLaunchParams()) {
+      if (getTelegramWebApp() || hasTelegramInitDataLaunchParam()) {
         await ensureTelegramSdk(1200);
         const tg = getTelegramWebApp<{ initData?: string }>();
         initData = tg?.initData || '';

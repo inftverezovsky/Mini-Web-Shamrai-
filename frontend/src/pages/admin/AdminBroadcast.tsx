@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { apiFetch } from '../../utils/api';
 import { BetResponse, BookmakerResponse, ChatConversationResponse, ForecastRequestResponse, PaginatedResponse } from '../../schemas/schemas';
 import { SPORT_FILTER_OPTIONS } from '../../constants/sports';
@@ -682,7 +683,10 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     resetFeedback();
     try {
       const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
-      const saveOnly = submitter?.value === 'save-only';
+      const isEditingPaidSet = isEditing && forecastRequests.some((request) => (
+        request.bet.id === targetBetId && isPaidSetRequest(request)
+      ));
+      const saveOnly = submitter?.value === 'save-only' || isEditingPaidSet;
       const actionKey = isPreparing
         ? `prepare:${targetBetId}`
         : isEditing
@@ -791,7 +795,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             notifySuccess(message);
           }
         } else if (isEditing && saveOnly) {
-          const message = 'Прогноз сохранен без нового анонса';
+          const message = isEditingPaidSet ? 'Набор сохранен' : 'Прогноз сохранен без нового анонса';
           setSuccessMessage(message);
           notifySuccess(message);
         } else if (fullForecastAutoSend && autoSendResult) {
@@ -919,7 +923,6 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       notifyError('Укажите стоимость набора в рублях');
       return;
     }
-
     const body = announcementBody.trim();
 
     try {
@@ -1076,6 +1079,10 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
   const fullForecastIsEditing = fullForecastMode === 'edit';
   const fullForecastIsBulkSending = fullForecastMode === 'bulkSend';
   const fullForecastModalOpen = Boolean(fullForecastRequest || fullForecastPreparedBetId);
+  const fullForecastTargetBet = fullForecastRequest?.bet
+    || forecastRequests.find((request) => request.bet.id === fullForecastPreparedBetId)?.bet
+    || null;
+  const fullForecastIsPaidSetEditing = fullForecastIsEditing && isPaidSetBet(fullForecastTargetBet);
   useGlassOverlayGuard(fullForecastModalOpen);
   const fullForecastActionKey = fullForecastIsPreparing && fullForecastPreparedBetId
     ? `prepare:${fullForecastPreparedBetId}`
@@ -1738,7 +1745,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                               </div>
 
                               {(processable || removable) && (
-                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-2">
                                   {processable && (
                                     <>
                                       {!requestIsPaidSet && (
@@ -1797,6 +1804,15 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                               <ExternalLink className="w-3 h-3" />
                                             </a>
                                           )}
+                                          <button
+                                            type="button"
+                                            onClick={() => openEditFullForecastModal(request.bet)}
+                                            disabled={requestActionLoading !== null}
+                                            className="px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-50 text-emerald-100 border border-emerald-300/25 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                          >
+                                            <ClipboardList className="w-3.5 h-3.5" />
+                                            <span>Дозаполнить</span>
+                                          </button>
                                         </>
                                       )}
                                       <button
@@ -1865,12 +1881,14 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
         </div>
       )}
 
-      {fullForecastModalOpen && (
-        <div className="glass-modal-layer fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/80 backdrop-blur-sm px-3 py-4">
+      {fullForecastModalOpen && createPortal(
+        <div className="glass-modal-layer shamrai-modal-root fixed inset-0 z-[1000] flex items-end justify-center overflow-y-auto overscroll-contain bg-slate-950/80 px-3 py-4 backdrop-blur-sm sm:items-center">
           <form
             onSubmit={handleFullForecastSubmit}
             onPaste={fullForecastFileHandlers.onPaste}
-            className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl border border-emerald-500/25 bg-slate-950 shadow-[0_0_45px_rgba(16,185,129,0.18)] p-5 space-y-4"
+            role="dialog"
+            aria-modal="true"
+            className="relative my-auto w-full max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-emerald-500/25 bg-slate-950 p-5 shadow-[0_0_45px_rgba(16,185,129,0.18)] space-y-4"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1878,7 +1896,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   {fullForecastIsPreparing
                     ? 'Полная ставка после анонса'
                     : fullForecastIsEditing
-                      ? 'Редактирование прогноза'
+                      ? fullForecastIsPaidSetEditing ? 'Дозаполнение набора' : 'Редактирование прогноза'
                     : fullForecastIsBulkSending
                       ? 'Полная ставка выбранным'
                       : 'Полная ставка'}
@@ -1887,7 +1905,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   {fullForecastIsPreparing
                     ? 'Заполните детали прогноза'
                     : fullForecastIsEditing
-                      ? 'Обновите прогноз и БК'
+                      ? fullForecastIsPaidSetEditing ? 'Сохраните ставку перед кнопкой «Взял»' : 'Обновите прогноз и БК'
                     : fullForecastIsBulkSending
                       ? `${fullForecastBulkRequests.length} клиентам`
                       : fullForecastRequest
@@ -2164,7 +2182,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
 
             <button
               type="submit"
-              value={fullForecastIsEditing ? 'reannounce' : 'default'}
+              value={fullForecastIsPaidSetEditing ? 'save-only' : fullForecastIsEditing ? 'reannounce' : 'default'}
               disabled={fullForecastSubmitting}
               className="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50 text-slate-950 font-black py-3.5 rounded-xl flex items-center justify-center space-x-2 transition-all shadow-neon-green uppercase tracking-wider text-sm"
             >
@@ -2179,17 +2197,17 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
               )}
               <span>
                 {fullForecastSubmitting
-                  ? fullForecastIsPreparing ? 'Сохранение...' : 'Отправка...'
+                  ? fullForecastIsPreparing || fullForecastIsPaidSetEditing ? 'Сохранение...' : 'Отправка...'
                   : fullForecastIsPreparing
                     ? fullForecastAutoSend ? 'Сохранить и отправить' : 'Сохранить полную ставку'
                     : fullForecastIsEditing
-                      ? 'Сохранить и анонсировать новым клиентам'
+                      ? fullForecastIsPaidSetEditing ? 'Сохранить набор' : 'Сохранить и анонсировать новым клиентам'
                     : fullForecastIsBulkSending
                       ? 'Отправить выбранным'
                       : 'Отправить полную ставку'}
               </span>
             </button>
-            {fullForecastIsEditing && (
+            {fullForecastIsEditing && !fullForecastIsPaidSetEditing && (
               <button
                 type="submit"
                 value="save-only"
@@ -2200,7 +2218,8 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
               </button>
             )}
           </form>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {(successMessage || deliveryResult) && (

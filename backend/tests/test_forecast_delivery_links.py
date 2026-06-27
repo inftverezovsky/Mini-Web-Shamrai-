@@ -685,6 +685,21 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Total over 3.5", message)
         self.assertIn("10 000 ₽", message)
 
+    def test_paid_set_sale_message_lists_bookmaker_with_custom_emoji(self):
+        forecast_request = self._forecast_request(self._user())
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+        original_value = delivery.settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS
+        try:
+            delivery.settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS = '{"fonbet":"111"}'
+            telegram_text._parse_custom_emoji_map.cache_clear()
+            message = delivery.build_paid_set_sale_message(forecast_request)
+        finally:
+            delivery.settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS = original_value
+            telegram_text._parse_custom_emoji_map.cache_clear()
+
+        self.assertIn('emoji-id="111"', message)
+        self.assertIn('</tg-emoji> <b>', message)
+
     async def test_admin_group_decline_notification_is_enqueued_without_buttons(self):
         class FakeDb:
             def __init__(self):
