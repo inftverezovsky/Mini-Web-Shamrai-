@@ -25,13 +25,12 @@ import { apiFetch } from '../utils/api';
 import { isVkIdReady, isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
 import { BookmakerResponse } from '../schemas/schemas';
 import EmojiTextField from './EmojiTextField';
-import { BookmakerLogoFrame, SportIconFrame } from './LogoFrame';
+import { BookmakerLogoFrame } from './LogoFrame';
 import OptimizedImage from './OptimizedImage';
 import { useAuthSelector } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
 import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
 import { getBookmakerLogoSrc } from '../constants/bookmakers';
-import { SPORT_OPTIONS } from '../constants/sports';
 import {
   buildOnboardingPayload,
   isBookmakerStepComplete,
@@ -41,6 +40,7 @@ import {
   type OnboardingDraftAnswers,
   type OnboardingGoal,
   type RiskTolerance,
+  type ServiceFormat,
 } from '../utils/onboardingQuiz';
 import { toggleBookmakerCodeSelection } from '../utils/bookmakerSelection';
 
@@ -55,6 +55,9 @@ interface OnboardingRecommendation {
   currency: CurrencyCode;
   source: string;
   resolved_bets_24h: number;
+  service_format_label: string;
+  vip_verdict_title: string;
+  vip_verdict_caption: string;
 }
 
 interface OnboardingResponse {
@@ -196,6 +199,33 @@ const riskOptions: ChoiceOption<RiskTolerance>[] = [
   },
 ];
 
+const serviceFormatOptions: ChoiceOption<ServiceFormat>[] = [
+  {
+    value: 'auto_fast',
+    title: 'Сигнал сразу',
+    description: 'Нужен самый короткий путь от уведомления до входа.',
+    icon: Zap,
+  },
+  {
+    value: 'logic_review',
+    title: 'С объяснением',
+    description: 'Важно понимать логику, value и почему вход появился.',
+    icon: Brain,
+  },
+  {
+    value: 'vip_support',
+    title: 'VIP-сопровождение',
+    description: 'Хочется личного контакта и контроля важных моментов.',
+    icon: Trophy,
+  },
+  {
+    value: 'distance_report',
+    title: 'Отчёт по дистанции',
+    description: 'Нужны цифры, отчётность и спокойная работа по флэту.',
+    icon: Gauge,
+  },
+];
+
 const fallbackBookmakers: BookmakerResponse[] = [
   { id: 1, name: 'Фонбет', code: 'fonbet', is_active: true },
   { id: 2, name: 'БетБум', code: 'betboom', is_active: true },
@@ -213,27 +243,11 @@ const fallbackBookmakers: BookmakerResponse[] = [
 
 const pulseLogs = [
   '142 профиля сверяют риск-модель',
-  'Линия по футболу ушла на 0.18 пункта',
+  'Линия сдвинулась на 0.18 пункта',
   'Shamrai Brain пересчитал флэт-порог',
   'Закрытая лента обновила value-сигнал',
   'Абонементы работают без фрибет-приманок',
 ];
-
-const favoriteSportLabels = [
-  'Футбол',
-  'Хоккей',
-  'Баскетбол',
-  'Теннис',
-  'Киберспорт',
-  'Единоборства',
-  'Бокс',
-  'Н/Т',
-  'Другие',
-];
-
-const favoriteSportOptions = favoriteSportLabels
-  .map((label) => SPORT_OPTIONS.find((sport) => sport.label === label))
-  .filter((sport): sport is NonNullable<typeof sport> => Boolean(sport));
 
 const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFromRub: number }> = {
   RUB: { label: '₽', symbol: '₽', rateFromRub: 1 },
@@ -242,9 +256,9 @@ const currencyMeta: Record<CurrencyCode, { label: string; symbol: string; rateFr
 };
 
 const riskFlatHint: Record<RiskTolerance, string> = {
-  cautious: 'Базовый коридор флэта: 1-2% от банка. Цель - пережить просадку без нервных догонов.',
-  balanced: 'Базовый коридор флэта: 2-3% от банка. Это рабочий режим для дистанции и скорости.',
-  aggressive: 'Базовый коридор флэта: 3-5% от банка. Входы быстрее, но цена ошибки выше.',
+  cautious: 'Базовый коридор флэта: от 7% банка. Цель - пережить просадку без нервных догонов.',
+  balanced: 'Базовый коридор флэта: 7-8% банка. Это рабочий режим для дистанции и скорости.',
+  aggressive: 'Базовый коридор флэта: 8-9% банка. Входы быстрее, но цена ошибки выше.',
 };
 
 const sourceLabels: Record<string, string> = {
@@ -269,6 +283,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     risk_tolerance: null,
     bookmaker_codes: [],
     other_bookmaker_name: '',
+    service_format: null,
     favorite_sports: [],
     vk_user_id: null,
   });
@@ -357,7 +372,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       return isBookmakerStepComplete({
         selectedBookmakerCodes: answers.bookmaker_codes,
         otherBookmakerName: answers.other_bookmaker_name,
-        favoriteSports: answers.favorite_sports,
+        serviceFormat: answers.service_format,
       });
     }
     return manifestAccepted && !finishing;
@@ -389,16 +404,6 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     }));
   }, []);
 
-  const toggleFavoriteSport = useCallback((sport: string) => {
-    setErrorMessage(null);
-    setAnswers((current) => ({
-      ...current,
-      favorite_sports: current.favorite_sports.includes(sport)
-        ? current.favorite_sports.filter((item) => item !== sport)
-        : [...current.favorite_sports, sport],
-    }));
-  }, []);
-
   const revealResults = () => {
     setDirection(1);
     setFlashActive(!reduceContinuousMotion);
@@ -414,9 +419,9 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     if (!isBookmakerStepComplete({
       selectedBookmakerCodes: answers.bookmaker_codes,
       otherBookmakerName: answers.other_bookmaker_name,
-      favoriteSports: answers.favorite_sports,
+      serviceFormat: answers.service_format,
     })) {
-      setErrorMessage('Выберите БК, любимые виды спорта и укажите название, если выбрали "Другие".');
+      setErrorMessage('Выберите БК, формат сервиса и укажите название, если выбрали "Другие".');
       return;
     }
 
@@ -429,6 +434,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
         bookmakers_count: answers.bookmaker_codes.length,
+        service_format: answers.service_format,
         favorite_sports_count: answers.favorite_sports.length,
         vk_linked: Boolean(nextVkUserId),
         currency,
@@ -450,6 +456,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         experience_level: answers.experience_level,
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
+        service_format: answers.service_format,
         vk_linked: Boolean(nextVkUserId),
         currency: response.recommendation.currency || currency,
       });
@@ -463,6 +470,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
         bankroll_size: answers.bankroll_size,
         risk_tolerance: answers.risk_tolerance,
         bookmakers_count: answers.bookmaker_codes.length,
+        service_format: answers.service_format,
         favorite_sports_count: answers.favorite_sports.length,
         vk_linked: Boolean(nextVkUserId),
       });
@@ -542,6 +550,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
           experience_level: answers.experience_level,
           bankroll_size: answers.bankroll_size,
           risk_tolerance: answers.risk_tolerance,
+          service_format: answers.service_format,
           favorite_sports_count: answers.favorite_sports.length,
           vk_linked: Boolean(answers.vk_user_id),
           currency,
@@ -646,16 +655,17 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                 />
               )}
               {stepIndex === 4 && (
-                <BookmakerSportsStep
+                <BookmakerStep
                   bookmakers={visibleBookmakers}
                   selectedBookmakerCodes={answers.bookmaker_codes}
                   otherBookmakerName={answers.other_bookmaker_name}
-                  favoriteSports={answers.favorite_sports}
+                  serviceFormat={answers.service_format}
                   bookmakersLoading={bookmakersLoading}
                   proMode={proMode}
+                  glow={glow}
                   onBookmaker={toggleBookmaker}
                   onOtherBookmakerName={(value) => updateAnswer('other_bookmaker_name', value)}
-                  onFavoriteSport={toggleFavoriteSport}
+                  onServiceFormat={(value) => updateAnswer('service_format', value)}
                 />
               )}
               {stepIndex === 5 && (
@@ -784,7 +794,7 @@ function IntroVkStep({
         <StepTitle
           index="01"
           title="Настроим ленту за 60 секунд"
-          caption="Сначала поймем ваш стиль: БК, риск, спорт и цель. После этого Shamrai покажет персональную модель входа."
+          caption="Быстро настроим риск, цель, БК и удобный формат сигналов."
         />
 
         <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
@@ -795,15 +805,15 @@ function IntroVkStep({
                 <Brain className="h-7 w-7 text-cyan-100" />
               </div>
               <div className="min-w-0">
-                <p className="text-sm font-black leading-tight text-white">Не капперская анкета, а калибровка риска</p>
+                <p className="text-sm font-black leading-tight text-white">Короткая калибровка риска</p>
                 <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
-                  Мы не обещаем исходы. Мы настраиваем фильтр, флэт и скорость доставки под ваш профиль.
+                  Без обещаний исходов: только фильтр, флэт и темп доставки под ваш профиль.
                 </p>
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 text-center">
               <Metric label="Время" value="~60с" caption="без длинной формы" compact />
-              <Metric label="Данные" value="CRM" caption="видят админы" compact />
+              <Metric label="Формат" value="4" caption="варианта сервиса" compact />
               <Metric label="Риск" value="18+" caption="без гарантий" compact />
             </div>
           </div>
@@ -866,7 +876,7 @@ function AntiCapperStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="02" title="Что сразу убивает доверие?" caption="Выберите все, что бесит. По этим ответам мы понимаем, как говорить с вами честно и без цирка." />
+      <StepTitle index="02" title="Что сразу убивает доверие?" caption="Отметьте то, что важно исключить сразу." />
       <div className="space-y-2">
         {antiCapperPains.map((pain) => {
           const selected = selectedPains.includes(pain);
@@ -922,7 +932,7 @@ function GoalExperienceStep({
 }) {
   return (
     <div className="space-y-4">
-      <StepTitle index="03" title="Цель и уровень" caption="Это попадет в CRM: админы увидят, кто пришел за скоростью, кто за дисциплиной, а кто сначала проверяет доверие." />
+      <StepTitle index="03" title="Цель и уровень" caption="Так Shamrai подберет темп, объяснения и уровень детализации." />
       <OptionGroup title="Зачем вы здесь" options={goalOptions} value={goal} proMode={proMode} glow={glow} onSelect={onGoal} />
       <OptionGroup title="Опыт" options={experienceOptions} value={experience} proMode={proMode} glow={glow} onSelect={onExperience} />
     </div>
@@ -958,37 +968,38 @@ function BankrollRiskStep({
   );
 }
 
-function BookmakerSportsStep({
+function BookmakerStep({
   bookmakers,
   selectedBookmakerCodes,
   otherBookmakerName,
-  favoriteSports,
+  serviceFormat,
   bookmakersLoading,
   proMode,
+  glow,
   onBookmaker,
   onOtherBookmakerName,
-  onFavoriteSport,
+  onServiceFormat,
 }: {
   bookmakers: BookmakerResponse[];
   selectedBookmakerCodes: string[];
   otherBookmakerName: string;
-  favoriteSports: string[];
+  serviceFormat: ServiceFormat | null;
   bookmakersLoading: boolean;
   proMode: boolean;
+  glow: string;
   onBookmaker: (value: string) => void;
   onOtherBookmakerName: (value: string) => void;
-  onFavoriteSport: (value: string) => void;
+  onServiceFormat: (value: ServiceFormat) => void;
 }) {
   const selectedBookmakerCodeSet = useMemo(
     () => new Set(selectedBookmakerCodes),
     [selectedBookmakerCodes],
   );
-  const selectedSportSet = useMemo(() => new Set(favoriteSports), [favoriteSports]);
   const otherSelected = selectedBookmakerCodeSet.has('other');
 
   return (
     <div className="space-y-4">
-      <StepTitle index="05" title="БК и спорт-интересы" caption="Быстро отмечаем, где вы реально ставите и какие виды спорта важны. Этот экран специально облегчён, чтобы не лагал." />
+      <StepTitle index="05" title="Букмекерские конторы" caption="Финальный скан: где ловим сигнал и какой формат сервиса вам ближе." />
 
       <div className="onboarding-fast-picker rounded-2xl p-3">
         <div className="mb-2 flex items-center justify-between gap-3">
@@ -1037,36 +1048,52 @@ function BookmakerSportsStep({
             className="mt-2 min-h-[88px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2 text-sm font-bold leading-relaxed text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-200/60 focus:ring-2 focus:ring-cyan-300/25"
           />
           <p className="mt-2 text-[10px] font-semibold leading-snug text-slate-400">
-            Обязательно для CRM: админы увидят название, а рассылка останется по категории "Другие".
+            Нужно, чтобы сигналы и уведомления не расходились с вашим реальным маршрутом.
           </p>
         </div>
       )}
 
       <div className="onboarding-fast-picker rounded-2xl p-3">
         <div className="mb-2 flex items-center justify-between gap-3">
-          <SectionLabel compact>Спорт-интересы</SectionLabel>
+          <SectionLabel compact>Формат сервиса</SectionLabel>
           <span className="shrink-0 rounded-xl border border-white/10 bg-slate-950/45 px-2 py-1 text-[10px] font-black text-cyan-100">
-            {favoriteSports.length || 0}
+            {serviceFormat ? '1' : '0'}
           </span>
         </div>
-        <div className="grid grid-cols-2 gap-2 min-[430px]:grid-cols-3">
-          {favoriteSportOptions.map((sport) => {
-            const selected = selectedSportSet.has(sport.label);
+        <div className="grid grid-cols-2 gap-2">
+          {serviceFormatOptions.map((option) => {
+            const selected = serviceFormat === option.value;
+            const Icon = option.icon;
             return (
               <button
-                key={sport.label}
+                key={option.value}
                 type="button"
                 aria-pressed={selected}
-                onClick={() => onFavoriteSport(sport.label)}
-                className={`onboarding-sport-chip ${selected ? 'onboarding-sport-chip--active' : ''}`}
+                onClick={() => onServiceFormat(option.value)}
+                className={`group relative min-h-[104px] overflow-hidden rounded-2xl ${GLASS_SURFACE} p-3 text-left text-white transition duration-300 active:scale-[0.98]`}
+                style={selected ? { boxShadow: glow } : undefined}
               >
-                <SportIconFrame label={sport.label} size="tiny" active={selected} />
-                <span className="truncate">{sport.label}</span>
+                <span className="pointer-events-none absolute inset-0 opacity-0 transition duration-300 group-hover:opacity-100 bg-[linear-gradient(110deg,transparent,rgba(255,255,255,0.12),transparent)]" />
+                <span className="relative z-10 flex h-full flex-col justify-between gap-3">
+                  <span className="flex items-center justify-between gap-2">
+                    <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl ${GLASS_SURFACE}`} style={selected ? { boxShadow: glow, color: proMode ? GOLD : CYAN } : undefined}>
+                      <Icon className="h-4 w-4" />
+                    </span>
+                    <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${GLASS_SURFACE}`} style={selected ? { boxShadow: glow } : undefined}>
+                      {selected && <span className="h-2 w-2 rounded-full bg-white shadow-[0_0_14px_rgba(255,255,255,0.9)]" />}
+                    </span>
+                  </span>
+                  <span>
+                    <span className="block text-[12px] font-black leading-tight">{option.title}</span>
+                    <span className="mt-1 block text-[10px] font-semibold leading-snug text-slate-400">{option.description}</span>
+                  </span>
+                </span>
               </button>
             );
           })}
         </div>
       </div>
+
     </div>
   );
 }
@@ -1208,14 +1235,14 @@ function FinalScreen({
         </div>
         <h2 className="font-display text-2xl font-black leading-tight text-white">Ваша модель собрана</h2>
         <p className="text-xs font-semibold leading-relaxed text-slate-300">
-          Ниже не обещание выигрыша, а ретро-оценка того, как ваш риск-профиль смотрелся бы на последнем окне Shamrai.
+          Ниже дисциплинарный флэт и ретро-оценка риска без обещаний дохода.
         </p>
       </div>
 
       <div className={`rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
         <p className="text-[10px] font-black uppercase tracking-[0.16em]" style={{ color: proMode ? '#fde68a' : '#a5f3fc' }}>Персональный флэт</p>
         <p className="mt-2 font-display text-xl font-black text-white">
-          {recommendation?.flat_stake_percent ?? 3}% от банка
+          {recommendation?.flat_stake_percent ?? 7}% от банка
         </p>
         <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-300">
           Это дисциплинарный размер входа, а не призыв увеличивать ставку после минуса.
@@ -1224,7 +1251,7 @@ function FinalScreen({
 
       <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: proMode ? GOLD_GLOW : PINK_GLOW }}>
         <div className="relative z-10 space-y-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-pink-100">FOMO-ретро окно</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-pink-100">Ретро-оценка окна</p>
           <div className="grid grid-cols-2 gap-2">
             <Metric label="Потенциал модели" value={`до +${recommendation?.monthly_profit_percent ?? 35}%`} caption="оценка месяца" />
             <Metric label="24 часа" value={`+${recommendation?.missed_profit_percent_24h ?? 7.4}%`} caption={`${amountLabel} к банку`} />

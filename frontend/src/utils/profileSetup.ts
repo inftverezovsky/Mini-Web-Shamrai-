@@ -34,6 +34,7 @@ export interface ConnectionSetupActionPresentation {
 
 const connectionActionTargets: Record<string, { setup: ProfileSetup; targetId: string }> = {
   'connect-telegram': { setup: 'telegram', targetId: 'connect-telegram' },
+  'confirm-telegram-chat': { setup: 'telegram', targetId: 'connect-telegram' },
   'connect-vk': { setup: 'vk', targetId: 'connect-vk' },
   'allow-vk-messages': { setup: 'vk-messages', targetId: 'connect-vk' },
   'enable-web-push': { setup: 'notifications', targetId: 'web-push' },
@@ -42,6 +43,12 @@ const connectionActionTargets: Record<string, { setup: ProfileSetup; targetId: s
 const connectionActionPresentations: Record<string, Omit<ConnectionSetupActionPresentation, 'title'>> = {
   'connect-telegram': {
     caption: 'Открою Telegram-бота. Останется нажать Start и вернуться сюда.',
+    busyLabel: 'Открываю Telegram...',
+    successLabel: 'Telegram открыт',
+    fallbackLabel: 'Открою профиль с Telegram-шагом',
+  },
+  'confirm-telegram-chat': {
+    caption: 'Открою Telegram-шаг. Нажмите Start в боте/чате и вернитесь в Shamrai.',
     busyLabel: 'Открываю Telegram...',
     successLabel: 'Telegram открыт',
     fallbackLabel: 'Открою профиль с Telegram-шагом',

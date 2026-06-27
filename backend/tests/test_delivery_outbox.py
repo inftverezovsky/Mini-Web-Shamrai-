@@ -13,6 +13,7 @@ from src.services import delivery_outbox
 from src.services.delivery_outbox import (
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
+    CHANNEL_CONNECTION_SETUP_REMINDER,
     CHANNEL_TELEGRAM_MESSAGE,
     CHANNEL_VK_MESSAGE,
     CHANNEL_WEB_PUSH_SIGNAL,
@@ -148,6 +149,24 @@ class DeliveryOutboxTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["ok"], True)
         vk_mock.assert_called_once_with(user, "hello vk", keyboard=None, image_path=None)
+
+    async def test_dispatch_connection_setup_reminder_uses_current_user_state(self):
+        user = User(telegram_id=12345, tg_chat_joined=True, vk_user_id="456", vk_messages_allowed=True)
+        delivery = DeliveryOutbox(
+            channel=CHANNEL_CONNECTION_SETUP_REMINDER,
+            user_id=user.telegram_id,
+            payload={"kind": "connection_setup_reminder"},
+        )
+        delivery.user = user
+
+        with patch(
+            "src.services.connection_onboarding.dispatch_connection_setup_reminder",
+            AsyncMock(return_value={"ok": True, "sent_channels": ["telegram", "vk"]}),
+        ) as reminder_mock:
+            result = await delivery_outbox.dispatch_delivery(delivery)
+
+        self.assertTrue(result["ok"])
+        reminder_mock.assert_awaited_once_with(user)
 
     async def test_dispatch_forecast_auto_delivery_uses_stored_request_id(self):
         request_id = uuid4()

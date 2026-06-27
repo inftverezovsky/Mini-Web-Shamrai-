@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getClientAvatarSources,
   getClientChannelStatuses,
+  getCrmClientTagLabel,
   getClientPriority,
   getClientRecentMatchSummary,
   getCrmBookmakerPreview,
@@ -36,6 +37,13 @@ describe('admin CRM display helpers', () => {
       'VK:нет разрешения',
       'Web:push включен',
     ]);
+  });
+
+  it('localizes legacy onboarding goal CRM tags', () => {
+    expect(getCrmClientTagLabel('goal: trust_check')).toBe('Цель: проверить честность');
+    expect(getCrmClientTagLabel('goal: fast_signals')).toBe('Цель: быстрые входы');
+    expect(getCrmClientTagLabel('  важный клиент  ')).toBe('важный клиент');
+    expect(getCrmClientTagLabel(null)).toBeNull();
   });
 
   it('prioritizes debt, guarantee, active, contact, then demo', () => {

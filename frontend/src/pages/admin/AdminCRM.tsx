@@ -13,6 +13,7 @@ import { isPrivilegedRole } from '../../utils/roles';
 import {
   getClientAvatarSources,
   getClientChannelStatuses,
+  getCrmClientTagLabel,
   getClientPriority,
   getClientRecentMatchSummary,
   getCrmBookmakerPreview,
@@ -334,7 +335,7 @@ function ClientIntelligenceRow({
                   {user.client_group || 'Без группы'}
                 </span>
                 <span className="rounded-lg border border-amber-200/16 bg-amber-200/[0.06] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-amber-100">
-                  {user.client_tag || 'Без метки'}
+                  {getCrmClientTagLabel(user.client_tag) || 'Без метки'}
                 </span>
                 <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-400">
                   A/B {user.ab_group || 'A'}
@@ -496,6 +497,7 @@ export default function AdminCRM() {
         getMatchBalance(user),
         user.client_group,
         user.client_tag,
+        getCrmClientTagLabel(user.client_tag),
         user.other_bookmaker_name,
       ].join(' ').toLowerCase();
 
@@ -541,7 +543,7 @@ export default function AdminCRM() {
     setEditBookmakersOpen(false);
     setEditOtherBookmakerName(user.other_bookmaker_name || '');
     setEditClientGroup(user.client_group || '');
-    setEditClientTag(user.client_tag || '');
+    setEditClientTag(getCrmClientTagLabel(user.client_tag) || '');
     setMatchDelta('');
   };
 
@@ -771,7 +773,7 @@ export default function AdminCRM() {
         {groups.map(group => <option key={group} value={group} />)}
       </datalist>
       <datalist id="client-tag-options">
-        {tags.map(tag => <option key={tag} value={tag} />)}
+        {tags.map(tag => <option key={tag} value={getCrmClientTagLabel(tag) || tag} />)}
       </datalist>
 
       <section className="relative overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_18%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_86%_16%,rgba(16,185,129,0.10),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
@@ -880,7 +882,7 @@ export default function AdminCRM() {
               className="min-h-[42px] w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/42 pl-8 pr-3 text-[10px] font-bold text-white outline-none focus:border-cyan-300/45"
             >
               <option value="all">Все метки</option>
-              {tags.map(tag => <option key={tag} value={tag}>{tag}</option>)}
+              {tags.map(tag => <option key={tag} value={tag}>{getCrmClientTagLabel(tag) || tag}</option>)}
             </select>
           </label>
         </div>
@@ -888,10 +890,12 @@ export default function AdminCRM() {
 
       <div className="space-y-3">
         {filteredUsers.length === 0 ? (
-          <div className="rounded-[24px] border border-dashed border-white/10 bg-white/[0.04] p-8 text-center text-xs text-slate-500">
-            <Users className="mx-auto h-8 w-8 text-slate-600" />
-            <p className="mt-3 font-black text-white">Клиенты не найдены</p>
-            <p className="mt-1 font-bold">Измените поиск или фильтры.</p>
+          <div className="flex min-h-[128px] flex-col items-center justify-center rounded-[24px] border border-dashed border-white/10 bg-white/[0.04] px-5 py-7 text-center text-xs text-slate-500">
+            <Users className="h-8 w-8 shrink-0 text-slate-500" />
+            <div className="mt-3 max-w-[28rem] space-y-1">
+              <p className="font-black leading-snug text-white">Клиенты не найдены</p>
+              <p className="font-bold leading-snug">Измените поиск или фильтры.</p>
+            </div>
           </div>
         ) : (
           filteredUsers.map(user => (

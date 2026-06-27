@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -7,8 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
+from src.core.telegram_delivery import user_can_receive_personal_telegram
 from src.models.models import PersonalSignal, User
 from src.services.signals import deliver_personal_signal
+from src.services.telegram_bot import call_telegram_api_async
+from src.services.vk_delivery import send_vk_message_to_user
 
 CONNECTION_SETUP_GUIDE_SIGNAL_TYPE = "connection_setup_guide"
 CONNECTION_SETUP_COMPLETE_SIGNAL_TYPE = "connection_setup_complete"
@@ -16,10 +21,15 @@ CONNECTION_SETUP_SIGNAL_TYPES = (
     CONNECTION_SETUP_GUIDE_SIGNAL_TYPE,
     CONNECTION_SETUP_COMPLETE_SIGNAL_TYPE,
 )
+CONNECTION_SETUP_REMINDER_DELAY = timedelta(hours=24)
 
 
 def has_telegram_identity(user: User) -> bool:
     return bool(getattr(user, "telegram_id", 0) and int(user.telegram_id) > 0)
+
+
+def has_telegram_chat_delivery(user: User) -> bool:
+    return bool(has_telegram_identity(user) and getattr(user, "tg_chat_joined", False))
 
 
 def has_vk_identity(user: User) -> bool:
@@ -38,6 +48,7 @@ def has_web_push_delivery(user: User) -> bool:
 def connection_checklist(user: User) -> dict[str, bool]:
     checklist = {
         "telegram_linked": has_telegram_identity(user),
+        "telegram_chat_ready": has_telegram_chat_delivery(user),
         "vk_linked": has_vk_identity(user),
         "vk_messages_allowed": has_vk_message_delivery(user),
         "web_push_enabled": has_web_push_delivery(user),
@@ -59,6 +70,12 @@ def setup_actions_for_user(user: User) -> list[dict[str, str]]:
         actions.append({
             "id": "connect-telegram",
             "label": "Подключить Telegram",
+            "url": _frontend_setup_url("telegram", "connect-telegram"),
+        })
+    elif not has_telegram_chat_delivery(user):
+        actions.append({
+            "id": "confirm-telegram-chat",
+            "label": "Подтвердить Telegram чат",
             "url": _frontend_setup_url("telegram", "connect-telegram"),
         })
     if not has_vk_identity(user):
@@ -88,11 +105,21 @@ def setup_actions_for_user(user: User) -> list[dict[str, str]]:
     return actions
 
 
+def _setup_action_link_lines(user: User) -> list[str]:
+    return [
+        f"{index}. {action['label']}: {action['url']}"
+        for index, action in enumerate(setup_actions_for_user(user), start=1)
+        if action["id"] != "open-profile"
+    ]
+
+
 def build_connection_setup_guide_text(user: User) -> str:
     checklist = connection_checklist(user)
     missing_lines: list[str] = []
     if not checklist["telegram_linked"]:
         missing_lines.append("Подключите Telegram: он нужен для входа через бота и восстановления доступа.")
+    elif not checklist["telegram_chat_ready"]:
+        missing_lines.append("Подтвердите Telegram чат: откройте бота/чат и нажмите Start, чтобы личные уведомления доходили в Telegram.")
     if not checklist["vk_linked"]:
         missing_lines.append("Подключите VK ID: это резервный вход и второй канал связи.")
     elif not checklist["vk_messages_allowed"]:
@@ -104,11 +131,28 @@ def build_connection_setup_guide_text(user: User) -> str:
         missing_lines.append("Проверьте профиль: основные каналы уже выглядят подключенными.")
 
     numbered = "\n".join(f"{index}. {line}" for index, line in enumerate(missing_lines, start=1))
+    direct_links = "\n".join(_setup_action_link_lines(user))
+    direct_links_block = f"\n\nПрямые ссылки:\n{direct_links}" if direct_links else ""
     return (
         "Привет! Я личный бот Shamrai. Помогу подключить связь за пару понятных шагов.\n\n"
         f"{numbered}\n\n"
         "Нажимайте кнопки ниже по очереди. Где можно, я все включу сам. "
         "Если браузер, VK или Telegram спросит подтверждение, нажмите «Разрешить» или Start и вернитесь сюда."
+        f"{direct_links_block}"
+    )
+
+
+def build_connection_setup_reminder_text(user: User) -> str:
+    direct_links = "\n".join(_setup_action_link_lines(user))
+    if not direct_links:
+        direct_links = f"1. Открыть профиль: {_frontend_setup_url('identity', 'connect-identity')}"
+
+    return (
+        "Подключение Shamrai давно не завершено. Из-за этого часть сигналов и важных уведомлений может не дойти.\n\n"
+        "Что осталось включить:\n"
+        f"{direct_links}\n\n"
+        "Откройте нужную ссылку, нажмите подтверждение в Telegram/VK/браузере и вернитесь в Shamrai. "
+        "После подключения лишние напоминания отправляться не будут."
     )
 
 
@@ -127,6 +171,129 @@ async def _existing_connection_signal_types(db: AsyncSession, user: User) -> set
         )
     )
     return {str(signal_type) for signal_type in result.scalars().all()}
+
+
+def _connection_reminder_dedupe_key(user: User) -> str:
+    action_ids = ",".join(action["id"] for action in setup_actions_for_user(user))
+    return f"connection_setup_reminder:v1:{user.telegram_id}:{action_ids}"
+
+
+async def enqueue_connection_setup_reminder(db: AsyncSession, user: User) -> Any:
+    if connection_checklist(user)["complete"]:
+        return None
+
+    from src.models.models import DeliveryOutbox
+    from src.services.delivery_outbox import (
+        CHANNEL_CONNECTION_SETUP_REMINDER,
+        STATUS_CANCELLED,
+        STATUS_PENDING,
+        STATUS_RETRY,
+        enqueue_delivery,
+    )
+
+    dedupe_key = _connection_reminder_dedupe_key(user)
+    run_after = datetime.now(timezone.utc) + CONNECTION_SETUP_REMINDER_DELAY
+    existing_result = await db.execute(
+        select(DeliveryOutbox).filter(DeliveryOutbox.dedupe_key == dedupe_key)
+    )
+    existing = existing_result.scalars().first()
+    if existing and existing.status != STATUS_CANCELLED:
+        return existing
+
+    stale_result = await db.execute(
+        select(DeliveryOutbox).filter(
+            DeliveryOutbox.channel == CHANNEL_CONNECTION_SETUP_REMINDER,
+            DeliveryOutbox.user_id == user.telegram_id,
+            DeliveryOutbox.status.in_([STATUS_PENDING, STATUS_RETRY]),
+        )
+    )
+    for stale_delivery in stale_result.scalars().all():
+        stale_delivery.status = STATUS_CANCELLED
+        stale_delivery.last_error = "Superseded by updated connection setup checklist"
+
+    if existing:
+        existing.status = STATUS_PENDING
+        existing.attempt_count = 0
+        existing.max_attempts = 3
+        existing.next_attempt_at = run_after
+        existing.last_error = None
+        existing.payload = {
+            "kind": "connection_setup_reminder",
+            "checklist": connection_checklist(user),
+            "setup_actions": setup_actions_for_user(user),
+        }
+        return existing
+
+    return await enqueue_delivery(
+        db,
+        channel=CHANNEL_CONNECTION_SETUP_REMINDER,
+        user_id=user.telegram_id,
+        dedupe_key=dedupe_key,
+        max_attempts=3,
+        run_after=run_after,
+        payload={
+            "kind": "connection_setup_reminder",
+            "checklist": connection_checklist(user),
+            "setup_actions": setup_actions_for_user(user),
+        },
+    )
+
+
+async def dispatch_connection_setup_reminder(user: User) -> dict[str, Any]:
+    checklist = connection_checklist(user)
+    if checklist["complete"]:
+        return {
+            "ok": True,
+            "skipped": True,
+            "description": "Connection setup is already complete",
+        }
+
+    message = build_connection_setup_reminder_text(user)
+    sent_channels: list[str] = []
+    errors: list[str] = []
+
+    if user_can_receive_personal_telegram(user):
+        telegram_result = await call_telegram_api_async(
+            "sendMessage",
+            {
+                "chat_id": user.telegram_id,
+                "text": message,
+                "disable_web_page_preview": True,
+            },
+        )
+        if telegram_result.get("ok"):
+            sent_channels.append("telegram")
+        else:
+            errors.append(str(telegram_result.get("description") or "Telegram delivery failed"))
+
+    if has_vk_message_delivery(user):
+        vk_result = await asyncio.to_thread(send_vk_message_to_user, user, message)
+        if vk_result.get("ok"):
+            sent_channels.append("vk")
+        else:
+            errors.append(str(vk_result.get("description") or vk_result.get("error") or "VK delivery failed"))
+
+    if sent_channels:
+        return {
+            "ok": True,
+            "sent_channels": sent_channels,
+            "checklist": checklist,
+            "errors": errors,
+        }
+
+    if not errors:
+        return {
+            "ok": True,
+            "skipped": True,
+            "description": "No external channel is ready for connection setup reminder",
+            "checklist": checklist,
+        }
+
+    return {
+        "ok": False,
+        "description": "; ".join(errors),
+        "checklist": checklist,
+    }
 
 
 async def sync_connection_onboarding(db: AsyncSession, user: User) -> dict[str, Any]:
@@ -171,6 +338,7 @@ async def sync_connection_onboarding(db: AsyncSession, user: User) -> dict[str, 
             send_web_push=False,
         )
         created_signal_types.append(CONNECTION_SETUP_GUIDE_SIGNAL_TYPE)
+    await enqueue_connection_setup_reminder(db, user)
 
     return {
         "status": "ok",

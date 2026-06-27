@@ -109,6 +109,7 @@ class OnboardRequest(BaseModel):
     primary_bookmaker: Optional[str] = Field(default=None, max_length=120)
     vk_user_id: Optional[str] = Field(default=None, max_length=80)
     other_bookmaker_name: Optional[str] = Field(default=None, max_length=120)
+    service_format: Optional[str] = Field(default="auto_fast", max_length=80)
     bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
     favorite_sports: List[str] = Field(default_factory=list, max_length=30)
     currency_preference: str = Field(default="RUB", max_length=12)
@@ -122,6 +123,9 @@ class OnboardRecommendationResponse(BaseModel):
     currency: str
     source: str
     resolved_bets_24h: int
+    service_format_label: str
+    vip_verdict_title: str
+    vip_verdict_caption: str
 
 
 class OnboardResponse(BaseModel):

@@ -28,6 +28,42 @@ const DEFAULT_MOCK_PREFERENCES = {
   stats_display_mode: 'percent',
 };
 
+const MOCK_SERVICE_FORMAT_LABELS: Record<string, string> = {
+  auto_fast: 'Сигнал сразу',
+  logic_review: 'С объяснением',
+  vip_support: 'VIP-сопровождение',
+  distance_report: 'Отчёт по дистанции',
+};
+
+function normalizeMockServiceFormat(value: unknown) {
+  return typeof value === 'string' && value in MOCK_SERVICE_FORMAT_LABELS ? value : 'auto_fast';
+}
+
+function buildMockVipVerdict(serviceFormat: string, onboardingGoal: unknown) {
+  if (serviceFormat === 'vip_support') {
+    return {
+      title: 'VIP-контур',
+      caption: 'Ваш профиль лучше всего раскрывается через личное сопровождение, быстрый контакт и контроль дисциплины.',
+    };
+  }
+  if (serviceFormat === 'logic_review' || onboardingGoal === 'trust_check') {
+    return {
+      title: 'Проверочный контур',
+      caption: 'Клиенту важны логика входа и прозрачный разбор: показывайте доказательства, статистику и причины сигнала.',
+    };
+  }
+  if (serviceFormat === 'distance_report' || onboardingGoal === 'discipline') {
+    return {
+      title: 'Дистанционный контур',
+      caption: 'Фокус на длинной дистанции: флэт, отчётность и спокойная работа без догонов.',
+    };
+  }
+  return {
+    title: 'Скоростной контур',
+    caption: 'Оптимален быстрый вход по линии: приоритет на уведомления, скорость доставки и короткий маршрут до сигнала.',
+  };
+}
+
 const MOCK_SECRET_SETTING_KEYS = new Set([
   'VK_ACCESS_TOKEN',
   'TELEGRAM_BOT_TOKEN',
@@ -1493,6 +1529,8 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         ? idsFromCodes
         : getMockBookmakerIds();
     const selectedBookmakers = MOCK_BOOKMAKERS.filter((bookmaker) => bookmakerIds.includes(bookmaker.id));
+    const serviceFormat = normalizeMockServiceFormat(body.service_format);
+    const vipVerdict = buildMockVipVerdict(serviceFormat, body.onboarding_goal);
     localStorage.setItem('bet_tma_mock_is_onboarded', 'true');
     localStorage.setItem('bet_tma_mock_bookmaker_ids', JSON.stringify(bookmakerIds));
     const user = {
@@ -1509,9 +1547,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       purchased_bets_balance: 12,
       free_bets_available: 0,
       bookmakers: selectedBookmakers,
-      favorite_sports: Array.isArray(body.favorite_sports) && body.favorite_sports.length
-        ? body.favorite_sports
-        : ['Футбол'],
+      favorite_sports: Array.isArray(body.favorite_sports) ? body.favorite_sports : [],
       preferred_sports: [
         'Автогонки',
         'Ам. футбол',
@@ -1555,13 +1591,16 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       status: 'success',
       message: 'Shamrai neural calibration completed',
       recommendation: {
-        flat_stake_percent: body.risk_tolerance === 'aggressive' ? 4 : body.risk_tolerance === 'cautious' ? 1.5 : 3,
+        flat_stake_percent: body.risk_tolerance === 'aggressive' ? 8.5 : body.risk_tolerance === 'cautious' ? 7 : 7.75,
         monthly_profit_percent: body.risk_tolerance === 'aggressive' ? 41.5 : body.risk_tolerance === 'cautious' ? 22.4 : 35,
         missed_profit_percent_24h: body.risk_tolerance === 'aggressive' ? 9.2 : body.risk_tolerance === 'cautious' ? 4.8 : 7.4,
         missed_profit_amount_24h: body.bankroll_size === 'high' ? 11100 : body.bankroll_size === 'micro' ? 2220 : 5550,
         currency: body.currency_preference ?? 'RUB',
         source: 'mock_channel_24h',
         resolved_bets_24h: 7,
+        service_format_label: MOCK_SERVICE_FORMAT_LABELS[serviceFormat],
+        vip_verdict_title: vipVerdict.title,
+        vip_verdict_caption: vipVerdict.caption,
       },
       user,
     };

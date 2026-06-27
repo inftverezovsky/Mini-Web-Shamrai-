@@ -62,6 +62,7 @@ EXPERIENCE_LEVELS = {"novice", "amateur", "pro"}
 BANKROLL_SIZES = {"micro", "mid", "high"}
 RISK_TOLERANCES = {"cautious", "balanced", "aggressive"}
 ONBOARDING_GOALS = {"trust_check", "discipline", "fast_signals", "raise_level"}
+SERVICE_FORMATS = {"auto_fast", "logic_review", "vip_support", "distance_report"}
 BOOKMAKER_CODES = {
     "fonbet",
     "betboom",
@@ -131,6 +132,24 @@ ONBOARDING_GOAL_LABELS = {
     "discipline": "Дисциплина банка",
     "fast_signals": "Быстрые входы по линии",
     "raise_level": "Поднять уровень",
+}
+ONBOARDING_GOAL_CRM_TAGS = {
+    "trust_check": "Цель: проверить честность",
+    "discipline": "Цель: дисциплина банка",
+    "fast_signals": "Цель: быстрые входы",
+    "raise_level": "Цель: поднять уровень",
+}
+SERVICE_FORMAT_LABELS = {
+    "auto_fast": "Сигнал сразу",
+    "logic_review": "С объяснением",
+    "vip_support": "VIP-сопровождение",
+    "distance_report": "Отчёт по дистанции",
+}
+SERVICE_FORMAT_NEXT_STEPS = {
+    "auto_fast": "Проверить готовность уведомлений и предложить быстрый вход в закрытую ленту.",
+    "logic_review": "Показать пример разбора прогноза и подчеркнуть прозрачность логики.",
+    "vip_support": "Передать администратору для личного контакта и VIP-сопровождения.",
+    "distance_report": "Показать статистику дистанции, правила флэта и формат отчётности.",
 }
 
 class AdminUserListResponse(BaseModel):
@@ -276,6 +295,7 @@ def validate_onboarding_payload(data: OnboardRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid risk_tolerance"
         )
+    normalize_service_format(data.service_format)
     selected_bookmakers = set(data.bookmakers or [])
     if data.primary_bookmaker:
         selected_bookmakers.add(data.primary_bookmaker)
@@ -295,12 +315,7 @@ def validate_onboarding_payload(data: OnboardRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid bookmakers: {invalid_bookmakers}"
         )
-    normalized_sports = normalize_onboarding_sports(data.favorite_sports)
-    if not normalized_sports:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Select at least one favorite sport"
-        )
+    normalize_onboarding_sports(data.favorite_sports)
     if normalize_currency(data.currency_preference) not in {"RUB", "USD", "FLATS"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -329,6 +344,47 @@ def normalize_onboarding_sports(sports: List[str]) -> List[str]:
     return normalized
 
 
+def normalize_service_format(service_format: Optional[str]) -> str:
+    value = (service_format or "auto_fast").strip() or "auto_fast"
+    if value not in SERVICE_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid service_format",
+        )
+    return value
+
+
+def onboarding_service_format_label(data: OnboardRequest) -> str:
+    return SERVICE_FORMAT_LABELS[normalize_service_format(data.service_format)]
+
+
+def onboarding_vip_verdict(data: OnboardRequest) -> tuple[str, str]:
+    service_format = normalize_service_format(data.service_format)
+    if service_format == "vip_support":
+        return (
+            "VIP-контур",
+            "Ваш профиль лучше всего раскрывается через личное сопровождение, быстрый контакт и контроль дисциплины.",
+        )
+    if service_format == "logic_review" or data.onboarding_goal == "trust_check":
+        return (
+            "Проверочный контур",
+            "Клиенту важны логика входа и прозрачный разбор: показывайте доказательства, статистику и причины сигнала.",
+        )
+    if service_format == "distance_report" or data.onboarding_goal == "discipline":
+        return (
+            "Дистанционный контур",
+            "Фокус на длинной дистанции: флэт, отчётность и спокойная работа без догонов.",
+        )
+    return (
+        "Скоростной контур",
+        "Оптимален быстрый вход по линии: приоритет на уведомления, скорость доставки и короткий маршрут до сигнала.",
+    )
+
+
+def onboarding_admin_next_step(data: OnboardRequest) -> str:
+    return SERVICE_FORMAT_NEXT_STEPS[normalize_service_format(data.service_format)]
+
+
 def onboarding_client_group(data: OnboardRequest) -> str:
     if data.experience_level == "pro" or data.bankroll_size == "high":
         return "Новый PRO"
@@ -340,7 +396,10 @@ def onboarding_client_group(data: OnboardRequest) -> str:
 
 
 def onboarding_client_tag(data: OnboardRequest) -> str:
-    return f"goal: {data.onboarding_goal}"
+    return ONBOARDING_GOAL_CRM_TAGS.get(
+        data.onboarding_goal or "",
+        f"Цель: {data.onboarding_goal or 'не указано'}",
+    )
 
 
 def validate_onboarding_vk_link(user: User, data: OnboardRequest) -> None:
@@ -363,15 +422,17 @@ async def build_onboarding_recommendation(
     db: AsyncSession,
     data: OnboardRequest,
 ):
+    recommended_flat_min_percent = 7.0
+    recommended_flat_max_percent = 10.0
     flat_by_risk = {
-        "cautious": 1.5,
-        "balanced": 2.5,
-        "aggressive": 3.5,
+        "cautious": 7.0,
+        "balanced": 7.5,
+        "aggressive": 8.25,
     }
     experience_adjustment = {
-        "novice": -0.25,
+        "novice": 0.0,
         "amateur": 0.25,
-        "pro": 0.5,
+        "pro": 0.75,
     }
     bankroll_amounts = {
         "micro": 30_000,
@@ -380,8 +441,11 @@ async def build_onboarding_recommendation(
     }
 
     flat_stake_percent = max(
-        1.0,
-        min(5.0, flat_by_risk[data.risk_tolerance] + experience_adjustment[data.experience_level]),
+        recommended_flat_min_percent,
+        min(
+            recommended_flat_max_percent,
+            flat_by_risk[data.risk_tolerance] + experience_adjustment[data.experience_level],
+        ),
     )
 
     since = datetime.now(timezone.utc) - timedelta(hours=24)
@@ -430,6 +494,7 @@ async def build_onboarding_recommendation(
             * risk_multiplier[data.risk_tolerance]),
     )
     missed_profit_amount = bankroll_amounts[data.bankroll_size] * missed_profit_percent / 100
+    verdict_title, verdict_caption = onboarding_vip_verdict(data)
 
     return {
         "flat_stake_percent": round(flat_stake_percent, 2),
@@ -439,6 +504,9 @@ async def build_onboarding_recommendation(
         "currency": normalize_currency(data.currency_preference),
         "source": source,
         "resolved_bets_24h": len(resolved_bets),
+        "service_format_label": onboarding_service_format_label(data),
+        "vip_verdict_title": verdict_title,
+        "vip_verdict_caption": verdict_caption,
     }
 
 
@@ -463,6 +531,10 @@ def _format_onboarding_report(
     favorite_sports = ", ".join(normalize_onboarding_sports(data.favorite_sports)) or "не указано"
     profile_type = "Web/VK клиент" if getattr(user, "is_web_only", False) else "Telegram клиент"
     goal_label = ONBOARDING_GOAL_LABELS.get(data.onboarding_goal or "", data.onboarding_goal or "не указано")
+    service_format_label = recommendation.get("service_format_label") or onboarding_service_format_label(data)
+    verdict_title, verdict_caption = onboarding_vip_verdict(data)
+    verdict_title = recommendation.get("vip_verdict_title") or verdict_title
+    verdict_caption = recommendation.get("vip_verdict_caption") or verdict_caption
     source = recommendation.get("source") or "не указано"
     resolved_bets = recommendation.get("resolved_bets_24h", 0)
 
@@ -484,6 +556,9 @@ def _format_onboarding_report(
         _onboarding_report_line("Риск", RISK_LABELS.get(data.risk_tolerance, data.risk_tolerance)),
         _onboarding_report_line("БК", selected_bookmaker_names),
         _onboarding_report_line("Спорты", favorite_sports),
+        _onboarding_report_line("Формат сервиса", service_format_label),
+        _onboarding_report_line("VIP-вердикт", verdict_title),
+        _onboarding_report_line("Следующий шаг для админа", onboarding_admin_next_step(data)),
         _onboarding_report_line("VK", f"привязан {user.vk_user_id}" if user.vk_user_id else "пропущен"),
     ]
 
@@ -492,6 +567,7 @@ def _format_onboarding_report(
 
     lines.extend([
         "",
+        _onboarding_report_line("Комментарий вердикта", verdict_caption),
         _onboarding_report_line("Рекомендованный флэт", f"{recommendation.get('flat_stake_percent', 'не указано')}%"),
         _onboarding_report_line("FOMO 24ч", f"+{recommendation.get('missed_profit_percent_24h', 'не указано')}%"),
         _onboarding_report_line("Потенциал модели", f"до +{recommendation.get('monthly_profit_percent', 'не указано')}%"),

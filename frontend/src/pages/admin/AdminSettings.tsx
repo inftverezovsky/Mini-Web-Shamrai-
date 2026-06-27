@@ -2482,7 +2482,7 @@ export default function AdminSettings() {
           <div
             role="tablist"
             aria-label="Подвкладки настроек"
-            className="flex w-full min-w-0 snap-x snap-mandatory flex-row gap-3 overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-smooth scrollbar-hide pb-2 pr-5 [-webkit-overflow-scrolling:touch]"
+            className="grid w-full min-w-0 grid-cols-2 gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
           >
           {SETTINGS_TABS.map(tab => {
             const TabIcon = tab.Icon;
@@ -2506,35 +2506,34 @@ export default function AdminSettings() {
                 aria-selected={active}
                 aria-controls={`settings-panel-${tab.id}`}
                 onClick={() => setActiveTab(tab.id)}
-                className={`smooth-pressable flex min-h-[52px] min-w-[min(82vw,210px)] flex-shrink-0 snap-start items-center gap-3 whitespace-nowrap rounded-2xl border px-3 py-2 text-left transition-all sm:min-w-[240px] ${
+                className={`smooth-pressable grid min-h-[78px] min-w-0 grid-cols-[2.25rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded-2xl border p-2 text-left transition-all sm:min-h-[72px] sm:grid-cols-[2.25rem_minmax(0,1fr)_auto] sm:p-2.5 ${
                   active
                     ? 'border-cyan-300/35 bg-cyan-300/[0.13] text-white shadow-neon-cyan'
                     : 'border-white/10 bg-white/5 text-slate-300 backdrop-blur hover:border-white/20 hover:bg-white/[0.08]'
                 }`}
               >
-                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${
+                <span className={`row-span-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${
                   active
                     ? 'border-cyan-300/35 bg-cyan-300/15 text-cyan-100'
                     : 'border-white/10 bg-black/20 text-slate-400'
                 }`}>
                   <TabIcon className="h-4 w-4" />
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[11px] font-black uppercase tracking-wider">
+                <span className="min-w-0 self-end">
+                  <span className="block text-[11px] font-black leading-tight text-white">
                     {tab.title}
                   </span>
-                  <span className="mt-0.5 block truncate text-[10px] font-bold text-slate-400">
+                  <span className="mt-0.5 block text-[10px] font-bold leading-tight text-slate-400">
                     {tab.subtitle}
                   </span>
                 </span>
-                <span className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-cyan-100">
+                <span className="col-start-2 w-fit max-w-full self-start rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black leading-none text-cyan-100 sm:col-start-auto sm:row-span-2 sm:self-center">
                   {statusText}
                 </span>
               </button>
             );
           })}
           </div>
-          <div className="pointer-events-none absolute right-0 top-0 h-[calc(100%-0.5rem)] w-8 rounded-r-2xl bg-gradient-to-l from-slate-950/80 to-transparent" aria-hidden="true" />
         </div>
 
         <div className="mt-2 flex justify-end">

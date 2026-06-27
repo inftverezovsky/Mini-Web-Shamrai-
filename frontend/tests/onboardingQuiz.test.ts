@@ -28,25 +28,33 @@ describe('onboarding quiz payload rules', () => {
     expect(isBookmakerStepComplete({
       selectedBookmakerCodes: ['fonbet', 'other'],
       otherBookmakerName: '',
-      favoriteSports: ['Футбол'],
+      serviceFormat: 'auto_fast',
     })).toBe(false);
 
     expect(isBookmakerStepComplete({
       selectedBookmakerCodes: ['fonbet', 'other'],
       otherBookmakerName: 'Pinnacle',
-      favoriteSports: ['Футбол'],
+      serviceFormat: 'auto_fast',
     })).toBe(true);
   });
 
-  it('requires at least one favorite sport on the bookmaker step', () => {
+  it('does not require favorite sports on the bookmaker step', () => {
     expect(isBookmakerStepComplete({
       selectedBookmakerCodes: ['fonbet'],
       otherBookmakerName: '',
-      favoriteSports: [],
+      serviceFormat: 'auto_fast',
+    })).toBe(true);
+  });
+
+  it('requires a service format on the bookmaker step', () => {
+    expect(isBookmakerStepComplete({
+      selectedBookmakerCodes: ['fonbet'],
+      otherBookmakerName: '',
+      serviceFormat: null,
     })).toBe(false);
   });
 
-  it('includes goal and sports in the onboarding payload', () => {
+  it('includes goal, sports, and service format in the onboarding payload', () => {
     const draft: OnboardingDraftAnswers = {
       anti_capper_pains: ['Поздние сигналы'],
       onboarding_goal: 'fast_signals',
@@ -55,6 +63,7 @@ describe('onboarding quiz payload rules', () => {
       risk_tolerance: 'aggressive',
       bookmaker_codes: ['fonbet', 'other'],
       other_bookmaker_name: 'Pinnacle',
+      service_format: 'vip_support',
       favorite_sports: ['Футбол', 'Теннис'],
       vk_user_id: '741852963',
     };
@@ -66,6 +75,7 @@ describe('onboarding quiz payload rules', () => {
       bookmakers: ['fonbet', 'other'],
       primary_bookmaker: 'fonbet',
       other_bookmaker_name: 'Pinnacle',
+      service_format: 'vip_support',
       currency_preference: 'RUB',
       vk_user_id: '741852963',
     });

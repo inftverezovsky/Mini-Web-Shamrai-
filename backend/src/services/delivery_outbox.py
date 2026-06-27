@@ -29,6 +29,7 @@ STATUS_CANCELLED = "cancelled"
 CHANNEL_TELEGRAM_MESSAGE = "telegram_message"
 CHANNEL_VK_MESSAGE = "vk_message"
 CHANNEL_WEB_PUSH_SIGNAL = "web_push_signal"
+CHANNEL_CONNECTION_SETUP_REMINDER = "connection_setup_reminder"
 CHANNEL_FORECAST_AUTO_DELIVERY = "forecast_auto_delivery"
 CHANNEL_FORECAST_FULL_DELIVERY = "forecast_full_delivery"
 PAUSABLE_DELIVERY_CHANNELS = {
@@ -305,6 +306,18 @@ async def dispatch_delivery(delivery: DeliveryOutbox, db: Optional[AsyncSession]
             payload.get("subscription"),
             signal_payload,
         )
+
+    if delivery.channel == CHANNEL_CONNECTION_SETUP_REMINDER:
+        user = _loaded_attr(delivery, "user")
+        if user is None and db is not None and delivery.user_id is not None:
+            user_result = await db.execute(select(User).filter(User.telegram_id == delivery.user_id))
+            user = user_result.scalars().first()
+        if user is None:
+            return {"ok": False, "description": "Connection setup reminder recipient was not found"}
+
+        from src.services.connection_onboarding import dispatch_connection_setup_reminder
+
+        return await dispatch_connection_setup_reminder(user)
 
     if delivery.channel == CHANNEL_FORECAST_AUTO_DELIVERY:
         from src.services.forecast_delivery import auto_deliver_forecast_request_for_request

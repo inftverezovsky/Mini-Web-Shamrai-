@@ -246,9 +246,9 @@ export default function MyBets() {
           />
 
           {!data?.timeline.length ? (
-            <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-8 text-center">
-              <Trophy className="mx-auto h-10 w-10 text-slate-600" />
-              <p className="mt-2 text-xs font-semibold text-slate-400">Пока нет купленных рассчитанных ставок</p>
+            <div className="flex min-h-[128px] flex-col items-center justify-center rounded-[28px] border border-white/10 bg-white/[0.04] px-5 py-7 text-center">
+              <Trophy className="h-10 w-10 shrink-0 text-slate-500" />
+              <p className="mt-3 max-w-[30rem] text-xs font-semibold leading-snug text-slate-400">Пока нет купленных рассчитанных ставок</p>
             </div>
           ) : null}
         </>

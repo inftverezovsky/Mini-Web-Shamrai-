@@ -88,6 +88,12 @@ describe('profile setup deep links', () => {
         caption: expect.stringContaining('разрешение'),
       }),
     );
+    expect(connectionSetupActionPresentation('confirm-telegram-chat', 'Подтвердить Telegram чат')).toEqual(
+      expect.objectContaining({
+        title: 'Подтвердить Telegram чат',
+        caption: expect.stringContaining('Start'),
+      }),
+    );
   });
 
   it('navigates setup actions inside the SPA without a document reload', () => {

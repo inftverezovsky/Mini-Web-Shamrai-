@@ -177,7 +177,7 @@ function setupActionIcon(actionId: string, busy: boolean, feedback?: SetupAction
   if (busy) return <Loader2 className="h-4 w-4 animate-spin" />;
   if (feedback?.tone === 'success') return <Check className="h-4 w-4" />;
   if (actionId === 'enable-web-push') return <BellRing className="h-4 w-4" />;
-  if (actionId === 'connect-telegram') return <MessageCircle className="h-4 w-4" />;
+  if (actionId === 'connect-telegram' || actionId === 'confirm-telegram-chat') return <MessageCircle className="h-4 w-4" />;
   if (actionId === 'connect-vk' || actionId === 'allow-vk-messages') return <ShieldCheck className="h-4 w-4" />;
   return <ExternalLink className="h-4 w-4" />;
 }

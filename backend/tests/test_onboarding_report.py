@@ -15,6 +15,7 @@ def make_onboarding_request() -> OnboardRequest:
         risk_tolerance="balanced",
         bookmakers=["fonbet"],
         primary_bookmaker="fonbet",
+        service_format="logic_review",
         favorite_sports=["Футбол", "Теннис"],
         vk_user_id="741852963",
         currency_preference="RUB",
@@ -22,6 +23,39 @@ def make_onboarding_request() -> OnboardRequest:
 
 
 class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_onboarding_recommendation_flat_never_drops_below_seven_percent(self):
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: [])
+                )
+            )
+        )
+        request = make_onboarding_request().model_copy(update={
+            "experience_level": "novice",
+            "risk_tolerance": "cautious",
+        })
+
+        recommendation = await users.build_onboarding_recommendation(db, request)
+
+        self.assertGreaterEqual(recommendation["flat_stake_percent"], 7.0)
+
+    async def test_onboarding_recommendation_includes_vip_verdict(self):
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: [])
+                )
+            )
+        )
+        request = make_onboarding_request().model_copy(update={"service_format": "vip_support"})
+
+        recommendation = await users.build_onboarding_recommendation(db, request)
+
+        self.assertEqual(recommendation["service_format_label"], "VIP-сопровождение")
+        self.assertEqual(recommendation["vip_verdict_title"], "VIP-контур")
+        self.assertIn("личное сопровождение", recommendation["vip_verdict_caption"])
+
     async def test_onboarding_report_falls_back_to_admin_group_chat(self):
         db = SimpleNamespace()
         user = SimpleNamespace(
@@ -38,6 +72,9 @@ class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
             "flat_stake_percent": 2.5,
             "monthly_profit_percent": 24.0,
             "missed_profit_percent_24h": 7.4,
+            "service_format_label": "С объяснением",
+            "vip_verdict_title": "Проверочный контур",
+            "vip_verdict_caption": "Клиенту важны логика входа и прозрачный разбор.",
         }
 
         with (
@@ -72,6 +109,11 @@ class OnboardingReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Быстрые входы по линии", payload["text"])
         self.assertIn("Спорты", payload["text"])
         self.assertIn("Футбол, Теннис", payload["text"])
+        self.assertIn("Формат сервиса", payload["text"])
+        self.assertIn("С объяснением", payload["text"])
+        self.assertIn("VIP-вердикт", payload["text"])
+        self.assertIn("Проверочный контур", payload["text"])
+        self.assertIn("Следующий шаг для админа", payload["text"])
         self.assertIn("Рекомендованный флэт", payload["text"])
         self.assertIn("FOMO 24ч", payload["text"])
         self.assertIn("Источник расчета", payload["text"])
@@ -127,6 +169,19 @@ class OnboardingPayloadValidationTests(unittest.TestCase):
 
         self.assertIn("Invalid favorite_sports", str(context.exception))
 
+    def test_allows_empty_favorite_sports(self):
+        request = make_onboarding_request().model_copy(update={"favorite_sports": []})
+
+        users.validate_onboarding_payload(request)
+
+    def test_rejects_unknown_service_format(self):
+        request = make_onboarding_request().model_copy(update={"service_format": "phone_spam"})
+
+        with self.assertRaises(Exception) as context:
+            users.validate_onboarding_payload(request)
+
+        self.assertIn("Invalid service_format", str(context.exception))
+
     def test_requires_other_bookmaker_name_for_other_code(self):
         request = make_onboarding_request().model_copy(update={
             "bookmakers": ["other"],
@@ -148,7 +203,12 @@ class OnboardingPayloadValidationTests(unittest.TestCase):
         })
 
         self.assertEqual(users.onboarding_client_group(request), "Новый PRO")
-        self.assertEqual(users.onboarding_client_tag(request), "goal: fast_signals")
+        self.assertEqual(users.onboarding_client_tag(request), "Цель: быстрые входы")
+
+    def test_client_tag_for_trust_check_is_display_ready_russian(self):
+        request = make_onboarding_request().model_copy(update={"onboarding_goal": "trust_check"})
+
+        self.assertEqual(users.onboarding_client_tag(request), "Цель: проверить честность")
 
 
 if __name__ == "__main__":

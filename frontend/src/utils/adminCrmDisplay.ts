@@ -48,6 +48,19 @@ export interface CrmClientPriority {
   tone: CrmPriorityTone;
 }
 
+const legacyOnboardingGoalTagLabels: Record<string, string> = {
+  'goal: trust_check': 'Цель: проверить честность',
+  'goal: discipline': 'Цель: дисциплина банка',
+  'goal: fast_signals': 'Цель: быстрые входы',
+  'goal: raise_level': 'Цель: поднять уровень',
+};
+
+export function getCrmClientTagLabel(tag: string | null | undefined) {
+  const cleanTag = tag?.trim();
+  if (!cleanTag) return null;
+  return legacyOnboardingGoalTagLabels[cleanTag] || cleanTag;
+}
+
 export function getCrmMatchBalance(user: Pick<CrmDisplayClient, 'purchased_bets_balance' | 'matches_remaining'>) {
   return user.purchased_bets_balance !== undefined && user.purchased_bets_balance !== 0
     ? user.purchased_bets_balance

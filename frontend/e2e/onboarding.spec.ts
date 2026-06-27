@@ -41,15 +41,17 @@ test('user completes the 6-step welcome quiz in low power mode', async ({ page }
   await page.getByRole('button', { name: /Агрессивная/ }).click();
   await page.getByRole('button', { name: 'Далее' }).click();
 
-  await expect(page.getByRole('heading', { name: 'БК и спорт-интересы' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Букмекерские конторы' })).toBeVisible();
   await page.getByRole('button', { name: /Фонбет/ }).click();
   await page.getByRole('button', { name: /БетБум/ }).click();
-  await page.getByRole('button', { name: /^Футбол$/ }).click();
-  await page.getByRole('button', { name: /^Теннис$/ }).click();
+  await page.getByRole('button', { name: /VIP-сопровождение/ }).click();
   await page.getByRole('button', { name: 'Рассчитать модель' }).click();
 
   await expect(page.getByRole('heading', { name: 'Ваша модель собрана' })).toBeVisible();
-  await expect(page.getByText(/FOMO-ретро окно/)).toBeVisible();
+  await expect(page.getByText('VIP-вердикт Shamrai')).toHaveCount(0);
+  await expect(page.getByText('VIP-контур')).toHaveCount(0);
+  await expect(page.getByText(/Персональный флэт/)).toBeVisible();
+  await expect(page.getByText(/Ретро-оценка окна/)).toBeVisible();
   await page.getByRole('button', { name: /Я понимаю/ }).click();
   await page.getByRole('button', { name: 'Войти в Analytics Hub' }).click();
 

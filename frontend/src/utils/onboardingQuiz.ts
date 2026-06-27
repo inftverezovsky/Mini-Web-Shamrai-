@@ -3,6 +3,7 @@ export type BankrollSize = 'micro' | 'mid' | 'high';
 export type RiskTolerance = 'cautious' | 'balanced' | 'aggressive';
 export type CurrencyCode = 'RUB' | 'USD' | 'FLATS';
 export type OnboardingGoal = 'trust_check' | 'discipline' | 'fast_signals' | 'raise_level';
+export type ServiceFormat = 'auto_fast' | 'logic_review' | 'vip_support' | 'distance_report';
 
 export interface OnboardingDraftAnswers {
   anti_capper_pains: string[];
@@ -12,6 +13,7 @@ export interface OnboardingDraftAnswers {
   risk_tolerance: RiskTolerance | null;
   bookmaker_codes: string[];
   other_bookmaker_name: string;
+  service_format: ServiceFormat | null;
   favorite_sports: string[];
   vk_user_id: string | null;
 }
@@ -19,7 +21,7 @@ export interface OnboardingDraftAnswers {
 export interface BookmakerStepState {
   selectedBookmakerCodes: string[];
   otherBookmakerName: string;
-  favoriteSports: string[];
+  serviceFormat: ServiceFormat | null;
 }
 
 export function isOtherBookmakerNameRequired(selectedBookmakerCodes: readonly string[]) {
@@ -29,9 +31,10 @@ export function isOtherBookmakerNameRequired(selectedBookmakerCodes: readonly st
 export function isBookmakerStepComplete({
   selectedBookmakerCodes,
   otherBookmakerName,
-  favoriteSports,
+  serviceFormat,
 }: BookmakerStepState) {
-  if (!selectedBookmakerCodes.length || !favoriteSports.length) return false;
+  if (!selectedBookmakerCodes.length) return false;
+  if (!serviceFormat) return false;
   if (isOtherBookmakerNameRequired(selectedBookmakerCodes) && !otherBookmakerName.trim()) return false;
   return true;
 }
@@ -50,6 +53,7 @@ export function buildOnboardingPayload(
     bookmakers: answers.bookmaker_codes,
     primary_bookmaker: answers.bookmaker_codes[0],
     other_bookmaker_name: answers.other_bookmaker_name.trim() || null,
+    service_format: answers.service_format ?? 'auto_fast',
     favorite_sports: answers.favorite_sports,
     vk_user_id: nextVkUserId,
     currency_preference: currency,
