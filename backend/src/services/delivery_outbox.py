@@ -32,11 +32,13 @@ CHANNEL_WEB_PUSH_SIGNAL = "web_push_signal"
 CHANNEL_CONNECTION_SETUP_REMINDER = "connection_setup_reminder"
 CHANNEL_FORECAST_AUTO_DELIVERY = "forecast_auto_delivery"
 CHANNEL_FORECAST_FULL_DELIVERY = "forecast_full_delivery"
+CHANNEL_FORECAST_ADMIN_FULL_COPY = "forecast_admin_full_copy"
 PAUSABLE_DELIVERY_CHANNELS = {
     CHANNEL_TELEGRAM_MESSAGE,
     CHANNEL_VK_MESSAGE,
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
+    CHANNEL_FORECAST_ADMIN_FULL_COPY,
 }
 
 
@@ -340,6 +342,14 @@ async def dispatch_delivery(delivery: DeliveryOutbox, db: Optional[AsyncSession]
             UUID(request_id),
             delivery_method=str(payload.get("delivery_method") or "auto"),
         )
+
+    if delivery.channel == CHANNEL_FORECAST_ADMIN_FULL_COPY:
+        from src.services.forecast_delivery import dispatch_admin_group_full_forecast_copy_from_outbox
+
+        request_id = str(payload.get("request_id") or "").strip()
+        if not request_id:
+            return {"ok": False, "description": "Invalid forecast admin full-copy payload"}
+        return await dispatch_admin_group_full_forecast_copy_from_outbox(UUID(request_id))
 
     return {"ok": False, "description": f"Unsupported delivery channel: {delivery.channel}"}
 

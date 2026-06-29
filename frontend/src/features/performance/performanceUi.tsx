@@ -137,6 +137,21 @@ export function buildProfitCurvePoints(data: PerformanceTimelineResponse | null)
   });
 }
 
+export function buildProfitCurveStatCards(points: Array<{ value: number }>) {
+  if (!points.length) return [];
+
+  const values = points.map((point) => point.value);
+  const maxValue = Math.max(...values);
+  const latest = points[points.length - 1].value;
+  const cards = [{ key: 'max', label: 'Макс', value: maxValue }];
+
+  if (latest > 0) {
+    cards.push({ key: 'current', label: 'Сейчас', value: latest });
+  }
+
+  return cards;
+}
+
 export function flattenTimelineBets(data: PerformanceTimelineResponse | null) {
   return (data?.timeline ?? [])
     .flatMap((month) => month.days.flatMap((day) => day.bets))
@@ -275,7 +290,7 @@ export function ExecutiveScoreboard({
     : streakLabel(summary);
 
   return (
-    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
       <ExecutiveMetric
         label="Прибыль"
         value={formatStatsValue(summary.profit_units, valueMode)}
@@ -296,6 +311,13 @@ export function ExecutiveScoreboard({
         hint={`${resultCountLabel('win', summary.wins)} / ${resultCountLabel('loss', summary.losses)}`}
         tone="text-cyan-100"
         icon={<Activity className="h-4 w-4 text-cyan-200" />}
+      />
+      <ExecutiveMetric
+        label="Средний КФ"
+        value={summary.average_coefficient.toFixed(2)}
+        hint="по расчетам"
+        tone="text-indigo-100"
+        icon={<Sparkles className="h-4 w-4 text-indigo-200" />}
       />
       <ExecutiveMetric
         label="Объем"
@@ -730,9 +752,11 @@ export function ProfitCurve({
     ? `${linePath} L ${coords[coords.length - 1].x} ${height - padding} L ${coords[0].x} ${height - padding} Z`
     : '';
   const latest = points[points.length - 1]?.value ?? 0;
+  const showLatestProfit = latest > 0;
   const activePoint = activeIndex === null ? null : coords[activeIndex];
   const maxPoint = coords.length ? coords.reduce((best, point) => (point.value > best.value ? point : best), coords[0]) : null;
-  const minPoint = coords.length ? coords.reduce((weak, point) => (point.value < weak.value ? point : weak), coords[0]) : null;
+  const statCards = buildProfitCurveStatCards(points);
+  const statGridClass = statCards.length > 1 ? 'sm:grid-cols-2' : 'sm:grid-cols-1';
   const pathMotion = reduceMotion
     ? {}
     : {
@@ -751,29 +775,21 @@ export function ProfitCurve({
           </h3>
           <p className="mt-0.5 text-[9px] font-bold text-slate-500">Кумулятивно по дням расчета, наведите на точку</p>
         </div>
-        <div className={`min-w-0 text-left text-xs font-black tabular-nums sm:text-right ${profitTone(latest)}`}>{formatStatsValue(latest, valueMode)}</div>
+        {showLatestProfit ? (
+          <div className={`min-w-0 text-left text-xs font-black tabular-nums sm:text-right ${profitTone(latest)}`}>{formatStatsValue(latest, valueMode)}</div>
+        ) : null}
       </div>
       {coords.length ? (
         <div className="relative" onPointerLeave={() => setActiveIndex(null)}>
-          <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-3">
-            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Макс</div>
-              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${maxPoint ? profitTone(maxPoint.value) : 'text-slate-400'}`}>
-                {maxPoint ? formatStatsValue(maxPoint.value, valueMode) : '-'}
+          <div className={`mt-2 grid grid-cols-1 gap-1.5 ${statGridClass}`}>
+            {statCards.map((card) => (
+              <div key={card.key} className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
+                <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">{card.label}</div>
+                <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${profitTone(card.value)}`}>
+                  {formatStatsValue(card.value, valueMode)}
+                </div>
               </div>
-            </div>
-            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Сейчас</div>
-              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${profitTone(latest)}`}>
-                {formatStatsValue(latest, valueMode)}
-              </div>
-            </div>
-            <div className="rounded-xl border border-white/10 bg-slate-950/32 px-2 py-1.5">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">Мин</div>
-              <div className={`mt-0.5 truncate text-[10px] font-black tabular-nums ${minPoint ? profitTone(minPoint.value) : 'text-slate-400'}`}>
-                {minPoint ? formatStatsValue(minPoint.value, valueMode) : '-'}
-              </div>
-            </div>
+            ))}
           </div>
           <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-[150px] w-full overflow-visible">
             <defs>
@@ -829,9 +845,6 @@ export function ProfitCurve({
             })}
             {maxPoint ? (
               <circle cx={maxPoint.x} cy={maxPoint.y} r="6.6" fill="none" stroke="rgba(52,211,153,0.32)" strokeWidth="1.5" />
-            ) : null}
-            {minPoint && minPoint.value < 0 ? (
-              <circle cx={minPoint.x} cy={minPoint.y} r="6.6" fill="none" stroke="rgba(251,113,133,0.3)" strokeWidth="1.5" />
             ) : null}
           </svg>
           {activePoint ? (

@@ -13,14 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy import and_, func
-from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, Field
 from typing import Optional, Any
 from decimal import Decimal
 import base64
 
 from uuid import UUID
 from src.models.database import get_db
-from src.models.models import User, SubscriptionPlan, PaymentAttempt, PromoCode, Bet, user_bets
+from src.models.models import MatchBalanceLog, User, SubscriptionPlan, PaymentAttempt, PromoCode, PromoCodeRedemption, Bet, user_bets
 from src.core.config import settings
 from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_delivery import is_personal_telegram_user_id
@@ -30,6 +31,7 @@ from src.services.match_access import activate_match_subscription
 from src.services.crowd_bets import apply_verified_crowd_contribution
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.observability_alerts import record_payment_mismatch
+from src.services.system_settings import SUBSCRIPTION_PURCHASES_ENABLED_KEY, is_system_setting_enabled
 from src.services.telegram_bot import call_telegram_api_async
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -41,6 +43,9 @@ YOOKASSA_VERIFICATION_ERROR = "Не удалось проверить плате
 YOOKASSA_CHECKOUT_ERROR = "Не удалось создать платеж YooKassa. Попробуйте позже."
 TEGRO_CHECKOUT_ERROR = "Не удалось создать платеж Tegro. Попробуйте позже."
 TELEGRAM_STARS_CHECKOUT_ERROR = "Не удалось создать счет Telegram Stars. Попробуйте позже."
+SUBSCRIPTION_PURCHASES_DISABLED_ERROR = "Покупка абонементов временно отключена"
+PROMO_REWARD_DISCOUNT = "discount"
+PROMO_REWARD_MATCHES = "matches"
 
 class InvoiceRequest(BaseModel):
     plan_id: Optional[int] = None
@@ -62,6 +67,10 @@ class TegroPaymentRequest(BaseModel):
     promo_code: Optional[str] = None
 
 
+class PromoRedeemRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=80)
+
+
 class DebugTegroCompleteRequest(TegroPaymentRequest):
     attempt_id: Optional[UUID] = None
 
@@ -70,6 +79,15 @@ class TegroWebhookSignatureError(ValueError):
     def __init__(self, code: str):
         super().__init__(f"tegro_webhook_{code}")
         self.code = code
+
+
+async def _ensure_subscription_purchases_enabled(db: AsyncSession) -> None:
+    if await is_system_setting_enabled(db, SUBSCRIPTION_PURCHASES_ENABLED_KEY):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=SUBSCRIPTION_PURCHASES_DISABLED_ERROR,
+    )
 
 
 def _telegram_text(value: str, max_length: int) -> str:
@@ -291,16 +309,12 @@ def _decimal_eq(left: Decimal, right: Decimal) -> bool:
     return left.quantize(Decimal("0.01")) == right.quantize(Decimal("0.01"))
 
 
-async def _validate_promo(
-    db: AsyncSession,
-    *,
-    promo_code: Optional[str],
-    user: User,
-) -> tuple[Optional[str], int]:
-    if not promo_code:
-        return None, 0
+def _promo_reward_type(promo: PromoCode) -> str:
+    return promo.reward_type or PROMO_REWARD_DISCOUNT
 
-    normalized = promo_code.strip().upper()
+
+async def _load_active_promo(db: AsyncSession, code: str) -> PromoCode:
+    normalized = code.strip().upper()
     promo_res = await db.execute(
         select(PromoCode).filter(
             PromoCode.code == normalized,
@@ -314,10 +328,33 @@ async def _validate_promo(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Неверный или истекший промокод",
         )
+    return promo
+
+
+def _ensure_promo_available_for_user(promo: PromoCode, user: User) -> None:
     if promo.user_id is not None and promo.user_id != user.telegram_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Этот промокод привязан к другому пользователю",
+        )
+
+
+async def _validate_promo(
+    db: AsyncSession,
+    *,
+    promo_code: Optional[str],
+    user: User,
+) -> tuple[Optional[str], int]:
+    if not promo_code:
+        return None, 0
+
+    normalized = promo_code.strip().upper()
+    promo = await _load_active_promo(db, normalized)
+    _ensure_promo_available_for_user(promo, user)
+    if _promo_reward_type(promo) != PROMO_REWARD_DISCOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Этот промокод начисляет матчи и не применяется как скидка",
         )
     return normalized, int(promo.discount_percent or 0)
 
@@ -669,6 +706,8 @@ async def create_yookassa_payment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    await _ensure_subscription_purchases_enabled(db)
+
     plan_res = await db.execute(
         select(SubscriptionPlan).filter(
             SubscriptionPlan.id == payment_data.plan_id,
@@ -777,6 +816,8 @@ async def create_tegro_payment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _ensure_subscription_purchases_enabled(db)
+
     plan_res = await db.execute(
         select(SubscriptionPlan).filter(
             SubscriptionPlan.id == payment_data.plan_id,
@@ -883,6 +924,7 @@ async def complete_debug_yookassa_payment(
         if not attempt or attempt.user_id != current_user.telegram_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug payment attempt not found")
     else:
+        await _ensure_subscription_purchases_enabled(db)
         plan_res = await db.execute(select(SubscriptionPlan).filter(SubscriptionPlan.id == payment_data.plan_id))
         plan = plan_res.scalars().first()
         if not plan:
@@ -927,6 +969,7 @@ async def complete_debug_tegro_payment(
         if not attempt or attempt.user_id != current_user.telegram_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug payment attempt not found")
     else:
+        await _ensure_subscription_purchases_enabled(db)
         plan_res = await db.execute(select(SubscriptionPlan).filter(SubscriptionPlan.id == payment_data.plan_id))
         plan = plan_res.scalars().first()
         if not plan:
@@ -1049,28 +1092,103 @@ async def validate_promo_code(
     """
     GET /api/payments/promo/validate?code=...
     Checks if a promo code exists, is active, and is not expired.
-    Returns its discount percentage if valid.
+    Returns its reward type and value if valid.
     """
     normalized_code = code.strip().upper()
-    promo_res = await db.execute(
-        select(PromoCode).filter(
-            PromoCode.code == normalized_code,
-            PromoCode.is_active == True,
-            PromoCode.valid_until > datetime.now(timezone.utc)
+    promo = await _load_active_promo(db, normalized_code)
+    _ensure_promo_available_for_user(promo, current_user)
+
+    reward_type = _promo_reward_type(promo)
+    if reward_type == PROMO_REWARD_MATCHES:
+        existing = await db.execute(
+            select(PromoCodeRedemption).filter(
+                PromoCodeRedemption.promo_code_id == promo.id,
+                PromoCodeRedemption.user_id == current_user.telegram_id,
+            )
+        )
+        if existing.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Этот промокод уже применен",
+            )
+
+    return {
+        "code": promo.code,
+        "reward_type": reward_type,
+        "discount_percent": int(promo.discount_percent or 0),
+        "matches_count": int(promo.matches_count or 0),
+    }
+
+
+@router.post("/promo/redeem")
+async def redeem_promo_code(
+    data: PromoRedeemRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Redeem a match-credit promo code and add its matches to the user's balance once."""
+    normalized_code = data.code.strip().upper()
+    promo = await _load_active_promo(db, normalized_code)
+    _ensure_promo_available_for_user(promo, current_user)
+
+    if _promo_reward_type(promo) != PROMO_REWARD_MATCHES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Этот промокод предназначен для скидки",
+        )
+
+    matches_added = int(promo.matches_count or 0)
+    if matches_added <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="У промокода не задано количество матчей",
+        )
+
+    existing = await db.execute(
+        select(PromoCodeRedemption).filter(
+            PromoCodeRedemption.promo_code_id == promo.id,
+            PromoCodeRedemption.user_id == current_user.telegram_id,
         )
     )
-    promo = promo_res.scalars().first()
-    if not promo:
+    if existing.scalars().first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Неверный или истекший промокод"
+            detail="Этот промокод уже применен",
         )
-    if promo.user_id is not None and promo.user_id != current_user.telegram_id:
+
+    balance_before = int(current_user.purchased_bets_balance or current_user.matches_remaining or 0)
+    balance_after = balance_before + matches_added
+    current_user.purchased_bets_balance = balance_after
+    current_user.matches_remaining = balance_after
+
+    db.add(PromoCodeRedemption(
+        promo_code_id=promo.id,
+        user_id=current_user.telegram_id,
+        matches_added=matches_added,
+    ))
+    db.add(MatchBalanceLog(
+        user_id=current_user.telegram_id,
+        delta_matches=matches_added,
+        event_type="promo_match_credit",
+        note=f"Redeemed promo code {promo.code}",
+    ))
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Этот промокод привязан к другому пользователю"
+            detail="Этот промокод уже применен",
         )
-    return {"code": promo.code, "discount_percent": promo.discount_percent}
+
+    return {
+        "code": promo.code,
+        "reward_type": PROMO_REWARD_MATCHES,
+        "matches_added": matches_added,
+        "balance_before": balance_before,
+        "balance_after": balance_after,
+    }
 
 
 @router.post("/debug/complete-bet/{bet_id}")

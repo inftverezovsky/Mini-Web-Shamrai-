@@ -40,6 +40,7 @@ describe('settings theme manager helpers', () => {
       glow_strength: 1.2,
       global_performance_mode: true,
       welcome_quiz_enabled: true,
+      subscription_purchases_enabled: true,
     });
 
     expect(theme.primary_color).toBe('#abcdef');
@@ -50,6 +51,13 @@ describe('settings theme manager helpers', () => {
     expect(theme.theme_density).toBe('compact');
     expect(theme.global_performance_mode).toBe(true);
     expect(theme.welcome_quiz_enabled).toBe(true);
+    expect(theme.subscription_purchases_enabled).toBe(true);
+  });
+
+  it('keeps subscription purchases hidden unless public settings enable them', () => {
+    expect(normalizedThemeSettings({}).subscription_purchases_enabled).toBe(false);
+    expect(normalizedThemeSettings({ subscription_purchases_enabled: false }).subscription_purchases_enabled).toBe(false);
+    expect(normalizedThemeSettings({ subscription_purchases_enabled: true }).subscription_purchases_enabled).toBe(true);
   });
 
   it('applies brand-kit values to root CSS variables and flags', () => {

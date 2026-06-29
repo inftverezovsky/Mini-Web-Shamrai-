@@ -7,14 +7,13 @@ describe('getTelegramIdentityStatus', () => {
       identity_providers: ['telegram', 'vk'],
       is_web_only: false,
       telegram_id: 1106710042,
-      tg_chat_joined: false,
       username: 'Daniil_Tverezovsky',
     });
 
     expect(status.linked).toBe(true);
-    expect(status.badge).toBe('Готово');
+    expect(status.badge).toBe('привязан');
     expect(status.detail).toBe('Telegram привязан: @Daniil_Tverezovsky');
-    expect(status.deliveryDetail).toContain('Авторизация Telegram активна');
+    expect(status.deliveryDetail).toBeNull();
   });
 
   it('keeps legacy Telegram users linked even when identity providers are missing', () => {
@@ -22,13 +21,12 @@ describe('getTelegramIdentityStatus', () => {
       identity_providers: [],
       is_web_only: false,
       telegram_id: 123,
-      tg_chat_joined: true,
       username: null,
     });
 
     expect(status.linked).toBe(true);
     expect(status.detail).toBe('Telegram привязан: ID 123');
-    expect(status.deliveryDetail).toBe('Telegram-бот и чат подтверждены.');
+    expect(status.deliveryDetail).toBeNull();
   });
 
   it('shows a VK-only web profile as ready to connect Telegram', () => {
@@ -36,11 +34,10 @@ describe('getTelegramIdentityStatus', () => {
       identity_providers: ['vk'],
       is_web_only: true,
       telegram_id: -1001,
-      tg_chat_joined: false,
       username: null,
     });
 
     expect(status.linked).toBe(false);
-    expect(status.badge).toBe('можно подключить');
+    expect(status.badge).toBe('не связан');
   });
 });

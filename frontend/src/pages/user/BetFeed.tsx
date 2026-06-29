@@ -438,9 +438,14 @@ const VirtualBetFeedList = memo(function VirtualBetFeedList({
 interface BetFeedProps {
   onNavigateToBilling?: () => void;
   active?: boolean;
+  subscriptionPurchasesEnabled?: boolean;
 }
 
-export default function BetFeed({ onNavigateToBilling, active: feedActive = true }: BetFeedProps) {
+export default function BetFeed({
+  onNavigateToBilling,
+  active: feedActive = true,
+  subscriptionPurchasesEnabled = false,
+}: BetFeedProps) {
   const queryClient = useQueryClient();
   const userProfile = useAuthSelector((state) => state.user);
   const { isCompact } = useLayoutMode();
@@ -689,7 +694,7 @@ export default function BetFeed({ onNavigateToBilling, active: feedActive = true
       )}
 
       {/* 2. Account Access Banner */}
-      {!active && (
+      {!active && subscriptionPurchasesEnabled && (
         <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-0.5">
             <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
@@ -720,7 +725,11 @@ export default function BetFeed({ onNavigateToBilling, active: feedActive = true
           <Trophy className="iridescent-icon w-8 h-8 mx-auto mb-2" />
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
           <p className="mx-auto mt-1 text-center text-[10px] leading-relaxed text-slate-400">
-            {active ? 'Сейчас нет активных прогнозов. Ожидайте уведомлений.' : 'Премиум-лента откроется после покупки абонемента.'}
+            {active
+              ? 'Сейчас нет активных прогнозов. Ожидайте уведомлений.'
+              : subscriptionPurchasesEnabled
+                ? 'Премиум-лента откроется после покупки абонемента.'
+                : 'Премиум-лента сейчас закрыта. Дождитесь уведомления от команды Shamrai.'}
           </p>
         </div>
       ) : (

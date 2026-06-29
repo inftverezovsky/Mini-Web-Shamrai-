@@ -45,6 +45,7 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
     won_expr = case((Bet.status == "win", 1), else_=0)
     lost_expr = case((Bet.status == "loss", 1), else_=0)
     refund_expr = case((Bet.status == "refund", 1), else_=0)
+    resolved_coefficient_expr = case((Bet.status.in_(["win", "loss"]), Bet.coefficient), else_=None)
 
     summary_result = await db.execute(
         select(
@@ -53,10 +54,11 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
             func.coalesce(func.sum(lost_expr), 0),
             func.coalesce(func.sum(refund_expr), 0),
             func.coalesce(func.sum(profit_expr), Decimal("0.00")),
+            func.coalesce(func.avg(resolved_coefficient_expr), Decimal("0.00")),
         )
         .filter(Bet.status.in_(resolved_statuses))
     )
-    total, won, lost, refunded, profit = summary_result.one()
+    total, won, lost, refunded, profit, average_coefficient = summary_result.one()
     total = int(total or 0)
     won = int(won or 0)
     lost = int(lost or 0)
@@ -99,6 +101,7 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
         "winrate": round(winrate, 2),
         "roi": round(roi, 2),
         "net_profit": round(float(profit), 2),
+        "average_coefficient": round(float(average_coefficient or 0), 2),
         "total_bets": total,
         "won_bets": won,
         "lost_bets": lost,

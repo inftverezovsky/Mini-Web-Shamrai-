@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../../utils/api';
-import { TrendingUp, Percent, Award, BookOpen, Loader2, RefreshCw } from 'lucide-react';
+import { TrendingUp, Percent, Award, BookOpen, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 
 interface ChartPoint {
   month: string;
@@ -15,6 +15,7 @@ interface GlobalStatsData {
   won_bets: number;
   lost_bets: number;
   refund_bets: number;
+  average_coefficient: number;
   chart_points: ChartPoint[];
 }
 
@@ -192,8 +193,8 @@ export default function GlobalStats() {
         </p>
       </div>
 
-      {/* Grid containing 3 premium metric blocks */}
-      <div className="grid grid-cols-3 gap-3">
+      {/* Grid containing premium metric blocks */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {/* Metric 1: pass rate */}
         <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-3.5 rounded-2xl flex flex-col justify-between space-y-2 relative overflow-hidden shadow-glass">
           <div className="absolute top-1 right-1 w-6 h-6 bg-indigo-500/5 rounded-full blur-sm"></div>
@@ -234,6 +235,19 @@ export default function GlobalStats() {
               {profitIsPositive ? '+' : ''}{stats.net_profit} флэт
             </h3>
             <p className="text-[7.5px] text-slate-500 font-extrabold uppercase mt-0.5">за все время</p>
+          </div>
+        </div>
+
+        {/* Metric 4: Average coefficient */}
+        <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-3.5 rounded-2xl flex flex-col justify-between space-y-2 relative overflow-hidden shadow-glass">
+          <div className="absolute top-1 right-1 w-6 h-6 bg-indigo-500/5 rounded-full blur-sm"></div>
+          <div className="flex items-center space-x-1.5 text-slate-400">
+            <Sparkles className="iridescent-icon w-3.5 h-3.5" />
+            <span className="text-[9px] font-bold tracking-wider uppercase">Средний КФ</span>
+          </div>
+          <div>
+            <h3 className="text-base font-black text-indigo-200">{Number(stats.average_coefficient || 0).toFixed(2)}</h3>
+            <p className="text-[7.5px] text-slate-500 font-extrabold uppercase mt-0.5">по расчетам</p>
           </div>
         </div>
       </div>

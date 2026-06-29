@@ -84,6 +84,7 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertEqual(summary["profit_units"], 0.5)
         self.assertEqual(summary["roi"], 25.0)
         self.assertEqual(summary["winrate"], 50.0)
+        self.assertEqual(summary["average_coefficient"], 2.15)
 
     def test_payload_keeps_author_and_client_aggregate_math_consistent(self):
         resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)

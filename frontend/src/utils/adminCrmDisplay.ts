@@ -73,38 +73,28 @@ export function getClientAvatarSources(user: Pick<CrmDisplayClient, 'photo_url' 
 
 export function getClientChannelStatuses(user: CrmDisplayClient): CrmChannelStatus[] {
   const telegramConnected = user.telegram_connected ?? ((user.telegram_id ?? 0) > 0);
-  const telegramReady = user.telegram_delivery_enabled ?? Boolean(user.tg_chat_joined);
   const vkConnected = user.vk_connected ?? Boolean(user.vk_user_id);
   const vkReady = user.vk_delivery_enabled ?? Boolean(user.vk_messages_allowed);
   const webPushReady = Boolean(user.web_push_enabled);
 
   return [
-    telegramConnected && telegramReady
+    telegramConnected
       ? {
           key: 'telegram',
           shortLabel: 'TG',
-          label: 'готов',
-          detail: 'Telegram: вход и чат готовы',
+          label: 'привязан',
+          detail: 'Telegram: аккаунт привязан',
           tone: 'ready',
-          ready: true,
+          ready: Boolean(user.telegram_delivery_enabled),
         }
-      : telegramConnected
-        ? {
-            key: 'telegram',
-            shortLabel: 'TG',
-            label: 'нет чата',
-            detail: 'Telegram: вход есть, чат не подтвержден',
-            tone: 'warning',
-            ready: false,
-          }
-        : {
-            key: 'telegram',
-            shortLabel: 'TG',
-            label: 'нет входа',
-            detail: 'Telegram: клиент не авторизован',
-            tone: 'missing',
-            ready: false,
-          },
+      : {
+          key: 'telegram',
+          shortLabel: 'TG',
+          label: 'не связан',
+          detail: 'Telegram: аккаунт не привязан',
+          tone: 'missing',
+          ready: false,
+        },
     vkConnected && vkReady
       ? {
           key: 'vk',

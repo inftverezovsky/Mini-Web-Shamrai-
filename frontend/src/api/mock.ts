@@ -104,6 +104,11 @@ const DEFAULT_MOCK_SYSTEM_SETTINGS = [
     description: 'Включает подробный приветственный опрос после шага VK-привязки.',
   },
   {
+    key: 'SUBSCRIPTION_PURCHASES_ENABLED',
+    value: 'false',
+    description: 'Показывает клиентам покупку абонементов и переход к оплате матчей.',
+  },
+  {
     key: 'VK_ACCESS_TOKEN',
     value: '',
     description: 'Токен доступа VK для внешних интеграций.',
@@ -269,6 +274,7 @@ function getMockPublicThemeSettings() {
     secondary_color: settingByKey.get('THEME_SECONDARY_COLOR')?.value || '#d946ef',
     global_performance_mode: settingByKey.get('GLOBAL_PERFORMANCE_MODE')?.value === 'true',
     welcome_quiz_enabled: settingByKey.get('WELCOME_QUIZ_ENABLED')?.value === 'true',
+    subscription_purchases_enabled: settingByKey.get('SUBSCRIPTION_PURCHASES_ENABLED')?.value === 'true',
     brand_logo_url: settingByKey.get('BRAND_LOGO_URL')?.value || '',
     brand_background_url: settingByKey.get('BRAND_BACKGROUND_URL')?.value || '',
     glass_opacity: Number(settingByKey.get('THEME_GLASS_OPACITY')?.value || 0.42),
@@ -2361,7 +2367,22 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/payments/invoice') return { invoice_url: 'https://example.com/mock-invoice' };
   if (endpoint.startsWith('/payments/debug/complete-bet/')) return { status: 'success' };
-  if (endpoint.startsWith('/payments/promo/validate')) return { valid: true, discount_percent: 10, code: 'DEBUG10' };
+  if (endpoint.startsWith('/payments/promo/validate')) {
+    const code = new URLSearchParams(endpoint.split('?')[1] || '').get('code') || 'DEBUG10';
+    if (code.toUpperCase().includes('MATCH')) {
+      return { code: code.toUpperCase(), reward_type: 'matches', discount_percent: 0, matches_count: 3 };
+    }
+    return { valid: true, reward_type: 'discount', discount_percent: 10, matches_count: 0, code: 'DEBUG10' };
+  }
+  if (endpoint === '/payments/promo/redeem') {
+    return {
+      code: 'MATCH3',
+      reward_type: 'matches',
+      matches_added: 3,
+      balance_before: 12,
+      balance_after: 15,
+    };
+  }
   if (endpoint === '/payments/yookassa/create') return { confirmation_url: 'https://example.com/mock-payment' };
   if (endpoint === '/payments/yookassa/debug-complete') return { status: 'success' };
   if (endpoint === '/marketing/marathon') return { current_day: 3, streak: 3, reward_available: true };

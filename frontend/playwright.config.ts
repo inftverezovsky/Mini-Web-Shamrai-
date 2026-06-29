@@ -21,6 +21,21 @@ export default defineConfig({
       name: 'chromium-smoke',
       use: { ...devices['Desktop Chrome'] },
     },
+    {
+      name: 'mobile-chrome-compat',
+      grep: /@compat/,
+      use: { ...devices['Pixel 7'] },
+    },
+    {
+      name: 'mobile-webkit-compat',
+      grep: /@compat/,
+      use: { ...devices['iPhone 15'] },
+    },
+    {
+      name: 'webkit-compat',
+      grep: /@compat/,
+      use: { ...devices['Desktop Safari'] },
+    },
   ],
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${port}`,

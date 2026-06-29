@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../../utils/api';
-import { Gift, Trash2, Plus, Loader2, Calendar } from 'lucide-react';
+import { Gift, Trash2, Plus, Loader2, Calendar, Percent, Ticket } from 'lucide-react';
 import { notifyError, notifySuccess } from '../../utils/notify';
+
+type PromoRewardType = 'discount' | 'matches';
 
 interface PromoCodeData {
   id: number;
   code: string;
+  reward_type?: PromoRewardType;
   discount_percent: number;
+  matches_count?: number;
   valid_until: string;
   is_active: boolean;
 }
@@ -17,7 +21,9 @@ export default function AdminMarketing() {
 
   // Promo Code Form
   const [promoCode, setPromoCode] = useState('');
+  const [promoRewardType, setPromoRewardType] = useState<PromoRewardType>('discount');
   const [discountPercent, setDiscountPercent] = useState('');
+  const [matchesCount, setMatchesCount] = useState('');
   const [validUntil, setValidUntil] = useState('');
   const [submittingPromo, setSubmittingPromo] = useState(false);
 
@@ -39,7 +45,8 @@ export default function AdminMarketing() {
 
   const handleCreatePromo = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!promoCode || !discountPercent || !validUntil) {
+    const valueField = promoRewardType === 'discount' ? discountPercent : matchesCount;
+    if (!promoCode || !valueField || !validUntil) {
       notifyError('Заполните все поля промокода');
       return;
     }
@@ -49,8 +56,10 @@ export default function AdminMarketing() {
       
       const payload = {
         code: promoCode,
-        discount_percent: parseInt(discountPercent),
-        valid_until: new Date(validUntil).toISOString()
+        reward_type: promoRewardType,
+        discount_percent: promoRewardType === 'discount' ? Number.parseInt(discountPercent, 10) : 0,
+        matches_count: promoRewardType === 'matches' ? Number.parseInt(matchesCount, 10) : 0,
+        valid_until: new Date(validUntil).toISOString(),
       };
 
       await apiFetch('/admin/promo', {
@@ -61,6 +70,7 @@ export default function AdminMarketing() {
       notifySuccess('Промокод успешно создан');
       setPromoCode('');
       setDiscountPercent('');
+      setMatchesCount('');
       setValidUntil('');
 
       // Refresh list
@@ -105,6 +115,33 @@ export default function AdminMarketing() {
 
         {/* Promo code create form */}
         <form onSubmit={handleCreatePromo} className="space-y-3.5 text-xs text-slate-350">
+          <div className="grid grid-cols-2 gap-2 rounded-xl border border-white/10 bg-slate-950/30 p-1">
+            <button
+              type="button"
+              onClick={() => setPromoRewardType('discount')}
+              className={`min-h-[34px] rounded-lg px-3 text-[10px] font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
+                promoRewardType === 'discount'
+                  ? 'bg-indigo-500 text-white shadow-glass'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Percent className="w-3.5 h-3.5" />
+              <span>Скидка</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPromoRewardType('matches')}
+              className={`min-h-[34px] rounded-lg px-3 text-[10px] font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
+                promoRewardType === 'matches'
+                  ? 'bg-indigo-500 text-white shadow-glass'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Ticket className="w-3.5 h-3.5" />
+              <span>Матчи</span>
+            </button>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Код купона</label>
@@ -117,19 +154,26 @@ export default function AdminMarketing() {
               />
             </div>
             <div>
-              <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Скидка (%)</label>
+              <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
+                {promoRewardType === 'discount' ? 'Скидка (%)' : 'Матчей'}
+              </label>
               <input
                 type="number"
-                value={discountPercent}
-                onChange={e => setDiscountPercent(e.target.value)}
-                placeholder="50"
+                min="1"
+                value={promoRewardType === 'discount' ? discountPercent : matchesCount}
+                onChange={e => (
+                  promoRewardType === 'discount'
+                    ? setDiscountPercent(e.target.value)
+                    : setMatchesCount(e.target.value)
+                )}
+                placeholder={promoRewardType === 'discount' ? '50' : '3'}
                 className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Скидка до</label>
+            <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Действует до</label>
             <input
               type="date"
               value={validUntil}
@@ -170,7 +214,11 @@ export default function AdminMarketing() {
                     <span className={`font-black tracking-wider uppercase ${p.is_active ? 'text-white' : 'text-slate-500 line-through'}`}>
                       {p.code}
                     </span>
-                    <p className="text-[9px] text-slate-450 font-semibold uppercase">Скидка: {p.discount_percent}%</p>
+                    <p className="text-[9px] text-slate-450 font-semibold uppercase">
+                      {(p.reward_type || 'discount') === 'matches'
+                        ? `Матчи: +${p.matches_count || 0}`
+                        : `Скидка: ${p.discount_percent}%`}
+                    </p>
                     <p className="text-[8px] text-slate-500 flex items-center uppercase font-bold">
                       <Calendar className="w-2.5 h-2.5 mr-0.5" />
                       до {new Date(p.valid_until).toLocaleDateString('ru-RU')}

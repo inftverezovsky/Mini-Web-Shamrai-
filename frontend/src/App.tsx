@@ -245,6 +245,7 @@ function useWheelScrollBridge() {
 export default function App() {
   const queryClient = useQueryClient();
   const themeQuery = useThemeManager();
+  const subscriptionPurchasesEnabled = Boolean(themeQuery.data?.subscription_purchases_enabled);
   const { isReady, isTelegram } = useTelegram();
   const userProfile = useAuthSelector((state) => state.user);
   const loading = useAuthSelector((state) => state.loading);
@@ -361,7 +362,7 @@ export default function App() {
       : [
           loadBetFeed,
           loadMyBets,
-          loadTariffs,
+          ...(subscriptionPurchasesEnabled ? [loadTariffs] : []),
           loadProfile,
           ...(shouldPreloadWebChat ? [loadWebBotChat] : []),
           ...(userProfile.is_onboarded === false ? [loadOnboarding] : []),
@@ -398,6 +399,7 @@ export default function App() {
     performanceProfile.canBulkPreload,
     performanceProfile.isAppVisible,
     performanceProfile.isBalanced,
+    subscriptionPurchasesEnabled,
     userProfile,
   ]);
 
@@ -418,7 +420,11 @@ export default function App() {
     && !showAdminInterface
     && !needsOnboarding
     && hasCabinetAccess;
-  const safeActiveUserTab = activeUserTab === 'chat' && !showWebChatTab ? 'feed' : activeUserTab;
+  const safeActiveUserTab = activeUserTab === 'chat' && !showWebChatTab
+    ? 'feed'
+    : activeUserTab === 'billing' && !subscriptionPurchasesEnabled
+      ? 'feed'
+      : activeUserTab;
 
   useEffect(() => {
     if (!introComplete || !userProfile || runsInTelegramMiniApp || showAdminInterface || needsOnboarding || !hasCabinetAccess) return;
@@ -537,6 +543,7 @@ export default function App() {
 
   const preloadTab = (tab: UserTabId | AdminShellTabId) => {
     if (!performanceProfile.isAppVisible || !performanceProfile.canPreloadOnIntent) return;
+    if (!showAdminInterface && tab === 'billing' && !subscriptionPurchasesEnabled) return;
     const loader = showAdminInterface
       ? adminTabLoaders[tab as AdminShellTabId]
       : userTabLoaders[tab as UserTabId];
@@ -555,6 +562,7 @@ export default function App() {
   };
 
   const handleNavigateToBilling = () => {
+    if (!subscriptionPurchasesEnabled) return;
     preloadTab('billing');
     startTabTransition(() => {
       setMountedUserTabs((current) => addUniqueTab(current, 'billing'));
@@ -574,7 +582,11 @@ export default function App() {
         setMountedAdminTabs((current) => addUniqueTab(current, targetTab));
         setActiveAdminTab(targetTab);
       } else {
-        const targetTab = tab === 'chat' && !showWebChatTab ? 'feed' : (tab as UserTabId);
+        const targetTab = tab === 'chat' && !showWebChatTab
+          ? 'feed'
+          : tab === 'billing' && !subscriptionPurchasesEnabled
+            ? 'feed'
+            : (tab as UserTabId);
         setMountedUserTabs((current) => addUniqueTab(current, targetTab));
         setActiveUserTab(targetTab);
       }
@@ -607,10 +619,18 @@ export default function App() {
 
   const renderUserPage = (tab: UserTabId) => {
     const active = safeActiveUserTab === tab && !showAdminInterface;
-    if (tab === 'feed') return <BetFeed onNavigateToBilling={handleNavigateToBilling} active={active} />;
+    if (tab === 'feed') {
+      return (
+        <BetFeed
+          onNavigateToBilling={subscriptionPurchasesEnabled ? handleNavigateToBilling : undefined}
+          subscriptionPurchasesEnabled={subscriptionPurchasesEnabled}
+          active={active}
+        />
+      );
+    }
     if (tab === 'chat') return <WebBotChat active={active} />;
     if (tab === 'stats' || tab === 'my_bets') return <MyBets />;
-    if (tab === 'billing') return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
+    if (tab === 'billing' && subscriptionPurchasesEnabled) return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
     return <Profile />;
   };
 
@@ -648,9 +668,12 @@ export default function App() {
       );
     }
 
-    const userPageTabs: UserTabId[] = showWebChatTab
+    const baseUserPageTabs: UserTabId[] = showWebChatTab
       ? ['feed', 'chat', 'stats', 'my_bets', 'billing', 'profile']
       : ['feed', 'stats', 'my_bets', 'billing', 'profile'];
+    const userPageTabs = subscriptionPurchasesEnabled
+      ? baseUserPageTabs
+      : baseUserPageTabs.filter((tab) => tab !== 'billing');
     const tabsToRender = mountedUserTabs.includes(safeActiveUserTab)
       ? mountedUserTabs
       : [...mountedUserTabs, safeActiveUserTab];

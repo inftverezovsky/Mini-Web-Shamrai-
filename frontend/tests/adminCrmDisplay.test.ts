@@ -19,7 +19,7 @@ describe('admin CRM display helpers', () => {
     ]);
   });
 
-  it('returns operator-focused channel labels', () => {
+  it('shows Telegram as linked without chat-state warnings', () => {
     const statuses = getClientChannelStatuses({
       telegram_id: 42,
       telegram_connected: true,
@@ -33,10 +33,15 @@ describe('admin CRM display helpers', () => {
     });
 
     expect(statuses.map((status) => `${status.shortLabel}:${status.label}`)).toEqual([
-      'TG:нет чата',
+      'TG:привязан',
       'VK:нет разрешения',
       'Web:push включен',
     ]);
+    expect(statuses[0]).toMatchObject({
+      tone: 'ready',
+      ready: false,
+      detail: 'Telegram: аккаунт привязан',
+    });
   });
 
   it('localizes legacy onboarding goal CRM tags', () => {

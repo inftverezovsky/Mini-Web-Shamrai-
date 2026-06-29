@@ -16,6 +16,7 @@ from src.models.models import DeliveryOutbox
 from src.services import forecast_delivery as delivery
 from src.services import telegram_bot
 from src.services.delivery_outbox import (
+    CHANNEL_FORECAST_ADMIN_FULL_COPY,
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
     CHANNEL_TELEGRAM_MESSAGE,
@@ -835,6 +836,124 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         self.assertEqual(db.added, [])
 
+    async def test_full_forecast_delivery_queues_admin_group_copy(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        db = FakeDb()
+        forecast_request = self._forecast_request(self._user())
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            await delivery.enqueue_forecast_full_delivery(
+                db,
+                forecast_request,
+                delivery_method="bot",
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+        self.assertEqual([item.channel for item in db.added], [
+            CHANNEL_FORECAST_FULL_DELIVERY,
+            CHANNEL_FORECAST_ADMIN_FULL_COPY,
+        ])
+        admin_item = db.added[1]
+        self.assertEqual(admin_item.forecast_request_id, forecast_request.id)
+        self.assertEqual(admin_item.payload["request_id"], str(forecast_request.id))
+        self.assertIn(str(forecast_request.bet.id), admin_item.dedupe_key)
+
+    async def test_paid_set_full_delivery_queues_admin_group_copy(self):
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        db = FakeDb()
+        forecast_request = self._forecast_request(self._user())
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            await delivery.enqueue_forecast_full_delivery(
+                db,
+                forecast_request,
+                delivery_method="bot",
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+
+        self.assertEqual([item.channel for item in db.added], [
+            CHANNEL_FORECAST_FULL_DELIVERY,
+            CHANNEL_FORECAST_ADMIN_FULL_COPY,
+        ])
+
+    def test_admin_group_full_copy_uses_client_telegram_forecast_format(self):
+        forecast_request = self._forecast_request(self._user())
+        forecast_request.bet.coupon_image_url = "https://example.com/coupon.jpg"
+        calls = []
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        original_call_telegram_api = delivery.call_telegram_api
+
+        def fake_call_telegram_api(method, payload):
+            calls.append((method, payload))
+            return {"ok": True}
+
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            delivery.call_telegram_api = fake_call_telegram_api
+            result = delivery.send_admin_group_full_forecast_copy(forecast_request)
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+            delivery.call_telegram_api = original_call_telegram_api
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual([method for method, _ in calls], ["sendPhoto"])
+        payload = calls[0][1]
+        self.assertEqual(payload["chat_id"], -100555)
+        self.assertEqual(payload["photo"], "https://example.com/coupon.jpg")
+        self.assertIn("France - Northern Ireland", payload["caption"])
+        self.assertIn("Total over 3.5", payload["caption"])
+        self.assertIn("Коэффициент:", payload["caption"])
+        self.assertEqual(
+            payload["reply_markup"]["inline_keyboard"][0][0]["url"],
+            f"https://shamra1.pro/api/go/bets/{forecast_request.bet.id}/bookmakers/1",
+        )
+
+    def test_admin_group_full_copy_uses_paid_set_sale_format(self):
+        forecast_request = self._forecast_request(self._user())
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+        forecast_request.bet.price_stars = 10_000
+        forecast_request.bet.coupon_image_url = None
+        calls = []
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        original_call_telegram_api = delivery.call_telegram_api
+
+        def fake_call_telegram_api(method, payload):
+            calls.append((method, payload))
+            return {"ok": True}
+
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            delivery.call_telegram_api = fake_call_telegram_api
+            result = delivery.send_admin_group_full_forecast_copy(forecast_request)
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+            delivery.call_telegram_api = original_call_telegram_api
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual([method for method, _ in calls], ["sendMessage"])
+        payload = calls[0][1]
+        self.assertEqual(payload["chat_id"], -100555)
+        self.assertIn("Набор оформлен", payload["text"])
+        self.assertIn("France - Northern Ireland", payload["text"])
+        self.assertIn("10 000 ₽", payload["text"])
+
     def test_status_for_vk_delivery_methods_is_sent(self):
         self.assertEqual(delivery._status_for_delivery_method("bot"), delivery.FORECAST_STATUS_SENT)
         self.assertEqual(delivery._status_for_delivery_method("vk"), delivery.FORECAST_STATUS_SENT)
@@ -923,8 +1042,11 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(record_calls), 1)
         self.assertFalse(record_calls[0][1]["allow_negative_balance"])
-        self.assertEqual(len(db.added), 1)
-        outbox_item = db.added[0]
+        full_delivery_items = [
+            item for item in db.added if item.channel == CHANNEL_FORECAST_FULL_DELIVERY
+        ]
+        self.assertEqual(len(full_delivery_items), 1)
+        outbox_item = full_delivery_items[0]
         self.assertIsInstance(outbox_item, DeliveryOutbox)
         self.assertEqual(outbox_item.channel, CHANNEL_FORECAST_FULL_DELIVERY)
         self.assertEqual(outbox_item.forecast_request_id, forecast_request.id)
@@ -932,6 +1054,58 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox_item.payload["delivery_method"], "vk_bot")
         self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_SENT)
         self.assertEqual(forecast_request.delivery_method, "vk_bot")
+
+    async def test_manual_forecast_delivery_queues_admin_group_copy_only(self):
+        user = self._user()
+        forecast_request = self._forecast_request(user)
+
+        class FakeDb:
+            def __init__(self):
+                self.added = []
+
+            def add(self, value):
+                self.added.append(value)
+
+            async def execute(self, _query):
+                return SimpleNamespace(rowcount=1)
+
+            async def commit(self):
+                return None
+
+            async def rollback(self):
+                return None
+
+        async def fake_record_user_bet_access(*_args, **_kwargs):
+            return SimpleNamespace(
+                already_recorded=False,
+                balance_before=3,
+                balance_after=2,
+                no_balance_warning=False,
+            )
+
+        previous_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        original_record = delivery.record_user_bet_access
+        db = FakeDb()
+        try:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+            delivery.record_user_bet_access = fake_record_user_bet_access
+            await delivery.deliver_forecast_request(
+                db,
+                forecast_request=forecast_request,
+                handled_by=111,
+                delivery_method="manual",
+                send_to_client=False,
+                commit=True,
+            )
+        finally:
+            delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = previous_chat_id
+            delivery.record_user_bet_access = original_record
+
+        self.assertEqual([item.channel for item in db.added], [CHANNEL_FORECAST_ADMIN_FULL_COPY])
+        self.assertEqual(db.added[0].forecast_request_id, forecast_request.id)
+        self.assertEqual(db.added[0].payload["request_id"], str(forecast_request.id))
+        self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_MANUAL_SENT)
+        self.assertEqual(forecast_request.delivery_method, "manual")
 
     async def test_take_without_full_access_returns_contact_required_without_status_change(self):
         user = self._user(balance=0)

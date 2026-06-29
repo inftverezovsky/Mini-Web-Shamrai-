@@ -422,10 +422,12 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(access["access_type"], "manual_paid_set")
             self.assertFalse(access["match_charged"])
             delivery_rows = (await session.execute(select(DeliveryOutbox))).scalars().all()
-            self.assertEqual(len(delivery_rows), 1)
-            self.assertEqual(delivery_rows[0].channel, "forecast_full_delivery")
-            self.assertEqual(delivery_rows[0].forecast_request_id, forecast_request.id)
-            self.assertEqual(delivery_rows[0].payload["delivery_method"], "bot")
+            full_delivery_rows = [
+                row for row in delivery_rows if row.channel == "forecast_full_delivery"
+            ]
+            self.assertEqual(len(full_delivery_rows), 1)
+            self.assertEqual(full_delivery_rows[0].forecast_request_id, forecast_request.id)
+            self.assertEqual(full_delivery_rows[0].payload["delivery_method"], "bot")
 
 
 if __name__ == "__main__":

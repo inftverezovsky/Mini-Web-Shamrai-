@@ -30,6 +30,7 @@ from src.models.models import (
     MatchBalanceLog,
     PaymentAttempt,
     PromoCode,
+    PromoCodeRedemption,
     PvPBattleVote,
     Subscription,
     SubscriptionPlan,
@@ -137,7 +138,9 @@ def _decode_admin_user_cursor(cursor: Optional[str]) -> tuple[datetime, int] | N
 
 class PromoCreate(BaseModel):
     code: str = Field(min_length=1, max_length=80)
-    discount_percent: int = Field(ge=1, le=100)
+    reward_type: str = Field(default="discount", pattern="^(discount|matches)$")
+    discount_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    matches_count: Optional[int] = Field(default=None, ge=0, le=1000)
     valid_until: datetime
 
 class MarathonCreateOrUpdate(BaseModel):
@@ -1435,9 +1438,34 @@ async def create_promo(
 ):
     """
     POST /api/admin/promo/
-    Creates a new active promotional discount code.
+    Creates a new active promotional code for discounts or match credits.
     """
-    exists = await db.execute(select(PromoCode).filter(PromoCode.code == data.code))
+    code = data.code.strip().upper()
+    reward_type = data.reward_type or "discount"
+    discount_percent = int(data.discount_percent or 0)
+    matches_count = int(data.matches_count or 0)
+
+    if reward_type == "discount":
+        if discount_percent <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Укажите скидку от 1 до 100%",
+            )
+        matches_count = 0
+    elif reward_type == "matches":
+        if matches_count <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Укажите количество матчей для промокода",
+            )
+        discount_percent = 0
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Некорректный тип промокода",
+        )
+
+    exists = await db.execute(select(PromoCode).filter(PromoCode.code == code))
     if exists.scalars().first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1445,8 +1473,10 @@ async def create_promo(
         )
         
     promo = PromoCode(
-        code=data.code.upper(),
-        discount_percent=data.discount_percent,
+        code=code,
+        reward_type=reward_type,
+        discount_percent=discount_percent,
+        matches_count=matches_count,
         valid_until=data.valid_until,
         is_active=True
     )
@@ -1457,7 +1487,9 @@ async def create_promo(
         action="promo_created",
         details={
             "code": promo.code,
+            "reward_type": promo.reward_type,
             "discount_percent": promo.discount_percent,
+            "matches_count": promo.matches_count,
             "valid_until": promo.valid_until.isoformat(),
         },
     )
@@ -2149,6 +2181,7 @@ async def admin_delete_user(
     await db.execute(delete(CrowdBetParticipant).where(CrowdBetParticipant.user_id == user.telegram_id))
     await db.execute(delete(DailyRewardClaim).where(DailyRewardClaim.user_id == user.telegram_id))
     await db.execute(delete(PvPBattleVote).where(PvPBattleVote.user_id == user.telegram_id))
+    await db.execute(delete(PromoCodeRedemption).where(PromoCodeRedemption.user_id == user.telegram_id))
     await db.execute(delete(PromoCode).where(PromoCode.user_id == user.telegram_id))
     await db.execute(delete(UserBadge).where(UserBadge.user_id == user.telegram_id))
     await db.execute(delete(UserNote).where(UserNote.user_id == user.telegram_id))

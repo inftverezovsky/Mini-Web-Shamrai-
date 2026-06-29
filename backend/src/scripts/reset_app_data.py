@@ -32,6 +32,7 @@ RESET_TABLES = [
     "live_pulse_logs",
     "marathons",
     "ab_test_configs",
+    "promo_code_redemptions",
     "promo_codes",
     "bets",
 ]

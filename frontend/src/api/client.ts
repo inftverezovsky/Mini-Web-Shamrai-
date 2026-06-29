@@ -1,6 +1,6 @@
-import { API_BASE_URL, AUTH_EXPIRED_EVENT, BEARER_AUTH_COMPAT_ENABLED, CSRF_HEADER_NAME } from '../config/api';
+import { API_BASE_URL, AUTH_EXPIRED_EVENT, CSRF_HEADER_NAME } from '../config/api';
 import { formatApiErrorMessage } from './errors';
-import { clearStoredAuthToken, getStoredAuthToken } from '../utils/authStorage';
+import { clearStoredAuthToken, getRequestAuthToken } from '../utils/authStorage';
 import { clearCsrfToken, csrfHeaderForRequest, requestNeedsCsrf } from '../utils/csrf';
 import { identityDeviceHeader } from '../utils/identityDevice';
 
@@ -17,7 +17,7 @@ export class ApiRequestError extends Error {
 }
 
 export async function requestApi<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token = BEARER_AUTH_COMPAT_ENABLED ? getStoredAuthToken() : null;
+  const token = getRequestAuthToken();
   const isFormData = options.body instanceof FormData;
 
   const headers = new Headers(options.headers || undefined);

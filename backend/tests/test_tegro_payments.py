@@ -5,7 +5,7 @@ import urllib.parse
 import unittest
 from decimal import Decimal
 from uuid import uuid4
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -217,6 +217,21 @@ class TegroPaymentProcessingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(ctx.exception.status_code, 403)
+
+
+class SubscriptionPurchaseGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_purchase_guard_rejects_disabled_checkout(self):
+        with patch.object(payments, "is_system_setting_enabled", new=AsyncMock(return_value=False)):
+            with self.assertRaises(HTTPException) as ctx:
+                await payments._ensure_subscription_purchases_enabled(object())
+
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_subscription_purchase_guard_allows_enabled_checkout(self):
+        with patch.object(payments, "is_system_setting_enabled", new=AsyncMock(return_value=True)) as enabled:
+            await payments._ensure_subscription_purchases_enabled(object())
+
+        enabled.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -849,6 +849,70 @@ function IntroVkStep({
   const loading = status === 'loading';
   const busy = loading || completing;
 
+  if (!welcomeQuizEnabled) {
+    return (
+      <div className="flex min-h-[430px] flex-col justify-between gap-5">
+        <div className="space-y-5">
+          <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-5`} style={{ boxShadow: glow }}>
+            <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_0%,rgba(0,210,255,0.24),transparent_38%),linear-gradient(135deg,rgba(255,255,255,0.06),transparent)]" />
+            <div className="relative z-10 flex flex-col items-center text-center">
+              <div className={`flex h-16 w-16 items-center justify-center rounded-2xl ${GLASS_SURFACE} text-2xl font-black tracking-[-0.02em] text-cyan-100`}>
+                VK
+              </div>
+              <h2 className="mt-4 text-3xl font-black leading-tight text-white">
+                VK
+              </h2>
+              <p className="mt-3 max-w-[32rem] text-sm font-semibold leading-relaxed text-slate-300">
+                VK нужен как резервный канал: если Telegram или web-push не доставят важное сообщение, мы продублируем его во VK. Можно пропустить и добавить VK позже в профиле.
+              </p>
+            </div>
+          </div>
+
+          <AnimatePresence mode="wait">
+            {linked ? (
+              <motion.div
+                key="vk-linked"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                className="rounded-2xl border border-emerald-200/20 bg-emerald-400/12 p-4 text-center text-sm font-black leading-relaxed text-emerald-50 shadow-[0_0_34px_rgba(34,197,94,0.32)]"
+              >
+                VK ID привязан: {displayName || 'профиль VK'}. Готовим кабинет.
+              </motion.div>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <ElectricButton
+                  label={loading ? 'Открываем VK ID...' : 'Связать VK'}
+                  icon={loading || completing ? Loader2 : Zap}
+                  highlighted={vkReady && !busy}
+                  loading={busy}
+                  disabled={!vkReady || busy}
+                  glow={glow}
+                  calm={calm}
+                  onClick={onLink}
+                />
+                <button
+                  type="button"
+                  onClick={onSkip}
+                  disabled={busy}
+                  className="min-h-[52px] rounded-2xl border border-white/10 bg-white/[0.04] px-5 py-3 text-sm font-black text-slate-200 transition hover:border-white/20 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {completing ? 'Завершаем...' : 'Пропустить'}
+                </button>
+              </div>
+            )}
+          </AnimatePresence>
+
+          {(!vkReady || error) && !linked && (
+            <p className="rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-300">
+              {error || 'VK ID не настроен для этой сборки. Можно продолжить без привязки.'}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-[490px] flex-col justify-between gap-5">
       <div className="space-y-5">

@@ -2,6 +2,8 @@ import { defineConfig, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import { visualizer } from 'rollup-plugin-visualizer'
 
+const browserTargets = ['chrome111', 'edge111', 'firefox114', 'safari16.4', 'ios16.4'];
+
 function manualChunks(id: string) {
   const normalizedId = id.replace(/\\/g, '/');
   if (!normalizedId.includes('/node_modules/')) return undefined;
@@ -61,6 +63,8 @@ export default defineConfig(({ mode }) => {
       ...(analyzerPlugin ? [analyzerPlugin] : []),
     ],
     build: {
+      target: browserTargets,
+      cssTarget: browserTargets,
       sourcemap: analyzeBundle,
       rollupOptions: {
         output: {

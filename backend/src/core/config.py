@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     DELIVERY_OUTBOX_BATCH_SIZE: int = 50
     DELIVERY_OUTBOX_IDLE_SECONDS: float = 5.0
     DELIVERY_OUTBOX_DEFAULT_CONCURRENCY: int = 2
-    DELIVERY_OUTBOX_CHANNEL_CONCURRENCY: str = "telegram_message=3,vk_message=2,web_push_signal=5,forecast_auto_delivery=1,forecast_full_delivery=1"
+    DELIVERY_OUTBOX_CHANNEL_CONCURRENCY: str = "telegram_message=3,vk_message=2,web_push_signal=5,forecast_auto_delivery=1,forecast_full_delivery=1,forecast_admin_full_copy=1"
     DELIVERY_OUTBOX_RETRY_BASE_SECONDS: int = 30
     DELIVERY_OUTBOX_STALE_LOCK_SECONDS: int = 300
     TELEGRAM_VIP_CHAT_ID: str = "-100200300400"

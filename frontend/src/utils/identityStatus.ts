@@ -2,7 +2,7 @@ import type { UserResponse } from '../schemas/schemas';
 
 type TelegramIdentityUser = Pick<
   UserResponse,
-  'identity_providers' | 'is_web_only' | 'telegram_id' | 'tg_chat_joined' | 'username'
+  'identity_providers' | 'is_web_only' | 'telegram_id' | 'username'
 >;
 
 export interface TelegramIdentityStatus {
@@ -30,18 +30,16 @@ export function getTelegramIdentityStatus(user?: TelegramIdentityUser | null): T
   if (!user || !linked) {
     return {
       linked: false,
-      badge: 'можно подключить',
-      detail: 'Telegram еще не привязан к этому кабинету.',
+      badge: 'не связан',
+      detail: 'Telegram не привязан к этому кабинету.',
       deliveryDetail: null,
     };
   }
 
   return {
     linked: true,
-    badge: 'Готово',
+    badge: 'привязан',
     detail: `Telegram привязан: ${telegramDisplayName(user)}`,
-    deliveryDetail: user.tg_chat_joined
-      ? 'Telegram-бот и чат подтверждены.'
-      : 'Авторизация Telegram активна; чат/бот можно подтвердить отдельно.',
+    deliveryDetail: null,
   };
 }

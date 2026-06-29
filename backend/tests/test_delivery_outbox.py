@@ -11,6 +11,7 @@ from src.models.database import Base
 from src.models.models import DeliveryOutbox, User
 from src.services import delivery_outbox
 from src.services.delivery_outbox import (
+    CHANNEL_FORECAST_ADMIN_FULL_COPY,
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
     CHANNEL_CONNECTION_SETUP_REMINDER,
@@ -200,6 +201,22 @@ class DeliveryOutboxTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         full_deliver.assert_awaited_once_with(request_id, delivery_method="vk_bot")
+
+    async def test_dispatch_forecast_admin_full_copy_uses_stored_request_id(self):
+        request_id = uuid4()
+        delivery = DeliveryOutbox(
+            channel=CHANNEL_FORECAST_ADMIN_FULL_COPY,
+            payload={"request_id": str(request_id)},
+        )
+
+        with patch(
+            "src.services.forecast_delivery.dispatch_admin_group_full_forecast_copy_from_outbox",
+            AsyncMock(return_value={"ok": True}),
+        ) as admin_copy:
+            result = await delivery_outbox.dispatch_delivery(delivery)
+
+        self.assertTrue(result["ok"])
+        admin_copy.assert_awaited_once_with(request_id)
 
     async def test_mark_delivery_sent_clears_lock_and_stores_safe_result(self):
         delivery = DeliveryOutbox(

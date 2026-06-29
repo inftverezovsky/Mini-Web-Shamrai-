@@ -31,6 +31,7 @@ from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
 from src.models.database import AsyncSessionLocal
 from src.models.models import Bet, ForecastRequest, User, user_bets
 from src.services.delivery_outbox import (
+    CHANNEL_FORECAST_ADMIN_FULL_COPY,
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
     CHANNEL_TELEGRAM_MESSAGE,
@@ -754,14 +755,12 @@ def _build_full_forecast_message(
     )
 
 
-def send_full_forecast_to_client(
+def send_full_forecast_to_telegram_chat(
     forecast_request: ForecastRequest,
     *,
+    chat_id: int,
     template_body: Optional[str] = None,
 ) -> dict:
-    if not is_personal_telegram_user_id(forecast_request.user_id):
-        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
-
     bet = forecast_request.bet
     base_full_message = _build_full_forecast_message(forecast_request, template_body=template_body)
     full_message_with_links = _build_full_forecast_message(
@@ -785,7 +784,7 @@ def send_full_forecast_to_client(
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         with open(coupon_file_path, "rb") as file_obj:
             payload = {
-                "chat_id": forecast_request.user_id,
+                "chat_id": chat_id,
                 "caption": coupon_caption,
             }
             if use_full_caption:
@@ -801,7 +800,7 @@ def send_full_forecast_to_client(
             )
         if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
             photo_result = _send_coupon_document_to_telegram(
-                chat_id=forecast_request.user_id,
+                chat_id=chat_id,
                 coupon_caption=coupon_caption,
                 coupon_file_path=coupon_file_path,
                 coupon_url=None,
@@ -812,7 +811,7 @@ def send_full_forecast_to_client(
             return photo_result
     elif coupon_url:
         payload = {
-            "chat_id": forecast_request.user_id,
+            "chat_id": chat_id,
             "photo": coupon_url,
             "caption": coupon_caption,
         }
@@ -823,7 +822,7 @@ def send_full_forecast_to_client(
         photo_result = call_telegram_api("sendPhoto", payload)
         if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
             photo_result = _send_coupon_document_to_telegram(
-                chat_id=forecast_request.user_id,
+                chat_id=chat_id,
                 coupon_caption=coupon_caption,
                 coupon_file_path=None,
                 coupon_url=coupon_url,
@@ -836,12 +835,12 @@ def send_full_forecast_to_client(
     if coupon_file_path or coupon_url:
         if use_full_caption:
             if not reply_markup:
-                links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+                links_result = _send_bookmaker_links_message(chat_id, bet)
                 if links_result and not links_result.get("ok"):
                     return links_result
             return photo_result
         text_result = call_telegram_api("sendMessage", {
-            "chat_id": forecast_request.user_id,
+            "chat_id": chat_id,
             "text": full_message,
             "parse_mode": "HTML",
             "disable_web_page_preview": False,
@@ -850,13 +849,13 @@ def send_full_forecast_to_client(
         if not text_result.get("ok"):
             return text_result
         if not reply_markup:
-            links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+            links_result = _send_bookmaker_links_message(chat_id, bet)
             if links_result and not links_result.get("ok"):
                 return links_result
         return text_result
 
     text_result = call_telegram_api("sendMessage", {
-        "chat_id": forecast_request.user_id,
+        "chat_id": chat_id,
         "text": full_message,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
@@ -865,10 +864,24 @@ def send_full_forecast_to_client(
     if not text_result.get("ok"):
         return text_result
     if not links_inline:
-        links_result = _send_bookmaker_links_message(forecast_request.user_id, bet)
+        links_result = _send_bookmaker_links_message(chat_id, bet)
         if links_result and not links_result.get("ok"):
             return links_result
     return text_result
+
+
+def send_full_forecast_to_client(
+    forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
+) -> dict:
+    if not is_personal_telegram_user_id(forecast_request.user_id):
+        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
+    return send_full_forecast_to_telegram_chat(
+        forecast_request,
+        chat_id=forecast_request.user_id,
+        template_body=template_body,
+    )
 
 
 def send_full_forecast_to_vk_client(
@@ -1043,12 +1056,11 @@ def build_web_paid_set_sale_signal_data(
     }
 
 
-def send_paid_set_sale_to_client(
+def send_paid_set_sale_to_telegram_chat(
     forecast_request: ForecastRequest,
+    *,
+    chat_id: int,
 ) -> dict:
-    if not is_personal_telegram_user_id(forecast_request.user_id):
-        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
-
     bet = forecast_request.bet
     message = build_paid_set_sale_message(forecast_request)
     reply_markup = _bookmaker_link_reply_markup(bet)
@@ -1062,7 +1074,7 @@ def send_paid_set_sale_to_client(
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         with open(coupon_file_path, "rb") as file_obj:
             payload = {
-                "chat_id": forecast_request.user_id,
+                "chat_id": chat_id,
                 "caption": coupon_caption,
             }
             if use_full_caption:
@@ -1078,7 +1090,7 @@ def send_paid_set_sale_to_client(
             )
         if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
             photo_result = _send_coupon_document_to_telegram(
-                chat_id=forecast_request.user_id,
+                chat_id=chat_id,
                 coupon_caption=coupon_caption,
                 coupon_file_path=coupon_file_path,
                 coupon_url=None,
@@ -1092,7 +1104,7 @@ def send_paid_set_sale_to_client(
 
     elif coupon_url:
         payload = {
-            "chat_id": forecast_request.user_id,
+            "chat_id": chat_id,
             "photo": coupon_url,
             "caption": coupon_caption,
         }
@@ -1103,7 +1115,7 @@ def send_paid_set_sale_to_client(
         photo_result = call_telegram_api("sendPhoto", payload)
         if not photo_result.get("ok") and _is_photo_dimensions_error(photo_result):
             photo_result = _send_coupon_document_to_telegram(
-                chat_id=forecast_request.user_id,
+                chat_id=chat_id,
                 coupon_caption=coupon_caption,
                 coupon_file_path=None,
                 coupon_url=coupon_url,
@@ -1116,12 +1128,20 @@ def send_paid_set_sale_to_client(
             return photo_result
 
     return call_telegram_api("sendMessage", {
-        "chat_id": forecast_request.user_id,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
         **({"reply_markup": reply_markup} if reply_markup else {}),
     })
+
+
+def send_paid_set_sale_to_client(
+    forecast_request: ForecastRequest,
+) -> dict:
+    if not is_personal_telegram_user_id(forecast_request.user_id):
+        return {"ok": False, "description": "Client does not have a personal Telegram chat"}
+    return send_paid_set_sale_to_telegram_chat(forecast_request, chat_id=forecast_request.user_id)
 
 
 def send_paid_set_sale_to_vk_client(forecast_request: ForecastRequest) -> dict:
@@ -1398,6 +1418,23 @@ def _admin_group_chat_id() -> Optional[int]:
         return None
 
 
+def send_admin_group_full_forecast_copy(
+    forecast_request: ForecastRequest,
+    *,
+    template_body: Optional[str] = None,
+) -> dict:
+    chat_id = _admin_group_chat_id()
+    if not chat_id:
+        return {"ok": False, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+    if request_is_paid_set(forecast_request):
+        return send_paid_set_sale_to_telegram_chat(forecast_request, chat_id=chat_id)
+    return send_full_forecast_to_telegram_chat(
+        forecast_request,
+        chat_id=chat_id,
+        template_body=template_body,
+    )
+
+
 def build_admin_group_forecast_response_delivery(
     forecast_request: ForecastRequest,
     *,
@@ -1659,6 +1696,33 @@ async def enqueue_forecast_auto_delivery(
     return {"ok": True, "queued": True}
 
 
+def _admin_group_full_copy_dedupe_key(forecast_request: ForecastRequest) -> str:
+    bet_id = str(getattr(forecast_request, "bet_id", None) or getattr(forecast_request.bet, "id", "") or "").strip()
+    if bet_id:
+        return f"bet:{bet_id}:admin_group:full_copy"
+    return f"forecast_request:{forecast_request.id}:admin_group:full_copy"
+
+
+async def enqueue_admin_group_full_forecast_copy(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> dict:
+    if not _admin_group_chat_id():
+        return {"ok": False, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+
+    await enqueue_delivery(
+        db,
+        channel=CHANNEL_FORECAST_ADMIN_FULL_COPY,
+        user_id=forecast_request.user_id,
+        forecast_request_id=forecast_request.id,
+        dedupe_key=_admin_group_full_copy_dedupe_key(forecast_request),
+        payload={
+            "request_id": str(forecast_request.id),
+        },
+    )
+    return {"ok": True, "queued": True}
+
+
 async def enqueue_forecast_full_delivery(
     db: AsyncSession,
     forecast_request: ForecastRequest,
@@ -1676,6 +1740,7 @@ async def enqueue_forecast_full_delivery(
             "delivery_method": delivery_method,
         },
     )
+    await enqueue_admin_group_full_forecast_copy(db, forecast_request)
     return {"ok": True, "queued": True}
 
 
@@ -1728,6 +1793,29 @@ async def dispatch_forecast_full_delivery_from_outbox(
             await deliver_full_forecast_to_web_chat(db, forecast_request, template_body=template_body)
         await db.commit()
         return {"ok": True, "delivery_method": resolved_delivery_method}
+
+
+async def dispatch_admin_group_full_forecast_copy_from_outbox(request_id: UUID) -> dict:
+    async with AsyncSessionLocal() as db:
+        forecast_request = await load_forecast_request(db, request_id)
+        if not _admin_group_chat_id():
+            return {"ok": True, "skipped": True, "description": "TELEGRAM_ADMIN_GROUP_CHAT_ID is not configured"}
+        template_body = (
+            None
+            if request_is_paid_set(forecast_request)
+            else await load_message_template_body(db, TEMPLATE_FORECAST_FULL)
+        )
+        result = await asyncio.to_thread(
+            send_admin_group_full_forecast_copy,
+            forecast_request,
+            template_body=template_body,
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "description": result.get("description") or "Admin group full forecast copy was not delivered",
+            }
+        return {"ok": True}
 
 
 async def notify_sales_manager_for_request(request_id: UUID) -> dict:
@@ -2127,6 +2215,8 @@ async def deliver_forecast_request(
                 forecast_request,
                 delivery_method=delivery_method,
             )
+        elif delivery_method == "manual" and _full_forecast_ready_error(forecast_request) is None:
+            await enqueue_admin_group_full_forecast_copy(db, forecast_request)
         if commit:
             await db.commit()
         else:

@@ -13,8 +13,10 @@ import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../con
 import {
   MOCK_DEBUG_AUTH_TOKEN,
   clearStoredAuthToken,
+  getRequestAuthToken,
   getStoredAuthToken,
   setStoredAuthToken,
+  setRuntimeAuthToken,
 } from '../utils/authStorage';
 import { formatApiErrorMessage } from '../api/errors';
 import {
@@ -266,7 +268,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
     clearVkAuthCooldown();
     setStoredAuthToken(data.access_token);
-    setToken(getStoredAuthToken());
+    setRuntimeAuthToken(data.access_token);
+    setToken(getRequestAuthToken());
     setUser(data.user);
     clearCsrfToken();
     setError(null);

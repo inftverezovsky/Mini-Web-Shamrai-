@@ -50,6 +50,7 @@ from src.models.models import (
     PersonalSignal,
     PersonalSignalReadCursor,
     PromoCode,
+    PromoCodeRedemption,
     PvPBattleVote,
     Subscription,
     User,
@@ -1162,6 +1163,7 @@ async def _move_user_references(db: AsyncSession, source_id: int, target_id: int
     await _merge_user_bets(db, source_id, target_id)
     await _merge_forecast_requests(db, source_id, target_id)
     await _merge_daily_rewards(db, source_id, target_id)
+    await _merge_promo_redemptions(db, source_id, target_id)
     await _merge_pvp_votes(db, source_id, target_id)
     await _merge_support_conversations(db, source_id, target_id)
     await _merge_chat_read_cursors_by_user(db, source_id, target_id)
@@ -1261,6 +1263,22 @@ async def _merge_daily_rewards(db: AsyncSession, source_id: int, target_id: int)
             await db.delete(claim)
         else:
             claim.user_id = target_id
+
+
+async def _merge_promo_redemptions(db: AsyncSession, source_id: int, target_id: int) -> None:
+    result = await db.execute(select(PromoCodeRedemption).filter(PromoCodeRedemption.user_id == source_id))
+    redemptions = result.scalars().all()
+    for redemption in redemptions:
+        conflict_result = await db.execute(
+            select(PromoCodeRedemption.id).filter(
+                PromoCodeRedemption.user_id == target_id,
+                PromoCodeRedemption.promo_code_id == redemption.promo_code_id,
+            )
+        )
+        if conflict_result.scalar_one_or_none():
+            await db.delete(redemption)
+        else:
+            redemption.user_id = target_id
 
 
 async def _merge_pvp_votes(db: AsyncSession, source_id: int, target_id: int) -> None:

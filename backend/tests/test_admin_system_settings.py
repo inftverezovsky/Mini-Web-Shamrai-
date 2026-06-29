@@ -102,12 +102,35 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(public_payload["welcome_quiz_enabled"])
 
+    async def test_subscription_purchase_flag_is_admin_editable_and_public(self):
+        async with self.Session() as session:
+            with (
+                patch.object(system_settings, "cache_get_json", new=AsyncMock(return_value=None)),
+                patch.object(system_settings, "cache_set_json", new=AsyncMock()),
+            ):
+                admin_payload = await system_settings.get_admin_system_settings(session)
+
+            settings_by_key = {item["key"]: item for item in admin_payload["settings"]}
+            self.assertEqual(settings_by_key["SUBSCRIPTION_PURCHASES_ENABLED"]["value"], "false")
+            self.assertFalse(settings_by_key["SUBSCRIPTION_PURCHASES_ENABLED"]["is_secret"])
+
+            with patch.object(system_settings, "cache_delete", new=AsyncMock()):
+                await system_settings.update_admin_system_settings(
+                    session,
+                    [{"key": "SUBSCRIPTION_PURCHASES_ENABLED", "value": "true"}],
+                )
+
+            public_payload = await system_settings.get_public_theme_settings(session)
+
+        self.assertTrue(public_payload["subscription_purchases_enabled"])
+
     async def test_public_theme_response_schema_keeps_welcome_quiz_flag(self):
         response_model = PublicThemeSettingsResponse(
             primary_color="#00d2ff",
             secondary_color="#d946ef",
             global_performance_mode=False,
             welcome_quiz_enabled=True,
+            subscription_purchases_enabled=True,
             brand_logo_url="",
             brand_background_url="",
             glass_opacity=0.42,
@@ -124,6 +147,7 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(payload["welcome_quiz_enabled"])
+        self.assertTrue(payload["subscription_purchases_enabled"])
 
     async def test_empty_secret_update_does_not_overwrite_existing_token(self):
         async with self.Session() as session:

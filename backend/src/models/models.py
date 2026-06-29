@@ -554,9 +554,29 @@ class PromoCode(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String, unique=True, index=True, nullable=False)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=True, index=True)
-    discount_percent = Column(Integer, nullable=False)
+    reward_type = Column(String, default="discount", nullable=False)
+    discount_percent = Column(Integer, default=0, nullable=False)
+    matches_count = Column(Integer, default=0, nullable=False)
     valid_until = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+
+
+class PromoCodeRedemption(Base):
+    __tablename__ = "promo_code_redemptions"
+    __table_args__ = (
+        UniqueConstraint("promo_code_id", "user_id", name="uq_promo_code_redemptions_code_user"),
+        Index("ix_promo_code_redemptions_user_redeemed", "user_id", "redeemed_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    promo_code_id = Column(Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    matches_added = Column(Integer, default=0, nullable=False)
+    redeemed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    promo_code = relationship("PromoCode")
+    user = relationship("User")
+
 
 class Marathon(Base):
     __tablename__ = "marathons"

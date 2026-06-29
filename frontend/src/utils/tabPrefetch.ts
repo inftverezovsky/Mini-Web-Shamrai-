@@ -40,7 +40,7 @@ export interface GlobalStatsData {
   won_bets: number;
   lost_bets: number;
   refund_bets: number;
-  average_coefficient?: number;
+  average_coefficient: number;
   chart_points: Array<{ month: string; profit: number }>;
 }
 

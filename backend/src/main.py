@@ -94,6 +94,21 @@ async def run_dev_schema_migrations(conn):
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS bookmaker_links JSON NOT NULL DEFAULT '[]'::json",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS auto_send_on_interest BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS user_id BIGINT",
+            "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS reward_type VARCHAR NOT NULL DEFAULT 'discount'",
+            "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS matches_count INTEGER NOT NULL DEFAULT 0",
+            """
+            CREATE TABLE IF NOT EXISTS promo_code_redemptions (
+                id SERIAL PRIMARY KEY,
+                promo_code_id INTEGER NOT NULL REFERENCES promo_codes(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                matches_added INTEGER NOT NULL DEFAULT 0,
+                redeemed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                CONSTRAINT uq_promo_code_redemptions_code_user UNIQUE (promo_code_id, user_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_promo_code_id ON promo_code_redemptions (promo_code_id)",
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_id ON promo_code_redemptions (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_redeemed ON promo_code_redemptions (user_id, redeemed_at)",
             """
             CREATE TABLE IF NOT EXISTS bet_bookmakers (
                 bet_id UUID NOT NULL REFERENCES bets(id) ON DELETE CASCADE,
@@ -330,6 +345,8 @@ async def run_dev_schema_migrations(conn):
             ],
             "promo_codes": [
                 ("user_id", "BIGINT"),
+                ("reward_type", "VARCHAR NOT NULL DEFAULT 'discount'"),
+                ("matches_count", "INTEGER NOT NULL DEFAULT 0"),
             ],
         }
         for table, columns in sqlite_columns.items():
@@ -383,6 +400,30 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_forecast_requests_status_created ON forecast_requests (status, created_at)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS promo_code_redemptions (
+                id INTEGER NOT NULL,
+                promo_code_id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
+                matches_added INTEGER NOT NULL DEFAULT 0,
+                redeemed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_promo_code_redemptions_code_user UNIQUE (promo_code_id, user_id),
+                FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_promo_code_id ON promo_code_redemptions (promo_code_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_id ON promo_code_redemptions (user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_redeemed ON promo_code_redemptions (user_id, redeemed_at)"
         )
         await conn.exec_driver_sql(
             """

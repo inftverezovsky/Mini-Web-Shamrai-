@@ -2,6 +2,7 @@ export const THEME_PRIMARY_COLOR_KEY = 'THEME_PRIMARY_COLOR';
 export const THEME_SECONDARY_COLOR_KEY = 'THEME_SECONDARY_COLOR';
 export const GLOBAL_PERFORMANCE_MODE_KEY = 'GLOBAL_PERFORMANCE_MODE';
 export const WELCOME_QUIZ_ENABLED_KEY = 'WELCOME_QUIZ_ENABLED';
+export const SUBSCRIPTION_PURCHASES_ENABLED_KEY = 'SUBSCRIPTION_PURCHASES_ENABLED';
 export const BRAND_LOGO_URL_KEY = 'BRAND_LOGO_URL';
 export const BRAND_BACKGROUND_URL_KEY = 'BRAND_BACKGROUND_URL';
 export const THEME_GLASS_OPACITY_KEY = 'THEME_GLASS_OPACITY';
@@ -18,6 +19,7 @@ export const DEFAULT_THEME_SETTINGS = {
   secondary_color: '#d946ef',
   global_performance_mode: false,
   welcome_quiz_enabled: false,
+  subscription_purchases_enabled: false,
   brand_logo_url: '',
   brand_background_url: '',
   glass_opacity: 0.42,
@@ -35,6 +37,7 @@ export type ThemeSettingKey =
   | typeof THEME_SECONDARY_COLOR_KEY
   | typeof GLOBAL_PERFORMANCE_MODE_KEY
   | typeof WELCOME_QUIZ_ENABLED_KEY
+  | typeof SUBSCRIPTION_PURCHASES_ENABLED_KEY
   | typeof BRAND_LOGO_URL_KEY
   | typeof BRAND_BACKGROUND_URL_KEY
   | typeof THEME_GLASS_OPACITY_KEY
@@ -49,6 +52,7 @@ export interface PublicThemeSettingsResponse {
   secondary_color: string;
   global_performance_mode: boolean;
   welcome_quiz_enabled: boolean;
+  subscription_purchases_enabled: boolean;
   brand_logo_url: string;
   brand_background_url: string;
   glass_opacity: number;
@@ -111,6 +115,7 @@ export function normalizedThemeSettings(theme?: Partial<PublicThemeSettingsRespo
     secondary_color: normalizeHexColor(theme?.secondary_color, DEFAULT_THEME_SETTINGS.secondary_color),
     global_performance_mode: Boolean(theme?.global_performance_mode),
     welcome_quiz_enabled: Boolean(theme?.welcome_quiz_enabled),
+    subscription_purchases_enabled: Boolean(theme?.subscription_purchases_enabled),
     brand_logo_url: normalizePublicUrl(theme?.brand_logo_url),
     brand_background_url: normalizePublicUrl(theme?.brand_background_url),
     glass_opacity: normalizeNumberRange(theme?.glass_opacity, DEFAULT_THEME_SETTINGS.glass_opacity, 0.15, 0.9),

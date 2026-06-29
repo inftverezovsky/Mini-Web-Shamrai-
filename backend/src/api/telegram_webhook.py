@@ -7,8 +7,10 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.database import AsyncSessionLocal
+from src.models.models import User
 from src.core.background_tasks import create_logged_task
 from src.core.config import settings
 from src.core.message_templates import TEMPLATE_TELEGRAM_WELCOME, render_message_template
@@ -65,6 +67,31 @@ def _telegram_update_chat_id(update: dict) -> Optional[int]:
     pre_checkout_query = update.get("pre_checkout_query") or {}
     user = pre_checkout_query.get("from") or {}
     return user.get("id")
+
+
+async def _mark_private_telegram_chat_joined(db: AsyncSession, message: dict) -> bool:
+    chat = message.get("chat") or {}
+    if chat.get("type") != "private":
+        return False
+
+    sender = message.get("from") or {}
+    candidate_id = sender.get("id") or chat.get("id")
+    try:
+        telegram_id = int(candidate_id)
+    except (TypeError, ValueError):
+        return False
+    if telegram_id <= 0:
+        return False
+
+    result = await db.execute(select(User).filter(User.telegram_id == telegram_id))
+    user = result.scalars().first()
+    if not user or user.tg_chat_joined:
+        return False
+
+    user.tg_chat_joined = True
+    await db.commit()
+    logger.info("[Webhook] marked telegram private chat ready for user_id=%s", telegram_id)
+    return True
 
 
 def _telegram_response_label(response: dict) -> str:
@@ -549,8 +576,11 @@ async def _handle_telegram_update_inner(update: dict, request_base_url: Optional
                     "start_param": _start_command_param(text),
                 },
             )
+            async with AsyncSessionLocal() as db:
+                await _mark_private_telegram_chat_joined(db, message)
             return _build_auth_response(message, confirmed, request_base_url=request_base_url)
         async with AsyncSessionLocal() as db:
+            await _mark_private_telegram_chat_joined(db, message)
             return await _build_start_response_from_template(db, message, request_base_url=request_base_url)
 
     emoji_ids_response = _build_emoji_ids_response(message, user.get("id"))
@@ -561,4 +591,5 @@ async def _handle_telegram_update_inner(update: dict, request_base_url: Optional
         }
 
     async with AsyncSessionLocal() as db:
+        await _mark_private_telegram_chat_joined(db, message)
         return await _build_start_response_from_template(db, message, request_base_url=request_base_url)

@@ -155,6 +155,84 @@ class TelegramForecastCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(created_tasks), 1)
 
 
+class TelegramChatJoinedTests(unittest.IsolatedAsyncioTestCase):
+    class _Scalars:
+        def __init__(self, user):
+            self.user = user
+
+        def first(self):
+            return self.user
+
+    class _Result:
+        def __init__(self, user):
+            self.user = user
+
+        def scalars(self):
+            return TelegramChatJoinedTests._Scalars(self.user)
+
+    class _Session:
+        def __init__(self, user):
+            self.user = user
+            self.committed = False
+
+        async def execute(self, _statement):
+            return TelegramChatJoinedTests._Result(self.user)
+
+        async def commit(self):
+            self.committed = True
+
+    async def test_private_bot_message_marks_existing_telegram_user_ready(self):
+        user = SimpleNamespace(telegram_id=123456789, tg_chat_joined=False)
+        session = self._Session(user)
+
+        changed = await telegram_webhook._mark_private_telegram_chat_joined(
+            session,
+            {
+                "chat": {"id": 123456789, "type": "private"},
+                "from": {"id": 123456789},
+                "text": "/start",
+            },
+        )
+
+        self.assertTrue(changed)
+        self.assertTrue(user.tg_chat_joined)
+        self.assertTrue(session.committed)
+
+    async def test_group_message_does_not_mark_telegram_chat_ready(self):
+        user = SimpleNamespace(telegram_id=123456789, tg_chat_joined=False)
+        session = self._Session(user)
+
+        changed = await telegram_webhook._mark_private_telegram_chat_joined(
+            session,
+            {
+                "chat": {"id": -100123, "type": "supergroup"},
+                "from": {"id": 123456789},
+                "text": "hello",
+            },
+        )
+
+        self.assertFalse(changed)
+        self.assertFalse(user.tg_chat_joined)
+        self.assertFalse(session.committed)
+
+    async def test_already_ready_user_is_not_committed_again(self):
+        user = SimpleNamespace(telegram_id=123456789, tg_chat_joined=True)
+        session = self._Session(user)
+
+        changed = await telegram_webhook._mark_private_telegram_chat_joined(
+            session,
+            {
+                "chat": {"id": 123456789, "type": "private"},
+                "from": {"id": 123456789},
+                "text": "hello",
+            },
+        )
+
+        self.assertFalse(changed)
+        self.assertTrue(user.tg_chat_joined)
+        self.assertFalse(session.committed)
+
+
 class VkHealthTests(unittest.IsolatedAsyncioTestCase):
     async def test_vk_health_is_fast_config_only(self):
         with (

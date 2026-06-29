@@ -114,6 +114,21 @@ function getClientIdLabel(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
   return user.is_web_only ? 'Web/VK клиент' : `ID: ${user.telegram_id}`;
 }
 
+const TELEGRAM_USERNAME_PATTERN = /^[A-Za-z0-9_]{5,32}$/;
+
+function getCleanTelegramUsername(username: string | null | undefined) {
+  return (username || '').trim().replace(/^@/, '');
+}
+
+function getTelegramUsernameDialogUrl(username: string | null | undefined) {
+  const cleanUsername = getCleanTelegramUsername(username);
+  return TELEGRAM_USERNAME_PATTERN.test(cleanUsername) ? `https://t.me/${cleanUsername}` : '';
+}
+
+function getTelegramIdDialogUrl(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
+  return !user.is_web_only && user.telegram_id > 0 ? `tg://user?id=${user.telegram_id}` : '';
+}
+
 function cleanText(value: string) {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
@@ -270,6 +285,61 @@ function ClientConnectionBadges({ user }: { user: CRMUser }) {
   );
 }
 
+function TelegramDialogLink({
+  href,
+  title,
+  children,
+  className = '',
+}: {
+  href: string;
+  title: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const isWebUrl = /^https?:\/\//i.test(href);
+
+  return (
+    <a
+      href={href}
+      target={isWebUrl ? '_blank' : undefined}
+      rel={isWebUrl ? 'noreferrer' : undefined}
+      onClick={(event) => event.stopPropagation()}
+      className={`inline-flex min-w-0 items-center rounded-md text-cyan-100 transition hover:text-cyan-50 hover:underline focus:outline-none focus:ring-1 focus:ring-cyan-300/45 ${className}`}
+      title={title}
+    >
+      {children}
+    </a>
+  );
+}
+
+function ClientTelegramContactLine({ user }: { user: CRMUser }) {
+  const cleanUsername = getCleanTelegramUsername(user.username);
+  const usernameLabel = cleanUsername ? `@${cleanUsername}` : 'без юзернейма';
+  const usernameUrl = getTelegramUsernameDialogUrl(cleanUsername);
+  const telegramIdLabel = getClientIdLabel(user);
+  const telegramIdUrl = getTelegramIdDialogUrl(user);
+
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1 normal-case tracking-normal">
+      {usernameUrl ? (
+        <TelegramDialogLink href={usernameUrl} title="Открыть диалог в Telegram Web" className="truncate">
+          {usernameLabel}
+        </TelegramDialogLink>
+      ) : (
+        <span className="min-w-0 truncate text-slate-500">{usernameLabel}</span>
+      )}
+      <span className="shrink-0 text-slate-600">/</span>
+      {telegramIdUrl ? (
+        <TelegramDialogLink href={telegramIdUrl} title="Открыть диалог в приложении Telegram" className="shrink-0">
+          {telegramIdLabel}
+        </TelegramDialogLink>
+      ) : (
+        <span className="shrink-0 text-slate-500">{telegramIdLabel}</span>
+      )}
+    </span>
+  );
+}
+
 function ClientBookmakerSummary({ user, align = 'end' }: { user: CRMUser; align?: 'start' | 'end' }) {
   const preview = getCrmBookmakerPreview(user.bookmakers, user.other_bookmaker_name);
   const hasBookmakers = preview.visibleBookmakers.length > 0;
@@ -279,10 +349,11 @@ function ClientBookmakerSummary({ user, align = 'end' }: { user: CRMUser; align?
       {hasBookmakers ? preview.visibleBookmakers.map((bookmaker) => (
         <span
           key={bookmaker.id}
-          className="inline-flex max-w-[9rem] items-center gap-1 rounded-lg border border-white/10 bg-white/[0.045] px-1.5 py-1 text-[8px] font-bold text-slate-300"
+          className="inline-flex h-7 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.045] p-1 text-slate-300"
+          title={bookmaker.name}
+          aria-label={`БК: ${bookmaker.name}`}
         >
           <BookmakerLogoFrame bookmaker={bookmaker} size="tiny" />
-          <span className="truncate">{bookmaker.name}</span>
         </span>
       )) : (
         <span className="rounded-lg border border-white/10 bg-white/[0.045] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-slate-500">
@@ -290,13 +361,11 @@ function ClientBookmakerSummary({ user, align = 'end' }: { user: CRMUser; align?
         </span>
       )}
       {preview.extraCount > 0 && (
-        <span className="rounded-lg border border-cyan-200/16 bg-cyan-200/[0.07] px-2 py-1 text-[8px] font-black text-cyan-100">
+        <span
+          className="rounded-lg border border-cyan-200/16 bg-cyan-200/[0.07] px-2 py-1 text-[8px] font-black text-cyan-100"
+          title={`Еще ${preview.extraCount} БК`}
+        >
           +{preview.extraCount}
-        </span>
-      )}
-      {preview.otherLabel && (
-        <span className="max-w-[10rem] truncate rounded-lg border border-amber-200/16 bg-amber-200/[0.06] px-2 py-1 text-[8px] font-black text-amber-100">
-          {preview.otherLabel}
         </span>
       )}
     </div>
@@ -314,10 +383,9 @@ function ClientIntelligenceRow({
   const matchSummary = getClientRecentMatchSummary(recentResults);
 
   return (
-    <button
-      type="button"
+    <article
       onClick={() => onOpen(user)}
-      className="smooth-pressable group w-full overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.045] p-3 text-left text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition-all hover:border-cyan-200/28 hover:bg-white/[0.065] active:scale-[0.995]"
+      className="smooth-pressable group w-full cursor-pointer overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.045] p-3 text-left text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition-all hover:border-cyan-200/28 hover:bg-white/[0.065] active:scale-[0.995]"
     >
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(12rem,0.68fr)_minmax(14rem,0.78fr)_minmax(12rem,0.62fr)] xl:items-center">
         <div className="min-w-0">
@@ -328,7 +396,7 @@ function ClientIntelligenceRow({
                 <h4 className="truncate text-sm font-black leading-snug text-white">{getDisplayName(user)}</h4>
               </div>
               <p className="mt-1 truncate text-[10px] font-bold text-slate-500">
-                {user.username ? `@${user.username}` : 'без юзернейма'} / {getClientIdLabel(user)}
+                <ClientTelegramContactLine user={user} />
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="rounded-lg border border-cyan-200/16 bg-cyan-200/[0.07] px-2 py-1 text-[8px] font-black uppercase tracking-[0.08em] text-cyan-100">
@@ -376,12 +444,19 @@ function ClientIntelligenceRow({
 
         <div className="flex items-center justify-between gap-3 xl:flex-col xl:items-end xl:justify-center">
           <ClientBookmakerSummary user={user} />
-          <span className="shrink-0 rounded-xl border border-cyan-200/18 bg-cyan-200/[0.07] px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-cyan-100 transition-all group-hover:bg-cyan-200/[0.12]">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(user);
+            }}
+            className="shrink-0 rounded-xl border border-cyan-200/18 bg-cyan-200/[0.07] px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-cyan-100 transition-all group-hover:bg-cyan-200/[0.12]"
+          >
             Открыть
-          </span>
+          </button>
         </div>
       </div>
-    </button>
+    </article>
   );
 }
 
@@ -947,8 +1022,8 @@ export default function AdminCRM() {
                     Карточка клиента
                   </div>
                   <h3 id="crm-client-edit-title" className="mt-1 truncate text-lg font-black text-white">{getDisplayName(selectedUser)}</h3>
-                  <p className="mt-0.5 truncate text-[10px] font-bold uppercase tracking-[0.08em] text-slate-450">
-                    {selectedUser.username ? `@${selectedUser.username}` : getClientIdLabel(selectedUser)}
+                  <p className="mt-0.5 truncate text-[10px] font-bold text-slate-450">
+                    <ClientTelegramContactLine user={selectedUser} />
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-1.5">
                     <ClientPriorityBadge user={selectedUser} compact />

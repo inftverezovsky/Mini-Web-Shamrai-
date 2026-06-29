@@ -11,6 +11,7 @@ import {
   DEFAULT_THEME_SETTINGS,
   GLOBAL_PERFORMANCE_MODE_KEY,
   PUBLIC_THEME_QUERY_KEY,
+  SUBSCRIPTION_PURCHASES_ENABLED_KEY,
   THEME_DENSITY_KEY,
   THEME_FONT_SCALE_KEY,
   THEME_GLASS_BLUR_PX_KEY,
@@ -84,7 +85,12 @@ interface SettingsTabConfig {
   Icon: LucideIcon;
 }
 
-type SwitchSettingKey = 'MAINTENANCE_MODE' | 'DISABLE_REGISTRATIONS' | 'PAUSE_BROADCASTS' | typeof WELCOME_QUIZ_ENABLED_KEY;
+type SwitchSettingKey =
+  | 'MAINTENANCE_MODE'
+  | 'DISABLE_REGISTRATIONS'
+  | 'PAUSE_BROADCASTS'
+  | typeof WELCOME_QUIZ_ENABLED_KEY
+  | typeof SUBSCRIPTION_PURCHASES_ENABLED_KEY;
 type SecretSettingKey = string;
 type SystemSettingKey = string;
 
@@ -287,6 +293,13 @@ const SWITCH_SETTINGS: SwitchSettingConfig[] = [
     description: 'Включает подробный опрос после VK-шага. Если выключено, первый вход состоит только из VK-привязки или пропуска.',
     badge: 'survey',
     tone: 'amber',
+  },
+  {
+    key: SUBSCRIPTION_PURCHASES_ENABLED_KEY,
+    title: 'Покупка абонементов',
+    description: 'Показывает клиентам блок покупки матчей и переход к оплате. Если выключено, клиент не видит покупку.',
+    badge: 'sales',
+    tone: 'cyan',
   },
 ];
 
@@ -532,6 +545,7 @@ const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   DISABLE_REGISTRATIONS: false,
   PAUSE_BROADCASTS: false,
   WELCOME_QUIZ_ENABLED: DEFAULT_THEME_SETTINGS.welcome_quiz_enabled,
+  SUBSCRIPTION_PURCHASES_ENABLED: DEFAULT_THEME_SETTINGS.subscription_purchases_enabled,
   THEME_PRIMARY_COLOR: DEFAULT_THEME_SETTINGS.primary_color,
   THEME_SECONDARY_COLOR: DEFAULT_THEME_SETTINGS.secondary_color,
   GLOBAL_PERFORMANCE_MODE: DEFAULT_THEME_SETTINGS.global_performance_mode,
@@ -737,6 +751,7 @@ function formValuesFromSettings(data?: AdminSettingsResponse): AdminSettingsForm
     DISABLE_REGISTRATIONS: truthySettingValue(settingsByKey.get('DISABLE_REGISTRATIONS')?.value),
     PAUSE_BROADCASTS: truthySettingValue(settingsByKey.get('PAUSE_BROADCASTS')?.value),
     WELCOME_QUIZ_ENABLED: truthySettingValue(settingsByKey.get(WELCOME_QUIZ_ENABLED_KEY)?.value),
+    SUBSCRIPTION_PURCHASES_ENABLED: truthySettingValue(settingsByKey.get(SUBSCRIPTION_PURCHASES_ENABLED_KEY)?.value),
     THEME_PRIMARY_COLOR: normalizeHexColor(
       settingsByKey.get(THEME_PRIMARY_COLOR_KEY)?.value,
       DEFAULT_THEME_SETTINGS.primary_color,
@@ -781,6 +796,10 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
     {
       key: WELCOME_QUIZ_ENABLED_KEY,
       value: truthySettingValue(values[WELCOME_QUIZ_ENABLED_KEY]) ? 'true' : 'false',
+    },
+    {
+      key: SUBSCRIPTION_PURCHASES_ENABLED_KEY,
+      value: truthySettingValue(values[SUBSCRIPTION_PURCHASES_ENABLED_KEY]) ? 'true' : 'false',
     },
     {
       key: THEME_PRIMARY_COLOR_KEY,
@@ -1595,6 +1614,7 @@ export default function AdminSettings() {
     const maintenanceMode = truthySettingValue(settingsForm.watch('MAINTENANCE_MODE'));
     const registrationsDisabled = truthySettingValue(settingsForm.watch('DISABLE_REGISTRATIONS'));
     const welcomeQuizEnabled = truthySettingValue(settingsForm.watch(WELCOME_QUIZ_ENABLED_KEY));
+    const subscriptionPurchasesEnabled = truthySettingValue(settingsForm.watch(SUBSCRIPTION_PURCHASES_ENABLED_KEY));
 
     return (
       <form
@@ -1607,14 +1627,19 @@ export default function AdminSettings() {
         <SettingsAccordionSection
           id="switches-access"
           title="Доступ и режимы"
-          subtitle="Maintenance mode, регистрации и приветственный опрос"
-          badge={`${Number(maintenanceMode) + Number(registrationsDisabled) + Number(welcomeQuizEnabled)}/3 on`}
+          subtitle="Maintenance mode, регистрации, онбординг и покупка"
+          badge={`${
+            Number(maintenanceMode)
+            + Number(registrationsDisabled)
+            + Number(welcomeQuizEnabled)
+            + Number(subscriptionPurchasesEnabled)
+          }/4 on`}
           Icon={ToggleLeft}
           open={sectionIsOpen('switches', 'switches-access')}
           onToggle={() => toggleAccordionSection('switches', 'switches-access')}
           dirty={settingsFormDirty}
         >
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-4">
             {SWITCH_SETTINGS.map(renderSwitchToggle)}
           </div>
         </SettingsAccordionSection>

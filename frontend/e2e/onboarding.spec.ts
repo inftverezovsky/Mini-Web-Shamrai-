@@ -35,9 +35,12 @@ test('user can skip the first-auth VK welcome step and enter the hub', async ({ 
   await seedOnboardingSession(page);
   await page.goto('/?force_onboarding&perf_profile=lowPower');
 
-  await expect(page.getByRole('heading', { name: 'Подключите VK к аккаунту' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'VK' })).toBeVisible();
+  await expect(page.getByText('Шаг')).toHaveCount(0);
+  await expect(page.getByText('Доставка')).toHaveCount(0);
+  await expect(page.getByText(/Можно пропустить и добавить VK позже в профиле/)).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Что сразу убивает доверие?' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Пропустить шаг' }).click();
+  await page.getByRole('button', { name: 'Пропустить' }).click();
   await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('bet_tma_mock_is_onboarded'))).toBe('true');
 
   await page.goto('/?perf_profile=lowPower');
@@ -54,7 +57,7 @@ test('user can link VK from the first-auth welcome step and enter the hub', asyn
   await seedOnboardingSession(page);
   await page.goto('/?force_onboarding&perf_profile=lowPower');
 
-  await expect(page.getByRole('heading', { name: 'Подключите VK к аккаунту' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'VK' })).toBeVisible();
   await page.getByRole('button', { name: 'Связать VK' }).click();
   await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('bet_tma_mock_vk_user_id'))).toBe('vk_mock_741852963');
   await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('bet_tma_mock_is_onboarded'))).toBe('true');

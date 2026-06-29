@@ -18,6 +18,23 @@ interface TariffsProps {
   onSubscriptionActivated?: () => void;
 }
 
+type PromoRewardType = 'discount' | 'matches';
+
+interface PromoValidationResponse {
+  code: string;
+  reward_type?: PromoRewardType;
+  discount_percent?: number;
+  matches_count?: number;
+}
+
+interface PromoRedeemResponse {
+  code: string;
+  reward_type: 'matches';
+  matches_added: number;
+  balance_before: number;
+  balance_after: number;
+}
+
 export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
   const { login } = useAuthActions();
   const debugCheckoutEnabled = DEBUG_AUTH_ENABLED;
@@ -50,10 +67,34 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
       setPromoError(null);
       trackEvent('Promo Validate Started');
 
-      const data = await apiFetch<{ code: string; discount_percent: number }>(`/payments/promo/validate?code=${encodeURIComponent(trimmed)}`);
-      setAppliedPromo(data);
+      const data = await apiFetch<PromoValidationResponse>(`/payments/promo/validate?code=${encodeURIComponent(trimmed)}`);
+      const rewardType = data.reward_type || 'discount';
+
+      if (rewardType === 'matches') {
+        const redeemed = await apiFetch<PromoRedeemResponse>('/payments/promo/redeem', {
+          method: 'POST',
+          body: JSON.stringify({ code: trimmed }),
+        });
+
+        setAppliedPromo(null);
+        setPromoCodeInput('');
+        setSuccessPopup(true);
+        notifySuccess(`Промокод ${redeemed.code} применен: +${redeemed.matches_added} матчей.`);
+        trackEvent('Promo Redeem Success', {
+          reward_type: rewardType,
+          matches_added: redeemed.matches_added,
+          balance_after: redeemed.balance_after,
+        });
+        await refreshAccount();
+        setTimeout(() => setSuccessPopup(false), 5000);
+        return;
+      }
+
+      const discountPercent = data.discount_percent ?? 0;
+      setAppliedPromo({ code: data.code, discount_percent: discountPercent });
       trackEvent('Promo Validate Success', {
-        discount_percent: data.discount_percent,
+        reward_type: rewardType,
+        discount_percent: discountPercent,
       });
     } catch (err: any) {
       setAppliedPromo(null);

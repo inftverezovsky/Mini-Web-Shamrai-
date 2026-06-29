@@ -4,6 +4,7 @@ export const MOCK_DEBUG_AUTH_TOKEN = 'mock_debug_access_token';
 
 const JWT_SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
 let memoryAuthToken: string | null = null;
+let runtimeAuthToken: string | null = null;
 
 function looksLikeJwt(token: string): boolean {
   const parts = token.split('.');
@@ -13,6 +14,11 @@ function looksLikeJwt(token: string): boolean {
 function isAllowedStoredToken(token: string | null): token is string {
   if (token === MOCK_DEBUG_AUTH_TOKEN) return DEBUG_AUTH_ENABLED;
   return BEARER_AUTH_COMPAT_ENABLED && Boolean(token && looksLikeJwt(token));
+}
+
+function isAllowedRuntimeToken(token: string | null): token is string {
+  if (token === MOCK_DEBUG_AUTH_TOKEN) return DEBUG_AUTH_ENABLED;
+  return Boolean(token && looksLikeJwt(token));
 }
 
 function getBrowserStorage(type: 'local' | 'session'): Storage | null {
@@ -67,6 +73,16 @@ export function getStoredAuthToken(): string | null {
   return null;
 }
 
+export function getRequestAuthToken(): string | null {
+  if (isAllowedRuntimeToken(runtimeAuthToken)) return runtimeAuthToken;
+  runtimeAuthToken = null;
+  return getStoredAuthToken();
+}
+
+export function setRuntimeAuthToken(token: string): void {
+  runtimeAuthToken = isAllowedRuntimeToken(token) ? token : null;
+}
+
 export function setStoredAuthToken(token: string): void {
   clearStoredAuthToken();
   if (!isAllowedStoredToken(token)) return;
@@ -83,6 +99,7 @@ export function setStoredAuthToken(token: string): void {
 }
 
 export function clearStoredAuthToken(): void {
+  runtimeAuthToken = null;
   memoryAuthToken = null;
   removeStorage('session', AUTH_TOKEN_STORAGE_KEY);
   removeStorage('local', AUTH_TOKEN_STORAGE_KEY);

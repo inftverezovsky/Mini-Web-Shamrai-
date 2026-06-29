@@ -673,6 +673,7 @@ class PublicThemeSettingsResponse(BaseModel):
     secondary_color: str
     global_performance_mode: bool = False
     welcome_quiz_enabled: bool = False
+    subscription_purchases_enabled: bool = False
     brand_logo_url: str = ""
     brand_background_url: str = ""
     glass_opacity: float = 0.42
