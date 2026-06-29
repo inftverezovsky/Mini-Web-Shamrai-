@@ -61,6 +61,16 @@ class CsrfProtectionTests(unittest.TestCase):
 
         self.assertFalse(should_check_csrf(request))
 
+    def test_signed_auth_login_endpoints_do_not_require_csrf(self):
+        for path in ("/api/auth/login", "/api/auth/telegram-widget"):
+            request = _request(
+                path=path,
+                cookies={AUTH_COOKIE_NAME: "stale-access-token"},
+            )
+
+            with self.subTest(path=path):
+                self.assertFalse(should_check_csrf(request))
+
     def test_bearer_only_compat_request_is_not_csrf_blocked(self):
         request = _request(headers={"Authorization": "Bearer access-token"})
 

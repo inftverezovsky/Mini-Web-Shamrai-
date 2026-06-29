@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { hasTelegramInitDataLaunchParam, hasTelegramLaunchParams } from '../src/utils/telegramSdk';
+import {
+  getTelegramLaunchInitData,
+  hasTelegramInitDataLaunchParam,
+  hasTelegramLaunchParams,
+} from '../src/utils/telegramSdk';
 
 function setLocation(path: string) {
   const [searchPart, hashPart = ''] = path.split('#', 2);
@@ -30,5 +34,13 @@ describe('telegramSdk launch params', () => {
 
     setLocation('/#/app?tgWebAppData=user%3D%257B%257D%26hash%3Dabc');
     expect(hasTelegramInitDataLaunchParam()).toBe(true);
+  });
+
+  it('extracts signed init data from Telegram launch params', () => {
+    setLocation('/?tgWebAppData=user%3D%257B%2522id%2522%253A42%257D%26auth_date%3D1710000000%26hash%3Dabc');
+    expect(getTelegramLaunchInitData()).toBe('user=%7B%22id%22%3A42%7D&auth_date=1710000000&hash=abc');
+
+    setLocation('/#/app?tgWebAppData=user%3D%257B%257D%26hash%3Dhash-from-hash');
+    expect(getTelegramLaunchInitData()).toBe('user=%7B%7D&hash=hash-from-hash');
   });
 });

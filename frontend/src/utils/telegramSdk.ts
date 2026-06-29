@@ -18,10 +18,31 @@ export function hasTelegramLaunchParams(): boolean {
   return /(?:^|[&#?])tgWebApp(?:Data|Version|Platform|ThemeParams)=/i.test(source);
 }
 
+function queryStringFromLocationPart(source: string): string {
+  const cleanSource = source.replace(/^[#?&]+/, '');
+  const queryStart = cleanSource.indexOf('?');
+  return queryStart >= 0 ? cleanSource.slice(queryStart + 1) : cleanSource;
+}
+
+function getTelegramLaunchParam(source: string, paramName: string): string {
+  if (!source) return '';
+
+  try {
+    return new URLSearchParams(queryStringFromLocationPart(source)).get(paramName) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function getTelegramLaunchInitData(): string {
+  if (typeof window === 'undefined') return '';
+
+  return getTelegramLaunchParam(window.location.search || '', 'tgWebAppData')
+    || getTelegramLaunchParam(window.location.hash || '', 'tgWebAppData');
+}
+
 export function hasTelegramInitDataLaunchParam(): boolean {
-  if (typeof window === 'undefined') return false;
-  const source = `${window.location.search || ''}&${window.location.hash || ''}`;
-  return /(?:^|[&#?])tgWebAppData=/i.test(source);
+  return Boolean(getTelegramLaunchInitData());
 }
 
 export async function ensureTelegramSdk(timeoutMs = 2200): Promise<void> {

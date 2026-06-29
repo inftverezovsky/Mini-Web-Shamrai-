@@ -20,6 +20,8 @@ CSRF_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSRF_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/auth/telegram-widget",
     "/api/payments/telegram-webhook",
     "/api/payments/tegro/webhook",
     "/api/payments/yookassa/webhook",

@@ -19,6 +19,7 @@ import {
 import { formatApiErrorMessage } from '../api/errors';
 import {
   ensureTelegramSdk,
+  getTelegramLaunchInitData,
   getTelegramWebApp,
   hasTelegramInitDataLaunchParam,
 } from '../utils/telegramSdk';
@@ -295,14 +296,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [API_URL, setError, setToken, setUser]);
 
   const runTelegramMiniAppLogin = useCallback(async (initData: string) => {
-    const csrfHeaders = await csrfHeaderForRequest({ method: 'POST' });
     const response = await fetch(`${API_URL}/api/auth/login`, {
       method: 'POST',
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...identityDeviceHeader(),
-        ...csrfHeaders,
       },
       body: JSON.stringify({ initData }),
     });
@@ -346,7 +345,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (getTelegramWebApp() || hasTelegramInitDataLaunchParam()) {
         await ensureTelegramSdk(1200);
         const tg = getTelegramWebApp<{ initData?: string }>();
-        initData = tg?.initData || '';
+        initData = tg?.initData || getTelegramLaunchInitData();
       }
 
       if (initData) {
@@ -443,14 +442,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setLoading(true);
       setError(null);
-      const csrfHeaders = await csrfHeaderForRequest({ method: 'POST' });
       const response = await fetch(`${API_URL}/api/auth/telegram-widget`, {
         method: 'POST',
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           ...identityDeviceHeader(),
-          ...csrfHeaders,
         },
         body: JSON.stringify(payload),
       });
