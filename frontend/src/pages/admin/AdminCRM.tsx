@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { apiFetch, downloadApiFile } from '../../utils/api';
 import { ADMIN_TAB_QUERY_STALE_TIME, BOOKMAKERS_QUERY_KEY, TAB_QUERY_STALE_TIME, adminUsersPageQueryKey, fetchAdminUsersPage, fetchBookmakers } from '../../utils/tabPrefetch';
-import { BookmakerResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
+import { BookmakerResponse, ChatConversationResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
@@ -45,6 +45,11 @@ import {
   X,
 } from 'lucide-react';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
+import {
+  adminWebChatConversationUrl,
+  adminWebChatUserUrl,
+  dispatchAdminWebChatOpen,
+} from '../../utils/adminWebChatNavigation';
 import {
   ExportActions,
   ExportStatusPanel,
@@ -116,10 +121,6 @@ function getClientIdLabel(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
 
 function getCleanTelegramUsername(username: string | null | undefined) {
   return (username || '').trim().replace(/^@/, '');
-}
-
-export function getAdminCrmWebChatUrl(user: { telegram_id: number }) {
-  return `/app?open=admin-web-chat&user_id=${encodeURIComponent(String(user.telegram_id))}`;
 }
 
 function cleanText(value: string) {
@@ -279,20 +280,48 @@ function ClientConnectionBadges({ user }: { user: CRMUser }) {
 }
 
 function AdminWebChatDialogLink({
-  href,
+  user,
   title,
   children,
   className = '',
 }: {
-  href: string;
+  user: { telegram_id: number };
   title: string;
   children: React.ReactNode;
   className?: string;
 }) {
+  const fallbackUrl = adminWebChatUserUrl(user.telegram_id);
+
+  const handleClick = async (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.stopPropagation();
+
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+
+    event.preventDefault();
+    try {
+      const conversation = await apiFetch<ChatConversationResponse>(
+        `/chat/admin/conversations/by-user/${encodeURIComponent(String(user.telegram_id))}`,
+        { method: 'POST' },
+      );
+      const conversationUrl = conversation.id ? adminWebChatConversationUrl(conversation.id) : fallbackUrl;
+      window.history.pushState({ open: 'admin-web-chat' }, '', conversationUrl);
+      dispatchAdminWebChatOpen({
+        conversation,
+        conversationId: conversation.id,
+        userId: user.telegram_id,
+      });
+      notifySuccess('Диалог с клиентом открыт', 'Чаты');
+    } catch (err: any) {
+      notifyError(err?.message || 'Не удалось открыть диалог с клиентом');
+    }
+  };
+
   return (
     <a
-      href={href}
-      onClick={(event) => event.stopPropagation()}
+      href={fallbackUrl}
+      onClick={handleClick}
       className={`inline-flex min-w-0 items-center rounded-md text-cyan-100 transition hover:text-cyan-50 hover:underline focus:outline-none focus:ring-1 focus:ring-cyan-300/45 ${className}`}
       title={title}
     >
@@ -304,20 +333,19 @@ function AdminWebChatDialogLink({
 function ClientTelegramContactLine({ user }: { user: CRMUser }) {
   const cleanUsername = getCleanTelegramUsername(user.username);
   const usernameLabel = cleanUsername ? `@${cleanUsername}` : 'без юзернейма';
-  const webChatUrl = getAdminCrmWebChatUrl(user);
   const telegramIdLabel = getClientIdLabel(user);
 
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1 normal-case tracking-normal">
       {cleanUsername ? (
-        <AdminWebChatDialogLink href={webChatUrl} title="Открыть диалог с клиентом в веб-чате" className="truncate">
+        <AdminWebChatDialogLink user={user} title="Открыть диалог с клиентом в веб-чате" className="truncate">
           {usernameLabel}
         </AdminWebChatDialogLink>
       ) : (
         <span className="min-w-0 truncate text-slate-500">{usernameLabel}</span>
       )}
       <span className="shrink-0 text-slate-600">/</span>
-      <AdminWebChatDialogLink href={webChatUrl} title="Открыть диалог с клиентом в веб-чате" className="shrink-0">
+      <AdminWebChatDialogLink user={user} title="Открыть диалог с клиентом в веб-чате" className="shrink-0">
         {telegramIdLabel}
       </AdminWebChatDialogLink>
     </span>

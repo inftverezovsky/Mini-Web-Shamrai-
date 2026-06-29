@@ -29,6 +29,7 @@ import { registerPwaServiceWorker } from './utils/webPush';
 import { prefetchAdminTab, prefetchUserTab } from './utils/tabPrefetch';
 import { canEnterCabinet } from './utils/identityAccess';
 import { syncConnectionOnboarding } from './utils/connectionOnboarding';
+import { ADMIN_WEB_CHAT_OPEN_EVENT } from './utils/adminWebChatNavigation';
 import {
   PROFILE_SETUP_NAVIGATION_EVENT,
   profileSetupIntentFromLocation,
@@ -284,8 +285,10 @@ export default function App() {
   }, [introComplete]);
 
   useEffect(() => {
-    if (!isReady || isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams()) return;
-    void registerPwaServiceWorker();
+    if (!isReady) return;
+
+    const runsInsideTelegram = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
+    if (!runsInsideTelegram) void registerPwaServiceWorker();
 
     let scrollTimer: number | undefined;
 
@@ -303,6 +306,12 @@ export default function App() {
       scrollToTarget(targetId, delay);
     };
 
+    const openAdminWebChatTarget = () => {
+      setAdminPreviewMode(false);
+      setMountedAdminTabs((current) => addUniqueTab(current, 'chats'));
+      setActiveAdminTab('chats');
+    };
+
     const applyOpenTargetFromLocation = () => {
       const params = new URLSearchParams(window.location.search);
       const openTarget = params.get('open');
@@ -311,8 +320,7 @@ export default function App() {
         setActiveUserTab('chat');
         scrollToTarget('web-bot-chat', 250);
       } else if (openTarget === 'admin-web-chat') {
-        setMountedAdminTabs((current) => addUniqueTab(current, 'chats'));
-        setActiveAdminTab('chats');
+        openAdminWebChatTarget();
       } else if (openTarget === 'profile') {
         openProfileTarget(profileSetupIntentFromLocation().targetId, 350);
       }
@@ -325,11 +333,13 @@ export default function App() {
 
     applyOpenTargetFromLocation();
     window.addEventListener(PROFILE_SETUP_NAVIGATION_EVENT, handleProfileSetupNavigation);
+    window.addEventListener(ADMIN_WEB_CHAT_OPEN_EVENT, openAdminWebChatTarget);
     window.addEventListener('popstate', applyOpenTargetFromLocation);
 
     return () => {
       if (scrollTimer) window.clearTimeout(scrollTimer);
       window.removeEventListener(PROFILE_SETUP_NAVIGATION_EVENT, handleProfileSetupNavigation);
+      window.removeEventListener(ADMIN_WEB_CHAT_OPEN_EVENT, openAdminWebChatTarget);
       window.removeEventListener('popstate', applyOpenTargetFromLocation);
     };
   }, [isReady, isTelegram]);

@@ -37,6 +37,10 @@ import {
   AdminWebChatMessageEventPayload,
 } from '../../components/AdminWebChatListener';
 import { applyReadReceiptToMessages } from '../../features/chat/readReceipts';
+import {
+  ADMIN_WEB_CHAT_OPEN_EVENT,
+  type AdminWebChatOpenDetail,
+} from '../../utils/adminWebChatNavigation';
 
 const ADMIN_CHAT_MESSAGES_PAGE_LIMIT = 100;
 const ADMIN_CHAT_CONVERSATION_LIMIT = 80;
@@ -648,6 +652,26 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
     setMessageSearchTerm('');
     setTypingText('');
   }, [selectedConversationId]);
+
+  useEffect(() => {
+    const handleOpenConversation = (event: Event) => {
+      const detail = (event as CustomEvent<AdminWebChatOpenDetail>).detail;
+      const conversation = detail?.conversation ?? null;
+      const conversationId = conversation?.id || detail?.conversationId || null;
+      if (!conversationId) return;
+
+      if (conversation) {
+        setConversations((current) => mergeConversation(current, conversation));
+        setStatusFilter(conversation.status);
+      }
+      setSelectedConversationId(conversationId);
+      setSearchTerm('');
+      setClientSearchResults([]);
+    };
+
+    window.addEventListener(ADMIN_WEB_CHAT_OPEN_EVENT, handleOpenConversation);
+    return () => window.removeEventListener(ADMIN_WEB_CHAT_OPEN_EVENT, handleOpenConversation);
+  }, []);
 
   const visibleConversations = useMemo(
     () => conversations.filter((conversation) => matchesSearch(conversation, debouncedSearchTerm)),
