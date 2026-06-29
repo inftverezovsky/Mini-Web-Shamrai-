@@ -3,13 +3,17 @@ param(
   [string]$HostKey = "ssh-ed25519 255 SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
-  [string]$SshKeyPath = "C:\Users\Sa1z1ngr0z\.ssh\codex_deploy_ed25519",
-  [string]$JsonKeyPath = "C:\Users\Sa1z1ngr0z\Downloads\Chrome\shamrai-8fe2bdbe5046.json",
-  [string]$DriveFolderId = "1WFPjbgH5k1slmCJ4g41YGoio25xFrW6G",
+  [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
+  [string]$JsonKeyPath = $env:SHAMRAI_GOOGLE_SERVICE_ACCOUNT_JSON_PATH,
+  [string]$DriveFolderId = $env:SHAMRAI_GOOGLE_DRIVE_STATS_FOLDER_ID,
   [int]$UnitStakeRub = 10000
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+  $SshKeyPath = Join-Path $env:USERPROFILE ".ssh\codex_deploy_ed25519"
+}
 
 function Find-Tool {
   param([string[]]$Candidates)
@@ -38,7 +42,7 @@ $plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
 
 $password = $env:SHAMRAI_SSH_PASSWORD
 $usePassword = -not [string]::IsNullOrWhiteSpace($password)
-$useKey = (-not $usePassword) -and (Test-Path -LiteralPath $SshKeyPath)
+$useKey = (-not $usePassword) -and (-not [string]::IsNullOrWhiteSpace($SshKeyPath)) -and (Test-Path -LiteralPath $SshKeyPath)
 if ($usePassword -and -not $plink) {
   throw "PuTTY plink not found."
 }
@@ -49,12 +53,15 @@ if (-not $usePassword -and -not $useKey) {
   throw "Set SHAMRAI_SSH_PASSWORD for this run or provide a valid SshKeyPath. Do not store passwords in files."
 }
 
+if ([string]::IsNullOrWhiteSpace($JsonKeyPath)) {
+  throw "Set SHAMRAI_GOOGLE_SERVICE_ACCOUNT_JSON_PATH for this run or pass -JsonKeyPath."
+}
 if (-not (Test-Path -LiteralPath $JsonKeyPath)) {
   throw "Google service account JSON key not found: $JsonKeyPath"
 }
 
 if ([string]::IsNullOrWhiteSpace($DriveFolderId)) {
-  throw "DriveFolderId is required."
+  throw "Set SHAMRAI_GOOGLE_DRIVE_STATS_FOLDER_ID for this run or pass -DriveFolderId."
 }
 
 if ($UnitStakeRub -le 0) {
@@ -147,7 +154,7 @@ for key, value in updates.items():
         out.append(f"{key}={value}")
 path.write_text("\n".join(out).rstrip() + "\n")
 print("google_drive_stats_env_updated")
-print(f"drive_folder_id={drive_folder_id}")
+print(f"drive_folder_configured={bool(drive_folder_id.strip())}")
 print(f"service_account_json_b64_len={len(service_account_json_b64)}")
 print(f"unit_stake_rub={unit_stake_rub}")
 PY
@@ -184,4 +191,4 @@ finally {
   [Console]::OutputEncoding = $previousOutputEncoding
 }
 
-Write-Host "Configured Google Drive stats export for $($json.client_email)"
+Write-Host "Configured Google Drive service-account stats export."

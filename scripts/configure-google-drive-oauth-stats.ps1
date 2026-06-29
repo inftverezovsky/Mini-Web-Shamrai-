@@ -3,12 +3,16 @@ param(
   [string]$HostKey = "ssh-ed25519 255 SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
-  [string]$SshKeyPath = "C:\Users\Sa1z1ngr0z\.ssh\codex_deploy_ed25519",
+  [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
   [string]$DriveFolderId = $env:SHAMRAI_GOOGLE_DRIVE_STATS_FOLDER_ID,
   [int]$UnitStakeRub = 10000
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+  $SshKeyPath = Join-Path $env:USERPROFILE ".ssh\codex_deploy_ed25519"
+}
 
 function Find-Tool {
   param([string[]]$Candidates)
@@ -37,7 +41,7 @@ $plink = Find-Tool @("C:\Program Files\PuTTY\plink.exe", "plink.exe")
 
 $password = $env:SHAMRAI_SSH_PASSWORD
 $usePassword = -not [string]::IsNullOrWhiteSpace($password)
-$useKey = (-not $usePassword) -and (Test-Path -LiteralPath $SshKeyPath)
+$useKey = (-not $usePassword) -and (-not [string]::IsNullOrWhiteSpace($SshKeyPath)) -and (Test-Path -LiteralPath $SshKeyPath)
 if ($usePassword -and -not $plink) {
   throw "PuTTY plink not found."
 }
