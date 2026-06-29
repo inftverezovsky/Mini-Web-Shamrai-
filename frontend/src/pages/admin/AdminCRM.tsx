@@ -114,19 +114,12 @@ function getClientIdLabel(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
   return user.is_web_only ? 'Web/VK клиент' : `ID: ${user.telegram_id}`;
 }
 
-const TELEGRAM_USERNAME_PATTERN = /^[A-Za-z0-9_]{5,32}$/;
-
 function getCleanTelegramUsername(username: string | null | undefined) {
   return (username || '').trim().replace(/^@/, '');
 }
 
-function getTelegramUsernameDialogUrl(username: string | null | undefined) {
-  const cleanUsername = getCleanTelegramUsername(username);
-  return TELEGRAM_USERNAME_PATTERN.test(cleanUsername) ? `https://t.me/${cleanUsername}` : '';
-}
-
-function getTelegramIdDialogUrl(user: Pick<CRMUser, 'telegram_id' | 'is_web_only'>) {
-  return !user.is_web_only && user.telegram_id > 0 ? `tg://user?id=${user.telegram_id}` : '';
+export function getAdminCrmWebChatUrl(user: { telegram_id: number }) {
+  return `/app?open=admin-web-chat&user_id=${encodeURIComponent(String(user.telegram_id))}`;
 }
 
 function cleanText(value: string) {
@@ -285,7 +278,7 @@ function ClientConnectionBadges({ user }: { user: CRMUser }) {
   );
 }
 
-function TelegramDialogLink({
+function AdminWebChatDialogLink({
   href,
   title,
   children,
@@ -296,13 +289,9 @@ function TelegramDialogLink({
   children: React.ReactNode;
   className?: string;
 }) {
-  const isWebUrl = /^https?:\/\//i.test(href);
-
   return (
     <a
       href={href}
-      target={isWebUrl ? '_blank' : undefined}
-      rel={isWebUrl ? 'noreferrer' : undefined}
       onClick={(event) => event.stopPropagation()}
       className={`inline-flex min-w-0 items-center rounded-md text-cyan-100 transition hover:text-cyan-50 hover:underline focus:outline-none focus:ring-1 focus:ring-cyan-300/45 ${className}`}
       title={title}
@@ -315,27 +304,22 @@ function TelegramDialogLink({
 function ClientTelegramContactLine({ user }: { user: CRMUser }) {
   const cleanUsername = getCleanTelegramUsername(user.username);
   const usernameLabel = cleanUsername ? `@${cleanUsername}` : 'без юзернейма';
-  const usernameUrl = getTelegramUsernameDialogUrl(cleanUsername);
+  const webChatUrl = getAdminCrmWebChatUrl(user);
   const telegramIdLabel = getClientIdLabel(user);
-  const telegramIdUrl = getTelegramIdDialogUrl(user);
 
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1 normal-case tracking-normal">
-      {usernameUrl ? (
-        <TelegramDialogLink href={usernameUrl} title="Открыть диалог в Telegram Web" className="truncate">
+      {cleanUsername ? (
+        <AdminWebChatDialogLink href={webChatUrl} title="Открыть диалог с клиентом в веб-чате" className="truncate">
           {usernameLabel}
-        </TelegramDialogLink>
+        </AdminWebChatDialogLink>
       ) : (
         <span className="min-w-0 truncate text-slate-500">{usernameLabel}</span>
       )}
       <span className="shrink-0 text-slate-600">/</span>
-      {telegramIdUrl ? (
-        <TelegramDialogLink href={telegramIdUrl} title="Открыть диалог в приложении Telegram" className="shrink-0">
-          {telegramIdLabel}
-        </TelegramDialogLink>
-      ) : (
-        <span className="shrink-0 text-slate-500">{telegramIdLabel}</span>
-      )}
+      <AdminWebChatDialogLink href={webChatUrl} title="Открыть диалог с клиентом в веб-чате" className="shrink-0">
+        {telegramIdLabel}
+      </AdminWebChatDialogLink>
     </span>
   );
 }
