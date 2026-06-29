@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from typing import Any, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime, timedelta, timezone
 
 from src.models.database import get_db, get_read_db
@@ -163,8 +163,7 @@ class AdminUserListResponse(BaseModel):
     subscription_end_date: Optional[datetime]
     bookmakers: List[BookmakerResponse]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 async def load_user_response(db: AsyncSession, telegram_id: int) -> User:

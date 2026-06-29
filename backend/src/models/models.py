@@ -84,7 +84,16 @@ class User(Base):
     free_bets_available = Column(Integer, default=0, nullable=False)
     matches_remaining = Column(Integer, default=0, nullable=False)
     guarantee_active = Column(Boolean, default=False, nullable=False)
-    guarantee_opened_from_bet_id = Column(Uuid(as_uuid=True), ForeignKey("bets.id", ondelete="SET NULL"), nullable=True)
+    guarantee_opened_from_bet_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "bets.id",
+            name="fk_users_guarantee_opened_from_bet_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     guarantee_closed_at = Column(DateTime(timezone=True), nullable=True)
     onboarding_goal = Column(String, nullable=True)
     ab_group = Column(String, nullable=True)

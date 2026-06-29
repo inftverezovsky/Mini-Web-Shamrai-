@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -26,8 +26,7 @@ class BookmakerBase(BaseModel):
 class BookmakerResponse(BookmakerBase):
     id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- BADGE SCHEMAS ---
 class UserBadgeResponse(BaseModel):
@@ -37,8 +36,7 @@ class UserBadgeResponse(BaseModel):
     icon_type: str
     unlocked_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- USER SCHEMAS ---
 class UserBase(BaseModel):
@@ -96,8 +94,7 @@ class UserResponse(UserBase):
     bookmakers: List[BookmakerResponse] = Field(default_factory=list)
     badges: List[UserBadgeResponse] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OnboardRequest(BaseModel):
     anti_capper_pains: List[str] = Field(default_factory=list, max_length=30)
@@ -177,8 +174,7 @@ class SubscriptionPlanUpdate(BaseModel):
 class SubscriptionPlanResponse(SubscriptionPlanBase):
     id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- SUBSCRIPTION SCHEMAS ---
 class SubscriptionBase(BaseModel):
@@ -198,8 +194,7 @@ class SubscriptionResponse(SubscriptionBase):
     created_at: datetime
     plan: Optional[SubscriptionPlanResponse] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class SubscriptionManualAssign(BaseModel):
     user_id: int
@@ -291,8 +286,7 @@ class BetResponse(BetBase):
     odds_dropped_to: Optional[Decimal] = None
     odds_drop_notified_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class BetOddsDropNotifyResponse(BaseModel):
@@ -316,8 +310,7 @@ class ForecastRequestUserResponse(BaseModel):
     guarantee_active: bool = False
     bookmakers: List[BookmakerResponse] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ForecastRequestResponse(BaseModel):
@@ -337,8 +330,7 @@ class ForecastRequestResponse(BaseModel):
     bet: BetResponse
     user: ForecastRequestUserResponse
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class BetHintRequest(BaseModel):
@@ -373,8 +365,7 @@ class CrowdBetResponse(BaseModel):
     progress_percent: float
     is_participant: bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CrowdBetFundResponse(BaseModel):
@@ -443,8 +434,7 @@ class PvPBattleResponse(BaseModel):
     percent_a: float
     percent_b: float
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PvPVoteRequest(BaseModel):
@@ -485,24 +475,21 @@ class MarathonResponse(BaseModel):
     total_steps: int
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class LivePulseLogResponse(BaseModel):
     id: int
     text_message: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class DailyRewardClaimResponse(BaseModel):
     id: int
     user_id: int
     claimed_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserNoteCreate(BaseModel):
@@ -518,8 +505,7 @@ class UserNoteResponse(BaseModel):
     emotion_score: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ABTestConfigCreate(BaseModel):
@@ -536,8 +522,7 @@ class ABTestConfigResponse(BaseModel):
     price_group_b: int
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ClientRecentMatchResult(BaseModel):
@@ -583,8 +568,7 @@ class AdminUserListResponse(BaseModel):
     badges: List[UserBadgeResponse] = Field(default_factory=list)
     recent_match_results: List[ClientRecentMatchResult] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AdminGrantRequest(BaseModel):
@@ -721,8 +705,7 @@ class UserPreferencesResponse(BaseModel):
     preferred_sports: List[str]
     stats_display_mode: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # --- PAYMENT TRANSACTION SCHEMAS ---
@@ -735,8 +718,7 @@ class PaymentTransactionResponse(BaseModel):
     created_at: datetime
     end_date: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaymentReconciliationIssue(BaseModel):

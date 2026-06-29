@@ -1,10 +1,12 @@
 from typing import Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LOCAL_DEV_JWT_SECRET = "BET_TMA_LOCAL_DEV_SECRET_CHANGE_ME"
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     APP_ENV: str = "local"
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/shamrai"
     DB_POOL_SIZE: int = 5
@@ -210,10 +212,6 @@ class Settings(BaseSettings):
                 raise RuntimeError("VK_CALLBACK_SECRET must be set when VK callbacks are enabled in production")
             if not self.VK_GROUP_ACCESS_TOKEN.strip():
                 raise RuntimeError("VK_GROUP_ACCESS_TOKEN must be set when VK delivery is enabled in production")
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 
 settings = Settings()
