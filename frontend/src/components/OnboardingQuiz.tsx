@@ -68,6 +68,7 @@ interface OnboardingResponse {
 
 interface OnboardingQuizProps {
   userId?: number;
+  welcomeQuizEnabled?: boolean;
   onCompleted: () => void | Promise<void>;
 }
 
@@ -267,7 +268,7 @@ const sourceLabels: Record<string, string> = {
   mock_channel_24h: 'локальная демо-выборка Shamrai за 24 часа',
 };
 
-export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizProps) {
+export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onCompleted }: OnboardingQuizProps) {
   const user = useAuthSelector((state) => state.user);
   const reduceMotion = useReducedMotion();
   const performanceProfile = usePerformanceProfile();
@@ -305,12 +306,35 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   const glow = proMode ? GOLD_GLOW : PINK_GLOW;
   const accent = proMode ? GOLD : PINK;
   const secondaryGlow = proMode ? GOLD_GLOW : CYAN_GLOW;
-  const progressIndex = Math.min(stepIndex, 5);
+  const stepCount = welcomeQuizEnabled ? 6 : 1;
+  const progressIndex = welcomeQuizEnabled ? Math.min(stepIndex, 5) : 0;
   const vkReady = isVkIdReady();
 
   const visibleBookmakers = useMemo(() => {
     return bookmakers.length ? bookmakers : fallbackBookmakers;
   }, [bookmakers]);
+
+  const completeWelcomeStep = useCallback(async (source: 'vk_linked' | 'vk_skipped' | 'already_linked', vkLinked: boolean) => {
+    try {
+      setSkipping(true);
+      setErrorMessage(null);
+      await apiFetch('/users/me/onboard/skip', { method: 'POST' });
+      trackEvent('Onboarding Welcome Step Completed', {
+        source,
+        vk_linked: vkLinked,
+        welcome_quiz_enabled: false,
+      });
+      await onCompleted();
+    } catch (error: any) {
+      setErrorMessage(error?.message || 'Не удалось завершить приветственный шаг');
+      trackEvent('Onboarding Welcome Step Failed', {
+        source,
+        vk_linked: vkLinked,
+      });
+    } finally {
+      setSkipping(false);
+    }
+  }, [onCompleted]);
 
   useEffect(() => {
     if (!user?.vk_user_id) return;
@@ -326,14 +350,23 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
 
     if (stepIndex === 0) {
       const timer = window.setTimeout(() => {
-        setDirection(1);
-        setStepIndex(1);
+        if (welcomeQuizEnabled) {
+          setDirection(1);
+          setStepIndex(1);
+          return;
+        }
+        void completeWelcomeStep('already_linked', true);
       }, 650);
       return () => window.clearTimeout(timer);
     }
-  }, [stepIndex, user?.vk_user_id]);
+  }, [completeWelcomeStep, stepIndex, user?.vk_user_id, welcomeQuizEnabled]);
 
   useEffect(() => {
+    if (!welcomeQuizEnabled) {
+      setBookmakersLoading(false);
+      return;
+    }
+
     let mounted = true;
 
     async function loadBookmakers() {
@@ -353,15 +386,16 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [welcomeQuizEnabled]);
 
   useEffect(() => {
+    if (!welcomeQuizEnabled) return;
     if (typeof Image === 'undefined') return;
     visibleBookmakers.forEach((bookmaker) => {
       const image = new Image();
       image.src = getBookmakerLogoSrc(bookmaker);
     });
-  }, [visibleBookmakers]);
+  }, [visibleBookmakers, welcomeQuizEnabled]);
 
   const canContinue = useMemo(() => {
     if (stepIndex === 0) return false;
@@ -497,8 +531,12 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       setVkLinkStatus('linked');
       trackEvent('Onboarding VK Link Success');
       window.setTimeout(() => {
-        setDirection(1);
-        setStepIndex(1);
+        if (welcomeQuizEnabled) {
+          setDirection(1);
+          setStepIndex(1);
+          return;
+        }
+        void completeWelcomeStep('vk_linked', true);
       }, 620);
     } catch (error: any) {
       if (isVkRedirectStartedError(error)) return;
@@ -512,6 +550,10 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     trackEvent('Onboarding VK Skipped');
     setVkLinkError(null);
     setVkLinkStatus('idle');
+    if (!welcomeQuizEnabled) {
+      void completeWelcomeStep('vk_skipped', false);
+      return;
+    }
     setDirection(1);
     setStepIndex(1);
   };
@@ -567,7 +609,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
     setStepIndex((current) => Math.max(0, current - 1));
   };
 
-  const showPulseWidget = stepIndex !== 4 && !performanceProfile.isLowPower && !performanceProfile.isBalanced;
+  const showPulseWidget = welcomeQuizEnabled && stepIndex !== 4 && !performanceProfile.isLowPower && !performanceProfile.isBalanced;
 
   return (
     <section
@@ -600,7 +642,7 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
       </AnimatePresence>
 
       <div className="relative z-10 flex min-h-[78vh] flex-col gap-3">
-        <Header progressIndex={progressIndex} proMode={proMode} glow={glow} accent={accent} />
+        <Header progressIndex={progressIndex} stepCount={stepCount} proMode={proMode} glow={glow} accent={accent} />
 
         <div className="relative flex-1">
           <AnimatePresence mode="wait" custom={direction}>
@@ -621,6 +663,8 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
                   displayName={vkDisplayName}
                   error={vkLinkError}
                   vkReady={vkReady}
+                  welcomeQuizEnabled={welcomeQuizEnabled}
+                  completing={skipping}
                   glow={glow}
                   calm={calmControls}
                   onLink={handleVkLink}
@@ -733,7 +777,19 @@ export default function OnboardingQuiz({ userId, onCompleted }: OnboardingQuizPr
   );
 }
 
-function Header({ progressIndex, proMode, glow, accent }: { progressIndex: number; proMode: boolean; glow: string; accent: string }) {
+function Header({
+  progressIndex,
+  stepCount,
+  proMode,
+  glow,
+  accent,
+}: {
+  progressIndex: number;
+  stepCount: number;
+  proMode: boolean;
+  glow: string;
+  accent: string;
+}) {
   return (
     <div className={`rounded-[1.35rem] ${GLASS_SURFACE} p-3`} style={{ boxShadow: glow }}>
       <div className="flex items-center justify-between gap-3">
@@ -753,8 +809,8 @@ function Header({ progressIndex, proMode, glow, accent }: { progressIndex: numbe
           />
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-6 gap-2">
-        {[0, 1, 2, 3, 4, 5].map((index) => (
+      <div className="mt-3 grid gap-2" style={{ gridTemplateColumns: `repeat(${stepCount}, minmax(0, 1fr))` }}>
+        {Array.from({ length: stepCount }, (_, index) => (
           <span
             key={index}
             className={`h-1.5 rounded-full ${GLASS_SURFACE}`}
@@ -771,6 +827,8 @@ function IntroVkStep({
   displayName,
   error,
   vkReady,
+  welcomeQuizEnabled,
+  completing,
   glow,
   calm,
   onLink,
@@ -780,6 +838,8 @@ function IntroVkStep({
   displayName: string | null;
   error: string | null;
   vkReady: boolean;
+  welcomeQuizEnabled: boolean;
+  completing: boolean;
   glow: string;
   calm: boolean;
   onLink: () => void;
@@ -787,14 +847,17 @@ function IntroVkStep({
 }) {
   const linked = status === 'linked';
   const loading = status === 'loading';
+  const busy = loading || completing;
 
   return (
     <div className="flex min-h-[490px] flex-col justify-between gap-5">
       <div className="space-y-5">
         <StepTitle
           index="01"
-          title="Настроим ленту за 60 секунд"
-          caption="Быстро настроим риск, цель, БК и удобный формат сигналов."
+          title={welcomeQuizEnabled ? 'Настроим ленту за 60 секунд' : 'Подключите VK к аккаунту'}
+          caption={welcomeQuizEnabled
+            ? 'Быстро настроим риск, цель, БК и удобный формат сигналов.'
+            : 'Свяжите VK с аккаунтом для резервной доставки уведомлений. Этот шаг можно пропустить.'}
         />
 
         <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: glow }}>
@@ -805,16 +868,30 @@ function IntroVkStep({
                 <Brain className="h-7 w-7 text-cyan-100" />
               </div>
               <div className="min-w-0">
-                <p className="text-sm font-black leading-tight text-white">Короткая калибровка риска</p>
+                <p className="text-sm font-black leading-tight text-white">
+                  {welcomeQuizEnabled ? 'Короткая калибровка риска' : 'VK как резервный канал'}
+                </p>
                 <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-300">
-                  Без обещаний исходов: только фильтр, флэт и темп доставки под ваш профиль.
+                  {welcomeQuizEnabled
+                    ? 'Без обещаний исходов: только фильтр, флэт и темп доставки под ваш профиль.'
+                    : 'Если Telegram или web-push не сработают, важные сообщения можно продублировать во VK.'}
                 </p>
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 text-center">
-              <Metric label="Время" value="~60с" caption="без длинной формы" compact />
-              <Metric label="Формат" value="4" caption="варианта сервиса" compact />
-              <Metric label="Риск" value="18+" caption="без гарантий" compact />
+              {welcomeQuizEnabled ? (
+                <>
+                  <Metric label="Время" value="~60с" caption="без длинной формы" compact />
+                  <Metric label="Формат" value="4" caption="варианта сервиса" compact />
+                  <Metric label="Риск" value="18+" caption="без гарантий" compact />
+                </>
+              ) : (
+                <>
+                  <Metric label="Шаг" value="1" caption="только VK" compact />
+                  <Metric label="Доставка" value="VK" caption="резерв" compact />
+                  <Metric label="Можно" value="позже" caption="в профиле" compact />
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -828,15 +905,15 @@ function IntroVkStep({
               exit={{ opacity: 0, y: 8 }}
               className="rounded-2xl border border-emerald-200/20 bg-emerald-400/12 p-4 text-center text-sm font-black leading-relaxed text-emerald-50 shadow-[0_0_34px_rgba(34,197,94,0.32)]"
             >
-              VK ID привязан: {displayName || 'профиль VK'}. Переходим к настройке.
+              VK ID привязан: {displayName || 'профиль VK'}. {welcomeQuizEnabled ? 'Переходим к настройке.' : 'Готовим кабинет.'}
             </motion.div>
           ) : (
             <ElectricButton
-              label={loading ? 'Открываем VK ID...' : 'Связать VK для дублирования'}
-              icon={loading ? Loader2 : Zap}
-              highlighted={vkReady && !loading}
-              loading={loading}
-              disabled={!vkReady || loading}
+              label={loading ? 'Открываем VK ID...' : welcomeQuizEnabled ? 'Связать VK для дублирования' : 'Связать VK'}
+              icon={loading || completing ? Loader2 : Zap}
+              highlighted={vkReady && !busy}
+              loading={busy}
+              disabled={!vkReady || busy}
               glow={glow}
               calm={calm}
               onClick={onLink}
@@ -855,10 +932,10 @@ function IntroVkStep({
         <button
           type="button"
           onClick={onSkip}
-          disabled={loading}
+          disabled={busy}
           className="mx-auto rounded-full border border-white/5 bg-white/[0.025] px-4 py-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-white/15 hover:bg-white/[0.055] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Настроить без VK
+          {completing ? 'Завершаем...' : welcomeQuizEnabled ? 'Настроить без VK' : 'Пропустить шаг'}
         </button>
       )}
     </div>

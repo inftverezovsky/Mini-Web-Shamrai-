@@ -25,6 +25,7 @@ MAX_SETTING_VALUE_LENGTH = 65536
 THEME_PRIMARY_COLOR_KEY = "THEME_PRIMARY_COLOR"
 THEME_SECONDARY_COLOR_KEY = "THEME_SECONDARY_COLOR"
 GLOBAL_PERFORMANCE_MODE_KEY = "GLOBAL_PERFORMANCE_MODE"
+WELCOME_QUIZ_ENABLED_KEY = "WELCOME_QUIZ_ENABLED"
 BRAND_LOGO_URL_KEY = "BRAND_LOGO_URL"
 BRAND_BACKGROUND_URL_KEY = "BRAND_BACKGROUND_URL"
 THEME_GLASS_OPACITY_KEY = "THEME_GLASS_OPACITY"
@@ -79,6 +80,12 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
         key="PAUSE_BROADCASTS",
         default_value="false",
         description="Экстренная пауза исходящих рассылок.",
+        value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key=WELCOME_QUIZ_ENABLED_KEY,
+        default_value="false",
+        description="Включает подробный приветственный опрос после шага VK-привязки.",
         value_kind="boolean",
     ),
     SystemSettingDefinition(
@@ -478,6 +485,7 @@ _PUBLIC_THEME_KEYS = (
     THEME_PRIMARY_COLOR_KEY,
     THEME_SECONDARY_COLOR_KEY,
     GLOBAL_PERFORMANCE_MODE_KEY,
+    WELCOME_QUIZ_ENABLED_KEY,
     BRAND_LOGO_URL_KEY,
     BRAND_BACKGROUND_URL_KEY,
     THEME_GLASS_OPACITY_KEY,
@@ -796,6 +804,9 @@ async def get_public_theme_settings(db: AsyncSession) -> dict[str, str | bool | 
         "secondary_color": _theme_value(stored_settings, THEME_SECONDARY_COLOR_KEY),
         "global_performance_mode": _coerce_boolean_value(
             _theme_value(stored_settings, GLOBAL_PERFORMANCE_MODE_KEY)
+        ) == "true",
+        "welcome_quiz_enabled": _coerce_boolean_value(
+            _theme_value(stored_settings, WELCOME_QUIZ_ENABLED_KEY)
         ) == "true",
         "brand_logo_url": _theme_value(stored_settings, BRAND_LOGO_URL_KEY),
         "brand_background_url": _theme_value(stored_settings, BRAND_BACKGROUND_URL_KEY),

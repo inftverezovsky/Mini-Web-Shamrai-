@@ -1,6 +1,7 @@
 export const THEME_PRIMARY_COLOR_KEY = 'THEME_PRIMARY_COLOR';
 export const THEME_SECONDARY_COLOR_KEY = 'THEME_SECONDARY_COLOR';
 export const GLOBAL_PERFORMANCE_MODE_KEY = 'GLOBAL_PERFORMANCE_MODE';
+export const WELCOME_QUIZ_ENABLED_KEY = 'WELCOME_QUIZ_ENABLED';
 export const BRAND_LOGO_URL_KEY = 'BRAND_LOGO_URL';
 export const BRAND_BACKGROUND_URL_KEY = 'BRAND_BACKGROUND_URL';
 export const THEME_GLASS_OPACITY_KEY = 'THEME_GLASS_OPACITY';
@@ -16,6 +17,7 @@ export const DEFAULT_THEME_SETTINGS = {
   primary_color: '#00d2ff',
   secondary_color: '#d946ef',
   global_performance_mode: false,
+  welcome_quiz_enabled: false,
   brand_logo_url: '',
   brand_background_url: '',
   glass_opacity: 0.42,
@@ -32,6 +34,7 @@ export type ThemeSettingKey =
   | typeof THEME_PRIMARY_COLOR_KEY
   | typeof THEME_SECONDARY_COLOR_KEY
   | typeof GLOBAL_PERFORMANCE_MODE_KEY
+  | typeof WELCOME_QUIZ_ENABLED_KEY
   | typeof BRAND_LOGO_URL_KEY
   | typeof BRAND_BACKGROUND_URL_KEY
   | typeof THEME_GLASS_OPACITY_KEY
@@ -45,6 +48,7 @@ export interface PublicThemeSettingsResponse {
   primary_color: string;
   secondary_color: string;
   global_performance_mode: boolean;
+  welcome_quiz_enabled: boolean;
   brand_logo_url: string;
   brand_background_url: string;
   glass_opacity: number;
@@ -106,6 +110,7 @@ export function normalizedThemeSettings(theme?: Partial<PublicThemeSettingsRespo
     primary_color: normalizeHexColor(theme?.primary_color, DEFAULT_THEME_SETTINGS.primary_color),
     secondary_color: normalizeHexColor(theme?.secondary_color, DEFAULT_THEME_SETTINGS.secondary_color),
     global_performance_mode: Boolean(theme?.global_performance_mode),
+    welcome_quiz_enabled: Boolean(theme?.welcome_quiz_enabled),
     brand_logo_url: normalizePublicUrl(theme?.brand_logo_url),
     brand_background_url: normalizePublicUrl(theme?.brand_background_url),
     glass_opacity: normalizeNumberRange(theme?.glass_opacity, DEFAULT_THEME_SETTINGS.glass_opacity, 0.15, 0.9),

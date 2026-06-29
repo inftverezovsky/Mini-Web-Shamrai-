@@ -19,6 +19,7 @@ import {
   THEME_PRIMARY_COLOR_KEY,
   THEME_RADIUS_SCALE_KEY,
   THEME_SECONDARY_COLOR_KEY,
+  WELCOME_QUIZ_ENABLED_KEY,
   normalizeHexColor,
 } from '../../features/settings/themeSettings';
 import {
@@ -83,7 +84,7 @@ interface SettingsTabConfig {
   Icon: LucideIcon;
 }
 
-type SwitchSettingKey = 'MAINTENANCE_MODE' | 'DISABLE_REGISTRATIONS' | 'PAUSE_BROADCASTS';
+type SwitchSettingKey = 'MAINTENANCE_MODE' | 'DISABLE_REGISTRATIONS' | 'PAUSE_BROADCASTS' | typeof WELCOME_QUIZ_ENABLED_KEY;
 type SecretSettingKey = string;
 type SystemSettingKey = string;
 
@@ -279,6 +280,13 @@ const SWITCH_SETTINGS: SwitchSettingConfig[] = [
     description: 'Новые пользователи не смогут пройти регистрацию, текущие клиенты останутся внутри.',
     badge: 'club',
     tone: 'cyan',
+  },
+  {
+    key: WELCOME_QUIZ_ENABLED_KEY,
+    title: 'Приветственный опрос',
+    description: 'Включает подробный опрос после VK-шага. Если выключено, первый вход состоит только из VK-привязки или пропуска.',
+    badge: 'survey',
+    tone: 'amber',
   },
 ];
 
@@ -523,6 +531,7 @@ const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   MAINTENANCE_MODE: false,
   DISABLE_REGISTRATIONS: false,
   PAUSE_BROADCASTS: false,
+  WELCOME_QUIZ_ENABLED: DEFAULT_THEME_SETTINGS.welcome_quiz_enabled,
   THEME_PRIMARY_COLOR: DEFAULT_THEME_SETTINGS.primary_color,
   THEME_SECONDARY_COLOR: DEFAULT_THEME_SETTINGS.secondary_color,
   GLOBAL_PERFORMANCE_MODE: DEFAULT_THEME_SETTINGS.global_performance_mode,
@@ -727,6 +736,7 @@ function formValuesFromSettings(data?: AdminSettingsResponse): AdminSettingsForm
     MAINTENANCE_MODE: truthySettingValue(settingsByKey.get('MAINTENANCE_MODE')?.value),
     DISABLE_REGISTRATIONS: truthySettingValue(settingsByKey.get('DISABLE_REGISTRATIONS')?.value),
     PAUSE_BROADCASTS: truthySettingValue(settingsByKey.get('PAUSE_BROADCASTS')?.value),
+    WELCOME_QUIZ_ENABLED: truthySettingValue(settingsByKey.get(WELCOME_QUIZ_ENABLED_KEY)?.value),
     THEME_PRIMARY_COLOR: normalizeHexColor(
       settingsByKey.get(THEME_PRIMARY_COLOR_KEY)?.value,
       DEFAULT_THEME_SETTINGS.primary_color,
@@ -767,6 +777,10 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
     {
       key: 'PAUSE_BROADCASTS',
       value: truthySettingValue(values.PAUSE_BROADCASTS) ? 'true' : 'false',
+    },
+    {
+      key: WELCOME_QUIZ_ENABLED_KEY,
+      value: truthySettingValue(values[WELCOME_QUIZ_ENABLED_KEY]) ? 'true' : 'false',
     },
     {
       key: THEME_PRIMARY_COLOR_KEY,
@@ -1580,6 +1594,7 @@ export default function AdminSettings() {
     const broadcastsPaused = truthySettingValue(settingsForm.watch('PAUSE_BROADCASTS'));
     const maintenanceMode = truthySettingValue(settingsForm.watch('MAINTENANCE_MODE'));
     const registrationsDisabled = truthySettingValue(settingsForm.watch('DISABLE_REGISTRATIONS'));
+    const welcomeQuizEnabled = truthySettingValue(settingsForm.watch(WELCOME_QUIZ_ENABLED_KEY));
 
     return (
       <form
@@ -1592,14 +1607,14 @@ export default function AdminSettings() {
         <SettingsAccordionSection
           id="switches-access"
           title="Доступ и режимы"
-          subtitle="Maintenance mode и закрытый клуб для новых регистраций"
-          badge={`${Number(maintenanceMode) + Number(registrationsDisabled)}/2 on`}
+          subtitle="Maintenance mode, регистрации и приветственный опрос"
+          badge={`${Number(maintenanceMode) + Number(registrationsDisabled) + Number(welcomeQuizEnabled)}/3 on`}
           Icon={ToggleLeft}
           open={sectionIsOpen('switches', 'switches-access')}
           onToggle={() => toggleAccordionSection('switches', 'switches-access')}
           dirty={settingsFormDirty}
         >
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
             {SWITCH_SETTINGS.map(renderSwitchToggle)}
           </div>
         </SettingsAccordionSection>
@@ -1680,9 +1695,10 @@ export default function AdminSettings() {
           open={sectionIsOpen('switches', 'switches-audit')}
           onToggle={() => toggleAccordionSection('switches', 'switches-audit')}
         >
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             {renderMetricCard('Maintenance', maintenanceMode ? 'ON' : 'OFF', 'Ограничение пользовательских сценариев.', maintenanceMode ? 'amber' : 'emerald')}
             {renderMetricCard('Регистрации', registrationsDisabled ? 'Закрыты' : 'Открыты', 'Контроль входа новых пользователей.', registrationsDisabled ? 'amber' : 'emerald')}
+            {renderMetricCard('Опрос', welcomeQuizEnabled ? 'Включен' : 'VK-шаг', 'Контроль подробного приветственного опроса.', welcomeQuizEnabled ? 'amber' : 'emerald')}
             {renderMetricCard('Рассылки', broadcastsPaused ? 'Пауза' : 'Активны', 'Контроль массовой доставки.', broadcastsPaused ? 'amber' : 'emerald')}
           </div>
         </SettingsAccordionSection>

@@ -39,6 +39,7 @@ describe('settings theme manager helpers', () => {
       theme_density: 'compact',
       glow_strength: 1.2,
       global_performance_mode: true,
+      welcome_quiz_enabled: true,
     });
 
     expect(theme.primary_color).toBe('#abcdef');
@@ -48,6 +49,7 @@ describe('settings theme manager helpers', () => {
     expect(theme.glass_blur_px).toBe(22);
     expect(theme.theme_density).toBe('compact');
     expect(theme.global_performance_mode).toBe(true);
+    expect(theme.welcome_quiz_enabled).toBe(true);
   });
 
   it('applies brand-kit values to root CSS variables and flags', () => {

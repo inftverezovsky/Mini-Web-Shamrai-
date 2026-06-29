@@ -99,6 +99,11 @@ const DEFAULT_MOCK_SYSTEM_SETTINGS = [
     description: 'Экстренная пауза исходящих рассылок.',
   },
   {
+    key: 'WELCOME_QUIZ_ENABLED',
+    value: 'false',
+    description: 'Включает подробный приветственный опрос после шага VK-привязки.',
+  },
+  {
     key: 'VK_ACCESS_TOKEN',
     value: '',
     description: 'Токен доступа VK для внешних интеграций.',
@@ -263,6 +268,7 @@ function getMockPublicThemeSettings() {
     primary_color: settingByKey.get('THEME_PRIMARY_COLOR')?.value || '#00d2ff',
     secondary_color: settingByKey.get('THEME_SECONDARY_COLOR')?.value || '#d946ef',
     global_performance_mode: settingByKey.get('GLOBAL_PERFORMANCE_MODE')?.value === 'true',
+    welcome_quiz_enabled: settingByKey.get('WELCOME_QUIZ_ENABLED')?.value === 'true',
     brand_logo_url: settingByKey.get('BRAND_LOGO_URL')?.value || '',
     brand_background_url: settingByKey.get('BRAND_BACKGROUND_URL')?.value || '',
     glass_opacity: Number(settingByKey.get('THEME_GLASS_OPACITY')?.value || 0.42),

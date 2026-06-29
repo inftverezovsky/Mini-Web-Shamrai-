@@ -244,7 +244,7 @@ function useWheelScrollBridge() {
 
 export default function App() {
   const queryClient = useQueryClient();
-  useThemeManager();
+  const themeQuery = useThemeManager();
   const { isReady, isTelegram } = useTelegram();
   const userProfile = useAuthSelector((state) => state.user);
   const loading = useAuthSelector((state) => state.loading);
@@ -406,6 +406,7 @@ export default function App() {
   const showAdminInterface = isAdmin && !adminPreviewMode;
   const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
   const hasCabinetAccess = Boolean(userProfile && (isAdmin || canEnterCabinet(userProfile)));
+  const welcomeQuizEnabled = Boolean(themeQuery.data?.welcome_quiz_enabled);
   const needsOnboarding = Boolean(
     userProfile
     && (forceOnboarding || userProfile.is_onboarded === false)
@@ -714,7 +715,10 @@ export default function App() {
               description="Остальная часть приложения продолжит работать, а анкету можно попробовать открыть повторно."
             >
               <Suspense fallback={<PageSkeleton />}>
-                <Onboarding onCompleted={fetchUserProfile} />
+                <Onboarding
+                  welcomeQuizEnabled={welcomeQuizEnabled}
+                  onCompleted={fetchUserProfile}
+                />
               </Suspense>
             </AppErrorBoundary>
           </div>
