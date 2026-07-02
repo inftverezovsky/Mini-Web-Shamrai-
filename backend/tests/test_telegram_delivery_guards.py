@@ -69,6 +69,22 @@ class TelegramDeliveryGuardTests(unittest.TestCase):
         self.assertEqual(payload["secret_token"], "secret")
         self.assertIn("callback_query", payload["allowed_updates"])
 
+    def test_emoji_ids_command_defaults_deny_when_allowlist_is_empty(self):
+        with (
+            patch.object(telegram_webhook.settings, "OWNER_TELEGRAM_ID", None),
+            patch.object(telegram_webhook.settings, "SALES_MANAGER_TELEGRAM_ID", None),
+        ):
+            self.assertFalse(telegram_webhook._can_use_emoji_id_command(12345))
+
+    def test_emoji_ids_command_allows_owner_or_sales_manager_only(self):
+        with (
+            patch.object(telegram_webhook.settings, "OWNER_TELEGRAM_ID", 111),
+            patch.object(telegram_webhook.settings, "SALES_MANAGER_TELEGRAM_ID", 222),
+        ):
+            self.assertTrue(telegram_webhook._can_use_emoji_id_command(111))
+            self.assertTrue(telegram_webhook._can_use_emoji_id_command(222))
+            self.assertFalse(telegram_webhook._can_use_emoji_id_command(333))
+
 
 class HealthDiagnosticsAccessTests(unittest.TestCase):
     def test_public_health_remains_public(self):

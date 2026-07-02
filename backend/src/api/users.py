@@ -343,6 +343,21 @@ def normalize_onboarding_sports(sports: List[str]) -> List[str]:
     return normalized
 
 
+def normalize_preferred_sports(sports: List[str]) -> List[str]:
+    if len(sports or []) > len(ALL_SPORT_LABELS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"preferred_sports can contain at most {len(ALL_SPORT_LABELS)} items",
+        )
+    try:
+        return normalize_onboarding_sports(sports)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc.detail).replace("favorite_sports", "preferred_sports"),
+        ) from exc
+
+
 def normalize_service_format(service_format: Optional[str]) -> str:
     value = (service_format or "auto_fast").strip() or "auto_fast"
     if value not in SERVICE_FORMATS:
@@ -1146,6 +1161,9 @@ async def generate_user_pdf_report(
         spaceAfter=12
     )
 
+    def pdf_text(value: object) -> str:
+        return escape(str(value if value is not None else ""))
+
     header_style = ParagraphStyle(
         'TableHeader',
         parent=styles['Normal'],
@@ -1158,11 +1176,12 @@ async def generate_user_pdf_report(
     story.append(Paragraph("OFFICIAL PERFORMANCE COCKPIT REPORT", subtitle_style))
     
     # Metadata Block
+    user_profile = f"{current_user.first_name or ''} {current_user.last_name or ''} (@{current_user.username or 'none'})"
     meta_data = [
-        [Paragraph("<b>User Profile:</b>", body_style), Paragraph(f"{current_user.first_name or ''} {current_user.last_name or ''} (@{current_user.username or 'none'})", body_style)],
-        [Paragraph("<b>Telegram ID:</b>", body_style), Paragraph(str(current_user.telegram_id), body_style)],
-        [Paragraph("<b>Report Generated:</b>", body_style), Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC"), body_style)],
-        [Paragraph("<b>A/B Test Group:</b>", body_style), Paragraph(current_user.ab_group or "A", body_style)]
+        [Paragraph("<b>User Profile:</b>", body_style), Paragraph(pdf_text(user_profile), body_style)],
+        [Paragraph("<b>Telegram ID:</b>", body_style), Paragraph(pdf_text(current_user.telegram_id), body_style)],
+        [Paragraph("<b>Report Generated:</b>", body_style), Paragraph(pdf_text(datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")), body_style)],
+        [Paragraph("<b>A/B Test Group:</b>", body_style), Paragraph(pdf_text(current_user.ab_group or "A"), body_style)]
     ]
     t_meta = Table(meta_data, colWidths=[150, 400])
     t_meta.setStyle(TableStyle([
@@ -1214,10 +1233,10 @@ async def generate_user_pdf_report(
     
     for bet in bets[:15]: # Show up to last 15 bets to fit nicely in pages
         hist_rows.append([
-            Paragraph(bet.created_at.strftime("%Y-%m-%d"), body_style),
-            Paragraph(bet.event_name, body_style),
-            Paragraph(f"{float(bet.coefficient):.2f}", body_style),
-            Paragraph(bet.status.upper(), ParagraphStyle('ResultCol', parent=body_style, textColor=pink_color if bet.status == 'win' else colors.red if bet.status == 'loss' else colors.grey))
+            Paragraph(pdf_text(bet.created_at.strftime("%Y-%m-%d")), body_style),
+            Paragraph(pdf_text(bet.event_name), body_style),
+            Paragraph(pdf_text(f"{float(bet.coefficient):.2f}"), body_style),
+            Paragraph(pdf_text(bet.status.upper()), ParagraphStyle('ResultCol', parent=body_style, textColor=pink_color if bet.status == 'win' else colors.red if bet.status == 'loss' else colors.grey))
         ])
         
     t_hist = Table(hist_rows, colWidths=[100, 270, 80, 100])
@@ -1313,7 +1332,7 @@ async def update_my_preferences(
         current_user.night_mode_end = next_night_mode_end
 
     if data.preferred_sports is not None:
-        current_user.preferred_sports = data.preferred_sports
+        current_user.preferred_sports = normalize_preferred_sports(data.preferred_sports)
 
     if data.stats_display_mode is not None:
         if data.stats_display_mode not in ("percent", "flat"):

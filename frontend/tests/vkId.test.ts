@@ -133,8 +133,6 @@ describe('VK ID auth helper', () => {
   it('completes VK redirect through backend complete endpoint', async () => {
     setBrowserEnv();
     apiFetchMock.mockResolvedValue({
-      access_token: 'jwt',
-      token_type: 'bearer',
       user: { telegram_id: -1001 },
     });
     const { completeVkRedirect } = await import('../src/utils/vkId');
@@ -156,8 +154,6 @@ describe('VK ID auth helper', () => {
       }),
     });
     expect(result).toEqual({
-      access_token: 'jwt',
-      token_type: 'bearer',
       user: { telegram_id: -1001 },
     });
   });

@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from pydantic import ValidationError
 
+from fastapi import HTTPException
+from src.api import users
 from src.schemas.schemas import (
     ABTestConfigCreate,
     AdminGrantRequest,
@@ -114,6 +116,18 @@ class SchemaValidationBoundaryTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             AnnouncementCreate(title="Line moved", match_link="file:///etc/passwd")
+
+    def test_preferred_sports_are_deduplicated_and_allowlisted(self):
+        self.assertEqual(
+            users.normalize_preferred_sports(["Футбол", "Футбол", " Теннис ", ""]),
+            ["Футбол", "Теннис"],
+        )
+
+        with self.assertRaises(HTTPException):
+            users.normalize_preferred_sports(["Квиддич"])
+
+        with self.assertRaises(HTTPException):
+            users.normalize_preferred_sports(users.ALL_SPORT_LABELS + ["Футбол"])
 
 
 if __name__ == "__main__":

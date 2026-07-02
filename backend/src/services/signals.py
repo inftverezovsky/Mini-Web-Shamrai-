@@ -20,6 +20,7 @@ from src.core.message_templates import (
 )
 from src.core.redis_cache import flush_signal_page_cache_invalidations, queue_signal_page_cache_invalidation
 from src.core.telegram_delivery import is_personal_telegram_user_id
+from src.core.web_push_security import validate_public_web_push_endpoint
 from src.models.database import AsyncSessionLocal
 from src.models.models import PersonalSignal, User
 from src.services.delivery_outbox import enqueue_signal_external_delivery_batch
@@ -279,6 +280,15 @@ def _web_push_notification_payload(signal_payload: dict[str, Any]) -> str:
 def _send_web_push(subscription: dict[str, Any], signal_payload: dict[str, Any]) -> dict[str, Any]:
     if not web_push_configured():
         return {"ok": False, "description": "Web Push VAPID is not configured"}
+
+    try:
+        validate_public_web_push_endpoint(str(subscription.get("endpoint") or ""))
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "description": str(exc),
+            "invalid_subscription": True,
+        }
 
     try:
         webpush(

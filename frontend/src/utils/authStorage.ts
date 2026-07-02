@@ -18,7 +18,7 @@ function isAllowedStoredToken(token: string | null): token is string {
 
 function isAllowedRuntimeToken(token: string | null): token is string {
   if (token === MOCK_DEBUG_AUTH_TOKEN) return DEBUG_AUTH_ENABLED;
-  return Boolean(token && looksLikeJwt(token));
+  return BEARER_AUTH_COMPAT_ENABLED && Boolean(token && looksLikeJwt(token));
 }
 
 function getBrowserStorage(type: 'local' | 'session'): Storage | null {
@@ -103,4 +103,15 @@ export function clearStoredAuthToken(): void {
   memoryAuthToken = null;
   removeStorage('session', AUTH_TOKEN_STORAGE_KEY);
   removeStorage('local', AUTH_TOKEN_STORAGE_KEY);
+}
+
+export function applyLoginAuthToken(accessToken?: string | null): string | null {
+  if (!accessToken) {
+    clearStoredAuthToken();
+    return null;
+  }
+
+  setStoredAuthToken(accessToken);
+  setRuntimeAuthToken(accessToken);
+  return getStoredAuthToken();
 }

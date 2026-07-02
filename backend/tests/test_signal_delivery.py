@@ -161,13 +161,31 @@ class SignalDeliveryTests(unittest.TestCase):
             patch.object(signals.settings, "WEB_PUSH_VAPID_PRIVATE_KEY", "private"),
         ):
             result = signals._send_web_push(
-                {"endpoint": "https://push.example/expired", "keys": {"p256dh": "x", "auth": "y"}},
+                {
+                    "endpoint": "https://updates.push.services.mozilla.com/wpush/v2/expired",
+                    "keys": {"p256dh": "x", "auth": "y"},
+                },
                 {"id": 77, "type": "forecast_full", "text": "Прогноз", "data": {}},
             )
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["status_code"], 410)
         self.assertTrue(result["invalid_subscription"])
+
+    def test_web_push_disallowed_endpoint_is_not_sent(self):
+        with (
+            patch.object(signals, "webpush") as webpush_mock,
+            patch.object(signals.settings, "WEB_PUSH_VAPID_PUBLIC_KEY", "public"),
+            patch.object(signals.settings, "WEB_PUSH_VAPID_PRIVATE_KEY", "private"),
+        ):
+            result = signals._send_web_push(
+                {"endpoint": "https://attacker.example.org/push", "keys": {"p256dh": "x", "auth": "y"}},
+                {"id": 77, "type": "forecast_full", "text": "Прогноз", "data": {}},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["invalid_subscription"])
+        webpush_mock.assert_not_called()
 
     def test_report_mode_can_commit_web_signals_before_external_push(self):
         db = FakeDb()

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_user, get_current_user_read
+from src.core.redis_cache import cache_pop_json_with_status, cache_set_json_with_status
 from src.core.roles import STAFF_ROLES, is_staff_role
 from src.models.database import AsyncSessionLocal, get_db, get_read_db
 from src.models.models import ChatConversation, ChatMessage, User
@@ -138,7 +139,9 @@ class ChatStreamTicketResponse(BaseModel):
 
 
 CHAT_STREAM_TICKET_TTL_SECONDS = 30
+CHAT_STREAM_TICKET_CACHE_PREFIX = "stream-ticket:v1:chat"
 _chat_stream_tickets: dict[str, tuple[int, float]] = {}
+_chat_stream_cache_backed_tickets: set[str] = set()
 _chat_stream_ticket_lock = RLock()
 
 
@@ -154,6 +157,7 @@ def _issue_chat_stream_ticket(user_id: int) -> str:
         ]
         for existing_ticket in expired:
             _chat_stream_tickets.pop(existing_ticket, None)
+            _chat_stream_cache_backed_tickets.discard(existing_ticket)
         _chat_stream_tickets[ticket] = (user_id, expires_at)
     return ticket
 
@@ -163,12 +167,59 @@ def _consume_chat_stream_ticket(ticket: str) -> Optional[int]:
         return None
     with _chat_stream_ticket_lock:
         item = _chat_stream_tickets.pop(ticket, None)
+        _chat_stream_cache_backed_tickets.discard(ticket)
     if not item:
         return None
     user_id, expires_at = item
     if expires_at <= time.monotonic():
         return None
     return user_id
+
+
+def _chat_stream_ticket_cache_key(ticket: str) -> str:
+    return f"{CHAT_STREAM_TICKET_CACHE_PREFIX}:{ticket}"
+
+
+def _stream_ticket_user_id(payload: Any) -> Optional[int]:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("user_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _issue_chat_stream_ticket_cached(user_id: int) -> str:
+    ticket = _issue_chat_stream_ticket(user_id)
+    cache_backed = await cache_set_json_with_status(
+        _chat_stream_ticket_cache_key(ticket),
+        {"user_id": int(user_id)},
+        ttl_seconds=CHAT_STREAM_TICKET_TTL_SECONDS,
+    )
+    if cache_backed:
+        with _chat_stream_ticket_lock:
+            if ticket in _chat_stream_tickets:
+                _chat_stream_cache_backed_tickets.add(ticket)
+    return ticket
+
+
+async def _consume_chat_stream_ticket_cached(ticket: str) -> Optional[int]:
+    if not ticket:
+        return None
+    cache_available, payload = await cache_pop_json_with_status(_chat_stream_ticket_cache_key(ticket))
+    user_id = _stream_ticket_user_id(payload)
+    if user_id is not None:
+        with _chat_stream_ticket_lock:
+            _chat_stream_tickets.pop(ticket, None)
+            _chat_stream_cache_backed_tickets.discard(ticket)
+        return user_id
+    if cache_available:
+        with _chat_stream_ticket_lock:
+            if ticket in _chat_stream_cache_backed_tickets:
+                _chat_stream_tickets.pop(ticket, None)
+                _chat_stream_cache_backed_tickets.discard(ticket)
+                return None
+    return _consume_chat_stream_ticket(ticket)
 
 
 def _safe_limit(limit: int, default: int = 50) -> int:
@@ -416,7 +467,7 @@ async def create_chat_stream_ticket(
     current_user: User = Depends(get_current_user),
 ):
     return ChatStreamTicketResponse(
-        ticket=_issue_chat_stream_ticket(current_user.telegram_id),
+        ticket=await _issue_chat_stream_ticket_cached(current_user.telegram_id),
         expires_in=CHAT_STREAM_TICKET_TTL_SECONDS,
     )
 
@@ -611,7 +662,7 @@ async def stream_chat_events(
     websocket: WebSocket,
     ticket: Annotated[str, Query()] = "",
 ):
-    user_id = _consume_chat_stream_ticket(ticket)
+    user_id = await _consume_chat_stream_ticket_cached(ticket)
     if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

@@ -42,7 +42,7 @@ describe('authStorage', () => {
     expect(authStorage.getRequestAuthToken()).toBeNull();
   });
 
-  it('keeps runtime auth tokens in memory when bearer compat storage is disabled', async () => {
+  it('rejects real runtime auth tokens when bearer compat is disabled', async () => {
     vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'false');
     const localStorage = memoryStorage();
     const sessionStorage = memoryStorage();
@@ -54,6 +54,20 @@ describe('authStorage', () => {
     expect(localStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
     expect(sessionStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
     expect(authStorage.getStoredAuthToken()).toBeNull();
+    expect(authStorage.getRequestAuthToken()).toBeNull();
+  });
+
+  it('allows runtime auth tokens only when bearer compat is enabled', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
+    const localStorage = memoryStorage();
+    const sessionStorage = memoryStorage();
+    vi.stubGlobal('window', { localStorage, sessionStorage });
+
+    const authStorage = await import('../src/utils/authStorage');
+    authStorage.setRuntimeAuthToken(validJwt);
+
+    expect(localStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
+    expect(sessionStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
     expect(authStorage.getRequestAuthToken()).toBe(validJwt);
   });
 
@@ -87,5 +101,23 @@ describe('authStorage', () => {
     setStoredAuthToken(MOCK_DEBUG_AUTH_TOKEN);
     expect(localStorage.setItem).toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, MOCK_DEBUG_AUTH_TOKEN);
     expect(getStoredAuthToken()).toBe(MOCK_DEBUG_AUTH_TOKEN);
+  });
+
+  it('clears stale bearer auth when applying a cookie-only login response', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
+    const localStorage = memoryStorage();
+    const sessionStorage = memoryStorage();
+    vi.stubGlobal('window', { localStorage, sessionStorage });
+
+    const authStorage = await import('../src/utils/authStorage');
+    authStorage.setStoredAuthToken(validJwt);
+    expect(authStorage.getRequestAuthToken()).toBe(validJwt);
+
+    expect(authStorage.applyLoginAuthToken(null)).toBeNull();
+
+    expect(localStorage.removeItem).toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY);
+    expect(sessionStorage.removeItem).toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY);
+    expect(authStorage.getStoredAuthToken()).toBeNull();
+    expect(authStorage.getRequestAuthToken()).toBeNull();
   });
 });

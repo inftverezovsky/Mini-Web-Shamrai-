@@ -63,8 +63,24 @@ describe('API auth client', () => {
     expect(headers.get('Authorization')).toBeNull();
   });
 
-  it('adds Authorization from runtime memory auth when bearer storage is disabled', async () => {
+  it('omits Authorization from runtime memory auth when bearer compat is disabled', async () => {
     vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'false');
+    setBrowserEnv();
+    const fetchMock = vi.fn().mockResolvedValue(okJson({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { setRuntimeAuthToken } = await import('../src/utils/authStorage');
+    const { requestApi } = await import('../src/api/client');
+    setRuntimeAuthToken(validJwt);
+
+    await requestApi('/users/me');
+
+    const headers = new Headers(fetchMock.mock.calls[0][1].headers);
+    expect(headers.get('Authorization')).toBeNull();
+  });
+
+  it('adds Authorization from runtime memory auth when bearer compat is enabled', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
     setBrowserEnv();
     const fetchMock = vi.fn().mockResolvedValue(okJson({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);

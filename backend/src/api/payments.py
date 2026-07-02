@@ -46,6 +46,54 @@ TELEGRAM_STARS_CHECKOUT_ERROR = "Не удалось создать счет Tel
 SUBSCRIPTION_PURCHASES_DISABLED_ERROR = "Покупка абонементов временно отключена"
 PROMO_REWARD_DISCOUNT = "discount"
 PROMO_REWARD_MATCHES = "matches"
+PAYMENT_AUDIT_METADATA_KEYS = {"attempt_id", "purchase_type", "plan_id", "bet_id", "crowd_bet_id"}
+PAYMENT_AUDIT_TOP_LEVEL_KEYS = {
+    "amount",
+    "currency",
+    "id",
+    "is_test",
+    "metadata",
+    "object",
+    "operation_id",
+    "order_id",
+    "paid",
+    "payment_id",
+    "payment_system",
+    "shop_id",
+    "status",
+    "test",
+}
+
+
+def _payment_audit_scalar(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _payment_audit_scalar(nested_value)
+            for key, nested_value in value.items()
+            if isinstance(key, str) and key in {"value", "currency"}
+        }
+    return str(value)
+
+
+def _processed_payment_payload(provider: str, raw_payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {"provider": provider}
+    for key, value in raw_payload.items():
+        if key == "metadata" and isinstance(value, dict):
+            metadata = {
+                metadata_key: _payment_audit_scalar(metadata_value)
+                for metadata_key, metadata_value in value.items()
+                if metadata_key in PAYMENT_AUDIT_METADATA_KEYS
+            }
+            if metadata:
+                sanitized["metadata"] = metadata
+            continue
+        if key in PAYMENT_AUDIT_TOP_LEVEL_KEYS:
+            sanitized[key] = _payment_audit_scalar(value)
+    return sanitized
 
 class InvoiceRequest(BaseModel):
     plan_id: Optional[int] = None
@@ -590,7 +638,7 @@ async def _process_payment_attempt(
     if raw_payload is not None:
         attempt.metadata_json = {
             **(attempt.metadata_json or {}),
-            "processed_payload": raw_payload,
+            "processed_payload": _processed_payment_payload(provider, raw_payload),
         }
     await db.flush()
     return result

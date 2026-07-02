@@ -1,9 +1,7 @@
-import ipaddress
 import secrets
 import time
 from threading import RLock
 from typing import Any, Optional
-from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -14,7 +12,9 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import get_current_user
 from src.core.config import settings
+from src.core.redis_cache import cache_pop_json_with_status, cache_set_json_with_status
 from src.core.roles import is_staff_role
+from src.core.web_push_security import validate_public_web_push_endpoint
 from src.models.database import AsyncSessionLocal, get_db
 from src.models.models import Bet, ForecastRequest, PersonalSignal, User
 from src.services.forecast_delivery import (
@@ -70,37 +70,7 @@ class WebPushSubscriptionPayload(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, value: str) -> str:
-        endpoint = value.strip()
-        parsed = urlparse(endpoint)
-        if parsed.scheme.lower() != "https" or not parsed.hostname:
-            raise ValueError("Web Push endpoint must be a public HTTPS URL")
-        if parsed.username or parsed.password:
-            raise ValueError("Web Push endpoint credentials are not allowed")
-        try:
-            parsed.port
-        except ValueError as exc:
-            raise ValueError("Web Push endpoint port is invalid") from exc
-
-        hostname = parsed.hostname.strip("[]").rstrip(".").lower()
-        reserved_names = ("localhost", ".localhost", ".local", ".invalid", ".test", ".example")
-        if hostname in {"localhost", "local"} or hostname.endswith(reserved_names[1:]):
-            raise ValueError("Web Push endpoint host must be public")
-
-        try:
-            address = ipaddress.ip_address(hostname)
-        except ValueError:
-            return endpoint
-
-        if (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        ):
-            raise ValueError("Web Push endpoint host must be public")
-        return endpoint
+        return validate_public_web_push_endpoint(value)
 
 
 class WebPushSubscriptionResponse(BaseModel):
@@ -125,7 +95,9 @@ class SignalStreamTicketResponse(BaseModel):
 
 
 SIGNAL_STREAM_TICKET_TTL_SECONDS = 30
+SIGNAL_STREAM_TICKET_CACHE_PREFIX = "stream-ticket:v1:signals"
 _signal_stream_tickets: dict[str, tuple[int, float]] = {}
+_signal_stream_cache_backed_tickets: set[str] = set()
 _signal_stream_ticket_lock = RLock()
 
 
@@ -231,6 +203,7 @@ def _issue_signal_stream_ticket(user_id: int) -> str:
         ]
         for existing_ticket in expired:
             _signal_stream_tickets.pop(existing_ticket, None)
+            _signal_stream_cache_backed_tickets.discard(existing_ticket)
         _signal_stream_tickets[ticket] = (user_id, expires_at)
     return ticket
 
@@ -240,12 +213,59 @@ def _consume_signal_stream_ticket(ticket: str) -> Optional[int]:
         return None
     with _signal_stream_ticket_lock:
         item = _signal_stream_tickets.pop(ticket, None)
+        _signal_stream_cache_backed_tickets.discard(ticket)
     if not item:
         return None
     user_id, expires_at = item
     if expires_at <= time.monotonic():
         return None
     return user_id
+
+
+def _signal_stream_ticket_cache_key(ticket: str) -> str:
+    return f"{SIGNAL_STREAM_TICKET_CACHE_PREFIX}:{ticket}"
+
+
+def _stream_ticket_user_id(payload: Any) -> Optional[int]:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("user_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _issue_signal_stream_ticket_cached(user_id: int) -> str:
+    ticket = _issue_signal_stream_ticket(user_id)
+    cache_backed = await cache_set_json_with_status(
+        _signal_stream_ticket_cache_key(ticket),
+        {"user_id": int(user_id)},
+        ttl_seconds=SIGNAL_STREAM_TICKET_TTL_SECONDS,
+    )
+    if cache_backed:
+        with _signal_stream_ticket_lock:
+            if ticket in _signal_stream_tickets:
+                _signal_stream_cache_backed_tickets.add(ticket)
+    return ticket
+
+
+async def _consume_signal_stream_ticket_cached(ticket: str) -> Optional[int]:
+    if not ticket:
+        return None
+    cache_available, payload = await cache_pop_json_with_status(_signal_stream_ticket_cache_key(ticket))
+    user_id = _stream_ticket_user_id(payload)
+    if user_id is not None:
+        with _signal_stream_ticket_lock:
+            _signal_stream_tickets.pop(ticket, None)
+            _signal_stream_cache_backed_tickets.discard(ticket)
+        return user_id
+    if cache_available:
+        with _signal_stream_ticket_lock:
+            if ticket in _signal_stream_cache_backed_tickets:
+                _signal_stream_tickets.pop(ticket, None)
+                _signal_stream_cache_backed_tickets.discard(ticket)
+                return None
+    return _consume_signal_stream_ticket(ticket)
 
 
 @router.get("/web-push/public-key", response_model=WebPushPublicKeyResponse)
@@ -297,7 +317,7 @@ async def create_signal_stream_ticket(
     current_user: User = Depends(get_current_user),
 ):
     return SignalStreamTicketResponse(
-        ticket=_issue_signal_stream_ticket(current_user.telegram_id),
+        ticket=await _issue_signal_stream_ticket_cached(current_user.telegram_id),
         expires_in=SIGNAL_STREAM_TICKET_TTL_SECONDS,
     )
 
@@ -408,7 +428,7 @@ async def stream_personal_signals(
     websocket: WebSocket,
     ticket: str = Query(""),
 ):
-    user_id = _consume_signal_stream_ticket(ticket)
+    user_id = await _consume_signal_stream_ticket_cached(ticket)
     if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

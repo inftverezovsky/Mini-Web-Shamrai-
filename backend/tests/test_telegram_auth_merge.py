@@ -421,7 +421,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(response.status, "confirmed")
-            self.assertIsNotNone(response.access_token)
+            self.assertIsNone(response.access_token)
             self.assertIsNotNone(response.user)
             self.assertEqual(response.user.telegram_id, 123456789)
             self.assertFalse(response.user.is_web_only)
@@ -518,7 +518,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             await telegram_auth.consume_telegram_bot_auth_session(session.auth_token)
             self.assertEqual(cached_sessions, {})
 
-    async def test_vk_first_then_telegram_same_device_merges_into_one_user(self):
+    async def test_vk_first_then_telegram_same_device_does_not_merge_without_current_cookie(self):
         device_id = "550e8400-e29b-41d4-a716-446655440000"
         async with self.Session() as db:
             with patch.object(
@@ -557,9 +557,38 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(tg_response.user.telegram_id, 223456789)
+            self.assertIsNone(tg_response.user.vk_user_id)
+            self.assertFalse(tg_response.user.identity_complete)
+            self.assertEqual(tg_response.user.identity_providers, ["telegram"])
+
+            result = await db.execute(select(User))
+            users = result.scalars().all()
+            self.assertEqual(len(users), 2)
+            self.assertEqual(sorted(user.telegram_id for user in users), [vk_response.user.telegram_id, 223456789])
+
+    async def test_vk_first_then_telegram_current_cookie_merges_into_one_user(self):
+        async with self.Session() as db:
+            web_user = await auth._create_vk_only_user(db, "741852963", "VK Client")
+            web_user.matches_remaining = 3
+            await db.commit()
+            web_user = await auth._load_user_with_profile(db, web_user.telegram_id)
+
+            with patch.object(
+                auth,
+                "verify_telegram_init_data",
+                return_value={"id": 223456789, "first_name": "Telegram", "username": "tg_user"},
+            ):
+                tg_response = await auth.login_user(
+                    auth.LoginRequest(initData="signed"),
+                    response=Response(),
+                    current_user=web_user,
+                    db=db,
+                )
+
+            self.assertEqual(tg_response.user.telegram_id, 223456789)
             self.assertEqual(tg_response.user.vk_user_id, "741852963")
             self.assertTrue(tg_response.user.identity_complete)
-            self.assertEqual(tg_response.user.identity_providers, ["telegram", "vk"])
+            self.assertEqual(tg_response.user.matches_remaining, 3)
 
             result = await db.execute(select(User))
             users = result.scalars().all()
@@ -567,7 +596,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(users[0].telegram_id, 223456789)
             self.assertEqual(users[0].vk_user_id, "741852963")
 
-    async def test_telegram_first_then_vk_same_device_attaches_vk_to_telegram_user(self):
+    async def test_telegram_first_then_vk_same_device_does_not_attach_without_current_cookie(self):
         device_id = "550e8400-e29b-41d4-a716-446655440001"
         async with self.Session() as db:
             with patch.object(
@@ -605,15 +634,14 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
                     db=db,
                 )
 
-            self.assertEqual(vk_response.user.telegram_id, 323456789)
+            self.assertLess(vk_response.user.telegram_id, 0)
             self.assertEqual(vk_response.user.vk_user_id, "741852963")
-            self.assertTrue(vk_response.user.identity_complete)
+            self.assertFalse(vk_response.user.identity_complete)
 
             result = await db.execute(select(User))
             users = result.scalars().all()
-            self.assertEqual(len(users), 1)
-            self.assertEqual(users[0].telegram_id, 323456789)
-            self.assertEqual(users[0].vk_user_id, "741852963")
+            self.assertEqual(len(users), 2)
+            self.assertEqual(sorted(user.telegram_id for user in users), [vk_response.user.telegram_id, 323456789])
 
     async def test_first_telegram_login_enqueues_registration_report_without_onboarding(self):
         async with self.Session() as db:
@@ -691,7 +719,7 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             users = result.scalars().all()
             self.assertEqual([user.telegram_id for user in users], [111111111, 222222222])
 
-    async def test_vk_login_conflicts_when_vk_belongs_to_another_real_telegram(self):
+    async def test_vk_login_ignores_stolen_device_link_when_vk_belongs_to_real_telegram(self):
         device_id = "550e8400-e29b-41d4-a716-446655440003"
         async with self.Session() as db:
             existing_vk_owner = User(
@@ -719,21 +747,22 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
                 "_exchange_vk_or_502",
                 new=AsyncMock(return_value={"vk_user_id": "741852963", "vk_display_name": "VK Client"}),
             ):
-                with self.assertRaises(HTTPException) as exc:
-                    await auth.vk_id_login(
-                        auth.VkOAuthCodeRequest(
-                            code="code",
-                            device_id="device",
-                            code_verifier="verifier",
-                            state="state",
-                        ),
-                        response=Response(),
-                        identity_device_id=device_id,
-                        current_user=None,
-                        db=db,
-                    )
+                response = await auth.vk_id_login(
+                    auth.VkOAuthCodeRequest(
+                        code="code",
+                        device_id="device",
+                        code_verifier="verifier",
+                        state="state",
+                    ),
+                    response=Response(),
+                    identity_device_id=device_id,
+                    current_user=None,
+                    db=db,
+                )
 
-            self.assertEqual(exc.exception.status_code, 409)
+            self.assertEqual(response.user.telegram_id, existing_vk_owner.telegram_id)
+            refreshed_device_user = await db.get(User, device_user.telegram_id)
+            self.assertIsNone(refreshed_device_user.vk_user_id)
 
     async def test_admin_merge_moves_extended_user_related_records_and_deletes_source(self):
         async with self.Session() as db:
@@ -897,6 +926,34 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(merged_user.matches_remaining, 7)
             self.assertTrue(merged_user.is_onboarded)
             self.assertEqual(merged_user.username, "tg_user")
+
+    async def test_web_only_admin_role_is_not_transferred_to_telegram_profile(self):
+        async with self.Session() as db:
+            web_user = User(
+                telegram_id=-1002,
+                phone="+79990001123",
+                first_name="Web",
+                role="admin",
+                stats_display_mode="percent",
+                purchased_bets_balance=1,
+                matches_remaining=1,
+                tg_chat_joined=False,
+            )
+            db.add(web_user)
+            await db.commit()
+
+            user = await auth._upsert_telegram_user(
+                db,
+                {
+                    "id": 123456790,
+                    "phone_number": "+7 (999) 000-11-23",
+                    "first_name": "Telegram",
+                },
+            )
+            await db.commit()
+
+            self.assertEqual(user.telegram_id, 123456790)
+            self.assertEqual(user.role, "user")
 
     async def test_rejects_phone_bound_to_another_real_telegram_profile(self):
         async with self.Session() as db:

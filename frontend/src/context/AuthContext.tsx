@@ -12,11 +12,10 @@ import { AUTH_EXPIRED_EVENT, apiFetch } from '../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED, DEBUG_ROLE_STORAGE_KEY } from '../config/api';
 import {
   MOCK_DEBUG_AUTH_TOKEN,
+  applyLoginAuthToken,
   clearStoredAuthToken,
-  getRequestAuthToken,
   getStoredAuthToken,
   setStoredAuthToken,
-  setRuntimeAuthToken,
 } from '../utils/authStorage';
 import { formatApiErrorMessage } from '../api/errors';
 import {
@@ -60,7 +59,7 @@ interface TelegramBotAuthStartResponse {
 
 interface TelegramBotAuthStatusResponse {
   status: 'pending' | 'confirmed' | 'expired' | 'consumed';
-  access_token?: string;
+  access_token?: string | null;
   token_type?: string;
   user?: UserResponse;
 }
@@ -265,11 +264,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearStoredAuthToken();
   }, [setAuthState]);
 
-  const applyLoginResponse = useCallback((data: { access_token: string; user: UserResponse }) => {
+  const applyLoginResponse = useCallback((data: { access_token?: string | null; user: UserResponse }) => {
     clearVkAuthCooldown();
-    setStoredAuthToken(data.access_token);
-    setRuntimeAuthToken(data.access_token);
-    setToken(getRequestAuthToken());
+    setToken(applyLoginAuthToken(data.access_token));
     setUser(data.user);
     clearCsrfToken();
     setError(null);
@@ -424,8 +421,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(null);
 
       const data = await completeVkRedirect(redirectResult);
-      if ('access_token' in data && data.access_token && 'user' in data) {
-        applyLoginResponse(data as { access_token: string; user: UserResponse });
+      if ('user' in data && data.user) {
+        applyLoginResponse(data as { access_token?: string | null; user: UserResponse });
         return true;
       }
 
@@ -490,11 +487,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             `/auth/telegram/bot-session/${encodeURIComponent(session.auth_token)}`,
           );
 
-          if (authStatus.status === 'confirmed' && authStatus.access_token && authStatus.user) {
-            applyLoginResponse({
-              access_token: authStatus.access_token,
-              user: authStatus.user,
-            });
+          if (authStatus.status === 'confirmed' && authStatus.user) {
+            applyLoginResponse(authStatus as { access_token?: string | null; user: UserResponse });
             return;
           }
 

@@ -84,15 +84,48 @@ async def cache_get_json(key: str) -> Any | None:
         return None
 
 
-async def cache_set_json(key: str, value: Any, ttl_seconds: int | None = None) -> None:
+async def cache_pop_json_with_status(key: str) -> tuple[bool, Any | None]:
+    client = get_redis_client()
+    if client is None or not key:
+        return False, None
+    try:
+        getdel = getattr(client, "getdel", None)
+        if getdel is not None:
+            raw_value = await getdel(key)
+        else:
+            raw_value, _ = await client.pipeline(transaction=True).get(key).delete(key).execute()
+    except Exception as exc:
+        _suspend_cache_temporarily(key, exc)
+        return False, None
+    if raw_value is None:
+        return True, None
+    try:
+        return True, json.loads(raw_value)
+    except json.JSONDecodeError:
+        await cache_delete(key)
+        return True, None
+
+
+async def cache_pop_json(key: str) -> Any | None:
+    _, value = await cache_pop_json_with_status(key)
+    return value
+
+
+async def cache_set_json_with_status(key: str, value: Any, ttl_seconds: int | None = None) -> bool:
     client = get_redis_client()
     if client is None:
-        return
+        return False
     ttl = max(1, int(ttl_seconds or settings.REDIS_HOT_CACHE_TTL_SECONDS))
     try:
         await client.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl)
     except Exception as exc:
         _suspend_cache_temporarily(key, exc)
+        return False
+    return True
+
+
+async def cache_set_json(key: str, value: Any, ttl_seconds: int | None = None) -> None:
+    await cache_set_json_with_status(key, value, ttl_seconds=ttl_seconds)
 
 
 async def cache_delete(*keys: str) -> None:

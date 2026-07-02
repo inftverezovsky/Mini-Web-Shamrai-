@@ -1,10 +1,12 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi import Response
 
 from src.api import auth
 from src.core import csrf
+from src.models.models import User
 
 
 def _set_cookie_headers(response: Response) -> list[str]:
@@ -32,6 +34,45 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("path=/api", cookie)
         self.assertIn("max-age=2592000", cookie)
         self.assertNotIn("; secure", cookie)
+
+    def test_login_response_sets_cookie_without_exposing_bearer_token(self):
+        response = Response()
+        now = datetime.now(timezone.utc)
+        user = User(
+            telegram_id=12345,
+            first_name="Client",
+            role="user",
+            stats_display_mode="percent",
+            bankroll=0.0,
+            is_onboarded=False,
+            favorite_sports=[],
+            vk_group_member=False,
+            vk_messages_allowed=False,
+            vk_notifications_allowed=False,
+            currency_preference="RUB",
+            purchased_bets_balance=0,
+            free_bets_available=0,
+            matches_remaining=0,
+            guarantee_active=False,
+            tg_chat_joined=False,
+            has_used_shield=False,
+            alert_min_coef=1.0,
+            odds_drop_notifications_enabled=True,
+            is_night_mode=False,
+            night_mode_start="23:00",
+            night_mode_end="08:00",
+            preferred_sports=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+        payload = auth._build_login_response(user, response)
+
+        self.assertIsNone(payload.access_token)
+        self.assertNotIn("access_token", payload.model_dump(exclude_none=True))
+        cookie = "; ".join(_set_cookie_headers(response)).lower()
+        self.assertIn("shamrai_access_token=", cookie)
+        self.assertIn("httponly", cookie)
 
     async def test_logout_clears_auth_cookie(self):
         response = Response()

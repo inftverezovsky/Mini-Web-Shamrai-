@@ -139,7 +139,7 @@ class VkAuthCompleteRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    access_token: str
+    access_token: Optional[str] = None
     token_type: str = "bearer"
     user: UserResponse
 
@@ -693,7 +693,7 @@ def _build_login_response(user: User, response: Optional[Response] = None) -> Lo
     if response is not None:
         _set_auth_cookie(response, access_token)
         set_csrf_cookie(response)
-    return LoginResponse(access_token=access_token, user=user)
+    return LoginResponse(user=user)
 
 
 def _registration_report_line(label: str, value: object) -> str:
@@ -943,7 +943,6 @@ def _is_web_only_user(user: User) -> bool:
 
 
 PROFILE_TRANSFER_FIELDS = (
-    "role",
     "stats_display_mode",
     "bankroll",
     "is_onboarded",
@@ -1328,6 +1327,7 @@ async def _promote_web_user_to_telegram(
             if source.referred_by_user_id not in {source_id, tg_id}
             else referred_by_user_id
         ),
+        role="owner" if is_owner else "user",
     )
     _copy_full_profile_fields(target, source)
     if is_owner:
@@ -1435,12 +1435,11 @@ async def _resolve_telegram_login_user(
     identity_device_id: Any,
     registration_source: str,
 ) -> User:
-    device_user = None if current_user else await _load_identity_device_user(db, identity_device_id)
     return await _upsert_telegram_user_with_optional_web_profile(
         db,
         tg_data,
         current_user,
-        device_user,
+        None,
         registration_source,
     )
 
@@ -1454,7 +1453,7 @@ async def _resolve_vk_login_user(
 ) -> User:
     vk_user_id = vk_profile["vk_user_id"]
     vk_photo_url = vk_profile.get("vk_photo_url")
-    source_user = current_user or await _load_identity_device_user(db, identity_device_id)
+    source_user = current_user
     existing_user = await _load_user_by_vk_id(db, vk_user_id)
 
     if source_user:
@@ -1583,7 +1582,7 @@ async def _exchange_vk_or_502(payload: dict[str, str]) -> dict:
         )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
 async def login_user(
     request_data: LoginRequest,
     response: Response,
@@ -1611,7 +1610,7 @@ async def login_user(
     return _build_login_response(hydrated_user, response)
 
 
-@router.post("/telegram-widget", response_model=LoginResponse)
+@router.post("/telegram-widget", response_model=LoginResponse, response_model_exclude_none=True)
 async def login_telegram_widget(
     request_data: TelegramWidgetLoginRequest,
     response: Response,
@@ -1639,7 +1638,7 @@ async def login_telegram_widget(
     return _build_login_response(hydrated_user, response)
 
 
-@router.get("/telegram/callback", response_model=LoginResponse)
+@router.get("/telegram/callback", response_model=LoginResponse, response_model_exclude_none=True)
 async def telegram_callback(
     request: Request,
     response: Response,
@@ -1684,7 +1683,7 @@ async def start_telegram_bot_auth_session(
             detail="Telegram bot username is not configured",
         )
 
-    source_user = _current_user_or_none(current_user) or await _load_identity_device_user(db, identity_device_id)
+    source_user = _current_user_or_none(current_user)
     session = await create_telegram_bot_auth_session(
         source_user_id=source_user.telegram_id if source_user else None,
     )
@@ -1696,7 +1695,7 @@ async def start_telegram_bot_auth_session(
     )
 
 
-@router.get("/telegram/bot-session/{auth_token}", response_model=TelegramBotAuthStatusResponse)
+@router.get("/telegram/bot-session/{auth_token}", response_model=TelegramBotAuthStatusResponse, response_model_exclude_none=True)
 async def poll_telegram_bot_auth_session(
     auth_token: str,
     response: Response,
@@ -1713,9 +1712,6 @@ async def poll_telegram_bot_auth_session(
     source_user = _current_user_or_none(current_user)
     if not source_user and session.source_user_id is not None:
         source_user = await _load_user_with_profile(db, session.source_user_id)
-    if not source_user:
-        source_user = await _load_identity_device_user(db, identity_device_id)
-
     user = await _upsert_telegram_user_with_optional_web_profile(
         db,
         session.telegram_user,
@@ -1731,7 +1727,7 @@ async def poll_telegram_bot_auth_session(
     login_response = _build_login_response(hydrated_user, response)
     return TelegramBotAuthStatusResponse(
         status="confirmed",
-        access_token=login_response.access_token,
+        access_token=None,
         token_type=login_response.token_type,
         user=login_response.user,
     )
@@ -1751,8 +1747,6 @@ async def vk_id_start(
     """
     action = _validate_vk_auth_action(request_data.action)
     source_user = _current_user_or_none(current_user)
-    if not source_user and isinstance(identity_device_id, str):
-        source_user = await _load_identity_device_user(db, identity_device_id)
 
     code_verifier = _generate_vk_code_verifier()
     state_value = _generate_vk_state(action)
@@ -1845,7 +1839,7 @@ async def vk_id_complete(
     )
 
 
-@router.post("/vk/login", response_model=LoginResponse)
+@router.post("/vk/login", response_model=LoginResponse, response_model_exclude_none=True)
 async def vk_id_login(
     request_data: VkOAuthCodeRequest,
     response: Response,

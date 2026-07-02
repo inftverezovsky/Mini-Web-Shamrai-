@@ -218,7 +218,7 @@ def _can_use_emoji_id_command(user_id: Optional[int]) -> bool:
         for value in (settings.OWNER_TELEGRAM_ID, settings.sales_manager_telegram_id)
         if value
     }
-    return not allowed_ids or int(user_id) in allowed_ids
+    return bool(allowed_ids) and int(user_id) in allowed_ids
 
 
 def _label_for_custom_emoji(text: str, entity: dict, index: int) -> str:
