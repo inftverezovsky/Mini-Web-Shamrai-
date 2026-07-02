@@ -18,6 +18,7 @@ import {
   setStoredAuthToken,
 } from '../utils/authStorage';
 import { formatApiErrorMessage } from '../api/errors';
+import { ApiRequestError } from '../api/client';
 import {
   ensureTelegramSdk,
   getTelegramLaunchInitData,
@@ -38,6 +39,15 @@ import {
   createTelegramBotAuthCoordinator,
   type TelegramBotAuthOptions,
 } from '../utils/telegramBotAuthCoordinator';
+import {
+  shouldAttemptFullAuthAfterProfileError,
+  shouldKeepExistingUserAfterProfileError,
+} from '../utils/authRecovery';
+import {
+  clearTelegramBotAuthCooldown,
+  getTelegramBotAuthCooldownStatus,
+  rememberTelegramBotAuthCooldownForError,
+} from '../utils/telegramBotAuthCooldown';
 
 export interface TelegramWidgetPayload {
   id: number;
@@ -92,6 +102,7 @@ const AuthStoreContext = createContext<AuthStore | undefined>(undefined);
 const AuthActionsContext = createContext<AuthActions | undefined>(undefined);
 
 const TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS = 1800;
+const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 
 function wait(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -120,6 +131,61 @@ function authErrorMessage(error: unknown, fallback: string) {
 async function responseErrorMessage(response: Response, fallback: string) {
   const errorData = await response.json().catch(() => ({}));
   return formatApiErrorMessage(response.status, errorData?.detail) || fallback;
+}
+
+function retryAfterSecondsFromResponse(response: Response) {
+  const retryAfterHeader = response.headers.get('Retry-After');
+  const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+  return Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : null;
+}
+
+async function authResponseError(response: Response, fallback: string) {
+  return new ApiRequestError(
+    await responseErrorMessage(response, fallback),
+    response.status,
+    retryAfterSecondsFromResponse(response),
+  );
+}
+
+async function fetchWithAuthTimeout(input: RequestInfo | URL, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+  const sourceSignal = init.signal;
+  const abortFromSource = () => controller.abort();
+  sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error('Превышено время ожидания ответа сервера. Проверьте интернет и попробуйте еще раз.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    sourceSignal?.removeEventListener('abort', abortFromSource);
+  }
+}
+
+async function apiFetchWithAuthTimeout<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+  const sourceSignal = options.signal;
+  const abortFromSource = () => controller.abort();
+  sourceSignal?.addEventListener('abort', abortFromSource, { once: true });
+
+  try {
+    return await apiFetch<T>(endpoint, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeout);
+    sourceSignal?.removeEventListener('abort', abortFromSource);
+  }
 }
 
 function createAuthStore(initialState: AuthState): AuthStore {
@@ -266,6 +332,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const applyLoginResponse = useCallback((data: { access_token?: string | null; user: UserResponse }) => {
     clearVkAuthCooldown();
+    clearTelegramBotAuthCooldown();
     setToken(applyLoginAuthToken(data.access_token));
     setUser(data.user);
     clearCsrfToken();
@@ -277,13 +344,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ...identityDeviceHeader(),
       ...(candidateToken ? { Authorization: `Bearer ${candidateToken}` } : {}),
     };
-    const response = await fetch(`${API_URL}/api/users/me`, {
+    const response = await fetchWithAuthTimeout(`${API_URL}/api/users/me`, {
       credentials: 'include',
       headers,
     });
 
     if (!response.ok) {
-      throw new Error('Сессия устарела');
+      throw await authResponseError(response, 'Сессия устарела');
     }
 
     const freshUser = await response.json();
@@ -296,7 +363,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [API_URL, setError, setToken, setUser]);
 
   const runTelegramMiniAppLogin = useCallback(async (initData: string) => {
-    const response = await fetch(`${API_URL}/api/auth/login`, {
+    const response = await fetchWithAuthTimeout(`${API_URL}/api/auth/login`, {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -307,7 +374,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     if (!response.ok) {
-      throw new Error(await responseErrorMessage(response, 'Авторизация Telegram на сервере не удалась'));
+      throw await authResponseError(response, 'Авторизация Telegram на сервере не удалась');
     }
 
     applyLoginResponse(await response.json());
@@ -329,7 +396,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try {
           await fetchCurrentUser(storedToken);
           return;
-        } catch {
+        } catch (error) {
+          if (authStore.getSnapshot().user && shouldKeepExistingUserAfterProfileError(error)) {
+            setError(null);
+            return;
+          }
+          if (!shouldAttemptFullAuthAfterProfileError(error)) {
+            throw error;
+          }
           clearStoredAuth();
         }
       }
@@ -337,7 +411,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         await fetchCurrentUser(null);
         return;
-      } catch {
+      } catch (error) {
+        if (authStore.getSnapshot().user && shouldKeepExistingUserAfterProfileError(error)) {
+          setError(null);
+          return;
+        }
+        if (!shouldAttemptFullAuthAfterProfileError(error)) {
+          throw error;
+        }
         clearStoredAuthToken();
       }
 
@@ -377,6 +458,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [
     allowDebugAuth,
     allowLocalMock,
+    authStore,
     clearStoredAuth,
     createMockUser,
     fetchCurrentUser,
@@ -442,7 +524,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`${API_URL}/api/auth/telegram-widget`, {
+      const response = await fetchWithAuthTimeout(`${API_URL}/api/auth/telegram-widget`, {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -453,7 +535,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (!response.ok) {
-        throw new Error('Telegram Login Widget не прошел проверку');
+        throw await authResponseError(response, 'Telegram Login Widget не прошел проверку');
       }
 
       applyLoginResponse(await response.json());
@@ -469,8 +551,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const loginWithTelegramBot = useCallback((options: TelegramBotAuthOptions = {}) => (
     telegramBotAuthCoordinator.run(options, async (notifySessionStarted) => {
       try {
+        const cooldown = getTelegramBotAuthCooldownStatus();
+        if (cooldown.active && cooldown.message) {
+          throw new Error(cooldown.message);
+        }
+
         setError(null);
-        const session = await apiFetch<TelegramBotAuthStartResponse>('/auth/telegram/bot-session', {
+        const session = await apiFetchWithAuthTimeout<TelegramBotAuthStartResponse>('/auth/telegram/bot-session', {
           method: 'POST',
         });
 
@@ -483,7 +570,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const expiresAt = new Date(session.expires_at).getTime();
         while (Date.now() < expiresAt) {
           await wait(TELEGRAM_BOT_AUTH_POLL_INTERVAL_MS);
-          const authStatus = await apiFetch<TelegramBotAuthStatusResponse>(
+          const authStatus = await apiFetchWithAuthTimeout<TelegramBotAuthStatusResponse>(
             `/auth/telegram/bot-session/${encodeURIComponent(session.auth_token)}`,
           );
 
@@ -500,6 +587,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Ссылка Telegram-входа устарела. Нажмите кнопку еще раз.');
       } catch (err: any) {
         const message = authErrorMessage(err, 'Не удалось войти через Telegram');
+        rememberTelegramBotAuthCooldownForError(err);
         setError(message);
         throw new Error(message);
       }

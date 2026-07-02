@@ -85,6 +85,29 @@ class SecurityRateLimitConfigTests(unittest.TestCase):
             ("user:12345",),
         )
 
+    def test_auth_subjects_prefer_hashed_identity_device_when_available(self):
+        request = SimpleNamespace(
+            headers={"x-shamrai-device-id": "device-12345678"},
+            client=SimpleNamespace(host="203.0.113.10"),
+        )
+
+        subjects = request_subjects(request, prefer_identity_device=True)
+
+        self.assertEqual(len(subjects), 1)
+        self.assertTrue(subjects[0].startswith("device:"))
+        self.assertNotIn("device-12345678", subjects[0])
+
+    def test_auth_subjects_fall_back_to_ip_without_identity_device(self):
+        request = SimpleNamespace(
+            headers={},
+            client=SimpleNamespace(host="203.0.113.10"),
+        )
+
+        self.assertEqual(
+            request_subjects(request, prefer_identity_device=True),
+            ("ip:203.0.113.10",),
+        )
+
 
 class FakeRedis:
     def __init__(self) -> None:

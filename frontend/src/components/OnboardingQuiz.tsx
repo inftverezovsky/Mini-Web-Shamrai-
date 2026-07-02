@@ -24,10 +24,11 @@ import {
 import { apiFetch } from '../utils/api';
 import { isVkIdReady, isVkRedirectStartedError, linkVkProfile } from '../utils/vkId';
 import { BookmakerResponse } from '../schemas/schemas';
+import type { UserResponse } from '../schemas/schemas';
 import EmojiTextField from './EmojiTextField';
 import { BookmakerLogoFrame } from './LogoFrame';
 import OptimizedImage from './OptimizedImage';
-import { useAuthSelector } from '../context/AuthContext';
+import { useAuthActions, useAuthSelector } from '../context/AuthContext';
 import { trackEvent } from '../utils/analytics';
 import { usePerformanceProfile } from '../hooks/usePerformanceProfile';
 import { getBookmakerLogoSrc } from '../constants/bookmakers';
@@ -64,6 +65,7 @@ interface OnboardingResponse {
   status: string;
   message: string;
   recommendation: OnboardingRecommendation;
+  user: UserResponse;
 }
 
 interface OnboardingQuizProps {
@@ -270,6 +272,7 @@ const sourceLabels: Record<string, string> = {
 
 export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onCompleted }: OnboardingQuizProps) {
   const user = useAuthSelector((state) => state.user);
+  const { setUser } = useAuthActions();
   const reduceMotion = useReducedMotion();
   const performanceProfile = usePerformanceProfile();
   const reduceContinuousMotion = reduceMotion || performanceProfile.shouldReduceMotion;
@@ -291,6 +294,7 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>(fallbackBookmakers);
   const [bookmakersLoading, setBookmakersLoading] = useState(true);
   const [recommendation, setRecommendation] = useState<OnboardingRecommendation | null>(null);
+  const [completedUser, setCompletedUser] = useState<UserResponse | null>(null);
   const [currency, setCurrency] = useState<CurrencyCode>('RUB');
   const [manifestAccepted, setManifestAccepted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -318,7 +322,8 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
     try {
       setSkipping(true);
       setErrorMessage(null);
-      await apiFetch('/users/me/onboard/skip', { method: 'POST' });
+      const updatedUser = await apiFetch<UserResponse>('/users/me/onboard/skip', { method: 'POST' });
+      setUser(updatedUser);
       trackEvent('Onboarding Welcome Step Completed', {
         source,
         vk_linked: vkLinked,
@@ -334,7 +339,7 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
     } finally {
       setSkipping(false);
     }
-  }, [onCompleted]);
+  }, [onCompleted, setUser]);
 
   useEffect(() => {
     if (!user?.vk_user_id) return;
@@ -484,6 +489,7 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
       ]);
 
       setRecommendation(response.recommendation);
+      setCompletedUser(response.user);
       setCurrency(response.recommendation.currency || currency);
       trackEvent('Onboarding Result Shown', {
         onboarding_goal: answers.onboarding_goal,
@@ -562,7 +568,8 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
     try {
       setSkipping(true);
       setErrorMessage(null);
-      await apiFetch('/users/me/onboard/skip', { method: 'POST' });
+      const updatedUser = await apiFetch<UserResponse>('/users/me/onboard/skip', { method: 'POST' });
+      setUser(updatedUser);
       trackEvent('Onboarding Skipped');
       await onCompleted();
     } catch (error: any) {
@@ -586,6 +593,9 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
     if (stepIndex === 5 && manifestAccepted) {
       try {
         setFinishing(true);
+        if (completedUser) {
+          setUser(completedUser);
+        }
         await onCompleted();
         trackEvent('Onboarding Completed', {
           onboarding_goal: answers.onboarding_goal,
@@ -597,6 +607,9 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
           vk_linked: Boolean(answers.vk_user_id),
           currency,
         });
+      } catch (error: any) {
+        setErrorMessage(error?.message || 'Не удалось открыть кабинет. Обновите страницу и попробуйте снова.');
+        trackEvent('Onboarding Complete Failed');
       } finally {
         setFinishing(false);
       }

@@ -16,6 +16,11 @@ export class ApiRequestError extends Error {
   }
 }
 
+function shouldHandleAuthExpired(endpoint: string) {
+  const cleanEndpoint = endpoint.split('?', 1)[0];
+  return cleanEndpoint !== '/users/me/presence';
+}
+
 export async function requestApi<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = getRequestAuthToken();
   const isFormData = options.body instanceof FormData;
@@ -50,7 +55,7 @@ export async function requestApi<T = any>(endpoint: string, options: RequestInit
     const retryAfterHeader = response.headers.get('Retry-After');
     const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
 
-    if (response.status === 401) {
+    if (response.status === 401 && shouldHandleAuthExpired(endpoint)) {
       clearStoredAuthToken();
       clearCsrfToken();
       window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { endpoint, message } }));

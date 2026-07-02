@@ -134,4 +134,26 @@ describe('API auth client', () => {
     expect(localStorage.removeItem).toHaveBeenCalledWith('bet_tma_jwt_token');
     expect(dispatchEvent).toHaveBeenCalled();
   });
+
+  it('does not clear auth or restart login after passive presence heartbeat 401', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
+    const { localStorage, dispatchEvent } = setBrowserEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: 'Session expired' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { setStoredAuthToken, getStoredAuthToken } = await import('../src/utils/authStorage');
+    const { requestApi } = await import('../src/api/client');
+    setStoredAuthToken(validJwt);
+    localStorage.removeItem.mockClear();
+    dispatchEvent.mockClear();
+
+    await expect(requestApi('/users/me/presence', { method: 'POST' })).rejects.toThrow();
+
+    expect(localStorage.removeItem).not.toHaveBeenCalledWith('bet_tma_jwt_token');
+    expect(getStoredAuthToken()).toBe(validJwt);
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  });
 });

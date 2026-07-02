@@ -5,6 +5,7 @@ export const MOCK_DEBUG_AUTH_TOKEN = 'mock_debug_access_token';
 const JWT_SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
 let memoryAuthToken: string | null = null;
 let runtimeAuthToken: string | null = null;
+let loginRuntimeAuthToken: string | null = null;
 
 function looksLikeJwt(token: string): boolean {
   const parts = token.split('.');
@@ -76,6 +77,8 @@ export function getStoredAuthToken(): string | null {
 export function getRequestAuthToken(): string | null {
   if (isAllowedRuntimeToken(runtimeAuthToken)) return runtimeAuthToken;
   runtimeAuthToken = null;
+  if (loginRuntimeAuthToken && looksLikeJwt(loginRuntimeAuthToken)) return loginRuntimeAuthToken;
+  loginRuntimeAuthToken = null;
   return getStoredAuthToken();
 }
 
@@ -100,6 +103,7 @@ export function setStoredAuthToken(token: string): void {
 
 export function clearStoredAuthToken(): void {
   runtimeAuthToken = null;
+  loginRuntimeAuthToken = null;
   memoryAuthToken = null;
   removeStorage('session', AUTH_TOKEN_STORAGE_KEY);
   removeStorage('local', AUTH_TOKEN_STORAGE_KEY);
@@ -111,7 +115,13 @@ export function applyLoginAuthToken(accessToken?: string | null): string | null 
     return null;
   }
 
-  setStoredAuthToken(accessToken);
-  setRuntimeAuthToken(accessToken);
-  return getStoredAuthToken();
+  if (isAllowedStoredToken(accessToken)) {
+    setStoredAuthToken(accessToken);
+    setRuntimeAuthToken(accessToken);
+    return getStoredAuthToken();
+  }
+
+  clearStoredAuthToken();
+  loginRuntimeAuthToken = looksLikeJwt(accessToken) ? accessToken : null;
+  return getRequestAuthToken();
 }

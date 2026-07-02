@@ -697,7 +697,7 @@ def _build_login_response(user: User, response: Optional[Response] = None) -> Lo
     if response is not None:
         _set_auth_cookie(response, access_token)
         set_csrf_cookie(response)
-    return LoginResponse(user=user)
+    return LoginResponse(access_token=access_token, user=user)
 
 
 def _registration_report_line(label: str, value: object) -> str:
@@ -1731,7 +1731,7 @@ async def poll_telegram_bot_auth_session(
     login_response = _build_login_response(hydrated_user, response)
     return TelegramBotAuthStatusResponse(
         status="confirmed",
-        access_token=None,
+        access_token=login_response.access_token,
         token_type=login_response.token_type,
         user=login_response.user,
     )

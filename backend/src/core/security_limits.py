@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import ipaddress
+import re
 import time
 import uuid
 from collections import Counter, deque
@@ -19,6 +21,8 @@ from src.core.security import verify_access_token
 
 logger = logging.getLogger("uvicorn")
 AUTH_COOKIE_NAME = "shamrai_access_token"
+IDENTITY_DEVICE_HEADER = "x-shamrai-device-id"
+IDENTITY_DEVICE_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 RATE_LIMIT_GROUPS = {
     "public_read",
@@ -226,11 +230,34 @@ def _user_subject_from_authorization(request: Request) -> Optional[str]:
     return f"user:{payload['sub']}"
 
 
-def request_subjects(request: Request, *, prefer_authenticated_user: bool = False) -> tuple[str, ...]:
+def _header_value(request: Request, name: str) -> str:
+    headers = getattr(request, "headers", {}) or {}
+    value = headers.get(name) or headers.get(name.lower()) or headers.get(name.upper())
+    return str(value or "").strip()
+
+
+def _identity_device_subject(request: Request) -> Optional[str]:
+    raw_value = _header_value(request, IDENTITY_DEVICE_HEADER)
+    if not raw_value or not IDENTITY_DEVICE_RE.match(raw_value):
+        return None
+    digest = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:24]
+    return f"device:{digest}"
+
+
+def request_subjects(
+    request: Request,
+    *,
+    prefer_authenticated_user: bool = False,
+    prefer_identity_device: bool = False,
+) -> tuple[str, ...]:
     ip_subject = f"ip:{_client_ip(request)}"
     user_subject = _user_subject_from_authorization(request)
     if prefer_authenticated_user and user_subject:
         return (user_subject,)
+    if prefer_identity_device:
+        identity_subject = _identity_device_subject(request)
+        if identity_subject:
+            return (identity_subject,)
 
     subjects = [ip_subject]
     if user_subject:
@@ -240,6 +267,10 @@ def request_subjects(request: Request, *, prefer_authenticated_user: bool = Fals
 
 def _prefer_authenticated_rate_limit_subject(group: str) -> bool:
     return group in {"default", "payment", "admin", "upload"}
+
+
+def _prefer_identity_device_rate_limit_subject(group: str) -> bool:
+    return group in {"auth", "auth_poll"}
 
 
 class SecurityRateLimiter:
@@ -632,6 +663,7 @@ class SecurityRateLimitMiddleware(BaseHTTPMiddleware):
         subjects = request_subjects(
             request,
             prefer_authenticated_user=_prefer_authenticated_rate_limit_subject(group),
+            prefer_identity_device=_prefer_identity_device_rate_limit_subject(group),
         )
         decision = await self.limiter.check(group=group, subjects=subjects)
 

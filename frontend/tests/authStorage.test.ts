@@ -71,6 +71,21 @@ describe('authStorage', () => {
     expect(authStorage.getRequestAuthToken()).toBe(validJwt);
   });
 
+  it('keeps login response bearer fallback in memory when bearer compat is disabled', async () => {
+    vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'false');
+    const localStorage = memoryStorage();
+    const sessionStorage = memoryStorage();
+    vi.stubGlobal('window', { localStorage, sessionStorage });
+
+    const authStorage = await import('../src/utils/authStorage');
+
+    expect(authStorage.applyLoginAuthToken(validJwt)).toBe(validJwt);
+    expect(localStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
+    expect(sessionStorage.setItem).not.toHaveBeenCalledWith(AUTH_TOKEN_STORAGE_KEY, validJwt);
+    expect(authStorage.getStoredAuthToken()).toBeNull();
+    expect(authStorage.getRequestAuthToken()).toBe(validJwt);
+  });
+
   it('persists real website auth tokens only when bearer compat is enabled', async () => {
     vi.stubEnv('VITE_ENABLE_BEARER_AUTH_COMPAT', 'true');
     const localStorage = memoryStorage();

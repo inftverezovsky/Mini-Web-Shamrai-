@@ -51,7 +51,7 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("; secure", cookie)
         self.assertIn("path=/api", cookie)
 
-    def test_login_response_sets_cookie_without_exposing_bearer_token(self):
+    def test_login_response_sets_cookie_and_returns_bearer_fallback_token(self):
         response = Response()
         now = datetime.now(timezone.utc)
         user = User(
@@ -84,8 +84,8 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
 
         payload = auth._build_login_response(user, response)
 
-        self.assertIsNone(payload.access_token)
-        self.assertNotIn("access_token", payload.model_dump(exclude_none=True))
+        self.assertIsNotNone(payload.access_token)
+        self.assertIn("access_token", payload.model_dump(exclude_none=True))
         cookie = "; ".join(_set_cookie_headers(response)).lower()
         self.assertIn("shamrai_access_token=", cookie)
         self.assertIn("httponly", cookie)

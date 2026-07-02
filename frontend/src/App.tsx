@@ -755,7 +755,7 @@ export default function App() {
               <Suspense fallback={<PageSkeleton />}>
                 <Onboarding
                   welcomeQuizEnabled={welcomeQuizEnabled}
-                  onCompleted={fetchUserProfile}
+                  onCompleted={() => undefined}
                 />
               </Suspense>
             </AppErrorBoundary>
