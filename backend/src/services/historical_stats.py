@@ -779,3 +779,250 @@ def _breakdown_snapshot_row(row: HistoricalStatsBreakdown) -> dict[str, Any]:
         "profit": _money(row.profit_rub),
         "average_coefficient": _decimal(row.average_coefficient),
     }
+
+
+def _performance_float(value: Any, places: str = "0.01") -> float:
+    return float(Decimal(str(value or "0")).quantize(Decimal(places), rounding=ROUND_HALF_UP))
+
+
+def _performance_summary_from_parts(
+    *,
+    bets: int,
+    wins: int,
+    losses: int,
+    profit_units: Decimal,
+    coefficient_sum: Decimal,
+    coefficient_count: int,
+    max_win_streak: int = 0,
+    max_loss_streak: int = 0,
+    current_streak: int = 0,
+    current_streak_type: Optional[str] = None,
+) -> dict[str, Any]:
+    resolved = int(wins or 0) + int(losses or 0)
+    return {
+        "bets": int(bets or 0),
+        "wins": int(wins or 0),
+        "losses": int(losses or 0),
+        "winrate": round((int(wins or 0) / resolved * 100) if resolved else 0.0, 2),
+        "roi": round((float(profit_units) / resolved * 100) if resolved else 0.0, 2),
+        "profit_units": _performance_float(profit_units),
+        "average_coefficient": _performance_float(
+            coefficient_sum / Decimal(coefficient_count)
+            if coefficient_count
+            else Decimal("0")
+        ),
+        "max_win_streak": int(max_win_streak or 0),
+        "max_loss_streak": int(max_loss_streak or 0),
+        "current_streak": int(current_streak or 0),
+        "current_streak_type": current_streak_type,
+    }
+
+
+def _performance_summary_parts(summary: dict[str, Any]) -> dict[str, Any]:
+    bets = int(summary.get("bets") or 0)
+    return {
+        "bets": bets,
+        "wins": int(summary.get("wins") or 0),
+        "losses": int(summary.get("losses") or 0),
+        "profit_units": Decimal(str(summary.get("profit_units") or "0")),
+        "coefficient_sum": Decimal(str(summary.get("average_coefficient") or "0")) * Decimal(bets),
+        "coefficient_count": bets,
+    }
+
+
+def _combine_performance_summaries(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    streak_source: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    left_parts = _performance_summary_parts(left)
+    right_parts = _performance_summary_parts(right)
+    source = streak_source or right
+    return _performance_summary_from_parts(
+        bets=left_parts["bets"] + right_parts["bets"],
+        wins=left_parts["wins"] + right_parts["wins"],
+        losses=left_parts["losses"] + right_parts["losses"],
+        profit_units=left_parts["profit_units"] + right_parts["profit_units"],
+        coefficient_sum=left_parts["coefficient_sum"] + right_parts["coefficient_sum"],
+        coefficient_count=left_parts["coefficient_count"] + right_parts["coefficient_count"],
+        max_win_streak=int(source.get("max_win_streak") or 0),
+        max_loss_streak=int(source.get("max_loss_streak") or 0),
+        current_streak=int(source.get("current_streak") or 0),
+        current_streak_type=source.get("current_streak_type"),
+    )
+
+
+def _historical_summary_to_performance(snapshot: HistoricalStatsSnapshot) -> dict[str, Any]:
+    summary = snapshot.summary
+    coefficient_count = sum(int(row.get("bets") or 0) for row in snapshot.monthly)
+    coefficient_sum = sum(
+        Decimal(str(row.get("average_coefficient") or "0")) * Decimal(int(row.get("bets") or 0))
+        for row in snapshot.monthly
+    )
+    return _performance_summary_from_parts(
+        bets=int(summary.get("bets") or 0),
+        wins=int(summary.get("wins") or 0),
+        losses=int(summary.get("losses") or 0),
+        profit_units=Decimal(str(summary.get("profit_units") or "0")),
+        coefficient_sum=coefficient_sum,
+        coefficient_count=coefficient_count,
+    )
+
+
+def _historical_row_to_performance_summary(row: dict[str, Any], unit_stake_rub: Decimal) -> dict[str, Any]:
+    bets = int(row.get("bets") or 0)
+    profit_units = Decimal(str(row.get("profit") or "0")) / unit_stake_rub if unit_stake_rub else Decimal("0")
+    coefficient_sum = Decimal(str(row.get("average_coefficient") or "0")) * Decimal(bets)
+    return _performance_summary_from_parts(
+        bets=bets,
+        wins=int(row.get("wins") or 0),
+        losses=int(row.get("losses") or 0),
+        profit_units=profit_units,
+        coefficient_sum=coefficient_sum,
+        coefficient_count=bets,
+    )
+
+
+def _historical_month_payload(row: dict[str, Any], unit_stake_rub: Decimal) -> dict[str, Any]:
+    key = str(row.get("period_key") or "")
+    return {
+        "key": key,
+        "label": row.get("period_label") or key,
+        "summary": _historical_row_to_performance_summary(row, unit_stake_rub),
+        "days": [],
+    }
+
+
+def _historical_breakdown_payload(row: dict[str, Any], unit_stake_rub: Decimal) -> dict[str, Any]:
+    label = str(row.get("label") or "").strip() or "Без данных"
+    key = _normalise_key(label) or str(row.get("normalized_key") or row.get("bookmaker_code") or "none")
+    return {
+        "key": key,
+        "label": label,
+        "summary": _historical_row_to_performance_summary(row, unit_stake_rub),
+    }
+
+
+def _merge_performance_months(
+    historical_months: list[dict[str, Any]],
+    live_months: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    months = {str(month.get("key") or ""): month for month in historical_months if month.get("key")}
+    for live_month in live_months:
+        key = str(live_month.get("key") or "")
+        if not key:
+            continue
+        existing = months.get(key)
+        if not existing:
+            months[key] = live_month
+            continue
+        months[key] = {
+            **existing,
+            "label": live_month.get("label") or existing.get("label") or key,
+            "summary": _combine_performance_summaries(
+                existing.get("summary") or {},
+                live_month.get("summary") or {},
+                streak_source=live_month.get("summary") or {},
+            ),
+            "days": live_month.get("days") or existing.get("days") or [],
+        }
+    return [months[key] for key in sorted(months.keys(), reverse=True)]
+
+
+def _breakdown_merge_key(item: dict[str, Any]) -> str:
+    return _normalise_key(str(item.get("label") or item.get("key") or "none")) or "none"
+
+
+def _merge_performance_breakdown(
+    historical_items: list[dict[str, Any]],
+    live_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in historical_items:
+        merged[_breakdown_merge_key(item)] = item
+    for item in live_items:
+        key = _breakdown_merge_key(item)
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = item
+            continue
+        merged[key] = {
+            **existing,
+            "label": existing.get("label") or item.get("label") or existing.get("key") or key,
+            "summary": _combine_performance_summaries(
+                existing.get("summary") or {},
+                item.get("summary") or {},
+                streak_source=item.get("summary") or {},
+            ),
+        }
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            -int((item.get("summary") or {}).get("bets") or 0),
+            str(item.get("label") or ""),
+        ),
+    )
+
+
+def merge_historical_performance_payload(
+    live_payload: dict[str, Any],
+    historical: Optional[HistoricalStatsSnapshot],
+) -> dict[str, Any]:
+    if not historical:
+        return live_payload
+
+    unit_stake_rub = Decimal(str(historical.unit_stake_rub or DEFAULT_UNIT_STAKE_RUB))
+    historical_summary = _historical_summary_to_performance(historical)
+    live_summary = live_payload.get("summary") or {}
+    combined_summary = _combine_performance_summaries(
+        historical_summary,
+        live_summary,
+        streak_source=live_summary,
+    )
+    live_source_split = live_payload.get("source_split") or {}
+    source_split = {
+        "all": combined_summary,
+        "feed": live_source_split.get("feed") or _performance_summary_from_parts(
+            bets=0,
+            wins=0,
+            losses=0,
+            profit_units=Decimal("0"),
+            coefficient_sum=Decimal("0"),
+            coefficient_count=0,
+        ),
+        "private": live_source_split.get("private") or _performance_summary_from_parts(
+            bets=0,
+            wins=0,
+            losses=0,
+            profit_units=Decimal("0"),
+            coefficient_sum=Decimal("0"),
+            coefficient_count=0,
+        ),
+        "paid_set": live_source_split.get("paid_set") or _performance_summary_from_parts(
+            bets=0,
+            wins=0,
+            losses=0,
+            profit_units=Decimal("0"),
+            coefficient_sum=Decimal("0"),
+            coefficient_count=0,
+        ),
+    }
+
+    return {
+        **live_payload,
+        "summary": combined_summary,
+        "source_split": source_split,
+        "timeline": _merge_performance_months(
+            [_historical_month_payload(row, unit_stake_rub) for row in historical.monthly],
+            list(live_payload.get("timeline") or []),
+        ),
+        "bookmaker_breakdown": _merge_performance_breakdown(
+            [_historical_breakdown_payload(row, unit_stake_rub) for row in historical.bookmaker_breakdowns],
+            list(live_payload.get("bookmaker_breakdown") or []),
+        ),
+        "sport_breakdown": _merge_performance_breakdown(
+            [_historical_breakdown_payload(row, unit_stake_rub) for row in historical.sport_breakdowns],
+            list(live_payload.get("sport_breakdown") or []),
+        ),
+    }

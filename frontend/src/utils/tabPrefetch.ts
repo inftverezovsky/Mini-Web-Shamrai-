@@ -57,6 +57,7 @@ export interface TariffsDashboardData {
 
 export interface AdminStatsDashboardData {
   authorTimeline: AdminAuthorTimelineResponse;
+  shamraiTimeline: PerformanceTimelineResponse;
   clients: AdminClientsStatsResponse;
   bookmakers: BookmakerResponse[];
 }
@@ -146,16 +147,22 @@ export function fetchAdminAuthorTimeline(period: PeriodFilter = 'all') {
   return apiFetch<AdminAuthorTimelineResponse>(`/admin/stats/author-timeline?period=${encodeURIComponent(period)}`);
 }
 
+export function fetchAdminShamraiTimeline(period: PeriodFilter = 'all') {
+  return apiFetch<PerformanceTimelineResponse>(`/admin/stats/shamrai-timeline?period=${encodeURIComponent(period)}`);
+}
+
 export async function fetchAdminStatsDashboard(period: PeriodFilter = 'all'): Promise<AdminStatsDashboardData> {
   const periodQuery = `period=${encodeURIComponent(period)}`;
-  const [authorTimeline, clients, bookmakers] = await Promise.all([
+  const [authorTimeline, shamraiTimeline, clients, bookmakers] = await Promise.all([
     fetchAdminAuthorTimeline(period),
+    fetchAdminShamraiTimeline(period),
     apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`),
     fetchBookmakers(),
   ]);
 
   return {
     authorTimeline,
+    shamraiTimeline,
     clients,
     bookmakers,
   };

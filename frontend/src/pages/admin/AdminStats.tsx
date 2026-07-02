@@ -54,6 +54,7 @@ import {
   ADMIN_TAB_QUERY_STALE_TIME,
   adminStatsDashboardQueryKey,
   fetchAdminAuthorTimeline,
+  fetchAdminShamraiTimeline,
   fetchAdminStatsDashboard,
   type AdminStatsDashboardData,
 } from '../../utils/tabPrefetch';
@@ -399,6 +400,7 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
   });
 
   const authorData = statsDashboardQuery.data?.authorTimeline ?? null;
+  const shamraiData = statsDashboardQuery.data?.shamraiTimeline ?? null;
   const clientsData = statsDashboardQuery.data?.clients ?? null;
   const bookmakers: BookmakerResponse[] = statsDashboardQuery.data?.bookmakers ?? [];
   const loading = statsDashboardQuery.isLoading || (statsDashboardQuery.isFetching && !statsDashboardQuery.data);
@@ -434,14 +436,17 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
     return () => window.clearInterval(timer);
   }, [active, driveJob]);
 
-  const selectedTimeline = useMemo(() => filterTimelineBySource(authorData, tab), [authorData, tab]);
+  const sourceTimeline = tab === 'all' ? shamraiData : authorData;
+  const selectedTimeline = useMemo(() => filterTimelineBySource(sourceTimeline, tab), [sourceTimeline, tab]);
   const summary = tab === 'clients'
     ? clientsData?.summary ?? EMPTY_SUMMARY
     : selectedTimeline?.summary ?? EMPTY_SUMMARY;
   const valueMode: StatsValueMode = tab === 'clients' ? 'flats' : 'rub';
   const displayTitle = tab === 'clients'
     ? 'Клиентская статистика'
-    : authorData?.author.name || 'Статистика Shamrai';
+    : tab === 'all'
+      ? 'Статистика Shamrai'
+      : authorData?.author.name || 'Статистика Shamrai';
   const displayEyebrow = tab === 'clients'
     ? 'Клиенты'
     : tab === 'feed'
@@ -495,9 +500,12 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
   };
 
   const refreshAuthorTimeline = useCallback(async () => {
-    const freshTimeline = await fetchAdminAuthorTimeline(period);
+    const [freshTimeline, freshShamraiTimeline] = await Promise.all([
+      fetchAdminAuthorTimeline(period),
+      fetchAdminShamraiTimeline(period),
+    ]);
     queryClient.setQueryData<AdminStatsDashboardData>(adminStatsDashboardQueryKey(period), (current) => (
-      current ? { ...current, authorTimeline: freshTimeline } : current
+      current ? { ...current, authorTimeline: freshTimeline, shamraiTimeline: freshShamraiTimeline } : current
     ));
   }, [period, queryClient]);
 
@@ -567,7 +575,7 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
       <StatsHero
         title={displayTitle}
         eyebrow={displayEyebrow}
-        periodLabel={tab === 'clients' ? clientsData?.period_label ?? 'Выбранный период' : authorData?.period_label ?? 'Выбранный период'}
+        periodLabel={tab === 'clients' ? clientsData?.period_label ?? 'Выбранный период' : selectedTimeline?.period_label ?? 'Выбранный период'}
         summary={summary}
         valueMode={valueMode}
         controls={<PeriodSelector value={period} onChange={setPeriod} activeTone="cyan" />}
@@ -609,7 +617,7 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
         <>
           <OverviewAnalytics
             data={selectedTimeline}
-            sourceSplit={authorData?.source_split}
+            sourceSplit={sourceTimeline?.source_split}
             bookmakerBreakdown={selectedTimeline?.bookmaker_breakdown ?? []}
             sportBreakdown={selectedTimeline?.sport_breakdown ?? []}
             valueMode={valueMode}

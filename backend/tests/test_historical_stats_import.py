@@ -10,6 +10,7 @@ from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.api.admin import get_admin_shamrai_timeline_stats
 from src.models.database import Base
 from src.models.models import Bet, HistoricalStatsImportBatch, HistoricalStatsMonthly
 from src.services.historical_stats import (
@@ -198,6 +199,49 @@ class HistoricalStatsImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Сентябрь 2025", detail_values)
         self.assertIn("Сентябрь 2025", history_values)
         self.assertIn("A - B", history_values)
+
+    async def test_admin_shamrai_timeline_merges_historical_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "stats.xlsx"
+            _sample_workbook(source)
+            parsed = parse_historical_stats_workbook(source)
+
+            async with self.Session() as session:
+                await apply_historical_stats_import(session, parsed, apply=True)
+                session.add_all([
+                    Bet(
+                        id=uuid.uuid4(),
+                        event_name="Old live duplicate",
+                        coefficient=Decimal("2.00"),
+                        status="win",
+                        publication_type="forecast",
+                        created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+                        resolved_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+                    ),
+                    Bet(
+                        id=uuid.uuid4(),
+                        event_name="Fresh July live",
+                        coefficient=Decimal("2.50"),
+                        status="win",
+                        publication_type="forecast",
+                        created_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+                        resolved_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+                        sport_type="Футбол",
+                        outcome="П1",
+                    ),
+                ])
+                await session.commit()
+
+                payload = await get_admin_shamrai_timeline_stats(period="all", admin=object(), db=session)
+
+        self.assertEqual(payload["summary"]["bets"], 5)
+        self.assertEqual(payload["summary"]["wins"], 3)
+        self.assertEqual(payload["summary"]["losses"], 2)
+        self.assertEqual(payload["summary"]["profit_units"], 1.9)
+        self.assertEqual([month["key"] for month in payload["timeline"]], ["2026-07", "2026-06", "2025-09"])
+        self.assertEqual(payload["timeline"][1]["days"], [])
+        july_bets = payload["timeline"][0]["days"][0]["bets"]
+        self.assertEqual([bet["event_name"] for bet in july_bets], ["Fresh July live"])
 
 
 if __name__ == "__main__":

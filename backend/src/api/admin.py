@@ -86,7 +86,7 @@ from src.services.statistics import (
     summarize_items,
 )
 from src.services.google_drive_export import get_drive_export_job, start_crm_drive_export_job, start_drive_export_job
-from src.services.historical_stats import load_active_historical_stats_snapshot
+from src.services.historical_stats import load_active_historical_stats_snapshot, merge_historical_performance_payload
 from src.services.system_settings import (
     create_integration_unlock_token,
     get_admin_system_settings,
@@ -849,6 +849,20 @@ async def get_admin_author_timeline_stats(
         "username": admin.username,
     }
     return payload
+
+
+@router.get("/stats/shamrai-timeline")
+async def get_admin_shamrai_timeline_stats(
+    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Resolved channel bets plus the imported all-time Shamrai baseline."""
+    normalized_period = normalize_period(period)
+    historical = await load_active_historical_stats_snapshot(db, normalized_period)
+    items = await _shamrai_export_items(db, normalized_period)
+    payload = build_performance_payload(items, include_bets=True, period=normalized_period)
+    return merge_historical_performance_payload(payload, historical)
 
 
 async def _load_client_stat_rows(
