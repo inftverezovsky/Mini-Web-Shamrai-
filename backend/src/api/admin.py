@@ -604,12 +604,23 @@ def _monitoring_log_candidates() -> list[Path]:
     ]
 
 
-def _tail_log_lines(path: Path, limit: int = 50) -> list[str]:
+def _tail_log_lines(path: Path, limit: int = 50, max_bytes: int = 64 * 1024) -> list[str]:
     try:
         if not path or not path.is_file():
             return []
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return [_redact_sensitive_text(line) for line in lines[-limit:]]
+        clean_limit = max(0, int(limit))
+        if clean_limit == 0:
+            return []
+        clean_max_bytes = max(1024, int(max_bytes))
+        size = path.stat().st_size
+        start = max(0, size - clean_max_bytes)
+        with path.open("rb") as file:
+            file.seek(start)
+            raw_chunk = file.read(clean_max_bytes)
+        lines = raw_chunk.decode("utf-8", errors="replace").splitlines()
+        if start > 0 and lines:
+            lines = lines[1:]
+        return [_redact_sensitive_text(line) for line in lines[-clean_limit:]]
     except Exception:
         return []
 

@@ -439,11 +439,16 @@ async def observability_alert_daemon(
     while True:
         sleep_seconds = max(5.0, _setting_float("OBSERVABILITY_ALERT_INTERVAL_SECONDS", 60.0))
         try:
-            delivery_metrics, telegram_health, vk_health = await asyncio.gather(
-                delivery_metrics_factory(),
-                telegram_health_factory(),
-                vk_health_factory(),
-            )
+            if bool(getattr(settings, "OBSERVABILITY_EXTERNAL_PROBES_ENABLED", False)):
+                delivery_metrics, telegram_health, vk_health = await asyncio.gather(
+                    delivery_metrics_factory(),
+                    telegram_health_factory(),
+                    vk_health_factory(),
+                )
+            else:
+                delivery_metrics = await delivery_metrics_factory()
+                telegram_health = None
+                vk_health = None
             payload = build_observability_alert_payload(
                 delivery_metrics=delivery_metrics,
                 telegram_health=telegram_health,

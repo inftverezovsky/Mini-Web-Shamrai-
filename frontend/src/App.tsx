@@ -260,6 +260,7 @@ export default function App() {
   const reduceMotion = useReducedMotion();
   const reducePageMotion = reduceMotion || performanceProfile.shouldReduceMotion;
   const motionReducedMode = performanceProfile.shouldReduceMotion ? 'always' : 'user';
+  const globalPerformanceModeEnabled = Boolean(themeQuery.data?.global_performance_mode);
   const [, startTabTransition] = useTransition();
 
   const [activeUserTab, setActiveUserTab] = useState<UserTabId>('feed');
@@ -377,14 +378,17 @@ export default function App() {
           ...(shouldPreloadWebChat ? [loadWebBotChat] : []),
           ...(userProfile.is_onboarded === false ? [loadOnboarding] : []),
         ];
-    const lightLoaders = userIsStaff
+    const canBulkPreload = performanceProfile.canBulkPreload && !globalPerformanceModeEnabled;
+    const lightLoaders = userIsStaff && globalPerformanceModeEnabled
+      ? []
+      : userIsStaff
       ? [loadAdminStats]
       : userProfile.is_onboarded === false
         ? [loadOnboarding]
         : [loadMyBets];
-    const loaders = performanceProfile.canBulkPreload ? fullLoaders : lightLoaders;
-    const staggerMs = performanceProfile.canBulkPreload ? 70 : performanceProfile.isBalanced ? 220 : 420;
-    const idleOptions = performanceProfile.canBulkPreload
+    const loaders = canBulkPreload ? fullLoaders : lightLoaders;
+    const staggerMs = canBulkPreload ? 70 : performanceProfile.isBalanced ? 220 : 420;
+    const idleOptions = canBulkPreload
       ? { timeout: 1400, fallbackDelay: 120 }
       : { timeout: 2600, fallbackDelay: 900 };
 
@@ -405,6 +409,7 @@ export default function App() {
     };
   }, [
     introComplete,
+    globalPerformanceModeEnabled,
     isTelegram,
     performanceProfile.canBulkPreload,
     performanceProfile.isAppVisible,
@@ -647,10 +652,10 @@ export default function App() {
   const renderAdminPage = (tab: AdminShellTabId) => {
     const active = showAdminInterface && activeAdminTab === tab;
     if (tab === 'manage_bets') return <AdminDashboard />;
-    if (tab === 'stats') return <AdminStats />;
-    if (tab === 'clients') return <AdminCRM />;
+    if (tab === 'stats') return <AdminStats active={active} />;
+    if (tab === 'clients') return <AdminCRM active={active} />;
     if (tab === 'chats') return <AdminWebChat active={active} />;
-    if (tab === 'settings') return <AdminSettings />;
+    if (tab === 'settings') return <AdminSettings active={active} />;
     return <Profile />;
   };
 

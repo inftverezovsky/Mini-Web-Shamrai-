@@ -473,7 +473,11 @@ function ClientIntelligenceRow({
   );
 }
 
-export default function AdminCRM() {
+interface AdminCRMProps {
+  active?: boolean;
+}
+
+export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
   const currentAdmin = useAuthSelector((state) => state.user);
   const [searchTerm, setSearchTerm] = useState('');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
@@ -512,13 +516,14 @@ export default function AdminCRM() {
   const bookmakersQuery = useQuery<BookmakerResponse[]>({
     queryKey: BOOKMAKERS_QUERY_KEY,
     queryFn: ({ signal }) => fetchBookmakers(signal),
+    enabled: active,
     staleTime: TAB_QUERY_STALE_TIME,
   });
 
   const usersQuery = useInfiniteQuery<PaginatedResponse<CRMUser>, Error>({
     queryKey: adminUsersPageQueryKey(debouncedSearchTerm, activityFilter, groupFilter, tagFilter, bookmakerFilter),
     initialPageParam: null as string | null,
-    enabled: Boolean(currentAdmin),
+    enabled: Boolean(currentAdmin) && active,
     queryFn: ({ pageParam, signal }) => fetchAdminUsersPage<CRMUser>((pageParam as string | null) ?? null, {
       searchTerm: debouncedSearchTerm,
       activityFilter,
@@ -551,7 +556,7 @@ export default function AdminCRM() {
   }, [bookmakersQuery, usersQuery]);
 
   useEffect(() => {
-    if (!driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
+    if (!active || !driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
     const timer = window.setInterval(async () => {
       try {
         const freshJob = await apiFetch<StatsDriveExportJob>(`/admin/users/drive-export/${driveJob.id}`);
@@ -565,7 +570,7 @@ export default function AdminCRM() {
       }
     }, 2200);
     return () => window.clearInterval(timer);
-  }, [driveJob]);
+  }, [active, driveJob]);
 
   const groups = useMemo(() => (
     Array.from(new Set(users.map(user => user.client_group?.trim()).filter(Boolean) as string[])).sort()

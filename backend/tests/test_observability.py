@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -184,6 +185,44 @@ class ObservabilityAlertTests(unittest.TestCase):
         self.assertIn("payments.webhook_mismatch", keys)
         self.assertIn("http.5xx", keys)
         self.assertNotIn("bad-secret", json.dumps(payload, ensure_ascii=False))
+
+
+class ObservabilityAlertDaemonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_health_probes_are_skipped_when_disabled(self):
+        from src.core.config import settings
+        from src.services.observability_alerts import observability_alert_daemon
+
+        tick_seen = asyncio.Event()
+        external_calls = []
+
+        async def delivery_metrics_factory():
+            tick_seen.set()
+            return {"queue_depth": 0}
+
+        async def telegram_health_factory():
+            external_calls.append("telegram")
+            return {"ok": True}
+
+        async def vk_health_factory():
+            external_calls.append("vk")
+            return {"ok": True}
+
+        with patch.object(settings, "OBSERVABILITY_EXTERNAL_PROBES_ENABLED", False, create=True):
+            task = asyncio.create_task(
+                observability_alert_daemon(
+                    delivery_metrics_factory=delivery_metrics_factory,
+                    telegram_health_factory=telegram_health_factory,
+                    vk_health_factory=vk_health_factory,
+                )
+            )
+            try:
+                await asyncio.wait_for(tick_seen.wait(), timeout=1)
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        self.assertEqual(external_calls, [])
 
 
 if __name__ == "__main__":

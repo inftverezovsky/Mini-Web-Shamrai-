@@ -8,7 +8,7 @@ from src.core.redis_cache import get_redis_client
 logger = logging.getLogger("uvicorn")
 PRESENCE_KEY_PREFIX = "presence:user"
 PRESENCE_KEY_PATTERN = f"{PRESENCE_KEY_PREFIX}:*"
-PRESENCE_TTL_SECONDS = 75
+PRESENCE_TTL_SECONDS = 135
 
 
 def presence_key(user_id: int) -> str:

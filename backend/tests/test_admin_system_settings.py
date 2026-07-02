@@ -403,6 +403,19 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.media_type, "text/plain")
         self.assertNotIn("SECRET", report.body.decode("utf-8"))
 
+    async def test_monitoring_log_tail_uses_bounded_suffix_read(self):
+        with TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "backend.log"
+            log_path.write_text(
+                "".join(f"line-{index}\n" for index in range(200)),
+                encoding="utf-8",
+            )
+
+            with patch.object(Path, "read_text", side_effect=AssertionError("log file read fully")):
+                lines = admin_api._tail_log_lines(log_path, limit=3, max_bytes=128)
+
+        self.assertEqual(lines, ["line-197", "line-198", "line-199"])
+
 
 if __name__ == "__main__":
     unittest.main()

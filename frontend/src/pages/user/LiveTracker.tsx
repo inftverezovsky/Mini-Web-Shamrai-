@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { apiFetch } from '../../utils/api';
 import { Activity, Clock } from 'lucide-react';
 
@@ -18,11 +18,32 @@ interface MatchScoreData {
 }
 
 export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [matchData, setMatchData] = useState<MatchScoreData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [visible, setVisible] = useState(true);
+  const performanceModeActive = typeof document !== 'undefined'
+    && (
+      document.documentElement.classList.contains('shamrai-global-performance-mode')
+      || document.documentElement.dataset.performanceProfile === 'lowPower'
+    );
+  const pollIntervalMs = performanceModeActive ? 15_000 : 5_000;
 
   useEffect(() => {
-    if (!active) return undefined;
+    if (typeof IntersectionObserver === 'undefined') return undefined;
+    const node = rootRef.current;
+    if (!node) return undefined;
+
+    const observer = new IntersectionObserver(([entry]) => {
+      setVisible(Boolean(entry?.isIntersecting));
+    }, { rootMargin: '120px 0px' });
+    observer.observe(node);
+
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!active || !visible) return undefined;
     let cancelled = false;
 
     async function fetchLiveScore() {
@@ -39,7 +60,7 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
 
     void fetchLiveScore();
 
-    const intervalId = setInterval(fetchLiveScore, 5000);
+    const intervalId = setInterval(fetchLiveScore, pollIntervalMs);
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') void fetchLiveScore();
     };
@@ -50,11 +71,11 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
       clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [active, apiMatchId]);
+  }, [active, apiMatchId, pollIntervalMs, visible]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-3 bg-white/[0.02] border border-white/5 rounded-xl">
+      <div ref={rootRef} className="flex items-center justify-center py-3 bg-white/[0.02] border border-white/5 rounded-xl">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider animate-pulse flex items-center">
           <Activity className="w-3.5 h-3.5 text-rose-500 mr-1.5 animate-spin" />
           Поиск матча...
@@ -63,12 +84,12 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
     );
   }
 
-  if (!matchData) return null;
+  if (!matchData) return <div ref={rootRef} className="hidden" aria-hidden="true" />;
 
   const isLive = matchData.status === 'Live';
 
   return (
-    <div className="bg-slate-950/70 border border-white/10 p-4 rounded-xl flex flex-col justify-between items-center shadow-lg relative overflow-hidden group">
+    <div ref={rootRef} className="bg-slate-950/70 border border-white/10 p-4 rounded-xl flex flex-col justify-between items-center shadow-lg relative overflow-hidden group">
       
       {/* Visual neon lines */}
       <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-rose-500 to-transparent shadow-[0_0_8px_#ff007f]"></div>

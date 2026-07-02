@@ -13,7 +13,7 @@ export function usePresenceHeartbeat(enabled: boolean) {
     };
 
     sendHeartbeat();
-    const intervalId = window.setInterval(sendHeartbeat, 30_000);
+    const intervalId = window.setInterval(sendHeartbeat, 60_000);
     document.addEventListener('visibilitychange', sendHeartbeat);
     window.addEventListener('focus', sendHeartbeat);
 

@@ -370,7 +370,11 @@ function ExportPanel({
   );
 }
 
-export default function AdminStats() {
+interface AdminStatsProps {
+  active?: boolean;
+}
+
+export default function AdminStats({ active = true }: AdminStatsProps = {}) {
   const queryClient = useQueryClient();
   const [selectedClient, setSelectedClient] = useState<AdminClientTimelineResponse | null>(null);
   const [tab, setTab] = useState<StatsTab>('all');
@@ -390,6 +394,7 @@ export default function AdminStats() {
   const statsDashboardQuery = useQuery<AdminStatsDashboardData>({
     queryKey: adminStatsDashboardQueryKey(period),
     queryFn: () => fetchAdminStatsDashboard(period),
+    enabled: active,
     staleTime: ADMIN_TAB_QUERY_STALE_TIME,
   });
 
@@ -413,7 +418,7 @@ export default function AdminStats() {
   }, [period]);
 
   useEffect(() => {
-    if (!driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
+    if (!active || !driveJob || driveJob.status === 'completed' || driveJob.status === 'failed') return;
     const timer = window.setInterval(async () => {
       try {
         const freshJob = await apiFetch<StatsDriveExportJob>(`/admin/stats/drive-export/${driveJob.id}`);
@@ -427,7 +432,7 @@ export default function AdminStats() {
       }
     }, 2200);
     return () => window.clearInterval(timer);
-  }, [driveJob]);
+  }, [active, driveJob]);
 
   const selectedTimeline = useMemo(() => filterTimelineBySource(authorData, tab), [authorData, tab]);
   const summary = tab === 'clients'

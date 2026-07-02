@@ -30,6 +30,10 @@ import {
   type SettingsAccordionState,
 } from '../../features/settings/settingsAccordion';
 import {
+  monitoringRefetchInterval,
+  shouldEnableMonitoringQuery,
+} from '../../features/settings/monitoringControls';
+import {
   Activity,
   AlertTriangle,
   BellRing,
@@ -83,6 +87,10 @@ interface SettingsTabConfig {
   subtitle: string;
   badge: string;
   Icon: LucideIcon;
+}
+
+interface AdminSettingsProps {
+  active?: boolean;
 }
 
 type SwitchSettingKey =
@@ -966,11 +974,12 @@ function SettingsAccordionSection({
   );
 }
 
-export default function AdminSettings() {
+export default function AdminSettings({ active = true }: AdminSettingsProps = {}) {
   const [templates, setTemplates] = useState<MessageTemplateResponse[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [activeKey, setActiveKey] = useState<string>('');
   const [activeTab, setActiveTab] = useState<SettingsTabId>('texts');
+  const [monitoringLiveEnabled, setMonitoringLiveEnabled] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Record<ChannelGroupId, boolean>>({
     telegram: false,
@@ -1005,8 +1014,17 @@ export default function AdminSettings() {
   const settingsQuery = useQuery({
     queryKey: ADMIN_SETTINGS_QUERY_KEY,
     queryFn: () => apiFetch<AdminSettingsResponse>('/admin/settings'),
+    enabled: active,
     staleTime: 60_000,
   });
+  const monitoringTabActive = activeTab === 'monitoring';
+  const monitoringLogsOpen = Boolean(openSections.monitoring?.['monitoring-logs']);
+  const monitoringQueryState = {
+    settingsActive: active,
+    monitoringTabActive,
+    liveEnabled: monitoringLiveEnabled,
+    logsOpen: monitoringLogsOpen,
+  };
   const unlockIntegrationsMutation = useMutation({
     mutationFn: (payload: IntegrationUnlockRequest) => apiFetch<IntegrationUnlockResponse>('/admin/settings/integrations/unlock', {
       method: 'POST',
@@ -1066,26 +1084,27 @@ export default function AdminSettings() {
   const onlineQuery = useQuery({
     queryKey: ['admin-monitoring-online'],
     queryFn: () => apiFetch<OnlineMonitoringResponse>('/admin/monitoring/online'),
-    enabled: activeTab === 'monitoring',
-    refetchInterval: activeTab === 'monitoring' ? 7_000 : false,
+    enabled: shouldEnableMonitoringQuery('online', monitoringQueryState),
+    staleTime: 60_000,
   });
   const parserStatusQuery = useQuery({
     queryKey: ['admin-monitoring-parser-status'],
     queryFn: () => apiFetch<ParserStatusResponse>('/admin/monitoring/parser-status'),
-    enabled: activeTab === 'monitoring',
-    refetchInterval: activeTab === 'monitoring' ? 10_000 : false,
+    enabled: shouldEnableMonitoringQuery('parser', monitoringQueryState),
+    staleTime: 60_000,
   });
   const monitoringLogsQuery = useQuery({
     queryKey: ['admin-monitoring-logs'],
     queryFn: () => apiFetch<MonitoringLogsResponse>('/admin/monitoring/logs'),
-    enabled: activeTab === 'monitoring',
-    refetchInterval: activeTab === 'monitoring' ? 10_000 : false,
+    enabled: shouldEnableMonitoringQuery('logs', monitoringQueryState),
+    staleTime: 30_000,
   });
   const monitoringSummaryQuery = useQuery({
     queryKey: ['admin-monitoring-summary'],
     queryFn: () => apiFetch<MonitoringSummaryResponse>('/admin/monitoring/summary'),
-    enabled: activeTab === 'monitoring',
-    refetchInterval: activeTab === 'monitoring' ? 10_000 : false,
+    enabled: shouldEnableMonitoringQuery('summary', monitoringQueryState),
+    refetchInterval: monitoringRefetchInterval('summary', monitoringQueryState),
+    staleTime: 30_000,
   });
   const integrationDiagnosticsMutation = useMutation({
     mutationFn: (groupId: string) => apiFetch<IntegrationDiagnosticsResponse>('/admin/settings/integrations/diagnostics', {
@@ -1378,6 +1397,20 @@ export default function AdminSettings() {
 
   const toggleSecretVisibility = (key: SecretSettingKey) => {
     setVisibleSecrets(current => ({ ...current, [key]: !current[key] }));
+  };
+
+  const handleRefreshMonitoring = async () => {
+    try {
+      const requests: Array<Promise<unknown>> = [monitoringSummaryQuery.refetch()];
+      if (monitoringLogsOpen) requests.push(monitoringLogsQuery.refetch());
+      await Promise.all(requests);
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось обновить мониторинг');
+    }
+  };
+
+  const handleToggleMonitoringLive = () => {
+    setMonitoringLiveEnabled(current => !current);
   };
 
   const handleDownloadMonitoringLog = async () => {
@@ -2267,8 +2300,9 @@ export default function AdminSettings() {
 
   const renderMonitoringTab = () => {
     const summary = monitoringSummaryQuery.data;
+    const monitoringFetching = monitoringSummaryQuery.isFetching || monitoringLogsQuery.isFetching;
     const onlineUsers = summary?.online?.online_users ?? onlineQuery.data?.online_users ?? 0;
-    const parserStatus = summary?.parser?.status || parserStatusQuery.data?.status || 'error';
+    const parserStatus = summary?.parser?.status || parserStatusQuery.data?.status || (monitoringLiveEnabled ? 'error' : 'manual');
     const parserActive = parserStatus === 'active' && !parserStatusQuery.isError;
     const parserLastSyncRaw = summary?.parser?.last_sync || parserStatusQuery.data?.last_sync;
     const parserLastSync = parserLastSyncRaw
@@ -2296,15 +2330,57 @@ export default function AdminSettings() {
         aria-labelledby="settings-tab-monitoring"
         className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/42 p-4 shadow-glass backdrop-blur-xl sm:p-5"
       >
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.035] p-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${
+              monitoringLiveEnabled
+                ? 'border-emerald-300/35 bg-emerald-300/[0.14] text-emerald-100'
+                : 'border-white/10 bg-black/25 text-slate-300'
+            }`}>
+              <Activity className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-black text-white">Мониторинг</p>
+              <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                {monitoringLiveEnabled ? 'live 30s' : 'manual'}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleToggleMonitoringLive}
+              aria-pressed={monitoringLiveEnabled}
+              className={`smooth-pressable inline-flex min-h-[38px] items-center justify-center gap-2 rounded-xl border px-3 text-[9px] font-black uppercase tracking-wider transition-all active:scale-[0.98] ${
+                monitoringLiveEnabled
+                  ? 'border-emerald-300/35 bg-emerald-300/[0.14] text-emerald-50'
+                  : 'border-white/10 bg-white/[0.04] text-slate-200 hover:border-cyan-300/30'
+              }`}
+            >
+              <Power className="h-4 w-4" />
+              <span>{monitoringLiveEnabled ? 'Выключить live' : 'Включить live'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleRefreshMonitoring()}
+              disabled={monitoringFetching}
+              className="smooth-pressable inline-flex min-h-[38px] items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.1] px-3 text-[9px] font-black uppercase tracking-wider text-cyan-50 transition-all hover:bg-cyan-300/[0.16] active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
+            >
+              {monitoringFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+              <span>Обновить</span>
+            </button>
+          </div>
+        </div>
+
         <SettingsAccordionSection
           id="monitoring-overview"
           title="Онлайн и parser"
           subtitle="Redis presence и синтетический статус парсера"
-          badge={monitoringSummaryQuery.isFetching ? 'sync' : 'live'}
+          badge={monitoringSummaryQuery.isFetching ? 'sync' : monitoringLiveEnabled ? 'live' : 'manual'}
           Icon={Activity}
           open={sectionIsOpen('monitoring', 'monitoring-overview')}
           onToggle={() => toggleAccordionSection('monitoring', 'monitoring-overview')}
-          status={renderStatusBadge(parserActive ? 'active' : 'error')}
+          status={renderStatusBadge(parserActive ? 'active' : monitoringLiveEnabled ? 'error' : 'manual')}
         >
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(280px,420px)]">
             <div className="rounded-3xl border border-cyan-300/20 bg-cyan-300/[0.075] p-5 shadow-neon-cyan">
@@ -2332,7 +2408,7 @@ export default function AdminSettings() {
                 <div className="min-w-0">
                   <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Статус парсера</p>
                   <h3 className="mt-2 text-xl font-black text-white">
-                    {parserActive ? 'Active' : 'Error'}
+                    {parserActive ? 'Active' : monitoringLiveEnabled ? 'Error' : 'Manual'}
                   </h3>
                   <p className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-400">
                     <Clock3 className="h-4 w-4 text-slate-500" />
@@ -2357,7 +2433,7 @@ export default function AdminSettings() {
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
             <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.035] p-4">
               <p className="text-xs font-black text-white">Системное здоровье</p>
-              {(healthEntries.length ? healthEntries : [['api', 'loading']]).map(([key, value]) => (
+              {(healthEntries.length ? healthEntries : [['mode', monitoringLiveEnabled ? 'loading' : 'manual']]).map(([key, value]) => (
                 <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2">
                   <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">{key}</span>
                   {renderStatusBadge(String(value || 'none'))}
