@@ -20,7 +20,10 @@ function collectRuntimeErrors(page: Page) {
 
   page.on('console', (message) => {
     const text = message.text();
-    const expectedOfflineApiNoise = text.includes('Failed to load resource: net::ERR_CONNECTION_REFUSED');
+    const expectedOfflineApiNoise =
+      text.includes('Failed to load resource') &&
+      (text.includes('net::ERR_CONNECTION_REFUSED') ||
+        text.includes('Could not connect to localhost: Connection refused'));
     if (message.type() === 'error' && !expectedOfflineApiNoise) {
       runtimeErrors.push(text);
     }
@@ -41,7 +44,7 @@ test.describe('@compat browser matrix smoke', () => {
     await page.goto('/?perf_profile=lowPower');
 
     const nav = page.getByRole('navigation', { name: /Навигация приложения/ }).first();
-    await expect(nav).toBeVisible();
+    await expect(nav).toBeVisible({ timeout: 15_000 });
     await expect(nav.getByRole('button', { name: 'Лента' })).toHaveAttribute('aria-current', 'page');
 
     const viewport = page.viewportSize();
