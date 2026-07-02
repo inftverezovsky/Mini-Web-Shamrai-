@@ -44,7 +44,7 @@ interface ForecastSignalActionResponse {
   status: string;
   message: string;
   forecast_request_id: string;
-  action?: 'accepted' | 'contact_required';
+  action?: 'accepted' | 'contact_required' | 'inactive';
   contact?: {
     draft_text: string;
     channel: 'web' | 'telegram' | 'vk';
@@ -636,6 +636,11 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
         { method: 'POST' },
       );
       updateSignalForecastStatus(requestId, response.status);
+      if (response.action === 'inactive') {
+        const notice = signalActionNotice(signal, action, response.message);
+        notifyInfo(notice.message, notice.title);
+        return;
+      }
       if (action === 'take' && response.action === 'contact_required' && response.contact?.draft_text) {
         openSupportDraft(response.contact.draft_text);
         notifyInfo(response.message, signalActionNotice(signal, action, response.message).title);

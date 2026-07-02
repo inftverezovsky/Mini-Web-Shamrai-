@@ -213,7 +213,7 @@ class BookmakerLink(BaseModel):
 
 
 class BetBase(BaseModel):
-    event_name: str = Field(min_length=1, max_length=200)
+    event_name: Optional[str] = Field(default=None, max_length=200)
     coefficient: Decimal = Field(ge=Decimal("1.0"), le=Decimal("999.99"))
     fair_coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
@@ -247,7 +247,7 @@ class BetResolve(BaseModel):
 
 
 class BetUpdate(BaseModel):
-    event_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    event_name: Optional[str] = Field(default=None, max_length=200)
     coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     fair_coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
@@ -270,6 +270,7 @@ class BetOddsDropUpdate(BaseModel):
 
 
 class BetResponse(BetBase):
+    event_name: str = Field(max_length=200)
     id: UUID
     status: str
     created_at: datetime

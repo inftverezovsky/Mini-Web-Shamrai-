@@ -711,6 +711,43 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_db.commits, 1)
         self.assertEqual(fake_db.rollbacks, 0)
 
+    async def test_process_inactive_forecast_button_answers_without_chat_duplicate(self):
+        expected_message = "Прогноз уже не активен. Реагировать не нужно."
+        event_object = {
+            "event_id": "event-1",
+            "user_id": 123,
+            "peer_id": 123,
+            "payload": json.dumps(
+                {
+                    "type": "forecast_request",
+                    "action": "take",
+                    "request_id": "00000000-0000-0000-0000-000000000001",
+                }
+            ),
+        }
+
+        class FakeSession:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        with (
+            patch.object(vk_callback, "AsyncSessionLocal", return_value=FakeSession()),
+            patch.object(
+                vk_callback,
+                "_handle_forecast_button",
+                new=AsyncMock(return_value={"status": "inactive", "message": expected_message}),
+            ),
+            patch.object(vk_callback, "_answer_forecast_button_event") as answer_event,
+            patch.object(vk_callback, "_send_forecast_button_message") as send_message,
+        ):
+            await vk_callback._process_forecast_button_event(event_object)
+
+        answer_event.assert_called_once_with(event_object, expected_message)
+        send_message.assert_not_called()
+
     async def test_handle_forecast_button_does_not_schedule_inline_auto_delivery_after_take(self):
         request_id = UUID("00000000-0000-0000-0000-000000000001")
         fake_user = SimpleNamespace(telegram_id=-1000000000123)

@@ -182,6 +182,7 @@ def start_crm_drive_export_job(
     activity: str,
     group: Optional[str],
     tag: Optional[str],
+    bookmaker_id: Optional[int],
     formats: list[DriveExportFormat],
 ) -> dict[str, Any]:
     _drive_enabled_or_400()
@@ -191,6 +192,7 @@ def start_crm_drive_export_job(
         "activity": activity,
         "group": (group or "").strip(),
         "tag": (tag or "").strip(),
+        "bookmaker_id": bookmaker_id,
     }
     job = DriveExportJob(
         id=job_id,
@@ -355,6 +357,9 @@ def _crm_filter_label(filters: dict[str, Any]) -> str:
         parts.append(f"группа: {group}")
     if tag and tag != "all":
         parts.append(f"метка: {tag}")
+    bookmaker_id = filters.get("bookmaker_id")
+    if bookmaker_id:
+        parts.append(f"БК #{bookmaker_id}")
     return "CRM: клиенты" + (f" ({', '.join(parts)})" if parts else "")
 
 
@@ -371,6 +376,7 @@ async def _build_crm_artifacts(
         activity=str(filters.get("activity") or "all"),
         group=str(filters.get("group") or ""),
         tag=str(filters.get("tag") or ""),
+        bookmaker_id=filters.get("bookmaker_id"),
     )
     filtered_user_ids = {row.user_id for row in filtered_info_rows}
     recent_rows = await load_client_recent_bet_export_rows(db, "all", limit_per_client=None)

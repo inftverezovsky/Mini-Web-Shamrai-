@@ -10,9 +10,10 @@ import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, E
 import { hasActivePromo, promoFlags } from '../../config/promoFlags';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import { isStaffRole } from '../../utils/roles';
-import { notifyError, notifyPending, notifySuccess } from '../../utils/notify';
+import { notifyError, notifyInfo, notifyPending, notifySuccess } from '../../utils/notify';
 import { trackEvent } from '../../utils/analytics';
 import { BETS_FEED_QUERY_KEY, TAB_QUERY_STALE_TIME, fetchBetsFeedPage } from '../../utils/tabPrefetch';
+import { betTakeFailureNotice } from './betFeedActions';
 
 const MarathonWidget = lazy(() => import('./MarathonWidget'));
 const LiveTracker = lazy(() => import('./LiveTracker'));
@@ -520,13 +521,18 @@ export default function BetFeed({
         unlocked: bet?.is_unlocked,
       });
     },
-    onError: (err: any, { bet }, context) => {
+    onError: (err: unknown, { bet }, context) => {
       queryClient.setQueryData(BETS_FEED_QUERY_KEY, context?.previousFeed);
       if (context?.previousTakenIds) {
         setTakenBetIds(context.previousTakenIds);
         persistTakenBetIds(context.previousTakenIds);
       }
-      notifyError(err.message || 'Не удалось принять ставку');
+      const notice = betTakeFailureNotice(err);
+      if (notice.type === 'info') {
+        notifyInfo(notice.message, notice.title);
+      } else {
+        notifyError(notice.message, notice.title);
+      }
       trackEvent('Bet Take Failed', {
         category: bet?.category,
         sport: bet?.sport_type,

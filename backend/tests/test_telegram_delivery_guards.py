@@ -1,12 +1,13 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from src import main
 from src.api import telegram_webhook
+from src.services import forecast_delivery
 
 
 class TelegramDeliveryGuardTests(unittest.TestCase):
@@ -151,6 +152,53 @@ class TelegramForecastCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["callback_query_id"], "callback-1")
         self.assertIn("отправляем", response["text"])
         process_sales_send.assert_called_once()
+        run_background.assert_called_once()
+        self.assertEqual(len(created_tasks), 1)
+
+    async def test_inactive_take_callback_shows_alert_and_clears_client_message(self):
+        request_id = "00000000-0000-0000-0000-000000000001"
+        forecast_request = SimpleNamespace(
+            id=request_id,
+            status=forecast_delivery.FORECAST_STATUS_REMOVED,
+        )
+        expected_message = "Прогноз уже не активен. Реагировать не нужно."
+
+        class FakeDb:
+            async def commit(self):
+                return None
+
+            async def rollback(self):
+                return None
+
+        created_tasks = []
+
+        def fake_run_background(coro):
+            created_tasks.append(coro)
+            if hasattr(coro, "close"):
+                coro.close()
+
+        with (
+            patch.object(
+                telegram_webhook,
+                "set_forecast_request_interested",
+                new=AsyncMock(return_value=(forecast_request, expected_message, False)),
+            ),
+            patch.object(telegram_webhook, "_run_background", side_effect=fake_run_background) as run_background,
+        ):
+            response = await telegram_webhook._handle_forecast_callback(
+                {
+                    "id": "callback-1",
+                    "from": {"id": 111},
+                    "message": {"chat": {"id": 111}},
+                    "data": f"forecast:take:{request_id}",
+                },
+                FakeDb(),
+            )
+
+        self.assertEqual(response["method"], "answerCallbackQuery")
+        self.assertEqual(response["callback_query_id"], "callback-1")
+        self.assertEqual(response["text"], expected_message)
+        self.assertTrue(response["show_alert"])
         run_background.assert_called_once()
         self.assertEqual(len(created_tasks), 1)
 

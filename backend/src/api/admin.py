@@ -162,6 +162,7 @@ class AdminCrmDriveExportRequest(BaseModel):
     activity: str = "all"
     group: Optional[str] = None
     tag: Optional[str] = None
+    bookmaker_id: Optional[int] = Field(default=None, ge=1)
     formats: List[str] = Field(default_factory=lambda: ["google_sheet"])
 
 
@@ -1655,6 +1656,7 @@ async def admin_list_users_page(
     activity: str = Query("all", pattern="^(all|active|empty|guarantee)$"),
     group: Optional[str] = Query(None),
     tag: Optional[str] = Query(None),
+    bookmaker_id: Optional[int] = Query(None, ge=1),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ):
@@ -1685,6 +1687,9 @@ async def admin_list_users_page(
         filters.append(User.client_group == group)
     if tag and tag != "all":
         filters.append(User.client_tag == tag)
+    clean_bookmaker_id = bookmaker_id if isinstance(bookmaker_id, int) and bookmaker_id > 0 else None
+    if clean_bookmaker_id:
+        filters.append(User.bookmakers.any(Bookmaker.id == clean_bookmaker_id))
     count_filters = list(filters)
     if cursor_value:
         cursor_created_at, cursor_telegram_id = cursor_value
@@ -1805,6 +1810,7 @@ async def export_admin_users(
     activity: str = Query("all", pattern="^(all|active|empty|guarantee)$"),
     group: Optional[str] = Query(None),
     tag: Optional[str] = Query(None),
+    bookmaker_id: Optional[int] = Query(None, ge=1),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> Response:
@@ -1816,6 +1822,7 @@ async def export_admin_users(
         activity=activity,
         group=group,
         tag=tag,
+        bookmaker_id=bookmaker_id if isinstance(bookmaker_id, int) and bookmaker_id > 0 else None,
     )
     filtered_user_ids = {row.user_id for row in filtered_info_rows}
 
@@ -1853,6 +1860,7 @@ async def create_admin_users_drive_export(
         activity=activity,
         group=payload.group,
         tag=payload.tag,
+        bookmaker_id=payload.bookmaker_id,
         formats=list(dict.fromkeys(formats)),
     )
 

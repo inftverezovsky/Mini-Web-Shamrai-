@@ -18,21 +18,27 @@ export const TAB_QUERY_STALE_TIME = 5 * 60_000;
 export const ADMIN_TAB_QUERY_STALE_TIME = 60_000;
 
 export const BETS_FEED_QUERY_KEY = ['bets-feed-page'] as const;
-export const GLOBAL_STATS_QUERY_KEY = ['global-stats'] as const;
 export const BOOKMAKERS_QUERY_KEY = ['bookmakers'] as const;
 export const TARIFFS_QUERY_KEY = ['tariffs-dashboard'] as const;
 
+export type GlobalStatsPeriod = Extract<PeriodFilter, 'all' | 'month'>;
+
 export const myBetsTimelineQueryKey = (period: PeriodFilter = 'all') => ['my-bets-timeline', period] as const;
+export const globalStatsQueryKey = (period: GlobalStatsPeriod = 'all') => ['global-stats', period] as const;
+export const GLOBAL_STATS_QUERY_KEY = globalStatsQueryKey('all');
 export const profileDashboardQueryKey = (telegramId: number | null | undefined) => ['profile-dashboard', telegramId] as const;
 export const adminUsersPageQueryKey = (
   searchTerm = '',
   activityFilter = 'all',
   groupFilter = 'all',
   tagFilter = 'all',
-) => ['admin-users-page', searchTerm, activityFilter, groupFilter, tagFilter] as const;
+  bookmakerFilter = 'all',
+) => ['admin-users-page', searchTerm, activityFilter, groupFilter, tagFilter, bookmakerFilter] as const;
 export const adminStatsDashboardQueryKey = (period: PeriodFilter = 'all') => ['admin-stats-dashboard', period] as const;
 
 export interface GlobalStatsData {
+  period: GlobalStatsPeriod;
+  period_label: string;
   winrate: number;
   roi: number;
   net_profit: number;
@@ -91,8 +97,8 @@ export function fetchMyBetsTimeline(period: PeriodFilter = 'all') {
   return apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`);
 }
 
-export function fetchGlobalStats() {
-  return apiFetch<GlobalStatsData>('/stats/global');
+export function fetchGlobalStats(period: GlobalStatsPeriod = 'all') {
+  return apiFetch<GlobalStatsData>(`/stats/global?period=${encodeURIComponent(period)}`);
 }
 
 export function fetchProfileDashboard() {
@@ -118,6 +124,7 @@ export function fetchAdminUsersPage<T = any>(
     activityFilter?: string;
     groupFilter?: string;
     tagFilter?: string;
+    bookmakerFilter?: string;
   } = {},
   signal?: AbortSignal,
 ) {
@@ -127,6 +134,7 @@ export function fetchAdminUsersPage<T = any>(
   if (filters.activityFilter && filters.activityFilter !== 'all') params.set('activity', filters.activityFilter);
   if (filters.groupFilter && filters.groupFilter !== 'all') params.set('group', filters.groupFilter);
   if (filters.tagFilter && filters.tagFilter !== 'all') params.set('tag', filters.tagFilter);
+  if (filters.bookmakerFilter && filters.bookmakerFilter !== 'all') params.set('bookmaker_id', filters.bookmakerFilter);
   return apiFetch<PaginatedResponse<T>>(`/admin/users-page?${params.toString()}`, { signal });
 }
 
@@ -176,8 +184,8 @@ export function prefetchUserTab(queryClient: QueryClient, tab: UserTabId, contex
               staleTime: TAB_QUERY_STALE_TIME,
             }),
             queryClient.prefetchQuery({
-              queryKey: GLOBAL_STATS_QUERY_KEY,
-              queryFn: fetchGlobalStats,
+              queryKey: globalStatsQueryKey('all'),
+              queryFn: () => fetchGlobalStats('all'),
               staleTime: TAB_QUERY_STALE_TIME,
             }),
           ]).then(() => undefined)

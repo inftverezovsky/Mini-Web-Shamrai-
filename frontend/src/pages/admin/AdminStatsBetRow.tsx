@@ -151,10 +151,6 @@ export default function AdminStatsBetRow({
     const eventName = draft.event_name.trim();
     const coefficient = normalizeOddsInput(draft.coefficient);
 
-    if (!eventName) {
-      notifyError('Укажите матч');
-      return;
-    }
     if (!coefficient) {
       notifyError('Укажите коэффициент');
       return;
@@ -324,7 +320,9 @@ export default function AdminStatsBetRow({
 
           <div className="mt-2 grid gap-2">
             <label className="grid gap-1">
-              <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">Матч</span>
+              <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                Матч <span className="normal-case tracking-normal">(необязательно)</span>
+              </span>
               <input
                 type="text"
                 value={draft.event_name}
@@ -359,7 +357,9 @@ export default function AdminStatsBetRow({
             </div>
 
             <label className="grid gap-1">
-              <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">Вид спорта</span>
+              <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                Вид спорта <span className="normal-case tracking-normal">(необязательно)</span>
+              </span>
               <input
                 type="text"
                 value={draft.sport_type}
@@ -408,7 +408,7 @@ export default function AdminStatsBetRow({
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider text-cyan-200">
                   <LinkIcon className="h-3.5 w-3.5" />
-                  Ссылки БК
+                  Ссылки БК <span className="normal-case tracking-normal">(необязательно)</span>
                 </div>
                 {selectedBookmakers.map((bookmaker) => (
                   <div

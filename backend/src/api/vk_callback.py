@@ -17,6 +17,7 @@ from src.models.models import ForecastRequest, User
 from src.services.forecast_delivery import (
     FORECAST_CONTACT_DRAFT_TEXT,
     FORECAST_STATUS_ANNOUNCED,
+    forecast_request_is_inactive_for_client,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
     set_forecast_request_interested,
@@ -294,16 +295,17 @@ async def _handle_forecast_button(event_object: dict, db: AsyncSession) -> dict:
                 auto_delivery_now=False,
             )
         elif action == "decline":
-            _, message = await set_forecast_request_declined(
+            forecast_request, message = await set_forecast_request_declined(
                 db,
                 request_id=request_id,
                 actor_user_id=user.telegram_id,
             )
-            forecast_request = None
         else:
             return {"status": "failed", "message": "Неизвестная кнопка"}
 
         await db.commit()
+        if forecast_request_is_inactive_for_client(forecast_request):
+            return {"status": "inactive", "message": message}
         if (
             action == "take"
             and forecast_request is not None
@@ -360,6 +362,9 @@ async def _process_forecast_button_event(event_object: dict) -> None:
         return
 
     message = result.get("message") or "Принято"
+    if result.get("status") == "inactive":
+        _answer_forecast_button_event(event_object, message)
+        return
     _answer_forecast_button_event(event_object, message)
     _send_forecast_button_message(event_object, message)
 

@@ -19,6 +19,7 @@ from src.core.telegram_text import SHAMRAI_CONTACT_USERNAME, contact_footer, wri
 from src.api.payments import process_telegram_payment_update
 from src.services.forecast_delivery import (
     FORECAST_CONTACT_DRAFT_TEXT,
+    forecast_request_is_inactive_for_client,
     handle_sales_callback,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
@@ -415,6 +416,7 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
 
     action = parts[1]
     should_notify_sales = False
+    forecast_request = None
     try:
         request_id = UUID(parts[2])
     except ValueError:
@@ -440,7 +442,7 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
                 auto_delivery_now=False,
             )
         elif action == "decline":
-            _, message = await set_forecast_request_declined(
+            forecast_request, message = await set_forecast_request_declined(
                 db,
                 request_id=request_id,
                 actor_user_id=int(actor_user_id),
@@ -469,8 +471,15 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
             await asyncio.to_thread(_send_forecast_contact_cta, int(chat_id), message)
             return _answer_callback_query(callback_id, callback_message)
 
+        inactive = (
+            action in {"take", "decline"}
+            and forecast_request is not None
+            and forecast_request_is_inactive_for_client(forecast_request)
+        )
         if action in {"take", "decline"}:
             _run_background(asyncio.to_thread(_clear_forecast_client_message, callback_query))
+        if inactive:
+            return _answer_callback_query(callback_id, message, True)
         if should_notify_sales:
             _run_background(notify_sales_manager_for_request(forecast_request.id))
         callback_message = "Принято" if action in {"take", "decline"} else message

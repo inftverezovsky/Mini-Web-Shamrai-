@@ -59,6 +59,8 @@ from src.services.forecast_delivery import (
     FORECAST_STATUS_DECLINED,
     FORECAST_STATUS_INTERESTED,
     FORECAST_STATUS_REMOVED,
+    FORECAST_INACTIVE_MESSAGE,
+    PLACEHOLDER_EVENT_NAME,
     count_client_bet_takers,
     enqueue_admin_group_forecast_result_notification,
 )
@@ -78,6 +80,10 @@ STATIC_COUPONS_DIR = os.path.join(
 
 ODDS_DROP_DELIVERED_FORECAST_STATUSES = {"sent", "manual_sent"}
 BET_HINT_PRICE_XTR = 20
+
+
+def _event_name_or_placeholder(value: Optional[str]) -> str:
+    return str(value or "").strip() or PLACEHOLDER_EVENT_NAME
 
 
 def _encode_feed_cursor(bet: Bet) -> str:
@@ -479,7 +485,7 @@ async def _build_bet_response(
     db: AsyncSession,
     admin: User,
     *,
-    event_name: str,
+    event_name: Optional[str],
     coefficient: Decimal,
     bookmaker_id: Optional[int],
     bookmaker_ids: Optional[List[int]],
@@ -518,7 +524,7 @@ async def _build_bet_response(
     primary_bookmaker_id = selected_bookmaker_ids[0] if selected_bookmaker_ids else None
 
     bet = Bet(
-        event_name=event_name,
+        event_name=_event_name_or_placeholder(event_name),
         coefficient=coefficient,
         bookmaker_id=primary_bookmaker_id,
         description=description,
@@ -722,6 +728,11 @@ async def take_bet(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Прогноз не найден"
+        )
+    if bet.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=FORECAST_INACTIVE_MESSAGE,
         )
 
     has_sub = await has_active_subscription(current_user, db)
@@ -983,7 +994,7 @@ async def create_bet(
         await broadcast_live_signal(
             db,
             users=res_users.scalars().all(),
-            event_name=bet_data.event_name,
+            event_name=_event_name_or_placeholder(bet_data.event_name),
             coefficient=bet_data.coefficient,
             brain_score=bet_data.brain_score,
         )
@@ -994,7 +1005,7 @@ async def create_bet(
 @router.post("/with-coupon", response_model=BetResponse, status_code=status.HTTP_201_CREATED)
 async def create_bet_with_coupon(
     request: Request,
-    event_name: str = Form(..., min_length=1, max_length=200),
+    event_name: Optional[str] = Form(None, max_length=200),
     coefficient: Decimal = Form(..., ge=Decimal("1.0"), le=Decimal("999.99")),
     bookmaker_id: Optional[int] = Form(None),
     description: Optional[str] = Form(None, max_length=4000),
@@ -1046,7 +1057,7 @@ async def create_bet_with_coupon(
         await broadcast_live_signal(
             db,
             users=res_users.scalars().all(),
-            event_name=event_name,
+            event_name=_event_name_or_placeholder(event_name),
             coefficient=coefficient,
             brain_score=brain_score,
         )
@@ -1082,13 +1093,7 @@ async def update_bet(
     update_payload = bet_data.model_dump(exclude_unset=True)
 
     if "event_name" in update_payload:
-        event_name = str(bet_data.event_name or "").strip()
-        if not event_name:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Укажите матч",
-            )
-        bet.event_name = event_name
+        bet.event_name = _event_name_or_placeholder(bet_data.event_name)
 
     if "coefficient" in update_payload:
         if bet_data.coefficient is None:

@@ -6,6 +6,7 @@ import {
   getClientPriority,
   getClientRecentMatchSummary,
   getCrmBookmakerPreview,
+  clientMatchesBookmakerFilter,
 } from '../src/utils/adminCrmDisplay';
 
 describe('admin CRM display helpers', () => {
@@ -90,5 +91,21 @@ describe('admin CRM display helpers', () => {
       extraCount: 1,
       otherLabel: 'Локальная БК',
     });
+  });
+
+  it('matches clients by selected bookmaker id', () => {
+    const fonbetClient = {
+      bookmakers: [{ id: 1, name: 'Фонбет', code: 'fonbet' }],
+      other_bookmaker_name: null,
+    };
+    const otherClient = {
+      bookmakers: [{ id: 99, name: 'Другая', code: 'other' }],
+      other_bookmaker_name: 'Локальная БК',
+    };
+
+    expect(clientMatchesBookmakerFilter(fonbetClient, 'all')).toBe(true);
+    expect(clientMatchesBookmakerFilter(fonbetClient, '1')).toBe(true);
+    expect(clientMatchesBookmakerFilter(fonbetClient, '2')).toBe(false);
+    expect(clientMatchesBookmakerFilter(otherClient, '99')).toBe(true);
   });
 });

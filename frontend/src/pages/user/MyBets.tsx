@@ -13,29 +13,62 @@ import {
   ExpandedMap,
   ExportActions,
   PeriodSelector,
-  ProfitCurve,
   BreakdownBars,
   MomentumStrip,
+  positiveStreakCount,
+  positiveStreakLabel,
   StatsHero,
   StatsKpiGrid,
   StatsSkeleton,
   StatTile,
   TimelineSectionBlock,
   recentResultCodes,
-  streakLabel,
 } from '../../features/performance/performanceUi';
 import { PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
 import { downloadApiFile } from '../../utils/api';
 import {
-  GLOBAL_STATS_QUERY_KEY,
   TAB_QUERY_STALE_TIME,
   fetchGlobalStats,
   fetchMyBetsTimeline,
+  globalStatsQueryKey,
   myBetsTimelineQueryKey,
   type GlobalStatsData,
+  type GlobalStatsPeriod,
 } from '../../utils/tabPrefetch';
 
 type ClientStatsView = 'shamrai' | 'mine';
+
+const SHAMRAI_PERIOD_OPTIONS: Array<{ value: GlobalStatsPeriod; label: string }> = [
+  { value: 'all', label: 'Все' },
+  { value: 'month', label: 'Месяц' },
+];
+
+function ShamraiPeriodSelector({
+  value,
+  onChange,
+}: {
+  value: GlobalStatsPeriod;
+  onChange: (value: GlobalStatsPeriod) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-white/10 bg-slate-950/35 p-1">
+      {SHAMRAI_PERIOD_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`min-h-[30px] rounded-lg px-1.5 text-[9px] font-black uppercase tracking-[0.08em] transition-all active:scale-[0.98] ${
+            value === option.value
+              ? 'bg-cyan-200/15 text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+              : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimelineResponse | null {
   if (!stats) return null;
@@ -70,8 +103,8 @@ function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimeli
   });
 
   return {
-    period: 'all',
-    period_label: 'Все время',
+    period: stats.period || 'all',
+    period_label: stats.period_label || 'Все время',
     summary,
     source_split: {
       all: summary,
@@ -95,8 +128,9 @@ function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimeli
 export default function MyBets() {
   const [expandedMonths, setExpandedMonths] = useState<ExpandedMap>({});
   const [expandedDays, setExpandedDays] = useState<ExpandedMap>({});
-  const [view, setView] = useState<ClientStatsView>('shamrai');
+  const [view, setView] = useState<ClientStatsView>('mine');
   const [period, setPeriod] = useState<PeriodFilter>('all');
+  const [shamraiPeriod, setShamraiPeriod] = useState<GlobalStatsPeriod>('all');
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -107,8 +141,8 @@ export default function MyBets() {
   });
 
   const shamraiStatsQuery = useQuery<GlobalStatsData>({
-    queryKey: GLOBAL_STATS_QUERY_KEY,
-    queryFn: fetchGlobalStats,
+    queryKey: globalStatsQueryKey(shamraiPeriod),
+    queryFn: () => fetchGlobalStats(shamraiPeriod),
     staleTime: TAB_QUERY_STALE_TIME,
   });
 
@@ -119,6 +153,8 @@ export default function MyBets() {
   const momentumResults = recentResultCodes(data, 14);
   const shamraiTimeline = globalStatsToTimeline(shamraiStatsQuery.data ?? null);
   const shamraiSummary = shamraiTimeline?.summary ?? EMPTY_SUMMARY;
+  const shamraiError = shamraiStatsQuery.error?.message || null;
+  const shamraiLoading = shamraiStatsQuery.isLoading && !shamraiStatsQuery.data;
 
   const exportMyBets = async (format: 'csv' | 'xlsx') => {
     try {
@@ -159,8 +195,8 @@ export default function MyBets() {
     <div className="space-y-5 pb-10">
       <div className="grid grid-cols-2 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/35 p-1">
         {([
-          ['shamrai', 'Статистика Shamrai'],
           ['mine', 'Моя статистика'],
+          ['shamrai', 'Статистика Shamrai'],
         ] as const).map(([value, label]) => (
           <button
             key={value}
@@ -177,29 +213,7 @@ export default function MyBets() {
         ))}
       </div>
 
-      {view === 'shamrai' ? (
-        <>
-          <StatsHero
-            title="Статистика Shamrai"
-            eyebrow="Общая платформа"
-            periodLabel={shamraiTimeline?.period_label || 'Все время'}
-            summary={shamraiSummary}
-            valueMode="rub"
-            controls={(
-              <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-3">
-                <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.13em] text-slate-500">
-                  <BarChart3 className="h-4 w-4 text-cyan-300" />
-                  Верифицированные расчеты
-                </div>
-                <div className="mt-1 text-sm font-black text-white">{shamraiSummary.bets} ставок</div>
-              </div>
-            )}
-            actions={<div className="min-h-[48px]" />}
-          />
-          <StatsKpiGrid summary={shamraiSummary} valueMode="rub" />
-          <ProfitCurve data={shamraiTimeline} valueMode="rub" title="Динамика Shamrai" />
-        </>
-      ) : (
+      {view === 'mine' ? (
         <>
           <StatsHero
             title="Моя статистика"
@@ -209,6 +223,7 @@ export default function MyBets() {
             valueMode="flats"
             controls={<PeriodSelector value={period} onChange={setPeriod} />}
             actions={<ExportActions exporting={exporting} onCsv={() => void exportMyBets('csv')} onXlsx={() => void exportMyBets('xlsx')} />}
+            seriesMode="positive"
           />
 
           <MomentumStrip results={momentumResults} title="Мой импульс" />
@@ -223,9 +238,9 @@ export default function MyBets() {
               icon={<Trophy className="h-4 w-4 text-emerald-300" />}
             />
             <StatTile
-              label="Текущая серия"
-              value={summary.current_streak ? streakLabel(summary) : '-'}
-              tone={summary.current_streak_type === 'win' ? 'text-emerald-300' : summary.current_streak_type === 'loss' ? 'text-rose-300' : 'text-white'}
+              label="Серия"
+              value={positiveStreakLabel(summary)}
+              tone={positiveStreakCount(summary) > 0 ? 'text-emerald-300' : 'text-white'}
               icon={<Sparkles className="h-4 w-4 text-amber-200" />}
             />
           </div>
@@ -252,6 +267,49 @@ export default function MyBets() {
             </div>
           ) : null}
         </>
+      ) : (
+        shamraiLoading ? (
+          <StatsSkeleton />
+        ) : shamraiError ? (
+          <div className="mx-auto max-w-md rounded-[26px] border border-rose-500/25 bg-rose-500/10 p-8 text-center">
+            <AlertCircle className="mx-auto h-8 w-8 text-rose-400" />
+            <h4 className="mt-3 text-sm font-bold text-white">Ошибка загрузки Shamrai</h4>
+            <p className="mt-2 text-xs text-slate-400">{shamraiError}</p>
+            <button
+              type="button"
+              onClick={() => void shamraiStatsQuery.refetch()}
+              className="mx-auto mt-4 inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2 text-xs font-bold text-white transition-all hover:bg-white/15 active:scale-[0.98]"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Повторить
+            </button>
+          </div>
+        ) : (
+          <>
+            <StatsHero
+              title="Статистика Shamrai"
+              eyebrow="Общая платформа"
+              periodLabel={shamraiTimeline?.period_label || 'Все время'}
+              summary={shamraiSummary}
+              valueMode="rub"
+              controls={(
+                <div className="grid gap-2">
+                  <ShamraiPeriodSelector value={shamraiPeriod} onChange={setShamraiPeriod} />
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-3">
+                    <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.13em] text-slate-500">
+                      <BarChart3 className="h-4 w-4 text-cyan-300" />
+                      Верифицированные расчеты
+                    </div>
+                    <div className="mt-1 text-sm font-black text-white">{shamraiSummary.bets} ставок</div>
+                  </div>
+                </div>
+              )}
+              actions={<div className="min-h-[48px]" />}
+              seriesMode="positive"
+            />
+            <StatsKpiGrid summary={shamraiSummary} valueMode="rub" />
+          </>
+        )
       )}
     </div>
   );

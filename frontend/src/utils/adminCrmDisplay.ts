@@ -30,6 +30,10 @@ export interface CrmDisplayClient {
   guarantee_active?: boolean;
 }
 
+export interface CrmBookmakerFilterClient {
+  bookmakers?: CrmBookmakerPreviewItem[];
+}
+
 export type CrmChannelTone = 'ready' | 'warning' | 'missing';
 export type CrmPriorityTone = 'danger' | 'warning' | 'success' | 'info' | 'muted';
 
@@ -240,6 +244,16 @@ export function getClientRecentMatchSummary(results: CrmRecentMatchResult[]) {
 export function getStableMatchSegments(results: CrmRecentMatchResult[], segmentCount = 10) {
   const chronologicalResults = [...results].reverse();
   return Array.from({ length: segmentCount }, (_, index) => chronologicalResults[index] ?? null);
+}
+
+export function clientMatchesBookmakerFilter(
+  user: CrmBookmakerFilterClient,
+  bookmakerFilter: string,
+) {
+  if (!bookmakerFilter || bookmakerFilter === 'all') return true;
+  const bookmakerId = Number.parseInt(bookmakerFilter, 10);
+  if (!Number.isFinite(bookmakerId)) return true;
+  return (user.bookmakers || []).some((bookmaker) => bookmaker.id === bookmakerId);
 }
 
 export function getCrmBookmakerPreview(

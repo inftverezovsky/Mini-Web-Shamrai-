@@ -16,6 +16,7 @@ import {
   getCrmClientTagLabel,
   getClientPriority,
   getClientRecentMatchSummary,
+  clientMatchesBookmakerFilter,
   getCrmBookmakerPreview,
   getCrmMatchBalance,
   getStableMatchSegments,
@@ -478,6 +479,7 @@ export default function AdminCRM() {
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [groupFilter, setGroupFilter] = useState('all');
   const [tagFilter, setTagFilter] = useState('all');
+  const [bookmakerFilter, setBookmakerFilter] = useState('all');
   const debouncedSearchTerm = useDebouncedValue(searchTerm, 250);
 
   const [selectedUser, setSelectedUser] = useState<CRMUser | null>(null);
@@ -514,7 +516,7 @@ export default function AdminCRM() {
   });
 
   const usersQuery = useInfiniteQuery<PaginatedResponse<CRMUser>, Error>({
-    queryKey: adminUsersPageQueryKey(debouncedSearchTerm, activityFilter, groupFilter, tagFilter),
+    queryKey: adminUsersPageQueryKey(debouncedSearchTerm, activityFilter, groupFilter, tagFilter, bookmakerFilter),
     initialPageParam: null as string | null,
     enabled: Boolean(currentAdmin),
     queryFn: ({ pageParam, signal }) => fetchAdminUsersPage<CRMUser>((pageParam as string | null) ?? null, {
@@ -522,6 +524,7 @@ export default function AdminCRM() {
       activityFilter,
       groupFilter,
       tagFilter,
+      bookmakerFilter,
     }, signal),
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
     staleTime: ADMIN_TAB_QUERY_STALE_TIME,
@@ -585,6 +588,7 @@ export default function AdminCRM() {
         user.client_group,
         user.client_tag,
         getCrmClientTagLabel(user.client_tag),
+        ...user.bookmakers.map(bookmaker => `${bookmaker.name} ${bookmaker.code}`),
         user.other_bookmaker_name,
       ].join(' ').toLowerCase();
 
@@ -596,10 +600,11 @@ export default function AdminCRM() {
         (activityFilter === 'guarantee' && user.guarantee_active);
       const matchesGroup = groupFilter === 'all' || user.client_group === groupFilter;
       const matchesTag = tagFilter === 'all' || user.client_tag === tagFilter;
+      const matchesBookmaker = clientMatchesBookmakerFilter(user, bookmakerFilter);
 
-      return matchesSearch && matchesActivity && matchesGroup && matchesTag;
+      return matchesSearch && matchesActivity && matchesGroup && matchesTag && matchesBookmaker;
     });
-  }, [activityFilter, groupFilter, searchTerm, tagFilter, users]);
+  }, [activityFilter, bookmakerFilter, groupFilter, searchTerm, tagFilter, users]);
 
   const summary = useMemo(() => {
     const active = users.filter(user => user.has_active_subscription).length;
@@ -607,8 +612,7 @@ export default function AdminCRM() {
     const guarantee = users.filter(user => user.guarantee_active).length;
     const debt = users.filter(user => getMatchBalance(user) < 0).length;
     const attention = users.filter(user => user.guarantee_active || getMatchBalance(user) < 0).length;
-    const totalBalance = users.reduce((sum, user) => sum + getMatchBalance(user), 0);
-    return { active, empty, guarantee, debt, attention, totalBalance };
+    return { active, empty, guarantee, debt, attention };
   }, [users]);
 
   const otherBookmakerSelected = useMemo(() => (
@@ -789,6 +793,7 @@ export default function AdminCRM() {
     if (activityFilter !== 'all') params.set('activity', activityFilter);
     if (groupFilter !== 'all') params.set('group', groupFilter);
     if (tagFilter !== 'all') params.set('tag', tagFilter);
+    if (bookmakerFilter !== 'all') params.set('bookmaker_id', bookmakerFilter);
 
     try {
       setExportingFormat(format);
@@ -813,6 +818,7 @@ export default function AdminCRM() {
           activity: activityFilter,
           group: groupFilter !== 'all' ? groupFilter : null,
           tag: tagFilter !== 'all' ? tagFilter : null,
+          bookmaker_id: bookmakerFilter !== 'all' ? Number.parseInt(bookmakerFilter, 10) : null,
           formats: ['xlsx', 'google_sheet'],
         }),
       });
@@ -878,9 +884,9 @@ export default function AdminCRM() {
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
               <span>{summary.active} активных</span>
               <span className="text-slate-700">/</span>
-              <span>{summary.attention} требуют внимания</span>
+              <span>{summary.empty} без матчей</span>
               <span className="text-slate-700">/</span>
-              <span>баланс {summary.totalBalance}</span>
+              <span>{summary.attention} требуют внимания</span>
             </div>
           </div>
           <div className="grid min-w-0 content-start gap-2">
@@ -911,12 +917,11 @@ export default function AdminCRM() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         <StatTile label="Активные" value={summary.active} hint="с доступом" tone="text-emerald-200" />
         <StatTile label="Без матчей" value={summary.empty} hint="нужен контакт" tone="text-slate-200" />
         <StatTile label="Гарантия" value={summary.guarantee} hint="открыта" tone="text-amber-200" />
         <StatTile label="Долг" value={summary.debt} hint="минусовой баланс" tone={summary.debt ? 'text-rose-200' : 'text-slate-300'} />
-        <StatTile label="Баланс" value={summary.totalBalance} hint="матчей всего" tone={summary.totalBalance >= 0 ? 'text-cyan-100' : 'text-rose-200'} />
       </div>
 
       <section className="rounded-[24px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
@@ -948,7 +953,7 @@ export default function AdminCRM() {
             ))}
           </div>
         </div>
-        <div className="mt-2 grid grid-cols-2 gap-2">
+        <div className="mt-2 grid gap-2 md:grid-cols-3">
           <label className="relative">
             <Layers3 className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <select
@@ -970,6 +975,22 @@ export default function AdminCRM() {
             >
               <option value="all">Все метки</option>
               {tags.map(tag => <option key={tag} value={tag}>{getCrmClientTagLabel(tag) || tag}</option>)}
+            </select>
+          </label>
+
+          <label className="relative">
+            <BadgeCheck className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <select
+              value={bookmakerFilter}
+              onChange={event => setBookmakerFilter(event.target.value)}
+              className="min-h-[42px] w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/42 pl-8 pr-3 text-[10px] font-bold text-white outline-none focus:border-cyan-300/45"
+            >
+              <option value="all">Все БК</option>
+              {bookmakers.map(bookmaker => (
+                <option key={bookmaker.id} value={String(bookmaker.id)}>
+                  {bookmaker.name}
+                </option>
+              ))}
             </select>
           </label>
         </div>

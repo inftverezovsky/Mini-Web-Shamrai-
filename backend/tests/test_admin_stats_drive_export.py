@@ -377,8 +377,8 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
     async def test_crm_xlsx_export_uses_filtered_client_info_workbook(self):
         db = object()
         rows = [
-            _client_info_row(user_id=1, client_name="Active Client", client_group="VIP", client_tag="hot", matches_remaining=3),
-            _client_info_row(user_id=2, client_name="Empty Client", client_group="Base", client_tag="cold", matches_remaining=0),
+            _client_info_row(user_id=1, client_name="Active Client", client_group="VIP", client_tag="hot", matches_remaining=3, bookmaker_ids=[1]),
+            _client_info_row(user_id=2, client_name="Active Bookmaker Client", client_group="VIP", client_tag="hot", matches_remaining=3, bookmaker_ids=[2]),
         ]
         recent_rows = [
             _recent_client_row(user_id=1, event_name="Active match"),
@@ -395,13 +395,14 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
                 activity="active",
                 group="VIP",
                 tag="hot",
+                bookmaker_id=2,
                 admin=object(),
                 db=db,
             )
 
         load_info_rows.assert_awaited_once_with(db, "all")
         load_recent_rows.assert_awaited_once_with(db, "all", limit_per_client=None)
-        build_workbook.assert_called_once_with([rows[0]], recent_rows=[recent_rows[0]], period_label="CRM: клиенты")
+        build_workbook.assert_called_once_with([rows[1]], recent_rows=[recent_rows[1]], period_label="CRM: клиенты")
         self.assertIn("shamrai_clients_crm.xlsx", response.headers["content-disposition"])
 
     async def test_crm_csv_export_contains_client_situation_and_remaining_matches(self):
@@ -459,6 +460,7 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
                     activity="active",
                     group="VIP",
                     tag="hot",
+                    bookmaker_id=2,
                     formats=["xlsx", "google_sheet", "xlsx"],
                 ),
                 admin=object(),
@@ -470,6 +472,7 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
             activity="active",
             group="VIP",
             tag="hot",
+            bookmaker_id=2,
             formats=["xlsx", "google_sheet"],
         )
 

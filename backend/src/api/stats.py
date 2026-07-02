@@ -7,6 +7,7 @@ from datetime import datetime
 
 from src.models.database import get_read_db
 from src.models.models import Bet
+from src.services.statistics import PERIOD_LABELS, normalize_period, period_start
 from src.services.stats_export import build_bookmaker_logo_png
 
 router = APIRouter(prefix="/stats", tags=["Stats"])
@@ -31,11 +32,15 @@ async def get_export_bookmaker_logo(codes: str = Query(..., min_length=1)):
     )
 
 @router.get("/global")
-async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
+async def get_global_stats(
+    period: str = Query("all", pattern="^(all|month)$"),
+    db: AsyncSession = Depends(get_read_db),
+):
     """
     GET /api/stats/global
     Public endpoint. Calculates global winrate, ROI, and profit trends.
     """
+    normalized_period = normalize_period(period)
     resolved_statuses = ["win", "loss", "refund"]
     profit_expr = case(
         (Bet.status == "win", Bet.coefficient - Decimal("1.00")),
@@ -46,6 +51,11 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
     lost_expr = case((Bet.status == "loss", 1), else_=0)
     refund_expr = case((Bet.status == "refund", 1), else_=0)
     resolved_coefficient_expr = case((Bet.status.in_(["win", "loss"]), Bet.coefficient), else_=None)
+    date_ref = func.coalesce(Bet.resolved_at, Bet.created_at)
+    filters = [Bet.status.in_(resolved_statuses)]
+    start = period_start(normalized_period)
+    if start:
+        filters.append(date_ref >= start)
 
     summary_result = await db.execute(
         select(
@@ -56,7 +66,7 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
             func.coalesce(func.sum(profit_expr), Decimal("0.00")),
             func.coalesce(func.avg(resolved_coefficient_expr), Decimal("0.00")),
         )
-        .filter(Bet.status.in_(resolved_statuses))
+        .filter(*filters)
     )
     total, won, lost, refunded, profit, average_coefficient = summary_result.one()
     total = int(total or 0)
@@ -68,7 +78,6 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
     roi = (float(profit) / resolved * 100) if resolved > 0 else 0.0
 
-    date_ref = func.coalesce(Bet.resolved_at, Bet.created_at)
     year_part = extract("year", date_ref)
     month_part = extract("month", date_ref)
     monthly_result = await db.execute(
@@ -77,7 +86,7 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
             month_part.label("month"),
             func.coalesce(func.sum(profit_expr), Decimal("0.00")).label("profit"),
         )
-        .filter(Bet.status.in_(resolved_statuses), date_ref.isnot(None))
+        .filter(*filters, date_ref.isnot(None))
         .group_by(year_part, month_part)
         .order_by(year_part.asc(), month_part.asc())
     )
@@ -98,6 +107,8 @@ async def get_global_stats(db: AsyncSession = Depends(get_read_db)):
         chart_points.append({"month": current_month, "profit": 0.0})
 
     return {
+        "period": normalized_period,
+        "period_label": PERIOD_LABELS[normalized_period],
         "winrate": round(winrate, 2),
         "roi": round(roi, 2),
         "net_profit": round(float(profit), 2),

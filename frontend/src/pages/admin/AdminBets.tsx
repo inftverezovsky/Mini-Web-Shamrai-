@@ -111,8 +111,8 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
 
   const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!eventName || !coefficient) {
-      notifyError('Заполните событие и коэффициент');
+    if (!coefficient) {
+      notifyError('Укажите коэффициент');
       return;
     }
     try {
@@ -120,7 +120,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       setSuccessMsg('');
 
       const formData = new FormData();
-      formData.append('event_name', eventName);
+      formData.append('event_name', eventName.trim());
       formData.append('coefficient', coefficient);
       if (selectedBkIds[0]) {
         formData.append('bookmaker_id', selectedBkIds[0].toString());
@@ -208,7 +208,9 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
 
         <form onSubmit={handlePublish} onPaste={handleCouponPaste} className="space-y-2.5 text-[11px] text-slate-300">
           <div>
-            <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">Событие</label>
+            <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
+              Событие <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
+            </label>
             <EmojiTextField
               type="text"
               value={eventName}
@@ -265,7 +267,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             <div className="space-y-2">
               <label className="flex items-center text-slate-400 font-bold mb-1 uppercase tracking-wider text-[9px]">
                 <LinkIcon className="w-3.5 h-3.5 mr-1.5 text-emerald-400" />
-                Ссылки для кнопок БК
+                Ссылки для кнопок БК <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
               </label>
               <div className="space-y-2">
                 {selectedBookmakers.map((bookmaker) => (
@@ -325,7 +327,9 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           </div>
 
           <div>
-            <label className="block text-slate-400 font-bold mb-1 uppercase tracking-wider text-[9px]">Вид спорта</label>
+            <label className="block text-slate-400 font-bold mb-1 uppercase tracking-wider text-[9px]">
+              Вид спорта <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
+            </label>
             <select
               value={sportType}
               onChange={e => setSportType(e.target.value)}

@@ -71,6 +71,8 @@ FORECAST_CONTACT_DRAFT_TEXT = "хочу получить ставку из ан�
 FORECAST_CONTACT_REQUIRED_MESSAGE = (
     f"Чтобы получить ставку, напишите Shamrai: {FORECAST_CONTACT_DRAFT_TEXT}"
 )
+FORECAST_INACTIVE_MESSAGE = "Прогноз уже не активен. Реагировать не нужно."
+PAID_SET_INACTIVE_MESSAGE = "Набор уже не активен. Реагировать не нужно."
 TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_TEXT_LIMIT = 4096
 STATIC_ROOT = os.path.abspath(
@@ -181,7 +183,18 @@ def bet_is_paid_set(bet: Optional[Bet]) -> bool:
 
 
 def request_is_paid_set(forecast_request: ForecastRequest) -> bool:
-    return bet_is_paid_set(forecast_request.bet)
+    return bet_is_paid_set(getattr(forecast_request, "bet", None))
+
+
+def forecast_request_inactive_message(forecast_request: ForecastRequest) -> str:
+    return PAID_SET_INACTIVE_MESSAGE if request_is_paid_set(forecast_request) else FORECAST_INACTIVE_MESSAGE
+
+
+def forecast_request_is_inactive_for_client(forecast_request: ForecastRequest) -> bool:
+    return (
+        getattr(forecast_request, "status", None) in {FORECAST_STATUS_CANCELLED, FORECAST_STATUS_REMOVED}
+        or getattr(getattr(forecast_request, "bet", None), "status", None) == "deleted"
+    )
 
 
 def _bookmaker_label(bookmaker) -> str:
@@ -1295,22 +1308,11 @@ def _status_for_delivery_method(delivery_method: str) -> str:
 
 def _ensure_full_forecast_ready(forecast_request: ForecastRequest) -> None:
     bet = forecast_request.bet
-    event_name = str(bet.event_name or "").strip()
     outcome = str(bet.outcome or "").strip()
-    if not event_name or event_name == PLACEHOLDER_EVENT_NAME:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Заполните матч перед отправкой прогноза",
-        )
     if not outcome:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Заполните исход перед отправкой прогноза",
-        )
-    if not bet.coupon_image_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Загрузите скрин купона перед отправкой прогноза",
         )
     if not _fits_text_message(_build_full_forecast_message(forecast_request)):
         raise HTTPException(
@@ -1899,8 +1901,8 @@ async def set_forecast_request_interested(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
-    if getattr(forecast_request.bet, "status", None) == "deleted":
-        return forecast_request, "Прогноз остановлен администратором.", False
+    if forecast_request_is_inactive_for_client(forecast_request):
+        return forecast_request, forecast_request_inactive_message(forecast_request), False
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен.", False
@@ -1910,10 +1912,6 @@ async def set_forecast_request_interested(
         return forecast_request, "Заявка уже обрабатывается.", False
     if forecast_request.status == FORECAST_STATUS_DECLINED:
         return forecast_request, "Отказ уже учтен.", False
-    if forecast_request.status == FORECAST_STATUS_CANCELLED:
-        return forecast_request, "Заявка отменена.", False
-    if forecast_request.status == FORECAST_STATUS_REMOVED:
-        return forecast_request, "Заявка удалена администратором.", False
 
     if forecast_request_requires_contact(forecast_request):
         return forecast_request, FORECAST_CONTACT_REQUIRED_MESSAGE, False
@@ -1932,6 +1930,8 @@ async def set_forecast_request_interested(
     )
     if lock_result.rowcount != 1:
         latest_request = await load_forecast_request(db, request_id)
+        if forecast_request_is_inactive_for_client(latest_request):
+            return latest_request, forecast_request_inactive_message(latest_request), False
         if latest_request.status == FORECAST_STATUS_INTERESTED:
             return latest_request, "Заявка уже отправлена Shamrai.", False
         if latest_request.status in DELIVERED_STATUSES:
@@ -1940,10 +1940,6 @@ async def set_forecast_request_interested(
             return latest_request, "Отказ уже учтен.", False
         if latest_request.status == FORECAST_STATUS_PROCESSING:
             return latest_request, "Заявка уже обрабатывается.", False
-        if latest_request.status == FORECAST_STATUS_CANCELLED:
-            return latest_request, "Заявка отменена.", False
-        if latest_request.status == FORECAST_STATUS_REMOVED:
-            return latest_request, "Заявка удалена администратором.", False
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Заявка уже изменила статус",
@@ -2018,8 +2014,8 @@ async def set_forecast_request_declined(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
-    if getattr(forecast_request.bet, "status", None) == "deleted":
-        return forecast_request, "Прогноз остановлен администратором."
+    if forecast_request_is_inactive_for_client(forecast_request):
+        return forecast_request, forecast_request_inactive_message(forecast_request)
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен."
@@ -2029,10 +2025,6 @@ async def set_forecast_request_declined(
         return forecast_request, "Заявка уже обрабатывается."
     if forecast_request.status == FORECAST_STATUS_DECLINED:
         return forecast_request, "Отказ уже учтен."
-    if forecast_request.status == FORECAST_STATUS_CANCELLED:
-        return forecast_request, "Заявка отменена."
-    if forecast_request.status == FORECAST_STATUS_REMOVED:
-        return forecast_request, "Заявка удалена администратором."
 
     forecast_request.status = FORECAST_STATUS_DECLINED
     forecast_request.responded_at = forecast_request.responded_at or _now()

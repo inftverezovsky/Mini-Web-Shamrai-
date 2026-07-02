@@ -105,7 +105,7 @@ class AdminForecastReannounceTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with (
-                patch.object(admin_broadcast, "_get_smart_target_users", AsyncMock(return_value=target_users)),
+                patch.object(admin_broadcast, "_get_smart_target_users", AsyncMock(return_value=target_users)) as get_targets,
                 patch.object(
                     admin_broadcast,
                     "_send_forecast_teasers",
@@ -145,6 +145,7 @@ class AdminForecastReannounceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(response.reannounce.total_audience, 2)
+            self.assertEqual(get_targets.await_args.kwargs["bookmaker_ids"], [2, 3])
             request_rows = (await session.execute(
                 select(ForecastRequest).filter(ForecastRequest.bet_id == bet.id)
             )).scalars().all()
@@ -228,6 +229,48 @@ class AdminForecastReannounceTests(unittest.IsolatedAsyncioTestCase):
             bet = (await session.execute(select(Bet).filter(Bet.delivery_mode == "paid_set"))).scalars().one()
             self.assertEqual(bet.bookmaker_links, [])
 
+    async def test_paid_set_broadcast_allows_missing_match_sport_and_coupon(self):
+        async with self.Session() as session:
+            fonbet = Bookmaker(id=1, name="Фонбет", code="fonbet", is_active=True)
+            admin = User(telegram_id=900, username="admin", role="admin")
+            client = self._user(301, [fonbet], balance=0)
+            session.add_all([fonbet, admin, client])
+            await session.commit()
+
+            fake_request = SimpleNamespace(
+                form=AsyncMock(return_value=FakeFormData({
+                    "bookmaker_ids": ["1"],
+                    "bookmaker_links": [],
+                }))
+            )
+
+            with (
+                patch.object(admin_broadcast, "_get_smart_target_users", AsyncMock(return_value=[client])),
+                patch.object(admin_broadcast, "broadcast_personal_signals", AsyncMock(return_value={"created": 1})),
+                patch.object(admin_broadcast, "_send_telegram_jobs", AsyncMock(return_value=(0, 0, []))),
+                patch.object(admin_broadcast, "_refresh_vk_audience", AsyncMock(return_value=[])),
+                patch.object(admin_broadcast, "_send_vk_jobs", AsyncMock(return_value=(0, 0, []))),
+            ):
+                await admin_broadcast.create_paid_set_broadcast(
+                    fake_request,
+                    title="ПЛАТНЫЙ НАБОР",
+                    event_name="",
+                    outcome="П1",
+                    coefficient=Decimal("3.90"),
+                    price_rub=3000,
+                    bookmaker_id=None,
+                    sport_type=None,
+                    teaser_text="Реальный КФ не выше 1.9!",
+                    coupon_image=None,
+                    current_admin=admin,
+                    db=session,
+                )
+
+            bet = (await session.execute(select(Bet).filter(Bet.delivery_mode == "paid_set"))).scalars().one()
+            self.assertEqual(bet.event_name, "Платный набор")
+            self.assertIsNone(bet.sport_type)
+            self.assertIsNone(bet.coupon_image_url)
+
     async def test_paid_set_full_forecast_save_adds_optional_bookmaker_links_for_sale_delivery(self):
         async with self.Session() as session:
             fonbet = Bookmaker(id=1, name="Фонбет", code="fonbet", is_active=True)
@@ -287,6 +330,56 @@ class AdminForecastReannounceTests(unittest.IsolatedAsyncioTestCase):
                     {"bookmaker_id": 2, "url": "https://betboom.ru/match/2"},
                 ],
             )
+
+    async def test_full_forecast_save_allows_missing_match_sport_and_coupon(self):
+        async with self.Session() as session:
+            fonbet = Bookmaker(id=1, name="Фонбет", code="fonbet", is_active=True)
+            admin = User(telegram_id=900, username="admin", role="admin")
+            bet = Bet(
+                id=uuid.uuid4(),
+                event_name="Закрытый прогноз",
+                coefficient=Decimal("2.10"),
+                status="pending",
+                delivery_mode="sales_private",
+                outcome=None,
+                coupon_image_url=None,
+                bookmaker_links=[],
+            )
+            bet.bookmakers = [fonbet]
+            session.add_all([fonbet, admin, bet])
+            await session.commit()
+
+            fake_request = SimpleNamespace(
+                form=AsyncMock(return_value=FakeFormData({
+                    "bookmaker_ids": ["1"],
+                    "bookmaker_links": [],
+                }))
+            )
+
+            response = await admin_broadcast.prepare_forecast_broadcast_full(
+                bet.id,
+                fake_request,
+                event_name="",
+                outcome="П1",
+                coefficient=Decimal("2.10"),
+                fair_coefficient="",
+                sport_type="",
+                teaser_text="Есть закрытый прогноз под вашу БК.",
+                description="Описание",
+                match_link=None,
+                category=None,
+                live_ends_at=None,
+                auto_send_interested=False,
+                reannounce_new_audience=False,
+                coupon_image=None,
+                current_admin=admin,
+                db=session,
+            )
+
+            self.assertEqual(response.bet.event_name, "Закрытый прогноз")
+            self.assertEqual(response.bet.outcome, "П1")
+            self.assertIsNone(response.bet.coupon_image_url)
+            self.assertIsNone(response.bet.sport_type)
 
     async def test_edit_can_clear_fair_coefficient_without_disabling_existing_auto_send(self):
         async with self.Session() as session:

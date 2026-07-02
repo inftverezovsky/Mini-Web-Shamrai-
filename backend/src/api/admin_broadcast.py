@@ -92,6 +92,15 @@ logger = logging.getLogger("uvicorn")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "static", "coupons")
 
 
+def _optional_text(value: Optional[str]) -> Optional[str]:
+    clean_value = str(value or "").strip()
+    return clean_value or None
+
+
+def _event_name_or_placeholder(value: Optional[str], placeholder: str) -> str:
+    return str(value or "").strip() or placeholder
+
+
 async def _ensure_broadcasts_are_not_paused(db: AsyncSession) -> None:
     if await is_system_setting_enabled(db, "PAUSE_BROADCASTS"):
         raise HTTPException(
@@ -462,14 +471,12 @@ async def _apply_full_forecast_fields(
     live_ends_at: Optional[datetime],
     coupon_image: Optional[UploadFile],
 ) -> Bet:
-    clean_event_name = (event_name or "").strip()
-    clean_outcome = (outcome or "").strip()
+    clean_event_name = _event_name_or_placeholder(
+        event_name if event_name is not None else bet.event_name,
+        PAID_SET_PLACEHOLDER_EVENT_NAME if bet_is_paid_set(bet) else PLACEHOLDER_EVENT_NAME,
+    )
+    clean_outcome = str(outcome if outcome is not None else bet.outcome or "").strip()
     normalized_match_link = normalize_match_url(match_link)
-    if not clean_event_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Укажите матч для полной ставки",
-        )
     if not clean_outcome:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -484,11 +491,6 @@ async def _apply_full_forecast_fields(
     coupon_url = await _store_coupon_image(coupon_image)
     if coupon_url:
         bet.coupon_image_url = coupon_url
-    if not bet.coupon_image_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Загрузите скрин купона для полной ставки",
-        )
 
     bet.event_name = clean_event_name
     bet.outcome = clean_outcome
@@ -505,8 +507,8 @@ async def _apply_full_forecast_fields(
         bet.fair_coefficient = fair_coefficient
     if teaser_text is not None:
         bet.teaser_text = teaser_text.strip() or None
-    if sport_type and sport_type.strip():
-        bet.sport_type = sport_type.strip()
+    if sport_type is not None:
+        bet.sport_type = sport_type.strip() or None
     if category and category.strip():
         bet.category = category.strip()
     if live_ends_at is not None:
@@ -1008,6 +1010,7 @@ async def create_forecast_broadcast(
     selected_bookmakers = await _load_bookmakers(db, selected_bookmaker_ids)
     clean_teaser_text = (teaser_text or "").strip() or "Есть закрытый прогноз под вашу БК. Берете матч?"
     parsed_fair_coefficient = _parse_optional_fair_coefficient(fair_coefficient)
+    clean_sport_type = _optional_text(sport_type)
 
     bet = Bet(
         event_name=PLACEHOLDER_EVENT_NAME,
@@ -1020,7 +1023,7 @@ async def create_forecast_broadcast(
         price_stars=price_stars,
         brain_score=brain_score,
         api_match_id=api_match_id,
-        sport_type=sport_type,
+        sport_type=clean_sport_type,
         status="pending",
         delivery_mode="sales_private",
         author_id=current_admin.telegram_id,
@@ -1031,7 +1034,7 @@ async def create_forecast_broadcast(
 
     target_users = await _get_smart_target_users(
         db,
-        sport_filter=sport_type,
+        sport_filter=clean_sport_type,
         bookmaker_id=None,
         bookmaker_ids=selected_bookmaker_ids,
         delivery_channel="any",
@@ -1092,14 +1095,10 @@ async def create_paid_set_broadcast(
     """
     await _ensure_broadcasts_are_not_paused(db)
     clean_title = (title or PAID_SET_PLACEHOLDER_EVENT_NAME).strip() or PAID_SET_PLACEHOLDER_EVENT_NAME
-    clean_event_name = (event_name or "").strip()
+    clean_event_name = _event_name_or_placeholder(event_name, PAID_SET_PLACEHOLDER_EVENT_NAME)
     clean_outcome = (outcome or "").strip()
     clean_teaser_text = (teaser_text or "").strip() or "Реальный КФ не выше 1.9!"
-    if not clean_event_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Укажите матч набора",
-        )
+    clean_sport_type = _optional_text(sport_type)
     if not clean_outcome:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1131,7 +1130,7 @@ async def create_paid_set_broadcast(
         bookmaker_id=selected_bookmaker_ids[0],
         category="prematch",
         price_stars=price_rub,
-        sport_type=sport_type,
+        sport_type=clean_sport_type,
         outcome=clean_outcome,
         description=clean_teaser_text,
         status="pending",
@@ -1145,7 +1144,7 @@ async def create_paid_set_broadcast(
 
     target_users = await _get_smart_target_users(
         db,
-        sport_filter=sport_type,
+        sport_filter=clean_sport_type,
         bookmaker_id=None,
         bookmaker_ids=selected_bookmaker_ids,
         delivery_channel="any",
@@ -1324,11 +1323,18 @@ async def prepare_forecast_broadcast_full(
         if fair_coefficient_provided
         else None
     )
+    previous_bookmaker_ids = bet.bookmaker_ids
     selected_bookmaker_ids = await _apply_forecast_bookmakers(
         db,
         bet,
         _bookmaker_ids_from_form(form_data),
     )
+    previous_bookmaker_id_set = set(previous_bookmaker_ids)
+    added_bookmaker_ids = [
+        bookmaker_id
+        for bookmaker_id in selected_bookmaker_ids
+        if bookmaker_id not in previous_bookmaker_id_set
+    ]
     await _apply_full_forecast_fields(
         bet,
         event_name=event_name,
@@ -1353,20 +1359,23 @@ async def prepare_forecast_broadcast_full(
     auto_send_result = None
     reannounce_result = None
     if reannounce_new_audience and not is_paid_set_bet:
-        target_users = await _get_smart_target_users(
-            db,
-            sport_filter=bet.sport_type,
-            bookmaker_id=None,
-            bookmaker_ids=selected_bookmaker_ids,
-            delivery_channel="any",
-            min_coef=float(bet.coefficient),
-        )
-        new_requests = await _create_missing_forecast_requests_for_bet(
-            db,
-            bet=bet,
-            users=target_users,
-        )
-        await db.commit()
+        if added_bookmaker_ids:
+            target_users = await _get_smart_target_users(
+                db,
+                sport_filter=bet.sport_type,
+                bookmaker_id=None,
+                bookmaker_ids=added_bookmaker_ids,
+                delivery_channel="any",
+                min_coef=float(bet.coefficient),
+            )
+            new_requests = await _create_missing_forecast_requests_for_bet(
+                db,
+                bet=bet,
+                users=target_users,
+            )
+            await db.commit()
+        else:
+            new_requests = []
         teaser_delivery = await _send_forecast_teasers(
             db,
             forecast_requests=new_requests,

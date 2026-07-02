@@ -71,6 +71,20 @@ export interface ForecastRequestGroup {
   requests: ForecastRequestResponse[];
 }
 
+export interface ForecastRequestDaySection {
+  key: string;
+  label: string;
+  requests: ForecastRequestResponse[];
+  groups: ForecastRequestGroup[];
+}
+
+export interface ForecastRequestMonthSection {
+  key: string;
+  label: string;
+  requests: ForecastRequestResponse[];
+  days: ForecastRequestDaySection[];
+}
+
 export const FORECAST_REQUEST_TABS: Array<{ status: ForecastRequestStatus; label: string }> = [
   { status: 'interested', label: 'Ожидают' },
   { status: 'announced', label: 'Анонсировано' },
@@ -217,12 +231,9 @@ export function bookmakerLinkError(rawUrl: string): string | null {
 
 export function betHasSavedFullForecast(bet: BetResponse | null | undefined): boolean {
   if (!bet || bet.status === 'deleted' || isPaidSetBet(bet)) return false;
-  const eventName = (bet.event_name || '').trim();
-  const hasEventName = Boolean(eventName && eventName !== 'Закрытый прогноз');
   const hasOutcome = Boolean((bet.outcome || '').trim());
   const hasCoefficient = Number(bet.coefficient || 0) > 0;
-  const hasCoupon = Boolean((bet.coupon_image_url || '').trim());
-  return hasEventName && hasOutcome && hasCoefficient && hasCoupon;
+  return hasOutcome && hasCoefficient;
 }
 
 export function formatRequestDate(value: string | null) {
@@ -244,6 +255,122 @@ export function getForecastRequestEventName(request: ForecastRequestResponse) {
   return request.bet.event_name?.trim() || 'Закрытый прогноз';
 }
 
+export function buildForecastRequestGroups(requests: ForecastRequestResponse[]): ForecastRequestGroup[] {
+  const groups = new Map<string, ForecastRequestGroup>();
+
+  requests.forEach((request) => {
+    const key = getForecastRequestGroupKey(request);
+    const existingGroup = groups.get(key);
+    groups.set(key, existingGroup
+      ? { ...existingGroup, requests: [...existingGroup.requests, request] }
+      : {
+          key,
+          eventName: getForecastRequestEventName(request),
+          bet: request.bet,
+          requests: [request],
+        });
+  });
+
+  return Array.from(groups.values());
+}
+
+const DATE_GROUPED_FORECAST_REQUEST_STATUSES = new Set<ForecastRequestStatus>([
+  'sent',
+  'manual_sent',
+  'declined',
+  'removed',
+]);
+
+export function forecastRequestStatusUsesDateSections(status: ForecastRequestStatus) {
+  return DATE_GROUPED_FORECAST_REQUEST_STATUSES.has(status);
+}
+
+export function getForecastRequestTimelineDate(request: ForecastRequestResponse) {
+  if (request.status === 'sent' || request.status === 'manual_sent') {
+    return request.delivered_at || request.responded_at || request.updated_at || request.created_at;
+  }
+  if (request.status === 'declined') {
+    return request.responded_at || request.updated_at || request.created_at;
+  }
+  if (request.status === 'removed') {
+    return request.updated_at || request.responded_at || request.delivered_at || request.created_at;
+  }
+  return request.responded_at || request.created_at;
+}
+
+function padDatePart(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+function dateKey(value: string, granularity: 'month' | 'day') {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'unknown';
+  const monthKey = `${parsed.getFullYear()}-${padDatePart(parsed.getMonth() + 1)}`;
+  if (granularity === 'month') return monthKey;
+  return `${monthKey}-${padDatePart(parsed.getDate())}`;
+}
+
+function dateLabel(value: string, options: Intl.DateTimeFormatOptions, fallback: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed.toLocaleDateString('ru-RU', options);
+}
+
+export function formatForecastRequestMonthLabel(value: string) {
+  return dateLabel(value, { month: 'long', year: 'numeric' }, 'Без даты');
+}
+
+export function formatForecastRequestDayLabel(value: string) {
+  return dateLabel(value, { day: 'numeric', month: 'long', weekday: 'long' }, 'Без даты');
+}
+
+export function buildForecastRequestDateSections(
+  requests: ForecastRequestResponse[],
+): ForecastRequestMonthSection[] {
+  const monthSections = new Map<string, ForecastRequestMonthSection>();
+
+  requests.forEach((request) => {
+    const timelineDate = getForecastRequestTimelineDate(request);
+    const monthKey = dateKey(timelineDate, 'month');
+    const dayKey = dateKey(timelineDate, 'day');
+    const existingMonth = monthSections.get(monthKey);
+    const previousDays = existingMonth?.days ?? [];
+    const existingDay = previousDays.find((day) => day.key === dayKey);
+    const nextDay: ForecastRequestDaySection = existingDay
+      ? { ...existingDay, requests: [...existingDay.requests, request] }
+      : {
+          key: dayKey,
+          label: formatForecastRequestDayLabel(timelineDate),
+          requests: [request],
+          groups: [],
+        };
+    const nextDays = existingDay
+      ? previousDays.map((day) => (day.key === dayKey ? nextDay : day))
+      : [...previousDays, nextDay];
+
+    monthSections.set(monthKey, {
+      key: monthKey,
+      label: existingMonth?.label ?? formatForecastRequestMonthLabel(timelineDate),
+      requests: [...(existingMonth?.requests ?? []), request],
+      days: nextDays,
+    });
+  });
+
+  return Array.from(monthSections.values()).map((month) => ({
+    ...month,
+    days: month.days.map((day) => ({
+      ...day,
+      groups: buildForecastRequestGroups(day.requests),
+    })),
+  }));
+}
+
+function formatForecastRequestVerbCount(count: number, singular: string, plural: string) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  return `${count} ${mod10 === 1 && mod100 !== 11 ? singular : plural}`;
+}
+
 export function formatForecastRequestCount(count: number) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -253,6 +380,19 @@ export function formatForecastRequestCount(count: number) {
       ? 'заявки'
       : 'заявок';
   return `${count} ${noun}`;
+}
+
+export function formatForecastRequestStatusCount(status: ForecastRequestStatus, count: number) {
+  if (status === 'sent' || status === 'manual_sent') {
+    return formatForecastRequestVerbCount(count, 'взял', 'взяли');
+  }
+  if (status === 'declined') {
+    return formatForecastRequestVerbCount(count, 'отказался', 'отказались');
+  }
+  if (status === 'removed') {
+    return formatForecastRequestVerbCount(count, 'удален', 'удалены');
+  }
+  return formatForecastRequestCount(count);
 }
 
 export function mergeForecastRequestPages(

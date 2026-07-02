@@ -463,6 +463,27 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
 
         delivery._ensure_full_forecast_ready(forecast_request)
 
+    def test_full_forecast_ready_allows_missing_match_and_coupon(self):
+        forecast_request = SimpleNamespace(
+            bet=self._bet(
+                event_name=delivery.PLACEHOLDER_EVENT_NAME,
+                coupon_image_url=None,
+            )
+        )
+
+        delivery._ensure_full_forecast_ready(forecast_request)
+
+    def test_full_forecast_ready_still_rejects_missing_outcome(self):
+        bet = self._bet(coupon_image_url=None)
+        bet.outcome = ""
+        forecast_request = SimpleNamespace(bet=bet)
+
+        with self.assertRaises(HTTPException) as raised:
+            delivery._ensure_full_forecast_ready(forecast_request)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(raised.exception.detail, "Заполните исход перед отправкой прогноза")
+
     def test_full_forecast_ready_rejects_text_too_long_for_telegram_message(self):
         forecast_request = SimpleNamespace(bet=self._bet(description="A" * 5000))
 
@@ -1133,6 +1154,62 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result_request, forecast_request)
         self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_ANNOUNCED)
         self.assertIn(delivery.FORECAST_CONTACT_DRAFT_TEXT, message)
+        self.assertFalse(should_notify_sales)
+
+    async def test_take_removed_request_returns_inactive_message_without_status_change(self):
+        user = self._user(balance=3)
+        forecast_request = self._forecast_request(user)
+        forecast_request.status = delivery.FORECAST_STATUS_REMOVED
+
+        class FakeDb:
+            async def execute(self, _query):
+                raise AssertionError("inactive request must not be updated")
+
+        original_loader = delivery.load_forecast_request
+        try:
+            delivery.load_forecast_request = AsyncMock(return_value=forecast_request)
+            result_request, message, should_notify_sales = await delivery.set_forecast_request_interested(
+                FakeDb(),
+                request_id=forecast_request.id,
+                actor_user_id=user.telegram_id,
+                notify_sales_manager_now=False,
+                auto_delivery_now=False,
+            )
+        finally:
+            delivery.load_forecast_request = original_loader
+
+        self.assertIs(result_request, forecast_request)
+        self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_REMOVED)
+        self.assertEqual(message, "Прогноз уже не активен. Реагировать не нужно.")
+        self.assertFalse(should_notify_sales)
+
+    async def test_take_deleted_paid_set_returns_paid_set_inactive_message(self):
+        user = self._user(balance=3)
+        forecast_request = self._forecast_request(user)
+        forecast_request.status = delivery.FORECAST_STATUS_ANNOUNCED
+        forecast_request.bet.status = "deleted"
+        forecast_request.bet.delivery_mode = delivery.DELIVERY_MODE_PAID_SET
+
+        class FakeDb:
+            async def execute(self, _query):
+                raise AssertionError("deleted paid set must not be updated")
+
+        original_loader = delivery.load_forecast_request
+        try:
+            delivery.load_forecast_request = AsyncMock(return_value=forecast_request)
+            result_request, message, should_notify_sales = await delivery.set_forecast_request_interested(
+                FakeDb(),
+                request_id=forecast_request.id,
+                actor_user_id=user.telegram_id,
+                notify_sales_manager_now=False,
+                auto_delivery_now=False,
+            )
+        finally:
+            delivery.load_forecast_request = original_loader
+
+        self.assertIs(result_request, forecast_request)
+        self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_ANNOUNCED)
+        self.assertEqual(message, "Набор уже не активен. Реагировать не нужно.")
         self.assertFalse(should_notify_sales)
 
     async def test_deliver_without_full_access_rejects_before_processing_or_debit(self):

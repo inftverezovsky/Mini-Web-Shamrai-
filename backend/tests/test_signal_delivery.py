@@ -326,6 +326,41 @@ class SignalDeliveryTests(unittest.TestCase):
         self.assertEqual(response.contact["channel"], "web")
         self.assertEqual(response.contact["draft_text"], forecast_delivery.FORECAST_CONTACT_DRAFT_TEXT)
 
+    def test_web_take_removed_request_returns_inactive_payload(self):
+        async def run_check():
+            request_id = uuid4()
+            forecast_request = SimpleNamespace(
+                id=request_id,
+                status=forecast_delivery.FORECAST_STATUS_REMOVED,
+            )
+
+            class FakeDb:
+                async def commit(self):
+                    return None
+
+            with patch.object(
+                signals_api,
+                "set_forecast_request_interested",
+                new=AsyncMock(return_value=(
+                    forecast_request,
+                    "Прогноз уже не активен. Реагировать не нужно.",
+                    False,
+                )),
+            ):
+                return await signals_api.answer_forecast_request_from_web_chat(
+                    request_id,
+                    "take",
+                    BackgroundTasks(),
+                    current_user=SimpleNamespace(telegram_id=12345),
+                    db=FakeDb(),
+                )
+
+        response = asyncio.run(run_check())
+
+        self.assertEqual(response.action, "inactive")
+        self.assertEqual(response.status, forecast_delivery.FORECAST_STATUS_REMOVED)
+        self.assertIsNone(response.contact)
+
 
 if __name__ == "__main__":
     unittest.main()

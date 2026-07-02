@@ -41,6 +41,7 @@ import {
   type BetCategory,
   type BroadcastMode,
   type DeliveryResult,
+  type ForecastRequestMonthSection,
   type ForecastBroadcastFullResult,
   type ForecastBroadcastStopResult,
   type ForecastBulkSendResult,
@@ -50,18 +51,19 @@ import {
   betHasSavedFullForecast,
   bookmakerLinkError,
   bookmakerLinksToState,
+  buildForecastRequestDateSections,
+  buildForecastRequestGroups,
   canProcessForecastRequest,
   canRemoveForecastRequest,
   forecastGroupIsStopped,
+  forecastRequestStatusUsesDateSections,
   forecastRequestTelegramDialogUrl,
   forecastRequestVkDialogUrl,
   forecastRequestWebChatUrl,
-  formatForecastRequestCount,
+  formatForecastRequestStatusCount,
   formatRequestDate,
   getBetBookmakers,
   getDeliveryMethodLabel,
-  getForecastRequestEventName,
-  getForecastRequestGroupKey,
   getForecastRequestUserIdLabel,
   getForecastRequestUserName,
   isPaidSetBet,
@@ -190,7 +192,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
   const [announcementEventName, setAnnouncementEventName] = useState('');
   const [announcementOutcome, setAnnouncementOutcome] = useState('');
   const [announcementBody, setAnnouncementBody] = useState('Реальный КФ не выше 1.9!\n(Вышлю первым 5-ти написавшим)');
-  const [announcementSport, setAnnouncementSport] = useState('Футбол');
+  const [announcementSport, setAnnouncementSport] = useState('');
   const [announcementBkIds, setAnnouncementBkIds] = useState<number[]>([]);
   const [announcementCoef, setAnnouncementCoef] = useState('3.90');
   const [announcementPriceRub, setAnnouncementPriceRub] = useState('1500');
@@ -202,14 +204,13 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
   const [forecastCoef, setForecastCoef] = useState('');
   const [forecastFairCoef, setForecastFairCoef] = useState('');
   const [forecastBkIds, setForecastBkIds] = useState<number[]>([]);
-  const [forecastSport, setForecastSport] = useState('Футбол');
   const [forecastTeaserText, setForecastTeaserText] = useState('');
 
   const [fullForecastEvent, setFullForecastEvent] = useState('');
   const [fullForecastOutcome, setFullForecastOutcome] = useState('');
   const [fullForecastCoef, setFullForecastCoef] = useState('');
   const [fullForecastFairCoef, setFullForecastFairCoef] = useState('');
-  const [fullForecastSport, setFullForecastSport] = useState('Футбол');
+  const [fullForecastSport, setFullForecastSport] = useState('');
   const [fullForecastTeaserText, setFullForecastTeaserText] = useState('');
   const [fullForecastDescription, setFullForecastDescription] = useState('');
   const [fullForecastBookmakerIds, setFullForecastBookmakerIds] = useState<number[]>([]);
@@ -542,7 +543,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     setFullForecastOutcome(bet.outcome || '');
     setFullForecastCoef(String(bet.coefficient || ''));
     setFullForecastFairCoef(bet.fair_coefficient ? String(bet.fair_coefficient) : '');
-    setFullForecastSport(bet.sport_type || 'Футбол');
+    setFullForecastSport(bet.sport_type || '');
     setFullForecastTeaserText(bet.teaser_text || '');
     setFullForecastDescription(bet.description || '');
     setFullForecastBookmakerIds(betBookmakers.map((bookmaker) => bookmaker.id));
@@ -553,7 +554,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     clearFullForecastFile();
   };
 
-  const openPrepareFullForecastModal = (betId: string, coefficient: string, fairCoefficient: string, sport: string, teaserText: string) => {
+  const openPrepareFullForecastModal = (betId: string, coefficient: string, fairCoefficient: string, teaserText: string) => {
     setFullForecastMode('prepare');
     setFullForecastPreparedBetId(betId);
     setFullForecastRequest(null);
@@ -562,7 +563,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     setFullForecastOutcome('');
     setFullForecastCoef(coefficient);
     setFullForecastFairCoef(fairCoefficient);
-    setFullForecastSport(sport || 'Футбол');
+    setFullForecastSport('');
     setFullForecastTeaserText(teaserText || 'Есть закрытый прогноз под вашу БК. Берете матч?');
     setFullForecastDescription('');
     setFullForecastBookmakerIds(forecastBkIds);
@@ -631,7 +632,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     setFullForecastOutcome('');
     setFullForecastCoef('');
     setFullForecastFairCoef('');
-    setFullForecastSport('Футбол');
+    setFullForecastSport('');
     setFullForecastTeaserText('');
     setFullForecastDescription('');
     setFullForecastBookmakerIds([]);
@@ -659,20 +660,12 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       notifyError('Отправка прогноза недоступна до оплаты');
       return;
     }
-    if (!fullForecastEvent.trim()) {
-      notifyError('Укажите матч');
-      return;
-    }
     if (!fullForecastOutcome.trim()) {
       notifyError('Укажите исход');
       return;
     }
     if (!fullForecastCoef) {
       notifyError('Укажите коэффициент');
-      return;
-    }
-    if (!fullForecastFile && !fullForecastExistingCouponUrl) {
-      notifyError('Загрузите скрин купона');
       return;
     }
     if (fullForecastHasInvalidBookmakerLink) {
@@ -704,7 +697,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       formData.append('event_name', fullForecastEvent.trim());
       formData.append('outcome', fullForecastOutcome.trim());
       formData.append('coefficient', fullForecastCoef);
-      formData.append('sport_type', fullForecastSport);
+      formData.append('sport_type', fullForecastSport.trim());
       formData.append('category', fullForecastCategory);
       if (isPreparing || isEditing) {
         formData.append('fair_coefficient', fullForecastFairCoef.trim());
@@ -907,10 +900,6 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       notifyError('Выберите одну или несколько букмекерских контор для набора');
       return;
     }
-    if (!announcementEventName.trim()) {
-      notifyError('Укажите матч набора');
-      return;
-    }
     if (!announcementOutcome.trim()) {
       notifyError('Укажите исход набора');
       return;
@@ -933,7 +922,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       formData.append('outcome', announcementOutcome.trim());
       formData.append('coefficient', announcementCoef);
       formData.append('price_rub', announcementPriceRub);
-      formData.append('sport_type', announcementSport);
+      if (announcementSport.trim()) formData.append('sport_type', announcementSport.trim());
       formData.append('teaser_text', body || 'Реальный КФ не выше 1.9!');
       formData.append('bookmaker_id', String(announcementBkIds[0]));
       announcementBkIds.forEach((bookmakerId) => {
@@ -1008,12 +997,10 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       setSubmitting(true);
       const announcedForecastCoef = forecastCoef;
       const announcedForecastFairCoef = forecastFairCoef;
-      const announcedForecastSport = forecastSport;
       const announcedForecastTeaserText = forecastTeaserText.trim() || 'Есть закрытый прогноз под вашу БК. Берете матч?';
       const formData = new FormData();
       formData.append('coefficient', forecastCoef);
       if (forecastFairCoef) formData.append('fair_coefficient', forecastFairCoef);
-      formData.append('sport_type', forecastSport);
       formData.append('brain_score', '5');
       formData.append('teaser_text', announcedForecastTeaserText);
       formData.append('bookmaker_id', String(forecastBkIds[0]));
@@ -1056,7 +1043,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       const createdBetId = result.bet_id ? String(result.bet_id) : null;
       setSuccessMessage(successText);
       if (createdBetId) {
-        openPrepareFullForecastModal(createdBetId, announcedForecastCoef, announcedForecastFairCoef, announcedForecastSport, announcedForecastTeaserText);
+        openPrepareFullForecastModal(createdBetId, announcedForecastCoef, announcedForecastFairCoef, announcedForecastTeaserText);
       }
       setForecastCoef('');
       setForecastFairCoef('');
@@ -1104,26 +1091,44 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
     (request) => selectedRequestIds.includes(request.id) && canProcessForecastRequest(request),
   );
   const selectedIncludesPaidSet = selectedProcessableRequests.some(isPaidSetRequest);
-  const forecastRequestGroups = useMemo<ForecastRequestGroup[]>(() => {
-    const groups = new Map<string, ForecastRequestGroup>();
+  const forecastRequestUsesDateSections = forecastRequestStatusUsesDateSections(requestStatusFilter);
+  const forecastRequestGroups = useMemo<ForecastRequestGroup[]>(() => (
+    buildForecastRequestGroups(forecastRequests)
+  ), [forecastRequests]);
+  const forecastRequestDateSections = useMemo<ForecastRequestMonthSection[]>(() => (
+    forecastRequestUsesDateSections ? buildForecastRequestDateSections(forecastRequests) : []
+  ), [forecastRequests, forecastRequestUsesDateSections]);
+  const forecastRequestRenderEntries = useMemo(() => {
+    if (!forecastRequestUsesDateSections) {
+      return forecastRequestGroups.map((group) => ({
+        type: 'group' as const,
+        key: `match:${group.key}`,
+        group,
+      }));
+    }
 
-    forecastRequests.forEach((request) => {
-      const key = getForecastRequestGroupKey(request);
-      const existingGroup = groups.get(key);
-      if (existingGroup) {
-        existingGroup.requests.push(request);
-        return;
-      }
-      groups.set(key, {
-        key,
-        eventName: getForecastRequestEventName(request),
-        bet: request.bet,
-        requests: [request],
-      });
-    });
-
-    return Array.from(groups.values());
-  }, [forecastRequests]);
+    return forecastRequestDateSections.flatMap((month) => [
+      {
+        type: 'month' as const,
+        key: `month:${month.key}`,
+        label: month.label,
+        count: month.requests.length,
+      },
+      ...month.days.flatMap((day) => [
+        {
+          type: 'day' as const,
+          key: `day:${month.key}:${day.key}`,
+          label: day.label,
+          count: day.requests.length,
+        },
+        ...day.groups.map((group) => ({
+          type: 'group' as const,
+          key: `group:${month.key}:${day.key}:${group.key}`,
+          group,
+        })),
+      ]),
+    ]);
+  }, [forecastRequestDateSections, forecastRequestGroups, forecastRequestUsesDateSections]);
   const expandedForecastMatchKeySet = useMemo(
     () => new Set(expandedForecastMatchKeys),
     [expandedForecastMatchKeys],
@@ -1235,7 +1240,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             <div className="grid grid-cols-1 sm:grid-cols-[1.25fr_0.75fr] gap-3">
               <div>
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Матч
+                  Матч <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
                 </label>
                 <EmojiTextField
                   type="text"
@@ -1262,7 +1267,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Спорт
+                  Спорт <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <SportIconFrame label={announcementSport} size="badge" active className="shrink-0" />
@@ -1271,6 +1276,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                     onChange={(event) => setAnnouncementSport(event.target.value)}
                     className="min-w-0 flex-1 bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-[#ff007f]/50 transition-colors"
                   >
+                    <option value="">Не указывать</option>
                     {SPORT_FILTER_OPTIONS.filter((sport) => sport !== 'Все').map((sport) => (
                       <option key={sport} value={sport}>{sport}</option>
                     ))}
@@ -1321,7 +1327,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
               file={announcementCouponFile}
               preview={announcementCouponPreview}
               dragging={announcementCouponDragging}
-              label="Скрин купона"
+              label="Скрин купона (необязательно)"
               inputRef={announcementCouponInputRef}
               onRemove={clearAnnouncementCouponFile}
               {...announcementCouponFileHandlers}
@@ -1384,23 +1390,6 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   placeholder="1.74"
                   className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
                 />
-              </div>
-              <div>
-                <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Спорт
-                </label>
-                <div className="flex items-center gap-2">
-                  <SportIconFrame label={forecastSport} size="badge" active className="shrink-0" />
-                  <select
-                    value={forecastSport}
-                    onChange={(event) => setForecastSport(event.target.value)}
-                    className="min-w-0 flex-1 bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
-                  >
-                    {SPORT_FILTER_OPTIONS.filter((sport) => sport !== 'Все').map((sport) => (
-                      <option key={sport} value={sport}>{sport}</option>
-                    ))}
-                  </select>
-                </div>
               </div>
             </div>
 
@@ -1558,19 +1547,47 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             </div>
           ) : (
             <div className="space-y-3">
-              {forecastRequestGroups.map((group) => {
-                const expanded = expandedForecastMatchKeySet.has(group.key);
+              {forecastRequestRenderEntries.map((entry) => {
+                if (entry.type === 'month') {
+                  return (
+                    <div
+                      key={entry.key}
+                      className="flex items-center justify-between gap-3 pt-1 text-[10px] font-black uppercase tracking-wider text-slate-400"
+                    >
+                      <span>{entry.label}</span>
+                      <span className="text-slate-500">
+                        {formatForecastRequestStatusCount(requestStatusFilter, entry.count)}
+                      </span>
+                    </div>
+                  );
+                }
+                if (entry.type === 'day') {
+                  return (
+                    <div
+                      key={entry.key}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-950/30 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-300"
+                    >
+                      <span>{entry.label}</span>
+                      <span className="text-slate-500">
+                        {formatForecastRequestStatusCount(requestStatusFilter, entry.count)}
+                      </span>
+                    </div>
+                  );
+                }
+
+                const { group } = entry;
+                const expanded = expandedForecastMatchKeySet.has(entry.key);
                 const groupBookmakers = getBetBookmakers(group.bet);
                 const selectedInGroup = group.requests.filter((request) => selectedRequestIds.includes(request.id)).length;
                 const stopActionKey = `stop:${group.bet.id}`;
                 const groupStopped = forecastGroupIsStopped(group);
                 const groupIsPaidSet = isPaidSetBet(group.bet);
                 return (
-                  <div key={group.key} className="overflow-hidden bg-slate-900/45 border border-white/10 rounded-xl">
+                  <div key={entry.key} className="overflow-hidden bg-slate-900/45 border border-white/10 rounded-xl">
                     <div className="flex items-stretch gap-2 px-3 py-3">
                       <button
                         type="button"
-                        onClick={() => toggleForecastMatchGroup(group.key)}
+                        onClick={() => toggleForecastMatchGroup(entry.key)}
                         aria-expanded={expanded}
                       className="smooth-pressable min-w-0 flex-1 text-left flex items-center gap-3 rounded-lg hover:bg-white/[0.03] transition-all"
                       >
@@ -1597,7 +1614,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                         </div>
                         <div className="shrink-0 text-right">
                           <div className="text-[10px] font-black uppercase tracking-wider text-slate-300">
-                            {formatForecastRequestCount(group.requests.length)}
+                            {formatForecastRequestStatusCount(requestStatusFilter, group.requests.length)}
                           </div>
                           {selectedInGroup > 0 && (
                             <div className="mt-1 text-[9px] font-black uppercase tracking-wider text-emerald-300">
@@ -1926,7 +1943,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="sm:col-span-2">
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Матч <span className="text-rose-400">*</span>
+                  Матч <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
                 </label>
                 <EmojiTextField
                   type="text"
@@ -1982,7 +1999,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
 
               <div>
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Спорт
+                  Спорт <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <SportIconFrame label={fullForecastSport} size="badge" active className="shrink-0" />
@@ -1991,6 +2008,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                     onChange={(event) => setFullForecastSport(event.target.value)}
                     className="min-w-0 flex-1 bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
                   >
+                    <option value="">Не указывать</option>
                     {SPORT_FILTER_OPTIONS.filter((sport) => sport !== 'Все').map((sport) => (
                       <option key={sport} value={sport}>{sport}</option>
                     ))}
@@ -2138,8 +2156,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
               preview={fullForecastPreview}
               existingUrl={fullForecastExistingCouponUrl}
               dragging={fullForecastDragging}
-              label="Скрин купона"
-              required={!fullForecastExistingCouponUrl}
+              label="Скрин купона (необязательно)"
               inputRef={fullForecastInputRef}
               onRemove={clearFullForecastFile}
               {...fullForecastFileHandlers}

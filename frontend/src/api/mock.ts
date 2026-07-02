@@ -1721,7 +1721,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/admin/forecast-broadcast') {
     const body = options.body instanceof FormData ? options.body : null;
     const coefficient = body?.get('coefficient') || 2;
-    const sportType = body?.get('sport_type') || 'Футбол';
+    const sportType = body?.get('sport_type') ? String(body.get('sport_type')) : null;
     const selectedBookmakerIds = body
       ? body.getAll('bookmaker_ids')
         .map((value) => Number(value))
@@ -1769,12 +1769,11 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/admin/paid-set-broadcast') {
     const body = options.body instanceof FormData ? options.body : null;
-    const title = String(body?.get('title') || 'ПЛАТНЫЙ НАБОР');
-    const eventName = String(body?.get('event_name') || title);
+    const eventName = String(body?.get('event_name') || 'Платный набор');
     const outcome = String(body?.get('outcome') || '');
     const coefficient = body?.get('coefficient') || 3.9;
     const priceRub = Number(body?.get('price_rub') || 1500);
-    const sportType = body?.get('sport_type') || 'Футбол';
+    const sportType = body?.get('sport_type') ? String(body.get('sport_type')) : null;
     const teaserText = String(body?.get('teaser_text') || 'Реальный КФ не выше 1.9!');
     const couponImage = body?.get('coupon_image');
     const selectedBookmakerIds = body
@@ -1838,20 +1837,36 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       const couponImageUrl = couponImage
         ? '/static/coupons/mock-prepared-coupon.png'
         : targetRequest.bet.coupon_image_url;
-      if (!couponImageUrl) throw new Error('Загрузите скрин купона для полной ставки');
       const autoSendEnabled = String(body?.get('auto_send_interested') || 'false') === 'true';
+      const reannounceNewAudience = String(body?.get('reannounce_new_audience') || 'false') === 'true';
+      const selectedBookmakerIds = body
+        ? body.getAll('bookmaker_ids')
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value > 0)
+        : [];
+      const previousBookmakerIds = Array.isArray(targetRequest.bet.bookmakers)
+        ? targetRequest.bet.bookmakers.map((bookmaker: any) => Number(bookmaker.id)).filter((value: number) => Number.isFinite(value))
+        : [];
+      const addedBookmakerIds = selectedBookmakerIds.filter((bookmakerId) => !previousBookmakerIds.includes(bookmakerId));
+      const nextSportType = body?.has('sport_type')
+        ? String(body.get('sport_type') || '').trim() || null
+        : targetRequest.bet.sport_type;
 
       const preparedBet = {
         ...targetRequest.bet,
-        event_name: String(body?.get('event_name') || targetRequest.bet.event_name),
+        event_name: String(body?.get('event_name') || targetRequest.bet.event_name || 'Закрытый прогноз'),
         outcome: String(body?.get('outcome') || targetRequest.bet.outcome || ''),
         coefficient: body?.get('coefficient') || targetRequest.bet.coefficient,
-        sport_type: String(body?.get('sport_type') || targetRequest.bet.sport_type || ''),
+        sport_type: nextSportType,
         category: String(body?.get('category') || targetRequest.bet.category || 'prematch'),
         description: body?.get('description') ? String(body.get('description')) : null,
         match_link: body?.get('match_link') ? String(body.get('match_link')) : null,
         bookmaker_links: readMockBookmakerLinks(body, targetRequest.bet.bookmaker_links),
         coupon_image_url: couponImageUrl,
+        bookmakers: selectedBookmakerIds.length
+          ? MOCK_BOOKMAKERS.filter((bookmaker) => selectedBookmakerIds.includes(bookmaker.id))
+          : targetRequest.bet.bookmakers,
+        bookmaker_id: selectedBookmakerIds[0] || targetRequest.bet.bookmaker_id,
         auto_send_on_interest: autoSendEnabled,
       };
 
@@ -1889,7 +1904,37 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
             })()
           : request
       ));
-      saveMockForecastRequests(requests);
+      let reannounce = null;
+      const nextRequests = [...requests];
+      if (reannounceNewAudience && addedBookmakerIds.length > 0) {
+        const existingUserIds = new Set(nextRequests.filter((request: any) => request.bet_id === betId).map((request: any) => request.user_id));
+        const mockUsers = getMockUsers().filter((user: any) => {
+          if (existingUserIds.has(user.telegram_id)) return false;
+          return Array.isArray(user.bookmakers) && user.bookmakers.some((bookmaker: any) => addedBookmakerIds.includes(bookmaker.id));
+        });
+        mockUsers.slice(0, 3).forEach((user: any, index: number) => {
+          nextRequests.push(buildMockForecastRequest(`mock-reannounce-${Date.now()}-${index}`, {
+            status: 'announced',
+            responded_at: null,
+            bet_id: betId,
+            user_id: user.telegram_id,
+            user,
+            bet: preparedBet,
+          }));
+        });
+        reannounce = {
+          total_audience: Math.min(mockUsers.length, 3),
+          sent: Math.min(mockUsers.length, 3),
+          failed: 0,
+          errors: [],
+          delivery: {
+            total_audience: Math.min(mockUsers.length, 3),
+            sent: Math.min(mockUsers.length, 3),
+            failed: 0,
+          },
+        };
+      }
+      saveMockForecastRequests(nextRequests);
       const autoSend = autoSendEnabled
         ? {
             status: failed === 0 ? 'success' : sent ? 'partial' : 'failed',
@@ -1903,6 +1948,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         bet: preparedBet,
         auto_send_enabled: autoSendEnabled,
         auto_send: autoSend,
+        reannounce,
       };
     }
   }
@@ -1923,7 +1969,6 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const couponImageUrl = couponImage
       ? '/static/coupons/mock-bulk-coupon.png'
       : referenceRequest?.bet?.coupon_image_url;
-    if (!couponImageUrl) throw new Error('Загрузите скрин купона для полной ставки');
 
     let sent = 0;
     let failed = 0;
@@ -1940,10 +1985,12 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       const balanceAfter = balanceBefore - 1;
       const sentBet = {
         ...request.bet,
-        event_name: String(body?.get('event_name') || request.bet.event_name),
+        event_name: String(body?.get('event_name') || request.bet.event_name || 'Закрытый прогноз'),
         outcome: String(body?.get('outcome') || request.bet.outcome || ''),
         coefficient: body?.get('coefficient') || request.bet.coefficient,
-        sport_type: String(body?.get('sport_type') || request.bet.sport_type || ''),
+        sport_type: body?.has('sport_type')
+          ? String(body.get('sport_type') || '').trim() || null
+          : request.bet.sport_type,
         category: String(body?.get('category') || request.bet.category || 'prematch'),
         description: body?.get('description') ? String(body.get('description')) : request.bet.description,
         match_link: body?.get('match_link') ? String(body.get('match_link')) : request.bet.match_link,
@@ -2010,10 +2057,12 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       const sentBet = action === 'send' || action === 'send-saved'
         ? {
             ...targetRequest.bet,
-            event_name: String(body?.get('event_name') || targetRequest.bet.event_name),
+            event_name: String(body?.get('event_name') || targetRequest.bet.event_name || 'Закрытый прогноз'),
             outcome: String(body?.get('outcome') || targetRequest.bet.outcome || ''),
             coefficient: body?.get('coefficient') || targetRequest.bet.coefficient,
-            sport_type: String(body?.get('sport_type') || targetRequest.bet.sport_type || ''),
+            sport_type: body?.has('sport_type')
+              ? String(body.get('sport_type') || '').trim() || null
+              : targetRequest.bet.sport_type,
             category: String(body?.get('category') || targetRequest.bet.category || 'prematch'),
             description: body?.get('description') ? String(body.get('description')) : targetRequest.bet.description,
             match_link: body?.get('match_link') ? String(body.get('match_link')) : targetRequest.bet.match_link,
@@ -2074,8 +2123,28 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       average_coefficient: total > 0 ? Number((coefficientSum / total).toFixed(2)) : 0,
     };
   }
-  if (endpoint === '/stats/global' || endpoint === '/bets/analytics') {
+  if (requestUrl.pathname === '/stats/global' || endpoint === '/bets/analytics') {
+    const period = requestUrl.searchParams.get('period') === 'month' ? 'month' : 'all';
+    if (period === 'month') {
+      return {
+        period,
+        period_label: 'Текущий месяц',
+        winrate: 66.67,
+        roi: 21.33,
+        net_profit: 6.4,
+        total_bets: 30,
+        won_bets: 20,
+        lost_bets: 10,
+        refund_bets: 0,
+        average_coefficient: 1.96,
+        chart_points: [
+          { month: 'Текущий месяц', profit: 6.4 },
+        ],
+      };
+    }
     return {
+      period,
+      period_label: 'Весь период',
       winrate: 64,
       roi: 18.7,
       net_profit: 42,
@@ -2532,9 +2601,9 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     const couponImage = body?.get('coupon_image');
 
     const nextBet = buildMockBet(`mock-bet-${Date.now()}`, {
-      event_name: String(body?.get('event_name') || 'Новая тестовая публикация'),
+      event_name: String(body?.get('event_name') || 'Закрытый прогноз'),
       coefficient: body?.get('coefficient') || 1.88,
-      sport_type: String(body?.get('sport_type') || 'Футбол'),
+      sport_type: body?.get('sport_type') ? String(body.get('sport_type')) : null,
       outcome: body?.get('outcome') ? String(body.get('outcome')) : 'Тестовый исход',
       description: body?.get('description') ? String(body.get('description')) : undefined,
       category: String(body?.get('category') || 'prematch'),

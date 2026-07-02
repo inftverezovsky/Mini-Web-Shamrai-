@@ -126,6 +126,16 @@ export function streakLabel(summary: Pick<PerformanceSummary, 'current_streak' |
   return `${summary.current_streak} ${resultLabel(summary.current_streak_type)}`;
 }
 
+export function positiveStreakCount(summary: Pick<PerformanceSummary, 'current_streak' | 'current_streak_type'>) {
+  return summary.current_streak_type === 'win' && summary.current_streak > 0 ? summary.current_streak : 0;
+}
+
+export function positiveStreakLabel(summary: Pick<PerformanceSummary, 'current_streak' | 'current_streak_type'>) {
+  const count = positiveStreakCount(summary);
+  if (!count) return '0';
+  return `${count} ${pluralRu(count, 'ставка', 'ставки', 'ставок')}`;
+}
+
 export function buildProfitCurvePoints(data: PerformanceTimelineResponse | null) {
   const days = (data?.timeline ?? [])
     .flatMap((month) => month.days.map((day) => ({ key: day.key, label: day.label, profit: day.summary.profit_units })))
@@ -533,6 +543,7 @@ export function StatsHero({
   valueMode,
   controls,
   actions,
+  seriesMode = 'risk',
 }: {
   title: string;
   eyebrow: string;
@@ -541,8 +552,20 @@ export function StatsHero({
   valueMode: StatsValueMode;
   controls: React.ReactNode;
   actions: React.ReactNode;
+  seriesMode?: 'risk' | 'positive';
 }) {
   const positive = summary.profit_units >= 0;
+  const showPositiveSeries = seriesMode === 'positive';
+  const heroSeriesCount = positiveStreakCount(summary);
+  const heroSeriesValue = showPositiveSeries ? positiveStreakLabel(summary) : streakLabel(summary);
+  const heroSeriesTone = showPositiveSeries
+    ? (heroSeriesCount > 0 ? 'text-emerald-300' : 'text-white')
+    : summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white';
+  const heroSeriesHint = showPositiveSeries && summary.max_win_streak > 0
+    ? `Макс. плюс ${positiveStreakLabel({ current_streak: summary.max_win_streak, current_streak_type: 'win' })}`
+    : !showPositiveSeries
+      ? `Макс. серии ${summary.max_win_streak}/${summary.max_loss_streak}`
+      : null;
   return (
     <section className="relative isolate overflow-hidden rounded-[26px] border border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.18),transparent_34%),radial-gradient(circle_at_82%_18%,rgba(16,185,129,0.09),transparent_28%),linear-gradient(135deg,rgba(15,23,42,0.96),rgba(8,13,28,0.92))] p-3.5 shadow-[0_18px_60px_rgba(2,6,23,0.34)]">
       <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
@@ -569,13 +592,15 @@ export function StatsHero({
           <div className="min-w-0">{controls}</div>
           <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,0.38fr)] lg:grid-cols-[minmax(0,1fr)_minmax(8rem,0.36fr)]">
             <div className="min-h-[70px] rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Риск сейчас</div>
-              <div className={`mt-0.5 truncate text-xs font-black ${summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white'}`}>
-                {streakLabel(summary)}
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">{showPositiveSeries ? 'Серия' : 'Риск сейчас'}</div>
+              <div className={`mt-0.5 min-w-0 break-words text-xs font-black ${heroSeriesTone}`}>
+                {heroSeriesValue}
               </div>
-              <div className="mt-1 text-[8px] font-bold uppercase tracking-[0.08em] text-slate-600">
-                Макс. серии {summary.max_win_streak}/{summary.max_loss_streak}
-              </div>
+              {heroSeriesHint ? (
+                <div className="mt-1 text-[8px] font-bold uppercase tracking-[0.08em] text-slate-600">
+                  {heroSeriesHint}
+                </div>
+              ) : null}
             </div>
             <div className="min-w-0">{actions}</div>
           </div>

@@ -33,6 +33,13 @@ class SchemaValidationBoundaryTests(unittest.TestCase):
         self.assertEqual(bet.event_name, "Team A - Team B")
         self.assertEqual(bet.coefficient, Decimal("1.80"))
 
+    def test_bet_payload_allows_missing_or_blank_event_name(self):
+        missing = BetCreate(coefficient=Decimal("1.80"))
+        blank = BetCreate(event_name="   ", coefficient=Decimal("1.80"))
+
+        self.assertIsNone(missing.event_name)
+        self.assertEqual(blank.event_name, "   ")
+
     def test_bet_rejects_oversized_text_and_bad_link_scheme(self):
         with self.assertRaises(ValidationError):
             BetCreate(event_name="A" * 201, coefficient=Decimal("1.80"))

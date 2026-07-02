@@ -236,6 +236,7 @@ class ClientInfoExportRow:
     situation_description: str
     ab_group: str = ""
     bookmaker_logo_codes: list[str] = field(default_factory=list)
+    bookmaker_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -326,8 +327,8 @@ def _bookmakers_for_user(user: User) -> str:
     return ", ".join(bookmaker["name"] for bookmaker in _bookmaker_refs_for_user(user))
 
 
-def _bookmaker_refs_for_user(user: User) -> list[dict[str, str]]:
-    bookmakers: list[dict[str, str]] = []
+def _bookmaker_refs_for_user(user: User) -> list[dict[str, Any]]:
+    bookmakers: list[dict[str, Any]] = []
     seen = set()
     for bookmaker in list(getattr(user, "bookmakers", None) or []):
         name = str(getattr(bookmaker, "name", "") or "").strip()
@@ -335,7 +336,7 @@ def _bookmaker_refs_for_user(user: User) -> list[dict[str, str]]:
         key = (code or name).lower()
         if name and key not in seen:
             seen.add(key)
-            bookmakers.append({"name": name, "code": code})
+            bookmakers.append({"id": getattr(bookmaker, "id", None), "name": name, "code": code})
     other_name = str(getattr(user, "other_bookmaker_name", "") or "").strip()
     if other_name and other_name.lower() not in seen:
         bookmakers.append({"name": other_name, "code": ""})
@@ -1547,10 +1548,12 @@ def filter_client_info_export_rows(
     activity: str,
     group: Optional[str],
     tag: Optional[str],
+    bookmaker_id: Optional[int] = None,
 ) -> list[ClientInfoExportRow]:
     clean_q = (q or "").strip().lower()
     clean_group = (group or "").strip()
     clean_tag = (tag or "").strip()
+    clean_bookmaker_id = bookmaker_id if isinstance(bookmaker_id, int) and bookmaker_id > 0 else None
 
     def row_matches(row: ClientInfoExportRow) -> bool:
         if clean_q:
@@ -1582,6 +1585,8 @@ def filter_client_info_export_rows(
         if clean_group and clean_group != "all" and row.client_group != clean_group:
             return False
         if clean_tag and clean_tag != "all" and row.client_tag != clean_tag:
+            return False
+        if clean_bookmaker_id and clean_bookmaker_id not in row.bookmaker_ids:
             return False
         return True
 
@@ -2643,6 +2648,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             situation_description=situation["description"],
             ab_group=str(getattr(user, "ab_group", "") or ""),
             bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmaker_refs),
+            bookmaker_ids=[int(bookmaker["id"]) for bookmaker in bookmaker_refs if bookmaker.get("id") is not None],
         ))
 
     return sorted(rows, key=lambda row: (

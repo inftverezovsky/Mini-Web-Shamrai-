@@ -22,6 +22,7 @@ from src.services.forecast_delivery import (
     build_web_forecast_signal_data,
     build_web_paid_set_signal_data,
     build_web_teaser_signal_data,
+    forecast_request_is_inactive_for_client,
     notify_sales_manager_for_request,
     set_forecast_request_declined,
     set_forecast_request_interested,
@@ -362,17 +363,19 @@ async def answer_forecast_request_from_web_chat(
             auto_delivery_now=False,
         )
         await db.commit()
+        inactive = forecast_request_is_inactive_for_client(forecast_request)
         if should_notify_sales:
             background_tasks.add_task(notify_sales_manager_for_request, forecast_request.id)
         contact_required = (
-            forecast_request.status == "announced"
+            not inactive
+            and forecast_request.status == "announced"
             and FORECAST_CONTACT_DRAFT_TEXT in message
         )
         return ForecastSignalActionResponse(
-            status=forecast_request.status,
+            status="removed" if inactive else forecast_request.status,
             message=message,
             forecast_request_id=str(forecast_request.id),
-            action="contact_required" if contact_required else "accepted",
+            action="inactive" if inactive else "contact_required" if contact_required else "accepted",
             contact={
                 "channel": "web",
                 "draft_text": FORECAST_CONTACT_DRAFT_TEXT,
@@ -386,11 +389,12 @@ async def answer_forecast_request_from_web_chat(
             actor_user_id=current_user.telegram_id,
         )
         await db.commit()
+        inactive = forecast_request_is_inactive_for_client(forecast_request)
         return ForecastSignalActionResponse(
-            status=forecast_request.status,
+            status="removed" if inactive else forecast_request.status,
             message=message,
             forecast_request_id=str(forecast_request.id),
-            action="accepted",
+            action="inactive" if inactive else "accepted",
         )
 
     raise HTTPException(
