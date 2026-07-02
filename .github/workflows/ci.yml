@@ -76,8 +76,8 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Run prelaunch smoke tests
         run: npm run test:e2e

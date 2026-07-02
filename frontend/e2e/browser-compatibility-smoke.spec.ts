@@ -19,8 +19,10 @@ function collectRuntimeErrors(page: Page) {
   const runtimeErrors: string[] = [];
 
   page.on('console', (message) => {
-    if (message.type() === 'error') {
-      runtimeErrors.push(message.text());
+    const text = message.text();
+    const expectedOfflineApiNoise = text.includes('Failed to load resource: net::ERR_CONNECTION_REFUSED');
+    if (message.type() === 'error' && !expectedOfflineApiNoise) {
+      runtimeErrors.push(text);
     }
   });
 
