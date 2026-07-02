@@ -1066,3 +1066,76 @@
 8. Public HTML проверяется на новые hashed `assets/*.js` и `assets/*.css`.
 Финиш: preview/public state проверен по правильной поверхности, без затрагивания unrelated nginx/apps.
 ```
+
+## 68. Embedded Browser Cookie Login
+
+```text
+Старт: клиент открывает приложение внутри Telegram Web, Telegram Mini App, VK или PWA.
+1. Frontend первым делом вызывает `/api/users/me` с `credentials: include`.
+2. Если cookie `shamrai_access_token` валиден, backend возвращает профиль и auth boot завершен.
+3. Если cookie отсутствует или устарел, frontend выбирает доступный способ входа:
+   Telegram initData, VK ID redirect, Telegram bot-session или локальный debug auth.
+4. Backend проверяет подпись внешнего провайдера.
+5. Backend создает нового пользователя или мержит web-only профиль с Telegram/VK профилем.
+6. Backend создает JWT, но не раскрывает access token в JSON response.
+7. Backend ставит `shamrai_access_token` и `shamrai_csrf_token` как httpOnly cookies.
+8. Если runtime production/HTTPS, cookies получают `Secure` и `SameSite=None`.
+9. Если runtime local HTTP, cookies остаются `SameSite=Lax` без `Secure`.
+10. Frontend сохраняет user payload и все дальнейшие API-вызовы делает с `credentials: include`.
+11. Следующий `/api/users/me` должен вернуть 200 на основе cookie.
+Финиш: клиент авторизован без хранения production bearer token в localStorage, а embedded браузеры не теряют session cookie.
+```
+
+## 69. Historical Shamrai Stats Import
+
+```text
+Старт: оператор запускает import command для исторического XLSX Shamrai.
+1. Команда читает source workbook и считает hash файла.
+2. В dry-run режиме парсер выводит totals и не меняет БД.
+3. В apply режиме создается или обновляется import batch по source hash/cutoff.
+4. Workbook rows нормализуются по статусам: `Победа -> win`, `Поражение -> loss`,
+   `Возврат -> refund`.
+5. Bookmaker aliases приводятся к стандартным кодам, когда маппинг известен.
+6. Monthly aggregates записываются отдельно от live `bets`.
+7. Bookmaker/sport breakdowns записываются отдельно от live `bets`.
+8. June detail rows из листа `Data` сохраняются в historical detail table, но не
+   превращаются в старые live match rows.
+9. Повторный apply того же файла обновляет/пропускает существующие rows без дублей.
+10. Parser totals сверяются с ожидаемыми totals workbook.
+Финиш: БД содержит исторический channel-level baseline до `2026-07-01`, не создавая фейковые клиентские ставки.
+```
+
+## 70. All-Time Shamrai Stats Merge
+
+```text
+Старт: frontend или export запрашивает all-time Shamrai/channel statistics.
+1. Backend определяет scope: client stats или channel/global stats.
+2. Если scope client, используются только реальные `user_bets`.
+3. Если scope channel/global и period=all, загружается исторический baseline.
+4. Live DB bets выбираются только с cutoff `resolved_at >= 2026-07-01`.
+5. Historical aggregates и live items приводятся к единому performance model.
+6. Summary считает bets, wins, losses, refunds, profit units, ROI, winrate.
+7. Monthly chart объединяет historical months и live post-cutoff points.
+8. Breakdown rows объединяют bookmaker/sport/source с учетом source boundaries.
+9. Admin XLSX/Google Drive export добавляет historical totals в Shamrai scope.
+10. Client exports не получают historical baseline, потому что Excel не содержит надежной client-level истории.
+Финиш: all-time Shamrai статистика показывает старые и новые данные вместе без double counting.
+```
+
+## 71. Documentation And GitHub Publish
+
+```text
+Старт: пользователь просит улучшить документацию, закоммитить и запушить.
+1. Проверить `git status --short --branch`.
+2. Прочитать актуальный README/docs и определить, какие разделы устарели.
+3. Добавить текстовое описание проекта, схемы доменов и алгоритмы основных процессов.
+4. Обновить ссылки между README и docs.
+5. Запустить проверки, соответствующие измененным зонам.
+6. Проверить `git diff --check`.
+7. Просмотреть staged/unstaged diff и убедиться, что секреты и test artifacts не попали в commit.
+8. Stage только ожидаемые файлы.
+9. Создать Conventional Commit.
+10. Push в существующий remote только после явной просьбы пользователя.
+11. Проверить GitHub: remote branch, последнюю commit SHA и статус workflow/check runs.
+Финиш: GitHub содержит актуальную документацию и исправления, а локальное состояние понятно.
+```

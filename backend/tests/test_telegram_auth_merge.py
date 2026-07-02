@@ -122,7 +122,8 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
         set_cookie = response.headers.get("set-cookie", "")
         self.assertIn(auth.VK_FLOW_COOKIE_NAME, set_cookie)
         self.assertIn("HttpOnly", set_cookie)
-        self.assertIn("SameSite=lax", set_cookie)
+        self.assertIn("SameSite=none", set_cookie)
+        self.assertIn("Secure", set_cookie)
 
     async def test_vk_complete_rejects_missing_flow_cookie(self):
         async with self.Session() as db:

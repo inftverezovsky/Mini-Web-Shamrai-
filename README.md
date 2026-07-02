@@ -13,6 +13,30 @@ Full-stack приложение для спортивной аналитики, 
 - Доставка сигналов: Telegram Bot API, VK Messages API, Web Push, WebSocket и retryable delivery outbox.
 - Инфраструктура: FastAPI backend, React/Vite frontend, PostgreSQL, Redis hot cache, Alembic migrations, Docker Compose preview и host-nginx public deploy.
 
+## Текстовое описание проекта
+
+Shamrai Mini App - это рабочая система для спортивно-аналитического продукта: клиент
+входит через Telegram или VK, проходит короткую настройку профиля, покупает доступ к
+прогнозам, берет ставки в ленте, получает закрытые сигналы и видит собственную
+статистику. Команда Shamrai через админский cockpit ведет клиентов, создает прогнозы,
+отвечает в чатах, запускает рассылки, управляет тарифами и выгружает отчеты.
+
+Проект состоит из трех пользовательских поверхностей и набора backend-интеграций:
+
+- **Telegram Mini App** - основной клиентский сценарий внутри Telegram.
+- **Browser/PWA** - web-вход через VK ID, Telegram bot-session и PWA push.
+- **Admin cockpit** - CRM, прогнозы, статистика, чаты, настройки и аудит.
+- **Integration layer** - Telegram/VK callbacks, YooKassa/Tegro webhooks, Google Drive export.
+
+Ключевой принцип: деньги, доступы, доставка и статистика не должны зависеть от
+повторных кликов или повторных webhook-ов. Поэтому платежи проходят через
+`PaymentAttempt`, выдача доступа - через ledger-сервисы, внешние сообщения - через
+`delivery_outbox`, а историческая статистика Shamrai хранится отдельно от реальных
+клиентских `user_bets`.
+
+Подробный обзор проекта, доменная карта и алгоритмы лежат в
+[docs/project-overview.md](docs/project-overview.md).
+
 ## Архитектура
 
 ```mermaid
@@ -51,6 +75,77 @@ flowchart LR
 Backend принимает API под `/api`, проверяет cookie/JWT, работает с PostgreSQL через SQLAlchemy async и отдаёт статические coupon-файлы. Внешняя доставка вынесена в outbox, чтобы Telegram, VK и Web Push можно было ретраить без двойной выдачи доступа.
 
 Frontend собирается Vite. В production API вызывается same-origin через `/api`. Важно различать Docker preview и публичный сайт: здоровый контейнер frontend preview не означает, что `https://shamra1.pro/` обновился, потому что публичный домен обслуживается host nginx из отдельного static web root, записанного в private runbook/project registry.
+
+## Ключевые алгоритмы
+
+### Авторизация и embedded cookie
+
+```mermaid
+sequenceDiagram
+  participant UI as Frontend
+  participant API as FastAPI /auth
+  participant DB as PostgreSQL
+
+  UI->>API: GET /api/users/me with credentials
+  alt cookie valid
+    API->>DB: load user from JWT subject
+    API-->>UI: UserResponse
+  else no session
+    UI->>API: POST /api/auth/login or /auth/vk/login
+    API->>API: verify Telegram/VK payload
+    API->>DB: upsert or merge user
+    API-->>UI: httpOnly auth cookie + CSRF cookie
+    Note over API,UI: HTTPS/production cookies use SameSite=None; Secure
+    UI->>API: GET /api/users/me with credentials
+    API-->>UI: authenticated profile
+  end
+```
+
+### Платеж и выдача доступа
+
+```mermaid
+flowchart TD
+  A["Клиент выбирает тариф"] --> B["Create PaymentAttempt pending"]
+  B --> C["Provider invoice / confirmation URL"]
+  C --> D["Provider webhook/update"]
+  D --> E["Server-side verification"]
+  E --> F{"Already succeeded?"}
+  F -- "yes" --> G["Idempotent ok"]
+  F -- "no" --> H["Activate subscription / unlock item"]
+  H --> I["Write match_balance_logs"]
+  I --> J["Mark attempt succeeded"]
+  J --> K["Queue confirmation delivery"]
+```
+
+### Доставка сигнала
+
+```mermaid
+flowchart LR
+  Event["Forecast/chat/result event"] --> Queue["delivery_outbox"]
+  Queue --> Claim["Daemon claims due rows"]
+  Claim --> Dispatch{"Channel"}
+  Dispatch --> TG["Telegram"]
+  Dispatch --> VK["VK"]
+  Dispatch --> Push["Web Push"]
+  TG --> Status{"ok / retry / failed"}
+  VK --> Status
+  Push --> Status
+  Status --> Sent["sent"]
+  Status --> Retry["retry with backoff"]
+  Status --> Failed["failed"]
+```
+
+### Общая статистика Shamrai
+
+```mermaid
+flowchart TD
+  A["/api/stats/global?period=all"] --> B{"Scope"}
+  B -- "client" --> C["Only real user_bets"]
+  B -- "channel/global" --> D["Historical baseline before 2026-07-01"]
+  D --> E["Live DB resolved bets from 2026-07-01 onward"]
+  E --> F["Normalize and merge performance items"]
+  F --> G["ROI, winrate, profit, monthly chart, breakdowns"]
+```
 
 ## Стек
 
@@ -270,30 +365,36 @@ Do not stop system nginx, unrelated containers, databases or ports `80/443` unle
 
 ## Local audit snapshot
 
-Snapshot from local checkout on `2026-06-24`.
+Snapshot from local checkout on `2026-07-02`.
 
-Production audit: `82/100`, launchable with caveats. No local ship blockers were found in the checked surface, but confidence is capped by missing live server health verification, missing Python dependency audit tooling and no browser E2E pass in this run.
+Project verification status: green. No local syntax, test, build or dependency-audit blockers were found in the checked surface.
 
 Evidence checked:
 
-- `git status --short --branch`: clean `main...origin/main` before README work.
-- `git log --oneline --decorate -20`: recent history reviewed.
-- `scripts/verify-local.ps1`: backend compile, Alembic head check, backend import, 303 backend tests, frontend lint and production build passed.
-- `npm test`: 11 frontend test files, 35 tests passed.
+- `git status --short --branch`: only the intended auth-cookie/docs changes were present.
+- Backend `compileall`: `backend/src` and `backend/alembic` passed.
+- Backend import: `import src.main` returned `backend_import_ok`.
+- Alembic: one head, `20260702_0036`.
+- Backend tests: `423 passed`.
+- Frontend lint: passed.
+- Frontend unit tests: `97 passed`.
+- Frontend production build: passed.
+- Playwright smoke/compat E2E: `9 passed`.
 - `npm audit --audit-level=high`: 0 frontend vulnerabilities found.
-- `docker compose config --quiet`: Compose config is valid.
-- PowerShell parser check for `scripts/*.ps1`: passed.
-- Env surface reviewed by key names only; real `.env` values were not printed.
+- `pip-audit -r requirements.txt --strict`: no known backend vulnerabilities found.
+- `git diff --check`: passed.
+- Secret surface checked by tracked files and patterns; real `.env` values were not printed.
 
 High-value follow-ups:
 
-- Keep Playwright prelaunch smoke focused on non-payment launch paths: auth/session, profile setup, support chat and admin web-chat.
-- Add at least one Playwright smoke path for auth/session, feed, tariff/payment entry and admin login.
-- Replace production daemon `print(...)` calls with structured logging before incident-heavy usage.
+- Keep Playwright coverage focused on launch-critical paths: auth/session, feed, tariff entry, support chat and admin flows.
+- Add provider-specific payment webhook regression tests whenever payment logic changes.
+- Keep historical stats import/export tests coupled to the Excel baseline totals.
 - Run a read-only VDS health audit before any public redeploy.
 
 ## Useful docs
 
+- [docs/project-overview.md](docs/project-overview.md) - текстовое описание проекта, доменная карта, схемы и ключевые алгоритмы.
 - [docs/developer-guide.md](docs/developer-guide.md) - backend, frontend, database, payments, delivery and deployment map.
 - [docs/backup-restore.md](docs/backup-restore.md) - encrypted Postgres backups, retention, restore drill and production restore runbook.
 - [docs/process-flows.md](docs/process-flows.md) - Mermaid process diagrams for auth, payments, delivery, forecast, chat and deploy.

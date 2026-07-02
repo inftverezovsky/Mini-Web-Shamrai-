@@ -218,6 +218,10 @@ def _auth_cookie_secure() -> bool:
     return settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://")
 
 
+def _auth_cookie_samesite() -> str:
+    return "none" if _auth_cookie_secure() else "lax"
+
+
 def _set_vk_flow_cookie(response: Response, payload: dict[str, Any]) -> None:
     response.set_cookie(
         VK_FLOW_COOKIE_NAME,
@@ -225,7 +229,7 @@ def _set_vk_flow_cookie(response: Response, payload: dict[str, Any]) -> None:
         max_age=VK_FLOW_TTL_SECONDS,
         httponly=True,
         secure=_auth_cookie_secure(),
-        samesite="lax",
+        samesite=_auth_cookie_samesite(),
         path=VK_FLOW_COOKIE_PATH,
     )
 
@@ -236,7 +240,7 @@ def _clear_vk_flow_cookie(response: Response) -> None:
         path=VK_FLOW_COOKIE_PATH,
         secure=_auth_cookie_secure(),
         httponly=True,
-        samesite="lax",
+        samesite=_auth_cookie_samesite(),
     )
 
 
@@ -672,8 +676,8 @@ def _set_auth_cookie(response: Response, access_token: str) -> None:
         access_token,
         max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         httponly=True,
-        secure=settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://"),
-        samesite="lax",
+        secure=_auth_cookie_secure(),
+        samesite=_auth_cookie_samesite(),
         path="/api",
     )
 
@@ -682,9 +686,9 @@ def _clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(
         AUTH_COOKIE_NAME,
         path="/api",
-        secure=settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://"),
+        secure=_auth_cookie_secure(),
         httponly=True,
-        samesite="lax",
+        samesite=_auth_cookie_samesite(),
     )
 
 

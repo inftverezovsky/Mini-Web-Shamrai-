@@ -34,6 +34,10 @@ def _csrf_cookie_secure() -> bool:
     return settings.is_production or settings.FRONTEND_BASE_URL.startswith("https://")
 
 
+def _csrf_cookie_samesite() -> str:
+    return "none" if _csrf_cookie_secure() else "lax"
+
+
 def _base64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -82,7 +86,7 @@ def set_csrf_cookie(response: Response, token: str | None = None) -> str:
         max_age=CSRF_TOKEN_TTL_SECONDS,
         httponly=True,
         secure=_csrf_cookie_secure(),
-        samesite="lax",
+        samesite=_csrf_cookie_samesite(),
         path="/api",
     )
     return csrf_token
@@ -94,7 +98,7 @@ def clear_csrf_cookie(response: Response) -> None:
         path="/api",
         secure=_csrf_cookie_secure(),
         httponly=True,
-        samesite="lax",
+        samesite=_csrf_cookie_samesite(),
     )
 
 

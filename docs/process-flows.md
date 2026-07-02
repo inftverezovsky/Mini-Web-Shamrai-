@@ -23,6 +23,31 @@ flowchart TD
   M --> N["Logout: POST /api/auth/logout очищает cookie и debug storage"]
 ```
 
+## Embedded Cookie Session
+
+```mermaid
+sequenceDiagram
+  participant Browser as Telegram Web / VK / PWA
+  participant Frontend as React AuthContext
+  participant API as FastAPI auth
+  participant DB as PostgreSQL
+
+  Browser->>Frontend: Open app
+  Frontend->>API: GET /api/users/me with credentials
+  alt Existing cookie works
+    API->>DB: Load user by JWT subject
+    API-->>Frontend: 200 profile
+  else No valid cookie
+    Frontend->>API: POST /api/auth/login or /api/auth/vk/login
+    API->>API: Verify signed provider payload
+    API->>DB: Upsert or merge user
+    API-->>Browser: Set-Cookie auth + CSRF
+    Note over API,Browser: HTTPS production cookies are SameSite=None; Secure
+    Frontend->>API: GET /api/users/me with credentials
+    API-->>Frontend: 200 profile
+  end
+```
+
 ## Payments
 
 ```mermaid
@@ -116,4 +141,41 @@ flowchart TD
   I --> J["Health check the private canonical health URL"]
   F -- "public shamra1.pro" --> K["Build frontend/dist and publish to private public web root"]
   K --> L["Verify public HTML references new assets"]
+```
+
+## Historical Shamrai Stats
+
+```mermaid
+flowchart TD
+  A["Excel baseline import"] --> B["Hash source file and register import batch"]
+  B --> C["Store monthly aggregate rows"]
+  B --> D["Store bookmaker/sport breakdown rows"]
+  B --> E["Store optional June detail rows separately"]
+  F["/api/stats/global?period=all"] --> G{"Stats scope"}
+  G -- "client" --> H["Use only real user_bets"]
+  G -- "channel/global" --> I["Load historical baseline before 2026-07-01"]
+  I --> J["Load live DB bets resolved from 2026-07-01 onward"]
+  J --> K["Normalize to common performance items"]
+  K --> L["Merge KPI, monthly chart, source/bookmaker/sport breakdowns"]
+  L --> M["Return UI payload or export workbook"]
+```
+
+## Commit And Release Hygiene
+
+```mermaid
+flowchart TD
+  A["Code/doc change"] --> B["git status --short --branch"]
+  B --> C["Run focused checks near changed files"]
+  C --> D{"Backend changed?"}
+  D -- "yes" --> E["compileall, import src.main, Alembic heads, pytest"]
+  D -- "no" --> F["skip backend gate if unrelated"]
+  E --> G{"Frontend changed?"}
+  F --> G
+  G -- "yes" --> H["lint, unit tests, build, E2E if user-facing"]
+  G -- "no" --> I["diff review"]
+  H --> I
+  I --> J["git diff --check and secret/artifact check"]
+  J --> K["stage intended files only"]
+  K --> L["Conventional commit"]
+  L --> M["push only when explicitly requested"]
 ```

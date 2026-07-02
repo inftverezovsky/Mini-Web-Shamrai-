@@ -35,6 +35,22 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max-age=2592000", cookie)
         self.assertNotIn("; secure", cookie)
 
+    def test_auth_cookie_uses_cross_site_policy_for_https_app(self):
+        response = Response()
+
+        with (
+            patch.object(auth.settings, "APP_ENV", "production"),
+            patch.object(auth.settings, "FRONTEND_BASE_URL", "https://shamra1.pro/app"),
+        ):
+            auth._set_auth_cookie(response, "access-token")
+
+        cookie = "; ".join(_set_cookie_headers(response)).lower()
+        self.assertIn("shamrai_access_token=access-token", cookie)
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=none", cookie)
+        self.assertIn("; secure", cookie)
+        self.assertIn("path=/api", cookie)
+
     def test_login_response_sets_cookie_without_exposing_bearer_token(self):
         response = Response()
         now = datetime.now(timezone.utc)
@@ -89,13 +105,35 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
     async def test_csrf_endpoint_issues_signed_http_only_cookie(self):
         response = Response()
 
-        payload = await auth.get_csrf_token(response)
+        with (
+            patch.object(csrf.settings, "APP_ENV", "development"),
+            patch.object(csrf.settings, "FRONTEND_BASE_URL", "http://localhost:5173"),
+        ):
+            payload = await auth.get_csrf_token(response)
 
         cookie = "; ".join(_set_cookie_headers(response)).lower()
         self.assertTrue(csrf.verify_csrf_token(payload.csrf_token))
         self.assertIn("shamrai_csrf_token=", cookie)
         self.assertIn("httponly", cookie)
         self.assertIn("samesite=lax", cookie)
+        self.assertIn("path=/api", cookie)
+        self.assertNotIn("; secure", cookie)
+
+    def test_csrf_cookie_uses_cross_site_policy_for_https_app(self):
+        response = Response()
+
+        with (
+            patch.object(csrf.settings, "APP_ENV", "production"),
+            patch.object(csrf.settings, "FRONTEND_BASE_URL", "https://shamra1.pro/app"),
+        ):
+            token = csrf.set_csrf_cookie(response)
+
+        cookie = "; ".join(_set_cookie_headers(response)).lower()
+        self.assertTrue(csrf.verify_csrf_token(token))
+        self.assertIn("shamrai_csrf_token=", cookie)
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=none", cookie)
+        self.assertIn("; secure", cookie)
         self.assertIn("path=/api", cookie)
 
 
