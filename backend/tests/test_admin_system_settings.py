@@ -296,7 +296,11 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_integration_diagnostics_require_unlock_token_and_redact_values(self):
         async with self.Session() as session:
-            session.add(SystemSetting(key="TELEGRAM_BOT_TOKEN", value="123456:real-secret", is_secret=True))
+            session.add_all([
+                SystemSetting(key="TELEGRAM_BOT_TOKEN", value="123456:real-secret", is_secret=True),
+                SystemSetting(key="TELEGRAM_WEBHOOK_SECRET_TOKEN", value="test-webhook-secret", is_secret=True),
+                SystemSetting(key="TELEGRAM_BOT_USERNAME", value="Shamra1_bot", is_secret=False),
+            ])
             await session.flush()
 
             with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=False)):

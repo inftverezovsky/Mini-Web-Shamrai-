@@ -495,6 +495,13 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.previous_admin_group_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
+        delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+
+    def tearDown(self):
+        delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = self.previous_admin_group_chat_id
+
     def _bookmaker(self):
         return SimpleNamespace(id=1, name="Фонбет", code="fonbet")
 
