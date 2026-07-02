@@ -86,6 +86,7 @@ from src.services.statistics import (
     summarize_items,
 )
 from src.services.google_drive_export import get_drive_export_job, start_crm_drive_export_job, start_drive_export_job
+from src.services.historical_stats import load_active_historical_stats_snapshot
 from src.services.system_settings import (
     create_integration_unlock_token,
     get_admin_system_settings,
@@ -1209,6 +1210,7 @@ async def _clients_export_items(db: AsyncSession, period: str) -> list[dict[str,
 
 
 async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str, Any]]:
+    historical = await load_active_historical_stats_snapshot(db, period)
     query = (
         select(Bet)
         .filter(
@@ -1222,6 +1224,8 @@ async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str,
     start = period_start(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    elif historical:
+        query = query.filter(Bet.resolved_at >= historical.cutoff_at)
     result = await db.execute(query)
     return [
         item
@@ -1244,11 +1248,13 @@ async def export_admin_stats(
         period_label = stats_export_period_label(normalized_period)
         if scope == "shamrai":
             export_items = await load_shamrai_export_items(db, normalized_period)
+            historical = await load_active_historical_stats_snapshot(db, normalized_period)
             content = build_stats_export_workbook(
                 export_items,
                 title="СТАТИСТИКА SHAMRAI",
                 period_label=period_label,
                 include_client=False,
+                historical=historical,
             )
         elif scope == "clients":
             client_info_rows = await load_client_info_export_rows(db, normalized_period)

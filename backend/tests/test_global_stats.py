@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.api.stats import get_global_stats
 from src.models.database import Base
-from src.models.models import Bet
+from src.models.models import Bet, HistoricalStatsImportBatch, HistoricalStatsMonthly
 from src.services.statistics import period_start
 
 
@@ -83,6 +83,67 @@ class GlobalStatsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["lost_bets"], 1)
         self.assertEqual(response["net_profit"], 0.2)
         self.assertEqual(response["roi"], 10.0)
+
+    async def test_all_period_merges_historical_baseline_and_filters_live_duplicates(self):
+        async with self.Session() as session:
+            batch = HistoricalStatsImportBatch(
+                source_filename="stats.xlsx",
+                source_sha256="sha-test",
+                cutoff_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                unit_stake_rub=Decimal("10000"),
+                is_active=True,
+                total_bets=4,
+                total_wins=2,
+                total_losses=2,
+                total_refunds=0,
+                total_turnover_rub=Decimal("40000"),
+                total_profit_rub=Decimal("4000"),
+            )
+            session.add(batch)
+            await session.flush()
+            session.add(HistoricalStatsMonthly(
+                batch_id=batch.id,
+                period_key="2026-06",
+                period_label="Июнь 2026",
+                period_start=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                bets=4,
+                wins=2,
+                losses=2,
+                refunds=0,
+                turnover_rub=Decimal("40000"),
+                profit_rub=Decimal("4000"),
+                average_coefficient=Decimal("2.00"),
+                top_sport="Футбол",
+                top_bookmaker="Фонбет",
+            ))
+            session.add_all([
+                self._bet(
+                    status="win",
+                    coefficient="9.00",
+                    resolved_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+                ),
+                self._bet(
+                    status="win",
+                    coefficient="2.50",
+                    resolved_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+                ),
+            ])
+            await session.commit()
+
+            response = await get_global_stats(db=session)
+
+        self.assertEqual(response["total_bets"], 5)
+        self.assertEqual(response["won_bets"], 3)
+        self.assertEqual(response["lost_bets"], 2)
+        self.assertEqual(response["net_profit"], 1.9)
+        self.assertEqual(response["roi"], 38.0)
+        self.assertEqual(
+            response["chart_points"],
+            [
+                {"month": "2026-06", "profit": 0.4},
+                {"month": "2026-07", "profit": 1.9},
+            ],
+        )
 
 
 if __name__ == "__main__":

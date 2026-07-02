@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from src.core.config import settings
 from src.core.roles import STAFF_ROLES
 from src.models.models import Bet, User, user_bets
+from src.services.historical_stats import HistoricalStatsSnapshot, load_active_historical_stats_snapshot
 from src.services.statistics import (
     MONTH_LABELS,
     as_moscow_datetime,
@@ -478,18 +479,18 @@ def export_item_from_bet(
     )
 
 
-def summarize_export_items(items: Iterable[StatsExportItem]) -> dict[str, Any]:
-    item_list = list(items)
-    total = len(item_list)
-    wins = sum(1 for item in item_list if item.status == "win")
-    losses = sum(1 for item in item_list if item.status == "loss")
-    refunds = sum(1 for item in item_list if item.status == "refund")
-    turnover = sum((item.turnover for item in item_list), Decimal("0"))
-    profit = sum((item.profit for item in item_list), Decimal("0"))
-    coefficient_count = sum(1 for item in item_list if item.coefficient > 0)
-    coefficient_sum = sum((item.coefficient for item in item_list), Decimal("0"))
+def _summary_from_parts(
+    *,
+    total: int,
+    wins: int,
+    losses: int,
+    refunds: int,
+    turnover: Decimal,
+    profit: Decimal,
+    coefficient_sum: Decimal,
+    coefficient_count: int,
+) -> dict[str, Any]:
     resolved = wins + losses
-
     return {
         "bets": total,
         "wins": wins,
@@ -502,6 +503,49 @@ def summarize_export_items(items: Iterable[StatsExportItem]) -> dict[str, Any]:
         "profit": profit,
         "roi": (profit / turnover) if turnover else 0,
     }
+
+
+def summarize_export_items(
+    items: Iterable[StatsExportItem],
+    *,
+    historical: Optional[HistoricalStatsSnapshot] = None,
+) -> dict[str, Any]:
+    item_list = list(items)
+    total = len(item_list)
+    wins = sum(1 for item in item_list if item.status == "win")
+    losses = sum(1 for item in item_list if item.status == "loss")
+    refunds = sum(1 for item in item_list if item.status == "refund")
+    turnover = sum((item.turnover for item in item_list), Decimal("0"))
+    profit = sum((item.profit for item in item_list), Decimal("0"))
+    coefficient_count = sum(1 for item in item_list if item.coefficient > 0)
+    coefficient_sum = sum((item.coefficient for item in item_list), Decimal("0"))
+
+    if historical:
+        summary = historical.summary
+        total += int(summary.get("bets") or 0)
+        wins += int(summary.get("wins") or 0)
+        losses += int(summary.get("losses") or 0)
+        refunds += int(summary.get("refunds") or 0)
+        turnover += Decimal(str(summary.get("turnover_rub") or "0"))
+        profit += Decimal(str(summary.get("profit_rub") or "0"))
+        historical_count = sum(int(row.get("bets") or 0) for row in historical.monthly)
+        historical_sum = sum(
+            Decimal(str(row.get("average_coefficient") or "0")) * Decimal(int(row.get("bets") or 0))
+            for row in historical.monthly
+        )
+        coefficient_count += historical_count
+        coefficient_sum += historical_sum
+
+    return _summary_from_parts(
+        total=total,
+        wins=wins,
+        losses=losses,
+        refunds=refunds,
+        turnover=turnover,
+        profit=profit,
+        coefficient_sum=coefficient_sum,
+        coefficient_count=coefficient_count,
+    )
 
 
 def _flat_stake_for_item(item: StatsExportItem) -> Decimal:
@@ -520,25 +564,108 @@ def _sorted_items(items: Iterable[StatsExportItem]) -> list[StatsExportItem]:
     return sorted(items, key=lambda item: (item.resolved_at, item.event_name))
 
 
-def _monthly_rows(items: list[StatsExportItem]) -> list[dict[str, Any]]:
-    months: dict[str, list[StatsExportItem]] = defaultdict(list)
+def _parts_from_items(items: Iterable[StatsExportItem]) -> dict[str, Any]:
+    item_list = list(items)
+    return {
+        "bets": len(item_list),
+        "wins": sum(1 for item in item_list if item.status == "win"),
+        "losses": sum(1 for item in item_list if item.status == "loss"),
+        "refunds": sum(1 for item in item_list if item.status == "refund"),
+        "turnover": sum((item.turnover for item in item_list), Decimal("0")),
+        "profit": sum((item.profit for item in item_list), Decimal("0")),
+        "coefficient_sum": sum((item.coefficient for item in item_list if item.coefficient > 0), Decimal("0")),
+        "coefficient_count": sum(1 for item in item_list if item.coefficient > 0),
+    }
+
+
+def _merge_summary_parts(parts: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    total_parts = list(parts)
+    return _summary_from_parts(
+        total=sum(int(part.get("bets") or 0) for part in total_parts),
+        wins=sum(int(part.get("wins") or 0) for part in total_parts),
+        losses=sum(int(part.get("losses") or 0) for part in total_parts),
+        refunds=sum(int(part.get("refunds") or 0) for part in total_parts),
+        turnover=sum((Decimal(str(part.get("turnover") or "0")) for part in total_parts), Decimal("0")),
+        profit=sum((Decimal(str(part.get("profit") or "0")) for part in total_parts), Decimal("0")),
+        coefficient_sum=sum((Decimal(str(part.get("coefficient_sum") or "0")) for part in total_parts), Decimal("0")),
+        coefficient_count=sum(int(part.get("coefficient_count") or 0) for part in total_parts),
+    )
+
+
+def _historical_summary_part(row: dict[str, Any]) -> dict[str, Any]:
+    bets = int(row.get("bets") or 0)
+    return {
+        "bets": bets,
+        "wins": int(row.get("wins") or 0),
+        "losses": int(row.get("losses") or 0),
+        "refunds": int(row.get("refunds") or 0),
+        "turnover": Decimal(str(row.get("turnover") or "0")),
+        "profit": Decimal(str(row.get("profit") or "0")),
+        "coefficient_sum": Decimal(str(row.get("average_coefficient") or "0")) * Decimal(bets),
+        "coefficient_count": bets,
+    }
+
+
+def _monthly_rows(
+    items: list[StatsExportItem],
+    *,
+    historical: Optional[HistoricalStatsSnapshot] = None,
+) -> list[dict[str, Any]]:
+    months: dict[str, dict[str, Any]] = {}
+    for row in (historical.monthly if historical else []):
+        key = str(row.get("period_key") or "")
+        if not key:
+            continue
+        months.setdefault(key, {"label": row.get("period_label") or key, "parts": []})["parts"].append(_historical_summary_part(row))
+
+    live_months: dict[str, list[StatsExportItem]] = defaultdict(list)
     for item in items:
-        months[item.period_key].append(item)
+        live_months[item.period_key].append(item)
+    for key, month_items in live_months.items():
+        months.setdefault(key, {"label": month_items[0].period_label, "parts": []})["parts"].append(_parts_from_items(month_items))
 
     rows = []
+    total_parts = []
     for key in sorted(months):
-        month_items = months[key]
-        summary = summarize_export_items(month_items)
+        summary = _merge_summary_parts(months[key]["parts"])
+        total_parts.extend(months[key]["parts"])
         rows.append({
-            "label": month_items[0].period_label,
+            "label": months[key]["label"],
             **summary,
         })
-    rows.append({"label": "ИТОГО", **summarize_export_items(items)})
+    rows.append({"label": "ИТОГО", **_merge_summary_parts(total_parts)})
     return rows
 
 
-def _breakdown_rows(items: list[StatsExportItem], *, kind: str) -> list[dict[str, Any]]:
+def _historical_breakdown_source(
+    historical: Optional[HistoricalStatsSnapshot],
+    *,
+    kind: str,
+) -> list[dict[str, Any]]:
+    if not historical:
+        return []
+    return historical.bookmaker_breakdowns if kind == "bookmaker" else historical.sport_breakdowns
+
+
+def _breakdown_rows(
+    items: list[StatsExportItem],
+    *,
+    kind: str,
+    historical: Optional[HistoricalStatsSnapshot] = None,
+) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
+    for row in _historical_breakdown_source(historical, kind=kind):
+        key = str(row.get("normalized_key") or row.get("label") or "").lower()
+        if not key:
+            continue
+        label = str(row.get("label") or "")
+        groups[key] = {
+            "label": label,
+            "icon": row.get("icon") or (BOOKMAKER_CODES.get(label, "") if kind == "bookmaker" else ""),
+            "logo_codes": [row.get("bookmaker_code")] if kind == "bookmaker" and row.get("bookmaker_code") not in {"", "other", None} else [],
+            "parts": [_historical_summary_part(row)],
+        }
+
     for item in items:
         labels = item.bookmaker_names if kind == "bookmaker" else [item.sport_type]
         for label in labels:
@@ -548,16 +675,16 @@ def _breakdown_rows(items: list[StatsExportItem], *, kind: str) -> list[dict[str
                     "label": label,
                     "icon": BOOKMAKER_CODES.get(label, "") if kind == "bookmaker" else item.sport_icon,
                     "logo_codes": _bookmaker_logo_codes_for_names([label]) if kind == "bookmaker" else [],
-                    "items": [],
+                    "parts": [],
                 }
-            groups[key]["items"].append(item)
+            groups[key]["parts"].append(_parts_from_items([item]))
 
     rows = [
         {
             "icon": group["icon"],
             "label": group["label"],
             "logo_codes": group["logo_codes"],
-            **summarize_export_items(group["items"]),
+            **_merge_summary_parts(group["parts"]),
         }
         for group in groups.values()
     ]
@@ -897,6 +1024,7 @@ def _write_monthly_table(
     *,
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> int:
     _write_section_title(ws, start_row, 1, 11, "Помесячная сводка", fill=COLOR_INFO_FILL)
     header_row = start_row + 1
@@ -917,7 +1045,7 @@ def _write_monthly_table(
         ws.cell(row=header_row, column=col, value=header)
     _style_range_header(ws, header_row, 1, len(headers), COLOR_HEADER_SAGE)
 
-    monthly_rows = _monthly_rows(items)
+    monthly_rows = _monthly_rows(items, historical=historical)
     for offset, row_data in enumerate(monthly_rows, 1):
         row = header_row + offset
         values = [
@@ -958,9 +1086,10 @@ def _write_compact_breakdowns(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
     logo_context: Optional[_LogoRenderContext] = None,
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> None:
-    bookmaker_rows = _breakdown_rows(items, kind="bookmaker")
-    sport_rows = _breakdown_rows(items, kind="sport")
+    bookmaker_rows = _breakdown_rows(items, kind="bookmaker", historical=historical)
+    sport_rows = _breakdown_rows(items, kind="sport", historical=historical)
 
     _write_section_title(ws, start_row, 1, 6, "Букмекеры", fill=COLOR_SAGE_FILL)
     _write_section_title(ws, start_row, 8, 13, "Виды спорта", fill=COLOR_INFO_FILL)
@@ -1017,6 +1146,7 @@ def _setup_statistics_sheet(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
     logo_context: Optional[_LogoRenderContext] = None,
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> None:
     ws = wb.active
     ws.title = "Статистика"
@@ -1026,7 +1156,7 @@ def _setup_statistics_sheet(
     _style_title(ws, 13)
     _write_metadata_row(ws, 2, period_label, value_label=value_label)
 
-    summary = summarize_export_items(items)
+    summary = summarize_export_items(items, historical=historical)
     _write_kpi(ws, 4, 1, "Всего ставок", summary["bets"], "bets", value_format=value_format)
     _write_kpi(ws, 4, 4, "Проходимость", summary["winrate"], "winrate", value_format=value_format)
     _write_kpi(ws, 4, 7, f"Прибыль, {value_label}", summary["profit"], "profit", value_format=value_format)
@@ -1036,7 +1166,7 @@ def _setup_statistics_sheet(
     _write_kpi(ws, 7, 7, "Побед", summary["wins"], "wins", value_format=value_format)
     _write_kpi(ws, 7, 10, "Поражений", summary["losses"], "losses", value_format=value_format)
 
-    next_row = _write_monthly_table(ws, 11, items, value_format=value_format, value_label=value_label)
+    next_row = _write_monthly_table(ws, 11, items, value_format=value_format, value_label=value_label, historical=historical)
     _write_compact_breakdowns(
         ws,
         next_row,
@@ -1044,6 +1174,7 @@ def _setup_statistics_sheet(
         value_format=value_format,
         value_label=value_label,
         logo_context=logo_context,
+        historical=historical,
     )
     _autosize(ws)
     _set_column_widths(ws, {
@@ -1071,6 +1202,7 @@ def _write_breakdown_sheet(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
     logo_context: Optional[_LogoRenderContext] = None,
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> None:
     ws = wb.create_sheet("Свод по БК и спорту")
     ws.sheet_view.showGridLines = False
@@ -1087,7 +1219,9 @@ def _write_breakdown_sheet(
     _style_range_header(ws, 2, 1, 11, COLOR_HEADER_SAGE)
     _style_range_header(ws, 2, 13, 23, COLOR_HEADER_STEEL)
 
-    for offset, row_data in enumerate(_breakdown_rows(items, kind="bookmaker"), 3):
+    bookmaker_rows = _breakdown_rows(items, kind="bookmaker", historical=historical)
+    sport_rows = _breakdown_rows(items, kind="sport", historical=historical)
+    for offset, row_data in enumerate(bookmaker_rows, 3):
         _write_breakdown_detail_row(
             ws,
             offset,
@@ -1097,10 +1231,10 @@ def _write_breakdown_sheet(
             add_bookmaker_logo=True,
             logo_context=logo_context,
         )
-    for offset, row_data in enumerate(_breakdown_rows(items, kind="sport"), 3):
+    for offset, row_data in enumerate(sport_rows, 3):
         _write_breakdown_detail_row(ws, offset, 13, row_data, value_format=value_format)
 
-    max_row = max(len(_breakdown_rows(items, kind="bookmaker")), len(_breakdown_rows(items, kind="sport"))) + 2
+    max_row = max(len(bookmaker_rows), len(sport_rows)) + 2
     _set_border(ws, 2, max_row, 1, 11)
     _set_border(ws, 2, max_row, 13, 23)
     _set_auto_filter(ws, 2, max_row, 1, 23)
@@ -1330,6 +1464,127 @@ def _write_detail_sheet(
         "S": 36,
     })
     ws.freeze_panes = "A2"
+
+
+def _write_historical_sheet(
+    wb: Workbook,
+    historical: Optional[HistoricalStatsSnapshot],
+    *,
+    value_format: str = MONEY_FORMAT,
+    value_label: str = "₽",
+) -> None:
+    if not historical:
+        return
+
+    ws = wb.create_sheet("История")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = COLOR_HEADER_AMBER
+    _write_section_title(ws, 1, 1, 11, "Исторический baseline до 01.07.2026", fill=COLOR_INFO_FILL)
+
+    monthly_headers = [
+        "Месяц",
+        "Ставки",
+        "Побед",
+        "Пораж.",
+        "Возврат",
+        "Проход",
+        "Ср. коэфф.",
+        f"Оборот, {value_label}",
+        f"Прибыль, {value_label}",
+        "ROI",
+        "Топ БК",
+    ]
+    for col, header in enumerate(monthly_headers, 1):
+        ws.cell(row=3, column=col, value=header)
+    _style_range_header(ws, 3, 1, len(monthly_headers), COLOR_HEADER_SAGE)
+
+    for offset, row_data in enumerate(_monthly_rows([], historical=historical), 4):
+        values = [
+            row_data["label"],
+            row_data["bets"],
+            row_data["wins"],
+            row_data["losses"],
+            row_data["refunds"],
+            row_data["winrate"],
+            row_data["average_coefficient"],
+            row_data["turnover"],
+            row_data["profit"],
+            row_data["roi"],
+            next((row.get("top_bookmaker", "") for row in historical.monthly if row.get("period_label") == row_data["label"]), ""),
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=offset, column=col, value=value)
+        for col, key in [(6, "winrate"), (7, "average_coefficient"), (8, "turnover"), (9, "profit"), (10, "roi")]:
+            _format_summary_value(ws.cell(row=offset, column=col), key, value_format)
+        if row_data["label"] == "ИТОГО":
+            for col in range(1, len(monthly_headers) + 1):
+                ws.cell(row=offset, column=col).font = Font(bold=True)
+                ws.cell(row=offset, column=col).fill = _solid_fill(COLOR_TOTAL_FILL)
+
+    details_start = 6 + len(historical.monthly)
+    _write_section_title(ws, details_start, 1, 12, "Июньские исходные строки из Excel", fill=COLOR_AMBER_FILL)
+    detail_headers = [
+        "Месяц",
+        "№",
+        "Вид",
+        "Вид спорта",
+        "Матч",
+        "БК",
+        "Коэфф.",
+        "Ставка",
+        "Результат",
+        f"Оборот, {value_label}",
+        f"Прибыль, {value_label}",
+        "Источник",
+    ]
+    header_row = details_start + 1
+    for col, header in enumerate(detail_headers, 1):
+        ws.cell(row=header_row, column=col, value=header)
+    _style_range_header(ws, header_row, 1, len(detail_headers), COLOR_HEADER_AMBER)
+
+    for offset, detail in enumerate(historical.details, header_row + 1):
+        values = [
+            detail.get("period_label", ""),
+            detail.get("source_row_number", ""),
+            detail.get("sport_icon", ""),
+            detail.get("sport_type", ""),
+            detail.get("event_name", ""),
+            detail.get("bookmaker_name", ""),
+            detail.get("coefficient", ""),
+            detail.get("outcome", ""),
+            _status_label(str(detail.get("status", ""))),
+            detail.get("turnover", Decimal("0")),
+            detail.get("profit", Decimal("0")),
+            detail.get("source_file", ""),
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=offset, column=col, value=value)
+        ws.cell(row=offset, column=7).number_format = COEF_FORMAT
+        ws.cell(row=offset, column=10).number_format = value_format
+        ws.cell(row=offset, column=11).number_format = value_format
+        fill = _status_fill(str(detail.get("status", "")))
+        for col in range(1, len(detail_headers) + 1):
+            ws.cell(row=offset, column=col).fill = fill
+
+    max_row = max(header_row + len(historical.details), 3 + len(historical.monthly) + 1)
+    _set_border(ws, 3, 3 + len(historical.monthly) + 1, 1, len(monthly_headers))
+    _set_border(ws, header_row, max_row, 1, len(detail_headers))
+    _autosize(ws)
+    _set_column_widths(ws, {
+        "A": 16,
+        "B": 10,
+        "C": 10,
+        "D": 16,
+        "E": 42,
+        "F": 20,
+        "G": 12,
+        "H": 28,
+        "I": 14,
+        "J": 15,
+        "K": 15,
+        "L": 24,
+    })
+    ws.freeze_panes = "A4"
 
 
 def _autosize(ws) -> None:
@@ -2391,6 +2646,7 @@ def build_stats_export_workbook_artifact(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
     logo_mode: LogoRenderMode = "floating",
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> StatsWorkbookArtifact:
     item_list = _sorted_items(items)
     logo_context = _LogoRenderContext(mode=logo_mode)
@@ -2403,6 +2659,7 @@ def build_stats_export_workbook_artifact(
         value_format=value_format,
         value_label=value_label,
         logo_context=logo_context,
+        historical=historical,
     )
     _write_breakdown_sheet(
         wb,
@@ -2410,6 +2667,7 @@ def build_stats_export_workbook_artifact(
         value_format=value_format,
         value_label=value_label,
         logo_context=logo_context,
+        historical=historical,
     )
     _write_detail_sheet(
         wb,
@@ -2418,6 +2676,12 @@ def build_stats_export_workbook_artifact(
         value_format=value_format,
         value_label=value_label,
         logo_context=logo_context,
+    )
+    _write_historical_sheet(
+        wb,
+        historical,
+        value_format=value_format,
+        value_label=value_label,
     )
     buffer = BytesIO()
     wb.save(buffer)
@@ -2433,6 +2697,7 @@ def build_stats_export_workbook(
     value_format: str = MONEY_FORMAT,
     value_label: str = "₽",
     logo_mode: LogoRenderMode = "floating",
+    historical: Optional[HistoricalStatsSnapshot] = None,
 ) -> bytes:
     return build_stats_export_workbook_artifact(
         items,
@@ -2442,6 +2707,7 @@ def build_stats_export_workbook(
         value_format=value_format,
         value_label=value_label,
         logo_mode=logo_mode,
+        historical=historical,
     ).xlsx
 
 
@@ -2456,6 +2722,7 @@ def stats_export_period_label(period: str) -> str:
 
 
 async def load_shamrai_export_items(db: AsyncSession, period: str) -> list[StatsExportItem]:
+    historical = await load_active_historical_stats_snapshot(db, period)
     query = (
         select(Bet)
         .filter(Bet.publication_type == "forecast", Bet.status.in_(list(EXPORT_STATUSES)), Bet.resolved_at.isnot(None))
@@ -2465,6 +2732,8 @@ async def load_shamrai_export_items(db: AsyncSession, period: str) -> list[Stats
     start = period_start(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    elif historical:
+        query = query.filter(Bet.resolved_at >= historical.cutoff_at)
     result = await db.execute(query)
     return [
         item

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.models.database import AsyncSessionLocal
+from src.services.historical_stats import load_active_historical_stats_snapshot
 from src.services.statistics import MONTH_LABELS
 from src.services.stats_export import (
     FLAT_FORMAT,
@@ -276,6 +277,7 @@ async def _build_artifacts(
 
     if scope in {"shamrai", "all"}:
         shamrai_items = await load_shamrai_export_items(db, period)
+        shamrai_historical = await load_active_historical_stats_snapshot(db, period)
         artifacts.append(_artifact_with_google_sheet_variant(
             folder="Шамрай",
             title=f"Шамрай - статистика - {period_label}",
@@ -286,6 +288,7 @@ async def _build_artifacts(
                 period_label=period_label,
                 include_client=False,
                 logo_mode=logo_mode,
+                historical=shamrai_historical,
             ),
         ))
 

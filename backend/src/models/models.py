@@ -422,6 +422,100 @@ class SystemSetting(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
 
 
+class HistoricalStatsImportBatch(Base):
+    __tablename__ = "historical_stats_import_batches"
+    __table_args__ = (
+        UniqueConstraint("source_sha256", name="uq_historical_stats_import_batches_sha256"),
+        Index("ix_historical_stats_batches_active_cutoff", "is_active", "cutoff_at"),
+    )
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_filename = Column(String, nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    cutoff_at = Column(DateTime(timezone=True), nullable=False)
+    imported_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    unit_stake_rub = Column(Numeric(12, 2), nullable=False, default=10000)
+    is_active = Column(Boolean, default=True, nullable=False)
+    total_bets = Column(Integer, default=0, nullable=False)
+    total_wins = Column(Integer, default=0, nullable=False)
+    total_losses = Column(Integer, default=0, nullable=False)
+    total_refunds = Column(Integer, default=0, nullable=False)
+    total_turnover_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    total_profit_rub = Column(Numeric(14, 2), default=0, nullable=False)
+
+
+class HistoricalStatsMonthly(Base):
+    __tablename__ = "historical_stats_monthly"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "period_key", name="uq_historical_stats_monthly_batch_period"),
+        Index("ix_historical_stats_monthly_batch_period", "batch_id", "period_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
+    period_key = Column(String(7), nullable=False)
+    period_label = Column(String, nullable=False)
+    period_start = Column(DateTime(timezone=True), nullable=False)
+    bets = Column(Integer, default=0, nullable=False)
+    wins = Column(Integer, default=0, nullable=False)
+    losses = Column(Integer, default=0, nullable=False)
+    refunds = Column(Integer, default=0, nullable=False)
+    turnover_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    profit_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    average_coefficient = Column(Numeric(8, 3), default=0, nullable=False)
+    top_sport = Column(String, nullable=True)
+    top_bookmaker = Column(String, nullable=True)
+
+
+class HistoricalStatsBreakdown(Base):
+    __tablename__ = "historical_stats_breakdowns"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "dimension", "label", name="uq_historical_stats_breakdowns_batch_dimension_label"),
+        Index("ix_historical_stats_breakdowns_batch_dimension", "batch_id", "dimension"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
+    dimension = Column(String(32), nullable=False)  # "bookmaker" | "sport"
+    icon = Column(String, nullable=True)
+    label = Column(String, nullable=False)
+    normalized_key = Column(String, nullable=False)
+    bookmaker_code = Column(String, nullable=True)
+    bets = Column(Integer, default=0, nullable=False)
+    wins = Column(Integer, default=0, nullable=False)
+    losses = Column(Integer, default=0, nullable=False)
+    refunds = Column(Integer, default=0, nullable=False)
+    turnover_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    profit_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    average_coefficient = Column(Numeric(8, 3), default=0, nullable=False)
+
+
+class HistoricalStatsDetail(Base):
+    __tablename__ = "historical_stats_details"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "period_key", "source_row_number", name="uq_historical_stats_details_batch_period_row"),
+        Index("ix_historical_stats_details_batch_period", "batch_id", "period_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
+    period_key = Column(String(7), nullable=False)
+    period_label = Column(String, nullable=False)
+    source_row_number = Column(Integer, nullable=False)
+    sport_icon = Column(String, nullable=True)
+    sport_type = Column(String, nullable=True)
+    event_name = Column(String, nullable=False)
+    bookmaker_icon = Column(String, nullable=True)
+    bookmaker_name = Column(String, nullable=True)
+    bookmaker_code = Column(String, nullable=True)
+    coefficient = Column(Numeric(8, 3), nullable=False)
+    outcome = Column(Text, nullable=True)
+    status = Column(String, nullable=False)
+    turnover_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    profit_rub = Column(Numeric(14, 2), default=0, nullable=False)
+    source_file = Column(String, nullable=True)
+
+
 class Bet(Base):
     __tablename__ = "bets"
     __table_args__ = (
