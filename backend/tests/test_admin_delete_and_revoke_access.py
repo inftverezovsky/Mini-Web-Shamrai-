@@ -43,12 +43,13 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             matches_remaining=balance,
         )
 
-    def _bet(self, *, status: str = "pending") -> Bet:
+    def _bet(self, *, status: str = "pending", publication_type: str = "forecast") -> Bet:
         return Bet(
             id=uuid.uuid4(),
             event_name="Team A - Team B",
             coefficient=Decimal("1.90"),
             status=status,
+            publication_type=publication_type,
             sport_type="Football",
             outcome="Team A win",
         )
@@ -119,6 +120,20 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.delta_matches, 0)
             self.assertEqual(user.purchased_bets_balance, 7)
             self.assertEqual(user.matches_remaining, 7)
+
+    async def test_pending_bets_excludes_text_publications(self):
+        async with self.Session() as session:
+            forecast = self._bet(status="pending")
+            text_post = self._bet(status="pending", publication_type="text")
+            text_post.event_name = "Лента: новость"
+            text_post.sport_type = "Текст"
+            text_post.outcome = None
+            session.add_all([forecast, text_post])
+            await session.commit()
+
+            pending = await get_pending_bets(admin=self._user(900, 0, role="owner"), db=session)
+
+        self.assertEqual([bet.id for bet in pending], [forecast.id])
 
     async def test_revoking_after_loss_supercompensation_reverses_net_ledger(self):
         async with self.Session() as session:

@@ -429,6 +429,8 @@ def export_item_from_bet(
     client_name: str = "",
     access_type: str = "",
 ) -> Optional[StatsExportItem]:
+    if str(getattr(bet, "publication_type", "forecast") or "forecast") != "forecast":
+        return None
     if bet.status not in EXPORT_STATUSES or not bet.resolved_at:
         return None
 
@@ -2456,7 +2458,7 @@ def stats_export_period_label(period: str) -> str:
 async def load_shamrai_export_items(db: AsyncSession, period: str) -> list[StatsExportItem]:
     query = (
         select(Bet)
-        .filter(Bet.status.in_(list(EXPORT_STATUSES)), Bet.resolved_at.isnot(None))
+        .filter(Bet.publication_type == "forecast", Bet.status.in_(list(EXPORT_STATUSES)), Bet.resolved_at.isnot(None))
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
         .order_by(Bet.resolved_at.asc())
     )
@@ -2480,7 +2482,12 @@ async def load_author_export_items(
 ) -> list[StatsExportItem]:
     query = (
         select(Bet)
-        .filter(Bet.author_id == author_id, Bet.status.in_(list(EXPORT_STATUSES)), Bet.resolved_at.isnot(None))
+        .filter(
+            Bet.author_id == author_id,
+            Bet.publication_type == "forecast",
+            Bet.status.in_(list(EXPORT_STATUSES)),
+            Bet.resolved_at.isnot(None),
+        )
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
         .order_by(Bet.resolved_at.asc())
     )
@@ -2505,6 +2512,7 @@ async def load_client_export_groups(db: AsyncSession, period: str) -> list[Clien
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
             User.role.notin_(list(STAFF_ROLES)),
+            Bet.publication_type == "forecast",
             Bet.status.in_(list(EXPORT_STATUSES)),
             Bet.resolved_at.isnot(None),
         )
@@ -2567,7 +2575,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         select(User.telegram_id, Bet.status, user_bets.c.access_type, user_bets.c.match_charged)
         .join(user_bets, user_bets.c.user_id == User.telegram_id)
         .join(Bet, Bet.id == user_bets.c.bet_id)
-        .filter(User.role.notin_(list(STAFF_ROLES)))
+        .filter(User.role.notin_(list(STAFF_ROLES)), Bet.publication_type == "forecast")
     )
     for user_id, bet_status, access_type, match_charged in (await db.execute(counts_query)).all():
         counts = taken_counts.setdefault(user_id, {"total": 0, "settled": 0, "pending": 0, "refund": 0})
@@ -2585,6 +2593,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
             User.role.notin_(list(STAFF_ROLES)),
+            Bet.publication_type == "forecast",
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -2671,6 +2680,7 @@ async def load_client_recent_bet_export_rows(
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
             User.role.notin_(list(STAFF_ROLES)),
+            Bet.publication_type == "forecast",
             Bet.status.in_(["pending", "win", "loss", "refund"]),
         )
         .options(selectinload(User.bookmakers), selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))

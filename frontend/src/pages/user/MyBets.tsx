@@ -23,7 +23,7 @@ import {
   StatTile,
   TimelineSectionBlock,
   recentResultCodes,
-} from '../../features/performance/performanceUi';
+} from '../../features/performance/performanceStatsUi';
 import { PerformanceSummary, PerformanceTimelineResponse, PeriodFilter } from '../../schemas/schemas';
 import { downloadApiFile } from '../../utils/api';
 import {

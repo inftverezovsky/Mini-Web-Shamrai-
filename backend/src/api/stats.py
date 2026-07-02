@@ -52,7 +52,7 @@ async def get_global_stats(
     refund_expr = case((Bet.status == "refund", 1), else_=0)
     resolved_coefficient_expr = case((Bet.status.in_(["win", "loss"]), Bet.coefficient), else_=None)
     date_ref = func.coalesce(Bet.resolved_at, Bet.created_at)
-    filters = [Bet.status.in_(resolved_statuses)]
+    filters = [Bet.publication_type == "forecast", Bet.status.in_(resolved_statuses)]
     start = period_start(normalized_period)
     if start:
         filters.append(date_ref >= start)

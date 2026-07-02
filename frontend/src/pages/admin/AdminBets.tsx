@@ -14,18 +14,25 @@ interface AdminBetsProps {
 }
 
 const COUPON_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const TEXT_PUBLICATION_SPORT_TYPE = 'Текст';
+const TEXT_PUBLICATION_FALLBACK_TITLE = 'Публикация Shamrai';
+
+type FeedPublicationMode = 'forecast' | 'text';
 
 export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Form states
+  const [publicationMode, setPublicationMode] = useState<FeedPublicationMode>('forecast');
   const [eventName, setEventName] = useState('');
   const [coefficient, setCoefficient] = useState('');
   const [selectedBkIds, setSelectedBkIds] = useState<number[]>([]);
   const [sportType, setSportType] = useState('');
   const [outcome, setOutcome] = useState('');
   const [description, setDescription] = useState('');
+  const [textTitle, setTextTitle] = useState('');
+  const [textBody, setTextBody] = useState('');
   const [category, setCategory] = useState<'prematch' | 'live'>('prematch');
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
@@ -111,51 +118,72 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
 
   const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!coefficient) {
+    const isTextPublication = publicationMode === 'text';
+
+    if (isTextPublication && !textBody.trim()) {
+      notifyError('Введите текст публикации');
+      return;
+    }
+
+    if (!isTextPublication && !coefficient) {
       notifyError('Укажите коэффициент');
       return;
     }
+
     try {
       setSubmitting(true);
       setSuccessMsg('');
 
       const formData = new FormData();
-      formData.append('event_name', eventName.trim());
-      formData.append('coefficient', coefficient);
-      if (selectedBkIds[0]) {
-        formData.append('bookmaker_id', selectedBkIds[0].toString());
-      }
-      selectedBkIds.forEach(id => {
-        formData.append('bookmaker_ids', id.toString());
-      });
-      if (sportType) {
-        formData.append('sport_type', sportType);
-      }
-      if (outcome) {
-        formData.append('outcome', outcome.trim());
-      }
-      if (description) {
-        formData.append('description', description.trim());
-      }
-      formData.append('category', category);
-      if (category === 'live') {
-        formData.append('live_ends_at', new Date(Date.now() + 15 * 60000).toISOString());
-      }
-      if (priceStars) {
-        formData.append('price_stars', priceStars);
-      }
-      if (selectedBookmakers.length > 0) {
-        const bookmakerLinksPayload = selectedBookmakers
-          .map((bookmaker) => ({
-            bookmaker_id: bookmaker.id,
-            url: (bookmakerLinks[bookmaker.id] || '').trim(),
-          }))
-          .filter((link) => link.url.length > 0);
-        if (bookmakerLinksPayload.length > 0) {
-          formData.append('bookmaker_links', JSON.stringify(bookmakerLinksPayload));
+
+      if (isTextPublication) {
+        formData.append('event_name', textTitle.trim() || TEXT_PUBLICATION_FALLBACK_TITLE);
+        formData.append('coefficient', '1.00');
+        formData.append('publication_type', 'text');
+        formData.append('sport_type', TEXT_PUBLICATION_SPORT_TYPE);
+        formData.append('description', textBody.trim());
+        formData.append('category', 'prematch');
+        formData.append('brain_score', '0');
+      } else {
+        formData.append('event_name', eventName.trim());
+        formData.append('coefficient', coefficient);
+        formData.append('publication_type', 'forecast');
+        if (selectedBkIds[0]) {
+          formData.append('bookmaker_id', selectedBkIds[0].toString());
         }
+        selectedBkIds.forEach(id => {
+          formData.append('bookmaker_ids', id.toString());
+        });
+        if (sportType) {
+          formData.append('sport_type', sportType);
+        }
+        if (outcome) {
+          formData.append('outcome', outcome.trim());
+        }
+        if (description) {
+          formData.append('description', description.trim());
+        }
+        formData.append('category', category);
+        if (category === 'live') {
+          formData.append('live_ends_at', new Date(Date.now() + 15 * 60000).toISOString());
+        }
+        if (priceStars) {
+          formData.append('price_stars', priceStars);
+        }
+        if (selectedBookmakers.length > 0) {
+          const bookmakerLinksPayload = selectedBookmakers
+            .map((bookmaker) => ({
+              bookmaker_id: bookmaker.id,
+              url: (bookmakerLinks[bookmaker.id] || '').trim(),
+            }))
+            .filter((link) => link.url.length > 0);
+          if (bookmakerLinksPayload.length > 0) {
+            formData.append('bookmaker_links', JSON.stringify(bookmakerLinksPayload));
+          }
+        }
+        formData.append('brain_score', '5');
       }
-      formData.append('brain_score', '5');
+
       if (couponImage) {
         formData.append('coupon_image', couponImage);
       }
@@ -165,15 +193,24 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
         body: formData,
       });
 
-      setSuccessMsg('Прогноз опубликован успешно!');
-      setEventName('');
-      setCoefficient('');
-      setSelectedBkIds([]);
-      setSportType('');
-      setOutcome('');
-      setDescription('');
-      setPriceStars('');
-      setBookmakerLinks({});
+      const nextSuccessMsg = isTextPublication
+        ? 'Текстовая публикация добавлена в Ленту!'
+        : 'Прогноз опубликован успешно!';
+      setSuccessMsg(nextSuccessMsg);
+
+      if (isTextPublication) {
+        setTextTitle('');
+        setTextBody('');
+      } else {
+        setEventName('');
+        setCoefficient('');
+        setSelectedBkIds([]);
+        setSportType('');
+        setOutcome('');
+        setDescription('');
+        setPriceStars('');
+        setBookmakerLinks({});
+      }
       if (couponPreview) URL.revokeObjectURL(couponPreview);
       setCouponImage(null);
       setCouponPreview(null);
@@ -181,9 +218,9 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       if (onBetsUpdated) onBetsUpdated();
 
       setTimeout(() => setSuccessMsg(''), 3000);
-      notifySuccess('Прогноз опубликован успешно');
+      notifySuccess(nextSuccessMsg);
     } catch (err: any) {
-      notifyError(err.message || 'Ошибка создания прогноза');
+      notifyError(err.message || 'Ошибка создания публикации');
     } finally {
       setSubmitting(false);
     }
@@ -206,7 +243,34 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           Новая публикация
         </h3>
 
+        <div className="grid grid-cols-2 rounded-xl border border-slate-700/60 bg-slate-900/50 p-0.5 text-[9px] font-black uppercase tracking-wider">
+          <button
+            type="button"
+            onClick={() => setPublicationMode('forecast')}
+            className={`rounded-lg py-1.5 transition-all ${
+              publicationMode === 'forecast'
+                ? 'bg-indigo-500 text-white shadow-neon-indigo'
+                : 'text-slate-500 hover:text-slate-200'
+            }`}
+          >
+            Прогноз
+          </button>
+          <button
+            type="button"
+            onClick={() => setPublicationMode('text')}
+            className={`rounded-lg py-1.5 transition-all ${
+              publicationMode === 'text'
+                ? 'bg-emerald-500 text-slate-950 shadow-neon-green'
+                : 'text-slate-500 hover:text-slate-200'
+            }`}
+          >
+            Текстовый
+          </button>
+        </div>
+
         <form onSubmit={handlePublish} onPaste={handleCouponPaste} className="space-y-2.5 text-[11px] text-slate-300">
+          {publicationMode === 'forecast' ? (
+            <>
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
               Событие <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
@@ -357,10 +421,41 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
               className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-indigo-500/50 transition-all"
             />
           </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
+                  Заголовок <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
+                </label>
+                <EmojiTextField
+                  type="text"
+                  value={textTitle}
+                  onValueChange={setTextTitle}
+                  placeholder="Обновление Shamrai"
+                  className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-emerald-500/50 transition-all font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
+                  Текст публикации
+                </label>
+                <EmojiTextField
+                  multiline
+                  value={textBody}
+                  onValueChange={setTextBody}
+                  placeholder="Напишите текст для Ленты"
+                  rows={5}
+                  className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-emerald-500/50 transition-all"
+                />
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
-              Скриншот купона <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
+              {publicationMode === 'forecast' ? 'Скриншот купона' : 'Изображение'} <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
             </label>
             {!couponPreview ? (
               <label
@@ -386,7 +481,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                   <div className="w-8 h-8 rounded-lg overflow-hidden border border-white/5 bg-slate-950 shrink-0">
                     <img
                       src={couponPreview}
-                      alt="Купон"
+                      alt={publicationMode === 'forecast' ? 'Купон' : 'Изображение публикации'}
                       className="w-full h-full object-cover"
                     />
                   </div>
@@ -410,7 +505,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             )}
           </div>
 
-          {selectedBkIds.length > 0 && (
+          {publicationMode === 'forecast' && selectedBkIds.length > 0 && (
             <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 p-2.5 rounded-xl text-[9px] leading-normal flex items-center space-x-1.5 select-none">
               <ListFilter className="w-3.5 h-3.5 shrink-0" />
               <span>
@@ -427,7 +522,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             {submitting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
-              <span>Опубликовать в Ленту</span>
+              <span>{publicationMode === 'forecast' ? 'Опубликовать прогноз в Ленту' : 'Опубликовать текст в Ленту'}</span>
             )}
           </button>
 

@@ -78,6 +78,10 @@ STATIC_COUPONS_DIR = os.path.join(
     "coupons",
 )
 
+PUBLICATION_TYPE_FORECAST = "forecast"
+PUBLICATION_TYPE_TEXT = "text"
+PUBLICATION_TYPES = {PUBLICATION_TYPE_FORECAST, PUBLICATION_TYPE_TEXT}
+
 ODDS_DROP_DELIVERED_FORECAST_STATUSES = {"sent", "manual_sent"}
 BET_HINT_PRICE_XTR = 20
 
@@ -140,6 +144,20 @@ def _format_decimal(value: Optional[Decimal]) -> str:
         return f"{Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):.2f}"
     except Exception:
         return str(value or "").strip()
+
+
+def _normalize_publication_type(value: Optional[str]) -> str:
+    normalized = (value or PUBLICATION_TYPE_FORECAST).strip().lower()
+    if normalized not in PUBLICATION_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="publication_type must be forecast or text",
+        )
+    return normalized
+
+
+def _is_forecast_publication(bet: Bet) -> bool:
+    return str(getattr(bet, "publication_type", PUBLICATION_TYPE_FORECAST) or PUBLICATION_TYPE_FORECAST) == PUBLICATION_TYPE_FORECAST
 
 
 def _validate_odds_dropped_to(value: Optional[Decimal]) -> Optional[Decimal]:
@@ -501,7 +519,9 @@ async def _build_bet_response(
     match_link: Optional[str],
     bookmaker_links: Optional[object] = None,
     delivery_mode: str = "feed",
+    publication_type: str = PUBLICATION_TYPE_FORECAST,
 ) -> BetResponse:
+    normalized_publication_type = _normalize_publication_type(publication_type)
     normalized_match_link = normalize_match_url(match_link)
     if match_link and not normalized_match_link:
         raise HTTPException(
@@ -542,6 +562,7 @@ async def _build_bet_response(
             allowed_bookmaker_ids=selected_bookmaker_ids,
         ),
         delivery_mode=delivery_mode,
+        publication_type=normalized_publication_type,
         status="pending",
         author_id=admin.telegram_id
     )
@@ -734,6 +755,11 @@ async def take_bet(
             status_code=status.HTTP_409_CONFLICT,
             detail=FORECAST_INACTIVE_MESSAGE,
         )
+    if not _is_forecast_publication(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Текстовую публикацию нельзя взять как ставку",
+        )
 
     has_sub = await has_active_subscription(current_user, db)
     is_bet_free = (bet.price_stars is None or bet.price_stars == 0)
@@ -780,6 +806,11 @@ async def unlock_free_bet(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Bet not found"
+        )
+    if not _is_forecast_publication(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Текстовую публикацию нельзя открыть как прогноз",
         )
 
     # Check if already unlocked (present in user_bets)
@@ -831,6 +862,11 @@ async def buy_bet_hint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Прогноз не найден"
+        )
+    if not _is_forecast_publication(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Для текстовой публикации подсказка недоступна",
         )
 
     attempt = await _create_payment_attempt(
@@ -893,6 +929,11 @@ async def get_paid_bet_hint(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Платеж не относится к подсказке",
         )
+    if not _is_forecast_publication(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Для текстовой публикации подсказка недоступна",
+        )
 
     return BetHintResponse(
         bet_id=bet.id,
@@ -912,6 +953,7 @@ async def get_user_stats(
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
             Bet.status.in_(["win", "loss", "refund"]),
             Bet.resolved_at.isnot(None),
         )
@@ -986,10 +1028,11 @@ async def create_bet(
         coupon_image_url=bet_data.coupon_image_url,
         match_link=bet_data.match_link,
         bookmaker_links=bet_data.bookmaker_links,
+        publication_type=bet_data.publication_type,
     )
 
     # Process Live Alarm
-    if bet_data.live_alarm:
+    if bet_data.live_alarm and _is_forecast_publication(bet):
         res_users = await db.execute(select(User))
         await broadcast_live_signal(
             db,
@@ -1017,6 +1060,7 @@ async def create_bet_with_coupon(
     sport_type: Optional[str] = Form(None, max_length=120),
     outcome: Optional[str] = Form(None, max_length=200),
     match_link: Optional[str] = Form(None, max_length=2048),
+    publication_type: str = Form(PUBLICATION_TYPE_FORECAST, max_length=40),
     live_alarm: Optional[bool] = Form(False),
     coupon_image: Optional[UploadFile] = File(None),
     admin: User = Depends(get_current_admin),
@@ -1050,9 +1094,10 @@ async def create_bet_with_coupon(
         coupon_image_url=coupon_image_url,
         match_link=match_link,
         bookmaker_links=_bookmaker_links_from_form(form),
+        publication_type=publication_type,
     )
 
-    if live_alarm:
+    if live_alarm and _is_forecast_publication(bet):
         res_users = await db.execute(select(User))
         await broadcast_live_signal(
             db,
@@ -1122,6 +1167,9 @@ async def update_bet(
                         detail="Некорректная ссылка на матч",
                     )
             setattr(bet, field_name, clean_value or None)
+
+    if "publication_type" in update_payload:
+        bet.publication_type = _normalize_publication_type(bet_data.publication_type)
 
     selected_bookmaker_ids: Optional[List[int]] = None
     if "bookmaker_id" in update_payload or "bookmaker_ids" in update_payload:
@@ -1260,6 +1308,11 @@ async def resolve_bet(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Bet not found"
         )
+    if not _is_forecast_publication(bet):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Текстовую публикацию нельзя рассчитать как ставку",
+        )
         
     previous_status = bet.status
     previous_resolved_at = bet.resolved_at
@@ -1397,7 +1450,11 @@ async def resolve_bet(
             last_bets_query = (
                 select(Bet.status)
                 .join(user_bets)
-                .filter(user_bets.c.user_id == u_id, Bet.status.in_(["win", "loss", "refund"]))
+                .filter(
+                    user_bets.c.user_id == u_id,
+                    Bet.publication_type == PUBLICATION_TYPE_FORECAST,
+                    Bet.status.in_(["win", "loss", "refund"]),
+                )
                 .order_by(user_bets.c.taken_at.desc())
                 .limit(5)
             )
@@ -1448,7 +1505,7 @@ async def get_admin_analytics(
     )
     active_subs = sub_count_res.scalar() or 0
     
-    bets_res = await db.execute(select(Bet))
+    bets_res = await db.execute(select(Bet).filter(Bet.publication_type == PUBLICATION_TYPE_FORECAST))
     bets = bets_res.scalars().all()
     
     total_bets = len(bets)

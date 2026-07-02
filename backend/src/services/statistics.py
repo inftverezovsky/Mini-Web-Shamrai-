@@ -168,6 +168,8 @@ def stat_item_from_bet(
     match_charged: Optional[bool] = None,
     taken_at: Optional[datetime] = None,
 ) -> Optional[dict[str, Any]]:
+    if str(getattr(bet, "publication_type", "forecast") or "forecast") != "forecast":
+        return None
     if bet.status not in RESULT_STATUSES or not bet.resolved_at:
         return None
 

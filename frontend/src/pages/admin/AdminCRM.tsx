@@ -56,7 +56,7 @@ import {
   ExportStatusPanel,
   IconActionButton,
   StatTile,
-} from '../../features/performance/performanceUi';
+} from '../../features/performance/performanceStatsUi';
 import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
 
 type ActivityFilter = 'all' | 'active' | 'empty' | 'guarantee';

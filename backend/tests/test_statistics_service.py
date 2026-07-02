@@ -15,7 +15,15 @@ from src.services.statistics import (
 )
 
 
-def _bet(*, status, coefficient="2.00", created_at=None, resolved_at=None, delivery_mode="feed"):
+def _bet(
+    *,
+    status,
+    coefficient="2.00",
+    created_at=None,
+    resolved_at=None,
+    delivery_mode="feed",
+    publication_type="forecast",
+):
     bookmaker = SimpleNamespace(id=1, name="Фонбет", code="fonbet")
     return SimpleNamespace(
         id=uuid4(),
@@ -25,6 +33,7 @@ def _bet(*, status, coefficient="2.00", created_at=None, resolved_at=None, deliv
         created_at=created_at or datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
         resolved_at=resolved_at,
         delivery_mode=delivery_mode,
+        publication_type=publication_type,
         sport_type="Футбол",
         outcome="П1",
         description="Detailed forecast",
@@ -42,6 +51,7 @@ class StatisticsServiceTests(unittest.TestCase):
 
         self.assertIsNone(stat_item_from_bet(_bet(status="refund", resolved_at=resolved_at)))
         self.assertIsNone(stat_item_from_bet(_bet(status="pending", resolved_at=None)))
+        self.assertIsNone(stat_item_from_bet(_bet(status="win", resolved_at=resolved_at, publication_type="text")))
         self.assertIsNotNone(stat_item_from_bet(_bet(status="win", resolved_at=resolved_at)))
 
     def test_stat_item_includes_admin_edit_fields(self):

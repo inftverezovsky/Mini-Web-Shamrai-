@@ -64,6 +64,13 @@ function formatLiveTimeLeft(endsAt: string, now = Date.now()) {
     : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
+function isTextPublicationBet(bet: BetResponse) {
+  return bet.publication_type === 'text'
+    || (bet.sport_type?.trim().toLowerCase() === 'текст'
+    && Number(bet.coefficient) === 1
+    && !bet.outcome?.trim());
+}
+
 // Countdown text is intentionally mutated outside React. A 1s state update in a
 // blurred feed card makes iOS Safari re-run glass painting; this touches one text node.
 const LiveTimer = memo(function LiveTimer({ endsAt, active = true }: { endsAt: string; active?: boolean }) {
@@ -145,7 +152,8 @@ const BetFeedCard = memo(function BetFeedCard({
   active = true,
 }: BetFeedCardProps) {
   const unlocked = bet.is_unlocked;
-  const isLive = bet.category === 'live';
+  const isTextPublication = isTextPublicationBet(bet);
+  const isLive = !isTextPublication && bet.category === 'live';
   const isFreePublication = bet.price_stars == null || Number(bet.price_stars) <= 0;
   const betBookmakers = bet.bookmakers?.length
     ? bet.bookmakers
@@ -165,13 +173,18 @@ const BetFeedCard = memo(function BetFeedCard({
         </span>
 
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
-          {bet.sport_type && (
+          {bet.sport_type && !isTextPublication && (
             <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/60 py-0.5 pl-1 pr-2.5 text-[8.5px] font-bold uppercase tracking-wider text-slate-200 shadow-sm transition-all duration-300 hover:border-pink-500/30">
               <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full overflow-hidden" />
               <span className="min-w-0 truncate">{bet.sport_type}</span>
             </span>
           )}
-          {isLive && bet.live_ends_at ? (
+          {isTextPublication ? (
+            <span className="flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-emerald-300">
+              <Sparkles className="w-3 h-3" />
+              Текст
+            </span>
+          ) : isLive && bet.live_ends_at ? (
             <LiveTimer endsAt={bet.live_ends_at} active={active} />
           ) : (
             <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-bold">
@@ -190,11 +203,11 @@ const BetFeedCard = memo(function BetFeedCard({
           <div className="mt-2 bg-black/20 border border-white/10 rounded-xl p-1.5">
             <div className="flex items-center space-x-1.5 text-[8px] text-slate-500 font-extrabold uppercase tracking-wider mb-1.5 px-0.5">
               <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Скрин купона</span>
+              <span>{isTextPublication ? 'Изображение' : 'Скрин купона'}</span>
             </div>
             <img
               src={resolveAssetUrl(bet.coupon_image_url) || ''}
-              alt="Скрин купона"
+              alt={isTextPublication ? 'Изображение публикации' : 'Скрин купона'}
               className="w-full max-h-56 object-contain rounded-lg border border-white/5 bg-slate-950/60"
               loading="lazy"
               decoding="async"
@@ -202,7 +215,7 @@ const BetFeedCard = memo(function BetFeedCard({
           </div>
         )}
 
-        {betBookmakers.length > 0 && (
+        {betBookmakers.length > 0 && !isTextPublication && (
           <div className="mt-2 grid grid-cols-1 gap-1.5 min-[360px]:grid-cols-2">
             {betBookmakers.map((bookmaker) => {
               const bookmakerUrl = unlocked ? getBookmakerLinkUrl(bet, bookmaker.id) : null;
@@ -241,7 +254,7 @@ const BetFeedCard = memo(function BetFeedCard({
           </div>
         )}
 
-        {unlocked && bet.outcome && (
+        {unlocked && bet.outcome && !isTextPublication && (
           <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 p-2.5 rounded-xl">
             <span className="text-[8px] text-emerald-300/70 font-extrabold uppercase tracking-wider block">
               Ставка
@@ -256,7 +269,7 @@ const BetFeedCard = memo(function BetFeedCard({
           </p>
         )}
 
-        {unlocked && isLive && bet.api_match_id && (
+        {unlocked && isLive && bet.api_match_id && !isTextPublication && (
           <div className="mt-2">
             <PromoBoundary>
               <LiveTracker apiMatchId={bet.api_match_id} active={active} />
@@ -264,7 +277,7 @@ const BetFeedCard = memo(function BetFeedCard({
           </div>
         )}
 
-        {unlocked && bet.match_link && (
+        {unlocked && bet.match_link && !isTextPublication && (
           <div className="mt-2 space-y-2">
             <a
               href={bet.match_link}
@@ -283,53 +296,60 @@ const BetFeedCard = memo(function BetFeedCard({
         )}
       </div>
 
-      <div className="relative z-10 mt-1 flex flex-wrap items-center justify-between gap-2 border-t border-white/5 pt-2">
-        <div className="min-w-0">
-          <span className="text-[9px] uppercase font-bold text-slate-500 block">Коэффициент</span>
-          <span className="text-base font-black text-emerald-400 text-glow-green">{parseFloat(bet.coefficient as any).toFixed(2)}</span>
+      {isTextPublication ? (
+        <div className="relative z-10 mt-1 flex items-center gap-1.5 border-t border-white/5 pt-2 text-[9px] font-extrabold uppercase tracking-wider text-emerald-300">
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>Публикация в Ленте</span>
         </div>
+      ) : (
+        <div className="relative z-10 mt-1 flex flex-wrap items-center justify-between gap-2 border-t border-white/5 pt-2">
+          <div className="min-w-0">
+            <span className="text-[9px] uppercase font-bold text-slate-500 block">Коэффициент</span>
+            <span className="text-base font-black text-emerald-400 text-glow-green">{parseFloat(bet.coefficient as any).toFixed(2)}</span>
+          </div>
 
-        {unlocked ? (
-          isTaken ? (
-            <div className="flex min-h-[36px] items-center gap-1.5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[9px] font-extrabold text-emerald-400 shadow-neon-green animate-pulse">
-              <Check className="w-3.5 h-3.5" />
-              <span>Принято</span>
-            </div>
-          ) : isFreePublication ? (
-            null
+          {unlocked ? (
+            isTaken ? (
+              <div className="flex min-h-[36px] items-center gap-1.5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[9px] font-extrabold text-emerald-400 shadow-neon-green animate-pulse">
+                <Check className="w-3.5 h-3.5" />
+                <span>Принято</span>
+              </div>
+            ) : isFreePublication ? (
+              null
+            ) : (
+              <button
+                onClick={() => onTakeBet(bet.id)}
+                disabled={isActionLoading}
+                className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-green transition-all duration-300 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50"
+              >
+                {isActionLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <>
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Взять ставку</span>
+                  </>
+                )}
+              </button>
+            )
           ) : (
             <button
-              onClick={() => onTakeBet(bet.id)}
+              onClick={() => onBuyBet(bet.id)}
               disabled={isActionLoading}
-              className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-green transition-all duration-300 hover:bg-emerald-600 active:scale-[0.98] disabled:opacity-50"
+              className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-amber transition-all duration-300 hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50"
             >
               {isActionLoading ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
                 <>
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Взять ставку</span>
+                  <Star className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
+                  <span>Купить за {bet.price_stars ?? 50} Stars</span>
                 </>
               )}
             </button>
-          )
-        ) : (
-          <button
-            onClick={() => onBuyBet(bet.id)}
-            disabled={isActionLoading}
-            className="flex min-h-[36px] min-w-0 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-slate-950 shadow-neon-amber transition-all duration-300 hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50"
-          >
-            {isActionLoading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <>
-                <Star className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
-                <span>Купить за {bet.price_stars ?? 50} Stars</span>
-              </>
-            )}
-          </button>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 });
@@ -732,7 +752,7 @@ export default function BetFeed({
           <h4 className="text-xs font-bold text-white uppercase tracking-wider">Лента пуста</h4>
           <p className="mx-auto mt-1 text-center text-[10px] leading-relaxed text-slate-400">
             {active
-              ? 'Сейчас нет активных прогнозов. Ожидайте уведомлений.'
+              ? 'Сейчас нет активных публикаций. Ожидайте уведомлений.'
               : subscriptionPurchasesEnabled
                 ? 'Премиум-лента откроется после покупки абонемента.'
                 : 'Премиум-лента сейчас закрыта. Дождитесь уведомления от команды Shamrai.'}

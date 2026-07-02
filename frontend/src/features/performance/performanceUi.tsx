@@ -592,7 +592,7 @@ export function StatsHero({
           <div className="min-w-0">{controls}</div>
           <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,0.38fr)] lg:grid-cols-[minmax(0,1fr)_minmax(8rem,0.36fr)]">
             <div className="min-h-[70px] rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
-              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">{showPositiveSeries ? 'Серия' : 'Риск сейчас'}</div>
+              <div className="text-[8px] font-black uppercase tracking-[0.1em] text-slate-500">Серия</div>
               <div className={`mt-0.5 min-w-0 break-words text-xs font-black ${heroSeriesTone}`}>
                 {heroSeriesValue}
               </div>

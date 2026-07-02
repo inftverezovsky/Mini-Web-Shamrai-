@@ -12,7 +12,7 @@ export default function AdminDashboard() {
   const [mountedTabs, setMountedTabs] = useState<AdminDashboardTabId[]>(['bets']);
 
   const adminTabs: Array<{ id: AdminDashboardTabId; label: string }> = [
-    { id: 'bets', label: 'Прогноз' },
+    { id: 'bets', label: 'Лента' },
     { id: 'broadcast', label: 'Рассылки' },
     { id: 'requests', label: 'Заявки' },
     { id: 'results', label: 'Результаты' },

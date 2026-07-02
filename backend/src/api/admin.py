@@ -112,6 +112,7 @@ from src.services.stats_export import (
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
+PUBLICATION_TYPE_FORECAST = "forecast"
 
 
 def _encode_admin_user_cursor(user: User) -> str:
@@ -355,7 +356,7 @@ async def get_admin_dashboard_stats(
     resolved_coefficient_expr = case((Bet.status.in_(["win", "loss"]), Bet.coefficient), else_=None)
 
     async def summarize_bets(author_id: Optional[int] = None) -> Dict[str, float]:
-        filters = []
+        filters = [Bet.publication_type == PUBLICATION_TYPE_FORECAST]
         if author_id is not None:
             filters.append(Bet.author_id == author_id)
         result = await db.execute(
@@ -824,6 +825,7 @@ async def get_admin_author_timeline_stats(
         select(Bet)
         .filter(
             Bet.author_id == admin.telegram_id,
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -860,6 +862,7 @@ async def _load_client_stat_rows(
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
             User.role.notin_(list(STAFF_ROLES)),
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -1170,6 +1173,7 @@ async def _author_export_items(db: AsyncSession, admin: User, period: str, sourc
         select(Bet)
         .filter(
             Bet.author_id == admin.telegram_id,
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -1208,6 +1212,7 @@ async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str,
     query = (
         select(Bet)
         .filter(
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -1347,7 +1352,10 @@ async def get_pending_bets(
     )
     query = (
         select(Bet)
-        .filter(or_(Bet.status == "pending", legacy_stopped_private_filter))
+        .filter(
+            Bet.publication_type == PUBLICATION_TYPE_FORECAST,
+            or_(Bet.status == "pending", legacy_stopped_private_filter),
+        )
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
         .order_by(Bet.created_at.desc())
     )
@@ -1640,7 +1648,11 @@ async def admin_list_users(
                 Bet.status,
             )
             .join(Bet, Bet.id == user_bets.c.bet_id)
-            .filter(user_bets.c.user_id.in_(user_ids), Bet.status.in_(["win", "loss"]))
+            .filter(
+                user_bets.c.user_id.in_(user_ids),
+                Bet.publication_type == PUBLICATION_TYPE_FORECAST,
+                Bet.status.in_(["win", "loss"]),
+            )
             .order_by(user_bets.c.taken_at.desc())
         )
 
@@ -1736,7 +1748,11 @@ async def admin_list_users_page(
                 Bet.status,
             )
             .join(Bet, Bet.id == user_bets.c.bet_id)
-            .filter(user_bets.c.user_id.in_(user_ids), Bet.status.in_(["win", "loss"]))
+            .filter(
+                user_bets.c.user_id.in_(user_ids),
+                Bet.publication_type == PUBLICATION_TYPE_FORECAST,
+                Bet.status.in_(["win", "loss"]),
+            )
             .order_by(user_bets.c.taken_at.desc())
         )
 

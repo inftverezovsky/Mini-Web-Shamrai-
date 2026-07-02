@@ -231,12 +231,21 @@ class BetBase(BaseModel):
     match_link: Optional[str] = Field(default=None, max_length=2048)
     bookmaker_links: List[BookmakerLink] = Field(default_factory=list, max_length=50)
     delivery_mode: str = Field(default="feed", max_length=40)
+    publication_type: str = Field(default="forecast", max_length=40)
     auto_send_on_interest: bool = False
 
     @field_validator("coupon_image_url", "match_link")
     @classmethod
     def validate_url_fields(cls, value: Optional[str]) -> Optional[str]:
         return _validate_http_or_relative_url(value)
+
+    @field_validator("publication_type")
+    @classmethod
+    def validate_publication_type(cls, value: str) -> str:
+        normalized = (value or "forecast").strip().lower()
+        if normalized not in {"forecast", "text"}:
+            raise ValueError("publication_type must be forecast or text")
+        return normalized
 
 class BetCreate(BetBase):
     target_bookmaker_ids: Optional[List[int]] = Field(default=None, max_length=50)  # Specific list of bookmaker IDs for target audience filtering (optional)
@@ -258,11 +267,22 @@ class BetUpdate(BaseModel):
     teaser_text: Optional[str] = Field(default=None, max_length=4000)
     match_link: Optional[str] = Field(default=None, max_length=2048)
     bookmaker_links: Optional[List[BookmakerLink]] = Field(default=None, max_length=50)
+    publication_type: Optional[str] = Field(default=None, max_length=40)
 
     @field_validator("match_link")
     @classmethod
     def validate_match_link(cls, value: Optional[str]) -> Optional[str]:
         return _validate_http_or_relative_url(value)
+
+    @field_validator("publication_type")
+    @classmethod
+    def validate_update_publication_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip().lower()
+        if normalized not in {"forecast", "text"}:
+            raise ValueError("publication_type must be forecast or text")
+        return normalized
 
 
 class BetOddsDropUpdate(BaseModel):

@@ -85,6 +85,7 @@ async def run_dev_schema_migrations(conn):
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS access_type VARCHAR NOT NULL DEFAULT 'paid_match'",
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS match_charged BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR NOT NULL DEFAULT 'feed'",
+            "ALTER TABLE bets ADD COLUMN IF NOT EXISTS publication_type VARCHAR NOT NULL DEFAULT 'forecast'",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS fair_coefficient NUMERIC(5, 2)",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS teaser_text TEXT",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport_type VARCHAR",
@@ -264,6 +265,7 @@ async def run_dev_schema_migrations(conn):
             )
             """,
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_bets_publication_status_created ON bets (publication_type, status, created_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)",
             "CREATE INDEX IF NOT EXISTS ix_bets_author_status_resolved ON bets (author_id, status, resolved_at)",
             "CREATE INDEX IF NOT EXISTS ix_user_bets_user_taken ON user_bets (user_id, taken_at)",
@@ -334,6 +336,7 @@ async def run_dev_schema_migrations(conn):
             ],
             "bets": [
                 ("delivery_mode", "VARCHAR NOT NULL DEFAULT 'feed'"),
+                ("publication_type", "VARCHAR NOT NULL DEFAULT 'forecast'"),
                 ("fair_coefficient", "NUMERIC(5, 2)"),
                 ("teaser_text", "TEXT"),
                 ("sport_type", "VARCHAR"),
@@ -650,6 +653,9 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_bets_status_delivery_created ON bets (status, delivery_mode, created_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_bets_publication_status_created ON bets (publication_type, status, created_at)"
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_bets_status_resolved ON bets (status, resolved_at)"

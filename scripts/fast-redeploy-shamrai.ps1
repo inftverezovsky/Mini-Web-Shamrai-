@@ -617,16 +617,39 @@ PY
 
   Invoke-Step "Docker compose rebuild: $($services -join ', ')" {
     $serviceArgs = $services -join " "
+    $runBackendMigrations = if ($Target -eq "backend" -or $Target -eq "all") { "1" } else { "0" }
     $remote = @"
 set -e
 cd '$RemotePath'
 docker compose -p '$ComposeProject' config -q
-docker compose -p '$ComposeProject' up -d --build $serviceArgs
+if [ '$runBackendMigrations' = '1' ]; then
+  docker compose -p '$ComposeProject' up -d postgres redis
+  docker compose -p '$ComposeProject' build $serviceArgs
+else
+  docker compose -p '$ComposeProject' up -d --build $serviceArgs
+fi
 "@
     Invoke-RemoteSh -Script $remote
   }
 
   if ($Target -eq "backend" -or $Target -eq "all") {
+    Invoke-Step "Run database migrations" {
+      $serviceArgs = $services -join " "
+      $remote = @"
+set -e
+cd '$RemotePath'
+db_backup_dir='$RemotePath/.deploy-backups/db'
+db_backup_path="`$db_backup_dir/fast-$deployId-before-migrations.dump"
+mkdir -p "`$db_backup_dir"
+chmod 0700 "`$db_backup_dir"
+docker compose -p '$ComposeProject' exec -T postgres sh -c 'pg_dump -U "`$POSTGRES_USER" -d "`$POSTGRES_DB" -Fc' > "`$db_backup_path"
+chmod 0600 "`$db_backup_path"
+docker compose -p '$ComposeProject' run --rm backend alembic upgrade head
+docker compose -p '$ComposeProject' up -d $serviceArgs
+"@
+      Invoke-RemoteSh -Script $remote
+    }
+
     Invoke-Step "Reset Telegram delivery state" {
       $remote = @"
 set -e

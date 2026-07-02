@@ -37,7 +37,7 @@ import {
   recentResultCodes,
   streakLabel,
   summaryTone,
-} from '../../features/performance/performanceUi';
+} from '../../features/performance/performanceStatsUi';
 import {
   AdminClientStatsItem,
   AdminClientTimelineResponse,

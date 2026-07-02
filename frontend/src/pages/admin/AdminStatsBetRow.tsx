@@ -11,7 +11,7 @@ import {
 
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
-import { formatDateTime, formatStatsValue, profitTone, resultLabel, StatsValueMode } from '../../features/performance/performanceUi';
+import { formatDateTime, formatStatsValue, profitTone, resultLabel, StatsValueMode } from '../../features/performance/performanceStatsUi';
 import { BetResponse, BookmakerResponse, PerformanceBetItem } from '../../schemas/schemas';
 import { apiFetch } from '../../utils/api';
 import { notifyError, notifySuccess } from '../../utils/notify';

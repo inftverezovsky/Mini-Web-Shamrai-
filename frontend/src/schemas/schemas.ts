@@ -123,6 +123,7 @@ export interface BetResponse {
   match_link: string | null;
   bookmaker_links: BookmakerLink[];
   delivery_mode: 'feed' | 'sales_private' | 'paid_set';
+  publication_type?: 'forecast' | 'text';
   auto_send_on_interest: boolean;
   odds_dropped_to: string | number | null;
   odds_drop_notified_at: string | null;

@@ -465,7 +465,7 @@ async def build_onboarding_recommendation(
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     result = await db.execute(
         select(Bet)
-        .filter(Bet.status.in_(["win", "loss", "refund"]))
+        .filter(Bet.publication_type == "forecast", Bet.status.in_(["win", "loss", "refund"]))
         .filter(func.coalesce(Bet.resolved_at, Bet.created_at) >= since)
     )
     resolved_bets = result.scalars().all()
@@ -876,6 +876,7 @@ async def get_my_taken_bets_timeline(
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
+            Bet.publication_type == "forecast",
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -1037,6 +1038,7 @@ async def export_my_taken_bets_timeline(
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
+            Bet.publication_type == "forecast",
             Bet.status.in_(["win", "loss"]),
             Bet.resolved_at.isnot(None),
         )
@@ -1078,6 +1080,7 @@ async def generate_user_pdf_report(
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
+            Bet.publication_type == "forecast",
             Bet.status.in_(["win", "loss", "refund"]),
             Bet.resolved_at.isnot(None),
         )

@@ -439,6 +439,7 @@ class Bet(Base):
     teaser_text = Column(Text, nullable=True)
     status = Column(String, default="pending")  # "pending" | "win" | "loss" | "refund"
     delivery_mode = Column(String, default="feed", nullable=False)  # "feed" | "sales_private"
+    publication_type = Column(String, default="forecast", nullable=False)  # "forecast" | "text"
     author_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True), nullable=True)

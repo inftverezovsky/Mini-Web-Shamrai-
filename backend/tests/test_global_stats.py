@@ -23,13 +23,21 @@ class GlobalStatsTests(unittest.IsolatedAsyncioTestCase):
             await conn.run_sync(Base.metadata.drop_all)
         await self.engine.dispose()
 
-    def _bet(self, *, status: str, coefficient: str, resolved_at: datetime | None = None) -> Bet:
+    def _bet(
+        self,
+        *,
+        status: str,
+        coefficient: str,
+        resolved_at: datetime | None = None,
+        publication_type: str = "forecast",
+    ) -> Bet:
         resolved = resolved_at or datetime(2026, 6, 2, 12, tzinfo=timezone.utc)
         return Bet(
             id=uuid.uuid4(),
             event_name=f"{status} match",
             coefficient=Decimal(coefficient),
             status=status,
+            publication_type=publication_type,
             created_at=resolved - timedelta(hours=1),
             resolved_at=resolved,
         )
@@ -40,6 +48,7 @@ class GlobalStatsTests(unittest.IsolatedAsyncioTestCase):
                 self._bet(status="win", coefficient="2.50"),
                 self._bet(status="loss", coefficient="1.50"),
                 self._bet(status="refund", coefficient="9.99"),
+                self._bet(status="win", coefficient="99.00", publication_type="text"),
             ])
             await session.commit()
 
