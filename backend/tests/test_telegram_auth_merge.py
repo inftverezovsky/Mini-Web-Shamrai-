@@ -414,15 +414,17 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(confirmed)
 
-            response = await auth.poll_telegram_bot_auth_session(
-                session.auth_token,
-                response=Response(),
-                current_user=web_user,
-                db=db,
+            with patch.object(auth.settings, "OWNER_TELEGRAM_ID", None):
+                response = await auth.poll_telegram_bot_auth_session(
+                    session.auth_token,
+                    response=Response(),
+                    current_user=web_user,
+                    db=db,
             )
 
             self.assertEqual(response.status, "confirmed")
             self.assertIsNone(response.access_token)
+            self.assertNotIn("access_token", response.model_dump(exclude_none=True))
             self.assertIsNotNone(response.user)
             self.assertEqual(response.user.telegram_id, 123456789)
             self.assertFalse(response.user.is_web_only)
@@ -462,6 +464,8 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(response.status, "confirmed")
+            self.assertIsNone(response.access_token)
+            self.assertNotIn("access_token", response.model_dump(exclude_none=True))
             self.assertIsNotNone(response.user)
             self.assertEqual(response.user.telegram_id, 123456789)
             self.assertFalse(response.user.is_web_only)

@@ -77,7 +77,7 @@ export function getStoredAuthToken(): string | null {
 export function getRequestAuthToken(): string | null {
   if (isAllowedRuntimeToken(runtimeAuthToken)) return runtimeAuthToken;
   runtimeAuthToken = null;
-  if (loginRuntimeAuthToken && looksLikeJwt(loginRuntimeAuthToken)) return loginRuntimeAuthToken;
+  if (isAllowedRuntimeToken(loginRuntimeAuthToken)) return loginRuntimeAuthToken;
   loginRuntimeAuthToken = null;
   return getStoredAuthToken();
 }
@@ -122,6 +122,6 @@ export function applyLoginAuthToken(accessToken?: string | null): string | null 
   }
 
   clearStoredAuthToken();
-  loginRuntimeAuthToken = looksLikeJwt(accessToken) ? accessToken : null;
+  loginRuntimeAuthToken = isAllowedRuntimeToken(accessToken) ? accessToken : null;
   return getRequestAuthToken();
 }

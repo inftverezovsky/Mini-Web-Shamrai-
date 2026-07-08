@@ -12,6 +12,15 @@ from src.models.database import get_db
 from src.models.models import User, Marathon, LivePulseLog, DailyRewardClaim, PromoCode, Bet, Quiz, PvPBattle, PvPBattleVote
 from src.api.deps import get_current_user
 from src.core.config import settings
+from src.services.marketing_widgets import (
+    MarketingWidgetDisabledError,
+    MarketingWidgetLimitError,
+    active_widget_payloads_for_user,
+    ensure_widget_available,
+    ensure_widget_reward_allowed,
+    record_marketing_reward_event,
+    stored_widget_config_count,
+)
 from src.schemas.schemas import (
     MarathonResponse,
     SwipeCandidateResponse,
@@ -26,6 +35,14 @@ from src.schemas.schemas import (
 )
 
 router = APIRouter(prefix="/marketing", tags=["Marketing"])
+
+
+def marketing_widget_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, MarketingWidgetDisabledError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    if isinstance(exc, MarketingWidgetLimitError):
+        return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 def normalize_signal(value: str | None) -> str:
@@ -75,6 +92,7 @@ async def create_bound_promo(
             promo = PromoCode(
                 code=code,
                 user_id=user.telegram_id,
+                reward_type="discount",
                 discount_percent=discount_percent,
                 valid_until=datetime.now(timezone.utc) + timedelta(hours=hours_valid),
                 is_active=True,
@@ -226,6 +244,18 @@ async def get_pulse_logs(db: AsyncSession = Depends(get_db)):
         
     return [{"id": l.id, "text_message": l.text_message, "created_at": l.created_at} for l in logs]
 
+
+@router.get("/widgets")
+async def get_marketing_widgets(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    configured = (await stored_widget_config_count(db)) > 0
+    return {
+        "configured": configured,
+        "widgets": await active_widget_payloads_for_user(db, current_user) if configured else [],
+    }
+
 @router.post("/daily-spin")
 async def claim_daily_bonus(
     current_user: User = Depends(get_current_user),
@@ -233,54 +263,46 @@ async def claim_daily_bonus(
 ):
     """
     POST /api/marketing/daily-spin
-    Validates 24-hour limit (bypassed in debug mode).
+    Validates configured cooldown and limits.
     Randomly awards a promo code or +1 free bet slot.
     """
     now = datetime.now(timezone.utc)
-    
-    # Check cooldown constraint
-    last_claim_res = await db.execute(
-        select(DailyRewardClaim)
-        .filter(DailyRewardClaim.user_id == current_user.telegram_id)
-        .order_by(DailyRewardClaim.claimed_at.desc())
-    )
-    last_claim = last_claim_res.scalars().first()
-    
-    if last_claim and not settings.DEBUG_MODE:
-        elapsed = now - last_claim.claimed_at
-        if elapsed < timedelta(hours=24):
-            remaining = timedelta(hours=24) - elapsed
-            minutes_left = int(remaining.total_seconds() / 60)
-            hours_left = minutes_left // 60
-            mins_left = minutes_left % 60
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Следующая попытка доступна через {hours_left} ч. {mins_left} мин."
-            )
+    try:
+        widget_config = await ensure_widget_reward_allowed(db, "daily_spin", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
             
-    # Roll reward type: 50% Free Bet, 50% Promo Code
+    configured_reward = str(widget_config.get("reward_type") or "mixed")
+    reward_value = int(widget_config.get("reward_value") or 25)
+    promo_valid_hours = int(widget_config.get("promo_valid_hours") or 24)
     claim_date = now.date().isoformat()
-    reward_type = random.choice(["free_bet", "promo_code"])
+    reward_type = (
+        random.choice(["free_bet", "promo_code"])
+        if configured_reward == "mixed"
+        else "free_bet" if configured_reward == "free_bet"
+        else "promo_code"
+    )
     reward_detail = {}
+    promo = None
     
     if reward_type == "free_bet":
-        current_user.free_bets_available += 1
+        free_bets_added = max(1, reward_value or 1)
+        current_user.free_bets_available += free_bets_added
         reward_detail = {
             "type": "free_bet",
             "title": "Бесплатная ставка",
-            "value": "1 прогноз",
-            "message": "🎁 Вам начислен 1 бесплатный прогноз!"
+            "value": f"{free_bets_added} прогноз",
+            "message": f"🎁 Вам начислено прогнозов: {free_bets_added}"
         }
         pulse_msg = f"🎁 @{current_user.username[:4] if current_user.username else 'user'}*** выиграл бесплатный прогноз в Бонусе!"
     else:
-        # Fetch any active promo code to grant
-        promo_res = await db.execute(
-            select(PromoCode).filter(PromoCode.is_active == True, PromoCode.user_id.is_(None))
+        promo = await create_bound_promo(
+            db,
+            current_user,
+            "DAILY",
+            max(1, min(100, reward_value or 25)),
+            hours_valid=max(1, promo_valid_hours or 24),
         )
-        promo = promo_res.scalars().first()
-        
-        if not promo:
-            promo = await create_bound_promo(db, current_user, "DAILY", 25, hours_valid=24)
             
         reward_detail = {
             "type": "promo_code",
@@ -290,9 +312,23 @@ async def claim_daily_bonus(
         }
         pulse_msg = f"🎟️ @{current_user.username[:4] if current_user.username else 'user'}*** выиграл промокод на скидку {promo.discount_percent}%!"
 
-    # Record log
-    db.add(DailyRewardClaim(user_id=current_user.telegram_id, claimed_date=claim_date, claimed_at=now))
+    existing_daily_claim = (await db.execute(
+        select(DailyRewardClaim).filter(
+            DailyRewardClaim.user_id == current_user.telegram_id,
+            DailyRewardClaim.claimed_date == claim_date,
+        )
+    )).scalars().first()
+    if not existing_daily_claim:
+        db.add(DailyRewardClaim(user_id=current_user.telegram_id, claimed_date=claim_date, claimed_at=now))
     db.add(LivePulseLog(text_message=pulse_msg, created_at=now))
+    await record_marketing_reward_event(
+        db,
+        user=current_user,
+        widget_key="daily_spin",
+        reward_type="free_bet" if reward_type == "free_bet" else "discount",
+        reward_value=max(1, reward_value or 1),
+        promo_code_id=promo.id if promo else None,
+    )
     await db.commit()
     
     return reward_detail
@@ -304,6 +340,10 @@ async def get_swipe_candidate(
     db: AsyncSession = Depends(get_db)
 ):
     """Returns a prediction candidate for the Shamrai Swipe interaction."""
+    try:
+        await ensure_widget_available(db, "swipe", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     bet = await get_conversion_bet(db, allow_seed=settings.DEBUG_MODE)
     if not bet:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Нет активного прогноза для Swipe")
@@ -327,6 +367,10 @@ async def submit_swipe_guess(
     POST /api/marketing/swipe
     Compares the user's instinctive pick with Shamrai's prediction outcome.
     """
+    try:
+        widget_config = await ensure_widget_available(db, "swipe", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     if payload.bet_id:
         result = await db.execute(select(Bet).filter(Bet.id == payload.bet_id))
         bet = result.scalars().first()
@@ -340,18 +384,34 @@ async def submit_swipe_guess(
     matched = normalize_signal(payload.guess) == normalize_signal(bet.outcome or "П1")
     promo = None
     if matched:
-        promo = await create_bound_promo(db, current_user, "MIND", 50, hours_valid=24)
+        try:
+            await ensure_widget_reward_allowed(db, "swipe", current_user)
+        except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+            raise marketing_widget_http_error(exc)
+        discount_reward = max(1, min(100, int(widget_config.get("reward_value") or 50)))
+        promo_valid_hours = max(1, int(widget_config.get("promo_valid_hours") or 24))
+        promo = await create_bound_promo(db, current_user, "MIND", discount_reward, hours_valid=promo_valid_hours)
         db.add(LivePulseLog(
-            text_message=f"🧠 @{current_user.username[:4] if current_user.username else 'user'}*** совпал с прогнозом Shamrai и забрал скидку 50%!",
+            text_message=f"🧠 @{current_user.username[:4] if current_user.username else 'user'}*** совпал с прогнозом Shamrai и забрал скидку {discount_reward}%!",
             created_at=datetime.now(timezone.utc),
         ))
+        await record_marketing_reward_event(
+            db,
+            user=current_user,
+            widget_key="swipe",
+            reward_type="discount",
+            reward_value=discount_reward,
+            promo_code_id=promo.id,
+        )
+    else:
+        discount_reward = 0
 
     await db.commit()
     return SwipeResponse(
         match=matched,
-        discount=50 if matched else 0,
+        discount=discount_reward if matched else 0,
         promo_code=promo.code if promo else None,
-        message="Наши мысли сходятся! Скидка 50%" if matched else "Мнение принято. Shamrai Brain думает иначе.",
+        message=f"Наши мысли сходятся! Скидка {discount_reward}%" if matched else "Мнение принято. Shamrai Brain думает иначе.",
     )
 
 
@@ -361,6 +421,10 @@ async def get_active_quiz(
     db: AsyncSession = Depends(get_db)
 ):
     """Returns the active analytical quiz with answers hidden from the client."""
+    try:
+        await ensure_widget_available(db, "quiz", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     bet = await get_conversion_bet(db, allow_seed=settings.DEBUG_MODE)
     quiz = await get_quiz(db, bet, allow_seed=settings.DEBUG_MODE)
     if not bet or not quiz:
@@ -384,6 +448,10 @@ async def submit_quiz_answers(
     POST /api/marketing/quiz-submit
     Checks analytical answers and grants a temporary personal promo when all answers are correct.
     """
+    try:
+        widget_config = await ensure_widget_available(db, "quiz", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     quiz = None
     if payload.quiz_id:
         result = await db.execute(select(Quiz).filter(Quiz.id == payload.quiz_id))
@@ -409,19 +477,34 @@ async def submit_quiz_answers(
 
     passed = score == total and total >= 3
     promo = None
+    reward_discount = int(widget_config.get("reward_value") or quiz.discount_reward)
     if passed:
-        promo = await create_bound_promo(db, current_user, "LOGIC", quiz.discount_reward, hours_valid=48)
+        try:
+            await ensure_widget_reward_allowed(db, "quiz", current_user)
+        except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+            raise marketing_widget_http_error(exc)
+        reward_discount = max(1, min(100, reward_discount))
+        promo_valid_hours = max(1, int(widget_config.get("promo_valid_hours") or 48))
+        promo = await create_bound_promo(db, current_user, "LOGIC", reward_discount, hours_valid=promo_valid_hours)
         db.add(LivePulseLog(
             text_message=f"🎓 @{current_user.username[:4] if current_user.username else 'user'}*** прошел Аналитический тест Shamrai!",
             created_at=datetime.now(timezone.utc),
         ))
+        await record_marketing_reward_event(
+            db,
+            user=current_user,
+            widget_key="quiz",
+            reward_type="discount",
+            reward_value=reward_discount,
+            promo_code_id=promo.id,
+        )
 
     await db.commit()
     return QuizSubmitResponse(
         passed=passed,
         score=score,
         total=total,
-        discount=quiz.discount_reward if passed else 0,
+        discount=reward_discount if passed else 0,
         promo_code=promo.code if promo else None,
         message="Тест пройден! Ваша логика безупречна." if passed else "Почти. Разберем линию еще раз?",
     )
@@ -433,6 +516,10 @@ async def get_active_pvp_battle(
     db: AsyncSession = Depends(get_db)
 ):
     """Returns the current Battle of Minds voting panel."""
+    try:
+        await ensure_widget_available(db, "pvp", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     bet = await get_conversion_bet(db, allow_seed=settings.DEBUG_MODE)
     battle = await get_battle(db, bet, allow_seed=settings.DEBUG_MODE)
     if not battle:
@@ -460,6 +547,10 @@ async def submit_pvp_vote(
     POST /api/marketing/pvp-vote
     Records or updates the user's Battle of Minds vote and returns the live distribution.
     """
+    try:
+        await ensure_widget_available(db, "pvp", current_user)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     if payload.battle_id:
         result = await db.execute(select(PvPBattle).filter(PvPBattle.id == payload.battle_id))
         battle = result.scalars().first()
@@ -529,6 +620,10 @@ async def get_active_marathon(db: AsyncSession = Depends(get_db)):
     Returns the currently active betting marathon context.
     Seeds a default demo marathon only in DEBUG_MODE.
     """
+    try:
+        await ensure_widget_available(db, "marathon", None)
+    except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
+        raise marketing_widget_http_error(exc)
     result = await db.execute(select(Marathon).filter(Marathon.is_active == True))
     marathon = result.scalars().first()
     

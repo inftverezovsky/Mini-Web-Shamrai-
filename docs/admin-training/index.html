@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Админское обучение Shamrai</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07111f;
+        --panel: rgba(15, 23, 42, 0.84);
+        --panel-strong: rgba(2, 6, 23, 0.9);
+        --text: #f8fafc;
+        --muted: #b6c3d8;
+        --line: rgba(148, 163, 184, 0.22);
+        --cyan: #22d3ee;
+        --pink: #f472b6;
+        --green: #86efac;
+        --amber: #fde68a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 14% 0%, rgba(34, 211, 238, 0.18), transparent 28rem),
+          radial-gradient(circle at 88% 8%, rgba(244, 114, 182, 0.15), transparent 24rem),
+          var(--bg);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .shell {
+        width: min(1200px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 36px 0 56px;
+      }
+
+      header {
+        display: grid;
+        gap: 18px;
+        padding: 28px 0 18px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        max-width: 860px;
+        font-size: clamp(32px, 7vw, 70px);
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        font-size: clamp(24px, 3vw, 36px);
+        line-height: 1.05;
+      }
+
+      h3 {
+        font-size: 18px;
+      }
+
+      .lead {
+        max-width: 840px;
+        color: var(--muted);
+        font-size: 18px;
+      }
+
+      .badge {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid rgba(34, 211, 238, 0.4);
+        border-radius: 999px;
+        background: rgba(34, 211, 238, 0.1);
+        padding: 7px 11px;
+        color: #cffafe;
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        border-bottom: 1px solid var(--line);
+        background: rgba(7, 17, 31, 0.9);
+        padding: 12px 0;
+        backdrop-filter: blur(16px);
+      }
+
+      .nav a {
+        flex: 0 0 auto;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 999px;
+        padding: 8px 12px;
+        color: #dbeafe;
+        font-size: 13px;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .grid {
+        display: grid;
+        gap: 28px;
+        margin-top: 28px;
+      }
+
+      .section {
+        display: grid;
+        gap: 18px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel);
+        padding: 22px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.26);
+      }
+
+      .copy {
+        display: grid;
+        gap: 14px;
+      }
+
+      .columns {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .copy ul,
+      .copy ol {
+        margin: 0;
+        padding-left: 20px;
+        color: var(--muted);
+      }
+
+      .copy li + li {
+        margin-top: 6px;
+      }
+
+      .shot {
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 14px;
+        background: var(--panel-strong);
+      }
+
+      .shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .terms {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .term {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 14px;
+        background: rgba(2, 6, 23, 0.36);
+        padding: 14px;
+      }
+
+      .term strong {
+        display: block;
+        color: var(--green);
+      }
+
+      .warning strong {
+        color: var(--amber);
+      }
+
+      footer {
+        margin-top: 32px;
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 860px) {
+        .columns,
+        .terms {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .shell {
+          width: min(100% - 20px, 1200px);
+          padding-top: 20px;
+        }
+
+        .section {
+          border-radius: 14px;
+          padding: 14px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <span class="badge">Только для администраторов</span>
+        <h1>Админское обучение Shamrai</h1>
+        <p class="lead">Подробный гид по админке: публикации, рассылки, заявки, результаты, статистика, CRM, чаты и настройки. Смотрите подписи на скриншотах и следуйте маршрутам в каждом блоке.</p>
+      </header>
+
+      <nav class="nav" aria-label="Разделы обучения">
+        <a href="#route">Маршрут</a>
+        <a href="#feed">Лента</a>
+        <a href="#broadcast">Прогноз</a>
+        <a href="#set">Набор</a>
+        <a href="#requests">Заявки</a>
+        <a href="#results">Результаты</a>
+        <a href="#stats">Статистика</a>
+        <a href="#crm">CRM</a>
+        <a href="#chats">Чаты</a>
+        <a href="#settings">Настройки</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <div class="grid">
+        <section class="section" id="route">
+          <div class="copy">
+            <h2>Быстрый маршрут</h2>
+            <div class="terms">
+              <div class="term"><strong>Панель</strong>Лента, рассылки, заявки и результаты.</div>
+              <div class="term"><strong>Статистика</strong>ROI, прибыль, срезы, графики и экспорт.</div>
+              <div class="term"><strong>Клиенты</strong>CRM, баланс, БК, группы и метки.</div>
+              <div class="term"><strong>Чаты</strong>Ответы клиентам от имени Shamrai.</div>
+              <div class="term"><strong>Настройки</strong>Тексты, рубильники, интеграции, визуал и мониторинг.</div>
+              <div class="term"><strong>Кабинет клиента</strong>Просмотр интерфейса глазами клиента.</div>
+            </div>
+            <p class="warning"><strong>Безопасность:</strong> не вставляйте токены, webhook-секреты, платежные ключи, пароли и другие секреты в чат, документы или скриншоты.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/01-admin-panel-feed.png" alt="Панель администратора Shamrai с навигацией" />
+          </figure>
+        </section>
+
+        <section class="section" id="feed">
+          <div class="copy">
+            <h2>Публикация в Ленту</h2>
+            <p>Путь: <strong>Панель -> Лента</strong>. Здесь создаётся открытый прогноз или текстовая публикация для клиентской Ленты.</p>
+            <div class="columns">
+              <ol>
+                <li>Откройте <strong>Панель</strong> и внутреннюю вкладку <strong>Лента</strong>.</li>
+                <li>Для прогноза оставьте режим <strong>Прогноз</strong>.</li>
+                <li>Заполните событие, исход и коэффициент.</li>
+                <li>Выберите БК, категорию, спорт и описание.</li>
+                <li>При необходимости приложите скрин купона.</li>
+                <li>Нажмите <strong>Опубликовать прогноз в Ленту</strong>.</li>
+              </ol>
+              <ol>
+                <li>Для текста переключитесь на <strong>Текстовый</strong>.</li>
+                <li>Заполните заголовок, если он нужен.</li>
+                <li>Введите текст публикации.</li>
+                <li>При необходимости приложите изображение.</li>
+                <li>Нажмите <strong>Опубликовать текст в Ленту</strong>.</li>
+              </ol>
+            </div>
+          </div>
+          <figure class="shot">
+            <img src="assets/01-admin-panel-feed.png" alt="Создание публикации в Ленту" />
+          </figure>
+        </section>
+
+        <section class="section" id="broadcast">
+          <div class="copy">
+            <h2>Рассылка закрытого прогноза</h2>
+            <p>Путь: <strong>Панель -> Рассылки -> Прогноз</strong>. Этот режим отправляет клиентам анонс, после которого они нажимают <strong>Взять</strong> или <strong>Не взять</strong>.</p>
+            <ol>
+              <li>Укажите коэффициент и, если нужно, верный коэффициент.</li>
+              <li>Выберите БК: это основной фильтр аудитории.</li>
+              <li>Добавьте короткое описание анонса.</li>
+              <li>Нажмите <strong>Отправить анонс прогноза</strong>.</li>
+              <li>Обработайте ответы клиентов во вкладке <strong>Заявки</strong>.</li>
+            </ol>
+          </div>
+          <figure class="shot">
+            <img src="assets/02-admin-broadcast-forecast.png" alt="Рассылка закрытого прогноза" />
+          </figure>
+        </section>
+
+        <section class="section" id="set">
+          <div class="copy">
+            <h2>Рассылка набора</h2>
+            <p>Путь: <strong>Панель -> Рассылки -> Набор</strong>. Набор используется для платной подборки или ручной продажи через диалог.</p>
+            <ol>
+              <li>Переключитесь на <strong>Набор</strong>.</li>
+              <li>Проверьте счётчик получателей.</li>
+              <li>Заполните название, матч, исход, спорт, коэффициент и стоимость.</li>
+              <li>Выберите БК, приложите купон и описание.</li>
+              <li>Нажмите <strong>Отправить набор</strong>.</li>
+            </ol>
+          </div>
+          <figure class="shot">
+            <img src="assets/03-admin-broadcast-set.png" alt="Рассылка платного набора" />
+          </figure>
+        </section>
+
+        <section class="section" id="requests">
+          <div class="copy">
+            <h2>Очередь заявок</h2>
+            <p>Путь: <strong>Панель -> Заявки</strong>. Здесь обрабатываются клиенты, которые заинтересовались прогнозом или набором.</p>
+            <div class="columns">
+              <ul>
+                <li><strong>Ожидают</strong> - клиенты, которые нажали «Взять».</li>
+                <li><strong>Анонсировано</strong> - анонс отправлен, ответ ещё не получен.</li>
+                <li><strong>Отправлено</strong> - полная ставка уже ушла клиенту.</li>
+                <li><strong>Взяли вручную</strong> - менеджер закрыл заявку вручную.</li>
+              </ul>
+              <ol>
+                <li>Раскройте группу матча или набора.</li>
+                <li>Выберите клиента или нескольких клиентов.</li>
+                <li>Нажмите <strong>Отправить</strong> или <strong>Полная ставка</strong>.</li>
+                <li>Используйте <strong>Взял вручную</strong>, если выдача прошла вне автоматики.</li>
+                <li>Используйте <strong>Остановить</strong>, если новые действия по матчу нужно прекратить.</li>
+              </ol>
+            </div>
+          </div>
+          <figure class="shot">
+            <img src="assets/04-admin-requests.png" alt="Очередь заявок администратора" />
+          </figure>
+        </section>
+
+        <section class="section" id="results">
+          <div class="copy">
+            <h2>Результаты матчей</h2>
+            <p>Путь: <strong>Панель -> Результаты</strong>. Раздел нужен, чтобы закрывать прогнозы и обновлять статистику.</p>
+            <ol>
+              <li>Найдите матч и проверьте исход, БК, тип выдачи и коэффициент.</li>
+              <li>Если коэффициент просел, заполните <strong>Упал до</strong>, сохраните и отправьте уведомление.</li>
+              <li>После матча нажмите <strong>Победа</strong>, <strong>Неудача</strong> или <strong>Возврат</strong>.</li>
+              <li>Используйте <strong>Редактировать</strong>, если нужно поправить матч, БК или ссылки.</li>
+              <li>Удаляйте прогноз только когда уверены, что он не должен попасть в расчёт.</li>
+            </ol>
+          </div>
+          <figure class="shot">
+            <img src="assets/05-admin-results.png" alt="Проставление результатов матчей" />
+          </figure>
+        </section>
+
+        <section class="section" id="stats">
+          <div class="copy">
+            <h2>Статистика</h2>
+            <p>Путь: <strong>Статистика</strong>. Здесь проверяются результаты по периодам, источникам, БК, спорту и клиентам.</p>
+            <ul>
+              <li>Выберите период: неделя, месяц, квартал или всё время.</li>
+              <li>Переключите срез: обзор, лента, закрытые, наборы или клиенты.</li>
+              <li>Проверьте прибыль, ROI, проход, средний КФ, объём и серию.</li>
+              <li>Откройте детализацию по источникам, БК и видам спорта.</li>
+              <li>Используйте экспорт для отчёта.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="assets/06-admin-stats.png" alt="Статистика администратора" />
+          </figure>
+        </section>
+
+        <section class="section" id="crm">
+          <div class="copy">
+            <h2>CRM клиентов</h2>
+            <p>Путь: <strong>Клиенты</strong>. CRM помогает найти клиента, понять состояние и открыть карточку.</p>
+            <ul>
+              <li>Поиск работает по имени, username, ID, группе и метке.</li>
+              <li>Фильтры помогают сузить список по активности, группе, метке и БК.</li>
+              <li>Карточка строки показывает приоритет, каналы связи, баланс и последние результаты.</li>
+              <li>Кнопка <strong>Открыть</strong> запускает редактирование клиента.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="assets/07-admin-crm.png" alt="CRM клиентов Shamrai" />
+          </figure>
+          <div class="copy">
+            <h2>Карточка клиента</h2>
+            <p>В карточке можно поменять группу, метку, баланс матчей, БК и гарантию. После любого изменения нажмите <strong>Сохранить изменения</strong>.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/08-admin-crm-card.png" alt="Карточка клиента в CRM" />
+          </figure>
+        </section>
+
+        <section class="section" id="chats">
+          <div class="copy">
+            <h2>Чаты</h2>
+            <p>Путь: <strong>Чаты</strong>. Раздел нужен для ответа клиентам от имени Shamrai.</p>
+            <ol>
+              <li>Выберите <strong>Открытые</strong> или <strong>Закрытые</strong>.</li>
+              <li>Найдите диалог через список или поиск.</li>
+              <li>Откройте клиента и прочитайте историю.</li>
+              <li>Напишите ответ в нижнем поле.</li>
+              <li>При необходимости приложите файл или изображение.</li>
+              <li>Нажмите отправку. После решения вопроса можно закрыть диалог.</li>
+            </ol>
+          </div>
+          <figure class="shot">
+            <img src="assets/09-admin-chats.png" alt="Админские чаты Shamrai" />
+          </figure>
+        </section>
+
+        <section class="section" id="settings">
+          <div class="copy">
+            <h2>Тексты сообщений</h2>
+            <p>Путь: <strong>Настройки -> Тексты сообщений</strong>. Выберите шаблон Telegram, VK или сайта, отредактируйте текст, проверьте переменные и сохраните.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/10-admin-settings-texts.png" alt="Настройки текстов сообщений" />
+          </figure>
+
+          <div class="copy">
+            <h2>Системные рубильники</h2>
+            <p>Путь: <strong>Настройки -> Системные рубильники</strong>. Здесь находятся maintenance, регистрации, опрос, покупки, пауза рассылок и сброс сессий.</p>
+            <p class="warning"><strong>Важно:</strong> после изменения глобальных флагов нажмите <strong>Сохранить изменения</strong>.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/11-admin-settings-switches.png" alt="Системные рубильники" />
+          </figure>
+
+          <div class="copy">
+            <h2>Интеграции</h2>
+            <p>Путь: <strong>Настройки -> Интеграции</strong>. Вкладка закрыта паролем, потому что содержит настройки Telegram, VK, платежей, Web Push, Google Drive и публичных URL.</p>
+            <p class="warning"><strong>Правило:</strong> вводите пароль только в интерфейсе админки и не передавайте секреты в чат или документы.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/12-admin-settings-integrations.png" alt="Интеграции под паролем" />
+          </figure>
+        </section>
+
+        <section class="section" id="faq">
+          <div class="copy">
+            <h2>Короткий FAQ</h2>
+            <h3>Где создать прогноз в открытую Ленту?</h3>
+            <p>Панель -> Лента -> Прогноз -> Опубликовать прогноз в Ленту.</p>
+            <h3>Где отправить закрытый анонс?</h3>
+            <p>Панель -> Рассылки -> Прогноз -> Отправить анонс прогноза.</p>
+            <h3>Где клиенты, которые нажали «Взять»?</h3>
+            <p>Панель -> Заявки, обычно фильтр Ожидают.</p>
+            <h3>Где поставить результат матча?</h3>
+            <p>Панель -> Результаты -> Победа, Неудача или Возврат.</p>
+            <h3>Где изменить баланс клиенту?</h3>
+            <p>Клиенты -> Открыть -> Доступ и баланс -> Сохранить изменения.</p>
+            <h3>Где остановить массовые рассылки?</h3>
+            <p>Настройки -> Системные рубильники -> Экстренная пауза рассылок -> Сохранить изменения.</p>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        Версия материала: 07.07.2026. Для обновления скриншотов используйте `node .\scripts\capture-admin-training-screenshots.mjs`.
+      </footer>
+    </main>
+  </body>
+</html>

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     OWNER_TELEGRAM_ID: Optional[int] = None
     DEBUG_MODE: bool = False
     ALLOW_DEBUG_AUTH_BYPASS: bool = False
+    ENABLE_BEARER_AUTH_COMPAT: bool = False
     JWT_SECRET_KEY: str = LOCAL_DEV_JWT_SECRET
     CORS_ALLOWED_ORIGINS: str = "https://shamra1.pro,https://www.shamra1.pro,http://localhost:8082,http://127.0.0.1:8082"
     ENABLE_BACKGROUND_TASKS: bool = False

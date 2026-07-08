@@ -2,9 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { apiFetch, downloadApiFile } from '../../utils/api';
-import type { MessageTemplateResponse } from '../../schemas/schemas';
+import type { MarketingWidgetConfigResponse, MarketingWidgetsResponse, MessageTemplateResponse } from '../../schemas/schemas';
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import SmoothCollapse from '../../components/SmoothCollapse';
+import AdminMarketing from './AdminMarketing';
 import {
   BRAND_BACKGROUND_URL_KEY,
   BRAND_LOGO_URL_KEY,
@@ -47,6 +48,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Gift,
   Globe2,
   Info,
   KeyRound,
@@ -56,6 +58,7 @@ import {
   MessageCircle,
   MonitorSmartphone,
   Palette,
+  Percent,
   Plug,
   Power,
   RotateCcw,
@@ -65,12 +68,13 @@ import {
   Settings2,
   ShieldAlert,
   Sparkles,
+  Ticket,
   ToggleLeft,
   type LucideIcon,
 } from 'lucide-react';
 
 type ChannelGroupId = 'telegram' | 'vk' | 'site';
-type SettingsTabId = 'texts' | 'switches' | 'integrations' | 'theme' | 'monitoring';
+type SettingsTabId = 'texts' | 'switches' | 'integrations' | 'theme' | 'monitoring' | 'marketing';
 
 interface ChannelGroupConfig {
   id: ChannelGroupId;
@@ -97,6 +101,9 @@ type SwitchSettingKey =
   | 'MAINTENANCE_MODE'
   | 'DISABLE_REGISTRATIONS'
   | 'PAUSE_BROADCASTS'
+  | 'REFERRAL_PROGRAM_ENABLED'
+  | 'REFERRAL_DISCOUNT_ENABLED'
+  | 'REFERRAL_MATCH_REWARD_ENABLED'
   | typeof WELCOME_QUIZ_ENABLED_KEY
   | typeof SUBSCRIPTION_PURCHASES_ENABLED_KEY;
 type SecretSettingKey = string;
@@ -235,12 +242,88 @@ interface IntegrationDiagnosticsResponse {
   }>;
 }
 
+interface ReferralSummaryEvent {
+  id: number;
+  referrer_user_id: number;
+  referrer_label: string;
+  referred_user_id: number;
+  referred_label: string;
+  source_payment_attempt_id: string | null;
+  source_type: string;
+  discount_percent_snapshot: number;
+  matches_awarded: number;
+  status?: 'approved' | 'held' | 'rejected' | string;
+  risk_score?: number;
+  risk_reasons?: string[];
+  created_at: string | null;
+}
+
+interface MarketingSummaryResponse {
+  program_enabled: boolean;
+  discount_enabled: boolean;
+  discount_step_percent: number;
+  discount_max_percent: number;
+  match_reward_enabled: boolean;
+  match_reward_count: number;
+  invited_count: number;
+  qualified_purchase_events: number;
+  active_referrers: number;
+  matches_awarded_total: number;
+  held_events?: number;
+  rejected_events?: number;
+  recent_events: ReferralSummaryEvent[];
+}
+
+interface MarketingRiskQueueItem {
+  id: string;
+  kind: 'referral' | 'marketing';
+  title: string;
+  status: string;
+  risk_score: number;
+  risk_reasons: string[];
+  created_at: string | null;
+  payload: Record<string, unknown>;
+}
+
+interface MarketingRiskQueueResponse {
+  items: MarketingRiskQueueItem[];
+  held_count: number;
+}
+
+interface MarketingRewardEventResponse {
+  id: number;
+  user_id: number;
+  user_label: string;
+  widget_key: string;
+  reward_type: string;
+  reward_value: number;
+  promo_code_id: number | null;
+  promo_code: string | null;
+  risk_status: string;
+  risk_reasons: string[];
+  created_at: string | null;
+}
+
+interface MarketingRewardEventsResponse {
+  events: MarketingRewardEventResponse[];
+}
+
 type TemplateEditorToken =
   | { type: 'text'; value: string }
   | { type: 'variable'; raw: string; key: string; label: string; example: string }
   | { type: 'markup'; raw: string };
 
 const ADMIN_SETTINGS_QUERY_KEY = ['admin-settings'] as const;
+const ADMIN_REFERRALS_SUMMARY_QUERY_KEY = ['admin-referrals-summary'] as const;
+const ADMIN_MARKETING_WIDGETS_QUERY_KEY = ['admin-marketing-widgets'] as const;
+const ADMIN_MARKETING_RISK_QUEUE_QUERY_KEY = ['admin-marketing-risk-queue'] as const;
+const ADMIN_MARKETING_REWARD_EVENTS_QUERY_KEY = ['admin-marketing-reward-events'] as const;
+const REFERRAL_PROGRAM_ENABLED_KEY = 'REFERRAL_PROGRAM_ENABLED';
+const REFERRAL_DISCOUNT_ENABLED_KEY = 'REFERRAL_DISCOUNT_ENABLED';
+const REFERRAL_DISCOUNT_STEP_PERCENT_KEY = 'REFERRAL_DISCOUNT_STEP_PERCENT';
+const REFERRAL_DISCOUNT_MAX_PERCENT_KEY = 'REFERRAL_DISCOUNT_MAX_PERCENT';
+const REFERRAL_MATCH_REWARD_ENABLED_KEY = 'REFERRAL_MATCH_REWARD_ENABLED';
+const REFERRAL_MATCH_REWARD_COUNT_KEY = 'REFERRAL_MATCH_REWARD_COUNT';
 
 const SETTINGS_TABS: SettingsTabConfig[] = [
   {
@@ -278,6 +361,13 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
     badge: 'live',
     Icon: Activity,
   },
+  {
+    id: 'marketing',
+    title: 'Настройки маркетинга',
+    subtitle: 'Рефералка и промо',
+    badge: 'growth',
+    Icon: Gift,
+  },
 ];
 
 const SWITCH_SETTINGS: SwitchSettingConfig[] = [
@@ -307,6 +397,30 @@ const SWITCH_SETTINGS: SwitchSettingConfig[] = [
     title: 'Покупка абонементов',
     description: 'Показывает клиентам блок покупки матчей и переход к оплате. Если выключено, клиент не видит покупку.',
     badge: 'sales',
+    tone: 'cyan',
+  },
+];
+
+const REFERRAL_SWITCH_SETTINGS: SwitchSettingConfig[] = [
+  {
+    key: REFERRAL_PROGRAM_ENABLED_KEY,
+    title: 'Включить реферальную программу',
+    description: 'Главный тумблер: показывает клиентам реферальный блок и включает учет приглашений.',
+    badge: 'ref',
+    tone: 'cyan',
+  },
+  {
+    key: REFERRAL_DISCOUNT_ENABLED_KEY,
+    title: 'Авто-скидка пригласившему',
+    description: 'Применяет скидку к абонементу, если у клиента есть оплаченные приглашенные.',
+    badge: 'discount',
+    tone: 'amber',
+  },
+  {
+    key: REFERRAL_MATCH_REWARD_ENABLED_KEY,
+    title: 'Бонус матчами',
+    description: 'Начисляет пригласившему матчи после первой оплаченной покупки реферала.',
+    badge: 'matches',
     tone: 'cyan',
   },
 ];
@@ -545,6 +659,15 @@ const TAB_SECTION_IDS: Record<SettingsTabId, string[]> = {
   integrations: INTEGRATION_GROUPS.map(group => `integrations-${group.id}`),
   theme: ['theme-colors', 'theme-brand', 'theme-effects', 'theme-preview'],
   monitoring: ['monitoring-overview', 'monitoring-health', 'monitoring-delivery', 'monitoring-logs', 'monitoring-audit'],
+  marketing: [
+    'marketing-overview',
+    'marketing-referrals',
+    'marketing-rewards',
+    'marketing-widgets',
+    'marketing-risk',
+    'marketing-promos',
+    'marketing-events',
+  ],
 };
 
 const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
@@ -554,6 +677,12 @@ const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   PAUSE_BROADCASTS: false,
   WELCOME_QUIZ_ENABLED: DEFAULT_THEME_SETTINGS.welcome_quiz_enabled,
   SUBSCRIPTION_PURCHASES_ENABLED: DEFAULT_THEME_SETTINGS.subscription_purchases_enabled,
+  REFERRAL_PROGRAM_ENABLED: false,
+  REFERRAL_DISCOUNT_ENABLED: true,
+  REFERRAL_DISCOUNT_STEP_PERCENT: '5',
+  REFERRAL_DISCOUNT_MAX_PERCENT: '100',
+  REFERRAL_MATCH_REWARD_ENABLED: false,
+  REFERRAL_MATCH_REWARD_COUNT: '0',
   THEME_PRIMARY_COLOR: DEFAULT_THEME_SETTINGS.primary_color,
   THEME_SECONDARY_COLOR: DEFAULT_THEME_SETTINGS.secondary_color,
   GLOBAL_PERFORMANCE_MODE: DEFAULT_THEME_SETTINGS.global_performance_mode,
@@ -760,6 +889,12 @@ function formValuesFromSettings(data?: AdminSettingsResponse): AdminSettingsForm
     PAUSE_BROADCASTS: truthySettingValue(settingsByKey.get('PAUSE_BROADCASTS')?.value),
     WELCOME_QUIZ_ENABLED: truthySettingValue(settingsByKey.get(WELCOME_QUIZ_ENABLED_KEY)?.value),
     SUBSCRIPTION_PURCHASES_ENABLED: truthySettingValue(settingsByKey.get(SUBSCRIPTION_PURCHASES_ENABLED_KEY)?.value),
+    REFERRAL_PROGRAM_ENABLED: truthySettingValue(settingsByKey.get(REFERRAL_PROGRAM_ENABLED_KEY)?.value ?? 'false'),
+    REFERRAL_DISCOUNT_ENABLED: truthySettingValue(settingsByKey.get(REFERRAL_DISCOUNT_ENABLED_KEY)?.value ?? 'true'),
+    REFERRAL_DISCOUNT_STEP_PERCENT: settingsByKey.get(REFERRAL_DISCOUNT_STEP_PERCENT_KEY)?.value || '5',
+    REFERRAL_DISCOUNT_MAX_PERCENT: settingsByKey.get(REFERRAL_DISCOUNT_MAX_PERCENT_KEY)?.value || '100',
+    REFERRAL_MATCH_REWARD_ENABLED: truthySettingValue(settingsByKey.get(REFERRAL_MATCH_REWARD_ENABLED_KEY)?.value),
+    REFERRAL_MATCH_REWARD_COUNT: settingsByKey.get(REFERRAL_MATCH_REWARD_COUNT_KEY)?.value || '0',
     THEME_PRIMARY_COLOR: normalizeHexColor(
       settingsByKey.get(THEME_PRIMARY_COLOR_KEY)?.value,
       DEFAULT_THEME_SETTINGS.primary_color,
@@ -808,6 +943,30 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
     {
       key: SUBSCRIPTION_PURCHASES_ENABLED_KEY,
       value: truthySettingValue(values[SUBSCRIPTION_PURCHASES_ENABLED_KEY]) ? 'true' : 'false',
+    },
+    {
+      key: REFERRAL_PROGRAM_ENABLED_KEY,
+      value: truthySettingValue(values[REFERRAL_PROGRAM_ENABLED_KEY]) ? 'true' : 'false',
+    },
+    {
+      key: REFERRAL_DISCOUNT_ENABLED_KEY,
+      value: truthySettingValue(values[REFERRAL_DISCOUNT_ENABLED_KEY]) ? 'true' : 'false',
+    },
+    {
+      key: REFERRAL_DISCOUNT_STEP_PERCENT_KEY,
+      value: String(values[REFERRAL_DISCOUNT_STEP_PERCENT_KEY] || '5').trim(),
+    },
+    {
+      key: REFERRAL_DISCOUNT_MAX_PERCENT_KEY,
+      value: String(values[REFERRAL_DISCOUNT_MAX_PERCENT_KEY] || '100').trim(),
+    },
+    {
+      key: REFERRAL_MATCH_REWARD_ENABLED_KEY,
+      value: truthySettingValue(values[REFERRAL_MATCH_REWARD_ENABLED_KEY]) ? 'true' : 'false',
+    },
+    {
+      key: REFERRAL_MATCH_REWARD_COUNT_KEY,
+      value: String(values[REFERRAL_MATCH_REWARD_COUNT_KEY] || '0').trim(),
     },
     {
       key: THEME_PRIMARY_COLOR_KEY,
@@ -999,12 +1158,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
   const [integrationPassword, setIntegrationPassword] = useState('');
   const [integrationUnlockToken, setIntegrationUnlockToken] = useState('');
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState<Record<string, IntegrationDiagnosticsResponse['groups'][number]>>({});
+  const [marketingWidgetDrafts, setMarketingWidgetDrafts] = useState<Record<string, MarketingWidgetConfigResponse>>({});
   const [openSections, setOpenSections] = useState<Record<SettingsTabId, SettingsAccordionState>>(() => ({
     texts: createCollapsedSectionState(TAB_SECTION_IDS.texts),
     switches: createCollapsedSectionState(TAB_SECTION_IDS.switches),
     integrations: createCollapsedSectionState(TAB_SECTION_IDS.integrations),
     theme: createCollapsedSectionState(TAB_SECTION_IDS.theme),
     monitoring: createCollapsedSectionState(TAB_SECTION_IDS.monitoring),
+    marketing: createCollapsedSectionState(TAB_SECTION_IDS.marketing),
   }));
   const queryClient = useQueryClient();
   const settingsForm = useForm<AdminSettingsFormValues>({
@@ -1016,6 +1177,30 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     queryFn: () => apiFetch<AdminSettingsResponse>('/admin/settings'),
     enabled: active,
     staleTime: 60_000,
+  });
+  const marketingSummaryQuery = useQuery({
+    queryKey: ADMIN_REFERRALS_SUMMARY_QUERY_KEY,
+    queryFn: () => apiFetch<MarketingSummaryResponse>('/admin/referrals/summary'),
+    enabled: active && activeTab === 'marketing',
+    staleTime: 60_000,
+  });
+  const marketingWidgetsQuery = useQuery({
+    queryKey: ADMIN_MARKETING_WIDGETS_QUERY_KEY,
+    queryFn: () => apiFetch<MarketingWidgetsResponse>('/admin/marketing/widgets'),
+    enabled: active && activeTab === 'marketing',
+    staleTime: 60_000,
+  });
+  const marketingRiskQueueQuery = useQuery({
+    queryKey: ADMIN_MARKETING_RISK_QUEUE_QUERY_KEY,
+    queryFn: () => apiFetch<MarketingRiskQueueResponse>('/admin/marketing/risk-queue'),
+    enabled: active && activeTab === 'marketing',
+    staleTime: 30_000,
+  });
+  const marketingRewardEventsQuery = useQuery({
+    queryKey: ADMIN_MARKETING_REWARD_EVENTS_QUERY_KEY,
+    queryFn: () => apiFetch<MarketingRewardEventsResponse>('/admin/marketing/reward-events?limit=20'),
+    enabled: active && activeTab === 'marketing',
+    staleTime: 30_000,
   });
   const monitoringTabActive = activeTab === 'monitoring';
   const monitoringLogsOpen = Boolean(openSections.monitoring?.['monitoring-logs']);
@@ -1056,6 +1241,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     onSuccess: (data) => {
       queryClient.setQueryData(ADMIN_SETTINGS_QUERY_KEY, data);
       void queryClient.invalidateQueries({ queryKey: PUBLIC_THEME_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ADMIN_REFERRALS_SUMMARY_QUERY_KEY });
       const nextValues = formValuesFromSettings(data);
       if (integrationsUnlocked) {
         const currentValues = settingsForm.getValues();
@@ -1068,6 +1254,33 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     },
     onError: (err: any) => {
       notifyError(err.message || 'Не удалось сохранить настройки');
+    },
+  });
+  const saveMarketingWidgetsMutation = useMutation({
+    mutationFn: (widgets: MarketingWidgetConfigResponse[]) => apiFetch<MarketingWidgetsResponse>('/admin/marketing/widgets', {
+      method: 'PATCH',
+      body: JSON.stringify({ configs: widgets }),
+    }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(ADMIN_MARKETING_WIDGETS_QUERY_KEY, data);
+      notifySuccess('Промо-виджеты сохранены');
+    },
+    onError: (err: any) => {
+      notifyError(err.message || 'Не удалось сохранить промо-виджеты');
+    },
+  });
+  const reviewMarketingRiskMutation = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' }) => apiFetch(`/admin/marketing/risk-queue/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+    }),
+    onSuccess: (_data, variables) => {
+      notifySuccess(variables.action === 'approve' ? 'Событие подтверждено' : 'Событие отклонено');
+      void queryClient.invalidateQueries({ queryKey: ADMIN_REFERRALS_SUMMARY_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ADMIN_MARKETING_RISK_QUEUE_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ADMIN_MARKETING_REWARD_EVENTS_QUERY_KEY });
+    },
+    onError: (err: any) => {
+      notifyError(err.message || 'Не удалось обработать событие');
     },
   });
   const resetSessionsMutation = useMutation({
@@ -1163,6 +1376,13 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
       settingsForm.reset(nextValues);
     }
   }, [integrationsUnlocked, settingsForm, settingsQuery.data]);
+
+  useEffect(() => {
+    if (!marketingWidgetsQuery.data?.widgets) return;
+    setMarketingWidgetDrafts(
+      Object.fromEntries(marketingWidgetsQuery.data.widgets.map(widget => [widget.key, widget])),
+    );
+  }, [marketingWidgetsQuery.data]);
 
   useEffect(() => () => {
     if (editorScrollFrameRef.current !== undefined) window.cancelAnimationFrame(editorScrollFrameRef.current);
@@ -1581,13 +1801,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     return null;
   };
 
-  const renderSettingsSaveFooter = () => (
+  const renderSettingsSaveFooter = (mode: 'submit' | 'button' = 'submit') => (
     <div className="flex flex-col gap-3 border-t border-white/10 pt-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
         {settingsFormDirty ? 'Есть несохраненные изменения' : 'Все изменения сохранены'}
       </div>
       <button
-        type="submit"
+        type={mode === 'submit' ? 'submit' : 'button'}
+        onClick={mode === 'button' ? settingsForm.handleSubmit(handleSettingsSubmit) : undefined}
         disabled={!settingsFormDirty || !settingsFormValid || saveSettingsMutation.isPending || settingsQuery.isLoading}
         className="flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-cyan-300/30 bg-cyan-300/[0.13] px-4 text-[10px] font-black uppercase tracking-wider text-cyan-50 shadow-neon-cyan transition-all hover:bg-cyan-300/[0.18] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -1763,6 +1984,569 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
 
         {renderSettingsSaveFooter()}
       </form>
+    );
+  };
+
+  const renderMarketingNumberField = (
+    key: string,
+    label: string,
+    description: string,
+    min: number,
+    max: number,
+    fallback: string,
+    suffix: string,
+    Icon: LucideIcon,
+  ) => {
+    const rawValue = settingsForm.watch(key);
+    const value = rawValue === undefined || rawValue === null || rawValue === '' ? fallback : String(rawValue);
+
+    return (
+      <label key={key} className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
+        <span className="mb-3 flex min-w-0 items-start justify-between gap-3">
+          <span className="flex min-w-0 items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-100">
+              <Icon className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-xs font-black text-white">{label}</span>
+              <span className="mt-1 block text-[10px] font-semibold leading-relaxed text-slate-500">{description}</span>
+            </span>
+          </span>
+          <span className="shrink-0 rounded-xl border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-100">
+            {value}{suffix}
+          </span>
+        </span>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={1}
+          value={value}
+          onChange={(event) => settingsForm.setValue(key, event.target.value, {
+            shouldDirty: true,
+            shouldTouch: true,
+            shouldValidate: true,
+          })}
+          className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[16px] font-semibold text-white outline-none transition-all focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/10 sm:text-sm"
+        />
+      </label>
+    );
+  };
+
+  const marketingWidgetDraftList = useMemo(() => (
+    Object.values(marketingWidgetDrafts).sort((a, b) => (
+      (a.position - b.position) || a.key.localeCompare(b.key)
+    ))
+  ), [marketingWidgetDrafts]);
+
+  const updateMarketingWidgetDraft = (
+    key: string,
+    patch: Partial<MarketingWidgetConfigResponse>,
+  ) => {
+    setMarketingWidgetDrafts(prev => {
+      const current = prev[key];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [key]: { ...current, ...patch },
+      };
+    });
+  };
+
+  const renderWidgetNumberInput = (
+    widget: MarketingWidgetConfigResponse,
+    field: 'position' | 'cooldown_hours' | 'per_user_limit' | 'global_daily_limit' | 'reward_value' | 'promo_valid_hours',
+    label: string,
+    max = 100000,
+  ) => (
+    <label className="min-w-0 space-y-1">
+      <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">{label}</span>
+      <input
+        type="number"
+        min={0}
+        max={max}
+        value={widget[field] ?? 0}
+        onChange={(event) => updateMarketingWidgetDraft(widget.key, {
+          [field]: Math.max(0, Number.parseInt(event.target.value || '0', 10)),
+        })}
+        className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-[16px] font-bold text-white outline-none transition-all focus:border-cyan-300/45 sm:text-xs"
+      />
+    </label>
+  );
+
+  const renderMarketingWidgetsManager = () => {
+    if (marketingWidgetsQuery.isLoading) {
+      return (
+        <div className="flex min-h-[140px] items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
+        </div>
+      );
+    }
+
+    if (marketingWidgetsQuery.isError) {
+      return (
+        <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-xs font-semibold text-amber-100">
+          Не удалось загрузить конфиг промо-виджетов.
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          {marketingWidgetDraftList.map(widget => (
+            <div
+              key={widget.key}
+              className={`rounded-2xl border p-3 transition-all ${
+                widget.is_enabled
+                  ? 'border-cyan-300/20 bg-cyan-300/[0.06]'
+                  : 'border-white/10 bg-white/[0.025] opacity-75'
+              }`}
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-black uppercase tracking-wider text-white">{widget.title || widget.key}</p>
+                  <p className="mt-1 line-clamp-2 text-[10px] font-semibold leading-relaxed text-slate-500">
+                    {widget.description || widget.key}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => updateMarketingWidgetDraft(widget.key, { is_enabled: !widget.is_enabled })}
+                  className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-2 rounded-xl border px-3 text-[9px] font-black uppercase tracking-wider transition-all ${
+                    widget.is_enabled
+                      ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
+                      : 'border-slate-500/20 bg-slate-500/10 text-slate-300'
+                  }`}
+                >
+                  <Power className="h-3.5 w-3.5" />
+                  {widget.is_enabled ? 'Вкл' : 'Выкл'}
+                </button>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
+                <label className="min-w-0 space-y-1">
+                  <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Аудитория</span>
+                  <select
+                    value={widget.audience || 'all'}
+                    onChange={(event) => updateMarketingWidgetDraft(widget.key, { audience: event.target.value })}
+                    className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
+                  >
+                    <option value="all">Все</option>
+                    <option value="clients">Клиенты</option>
+                    <option value="referrals">Рефералы</option>
+                    <option value="staff">Команда</option>
+                  </select>
+                </label>
+                <label className="min-w-0 space-y-1">
+                  <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Награда</span>
+                  <select
+                    value={widget.reward_type || 'none'}
+                    onChange={(event) => updateMarketingWidgetDraft(widget.key, { reward_type: event.target.value })}
+                    className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
+                  >
+                    <option value="none">Нет</option>
+                    <option value="mixed">Микс</option>
+                    <option value="discount">Скидка</option>
+                    <option value="free_bet">Прогноз</option>
+                    <option value="matches">Матчи</option>
+                  </select>
+                </label>
+                {renderWidgetNumberInput(widget, 'reward_value', 'Размер')}
+                {renderWidgetNumberInput(widget, 'cooldown_hours', 'Cooldown, ч')}
+                {renderWidgetNumberInput(widget, 'per_user_limit', 'Лимит/user')}
+                {renderWidgetNumberInput(widget, 'global_daily_limit', 'Лимит/день')}
+                {renderWidgetNumberInput(widget, 'promo_valid_hours', 'Промо, ч')}
+                {renderWidgetNumberInput(widget, 'position', 'Позиция', 1000)}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            {marketingWidgetsQuery.data?.configured ? 'Backend-конфиг активен' : 'До первого сохранения лента использует ENV fallback'}
+          </p>
+          <button
+            type="button"
+            onClick={() => saveMarketingWidgetsMutation.mutate(marketingWidgetDraftList)}
+            disabled={saveMarketingWidgetsMutation.isPending || marketingWidgetDraftList.length === 0}
+            className="inline-flex min-h-[38px] items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 text-[10px] font-black uppercase tracking-wider text-slate-950 transition-all hover:bg-cyan-300 disabled:opacity-50"
+          >
+            {saveMarketingWidgetsMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Сохранить виджеты
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMarketingRiskManager = () => {
+    if (marketingRiskQueueQuery.isLoading) {
+      return (
+        <div className="flex min-h-[120px] items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
+        </div>
+      );
+    }
+
+    if (marketingRiskQueueQuery.isError) {
+      return (
+        <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-xs font-semibold text-amber-100">
+          Не удалось загрузить очередь антиабуза.
+        </div>
+      );
+    }
+
+    const riskItems = marketingRiskQueueQuery.data?.items || [];
+    const rewardEvents = marketingRewardEventsQuery.data?.events || [];
+
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {renderMetricCard('На проверке', riskItems.length, 'Held-события, которые не должны начислять бонусы автоматически.', 'amber')}
+          {renderMetricCard('Held ref', marketingSummaryQuery.data?.held_events ?? 0, 'Реферальные события на ручной проверке.', 'violet')}
+          {renderMetricCard('Reject', marketingSummaryQuery.data?.rejected_events ?? 0, 'Отклоненные реферальные события.', 'rose')}
+        </div>
+
+        <div className="space-y-2">
+          {riskItems.length === 0 ? (
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-center text-[11px] font-bold uppercase tracking-wider text-slate-500">
+              Очередь проверки пуста
+            </div>
+          ) : riskItems.map(item => (
+            <div key={item.id} className="grid gap-3 rounded-2xl border border-amber-300/18 bg-amber-300/[0.06] p-3 md:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-amber-100">
+                    {item.kind}
+                  </span>
+                  <span className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-slate-300">
+                    score {item.risk_score}
+                  </span>
+                </div>
+                <p className="mt-2 truncate text-xs font-black text-white">{item.title}</p>
+                <p className="mt-1 line-clamp-2 text-[10px] font-semibold leading-relaxed text-slate-500">
+                  {(item.risk_reasons || []).join(', ') || 'Причина не указана'}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 md:flex md:items-center">
+                <button
+                  type="button"
+                  onClick={() => reviewMarketingRiskMutation.mutate({ id: item.id, action: 'approve' })}
+                  disabled={reviewMarketingRiskMutation.isPending}
+                  className="inline-flex min-h-[34px] items-center justify-center rounded-xl border border-emerald-300/25 bg-emerald-300/10 px-3 text-[9px] font-black uppercase tracking-wider text-emerald-100 disabled:opacity-50"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => reviewMarketingRiskMutation.mutate({ id: item.id, action: 'reject' })}
+                  disabled={reviewMarketingRiskMutation.isPending}
+                  className="inline-flex min-h-[34px] items-center justify-center rounded-xl border border-rose-300/25 bg-rose-300/10 px-3 text-[9px] font-black uppercase tracking-wider text-rose-100 disabled:opacity-50"
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="space-y-2 border-t border-white/10 pt-3">
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Последние промо-награды</p>
+          {marketingRewardEventsQuery.isLoading ? (
+            <div className="flex min-h-[70px] items-center justify-center">
+              <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
+            </div>
+          ) : rewardEvents.length === 0 ? (
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-center text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              Наград пока нет
+            </div>
+          ) : rewardEvents.slice(0, 6).map(event => (
+            <div key={event.id} className="grid gap-2 rounded-2xl border border-white/10 bg-white/[0.035] p-3 text-xs text-slate-300 md:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="min-w-0">
+                <p className="truncate font-black text-white">{event.user_label} / {event.widget_key}</p>
+                <p className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                  {event.reward_type} · {event.reward_value} · {event.promo_code || 'без промо'}
+                </p>
+              </div>
+              <span className={`w-fit rounded-xl border px-2 py-1 text-[9px] font-black uppercase tracking-wider ${
+                event.risk_status === 'approved'
+                  ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
+                  : event.risk_status === 'held'
+                    ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                    : 'border-rose-300/20 bg-rose-300/10 text-rose-100'
+              }`}>
+                {event.risk_status}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderMarketingTab = () => {
+    const tabConfig = SETTINGS_TABS.find(tab => tab.id === 'marketing') || SETTINGS_TABS[0];
+    const state = renderSettingsQueryState(tabConfig);
+    if (state) return state;
+
+    const summary = marketingSummaryQuery.data;
+    const programEnabled = truthySettingValue(settingsForm.watch(REFERRAL_PROGRAM_ENABLED_KEY));
+    const discountEnabled = truthySettingValue(settingsForm.watch(REFERRAL_DISCOUNT_ENABLED_KEY));
+    const matchRewardEnabled = truthySettingValue(settingsForm.watch(REFERRAL_MATCH_REWARD_ENABLED_KEY));
+    const stepPercent = String(settingsForm.watch(REFERRAL_DISCOUNT_STEP_PERCENT_KEY) || '5');
+    const maxPercent = String(settingsForm.watch(REFERRAL_DISCOUNT_MAX_PERCENT_KEY) || '100');
+    const matchRewardCount = String(settingsForm.watch(REFERRAL_MATCH_REWARD_COUNT_KEY) || '0');
+
+    return (
+      <div
+        id="settings-panel-marketing"
+        role="tabpanel"
+        aria-labelledby="settings-tab-marketing"
+        className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/42 p-4 shadow-glass backdrop-blur-xl sm:p-5"
+      >
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
+          <div role="tablist" aria-label="Разделы маркетинга" className="grid grid-cols-1 gap-2 sm:max-w-sm">
+            <button
+              type="button"
+              id="marketing-referral-tab"
+              role="tab"
+              aria-selected="true"
+              aria-controls="marketing-referral-panel"
+              className={`flex min-h-[58px] items-center gap-3 rounded-xl border px-3 py-2 text-left transition-all ${
+                programEnabled
+                  ? 'border-emerald-300/30 bg-emerald-300/[0.12] text-emerald-100 shadow-[0_0_20px_rgba(52,211,153,0.12)]'
+                  : 'border-amber-300/24 bg-amber-300/[0.08] text-amber-100'
+              }`}
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-black/25">
+                <Link2 className="h-4 w-4" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-black uppercase tracking-wider text-white">Рефералка</span>
+                <span className="mt-0.5 block truncate text-[10px] font-bold text-slate-400">
+                  Ссылки, скидки, бонусы, антиабуз
+                </span>
+              </span>
+              <span className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[8px] font-black uppercase tracking-wider">
+                {programEnabled ? 'active' : 'off'}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div
+          id="marketing-referral-panel"
+          role="tabpanel"
+          aria-labelledby="marketing-referral-tab"
+          className="space-y-4"
+        >
+        <SettingsAccordionSection
+          id="marketing-overview"
+          title="Контроль реферальной программы"
+          subtitle="Сводка по приглашениям и начисленным бонусам"
+          badge={programEnabled ? 'active' : 'off'}
+          Icon={Activity}
+          tone={programEnabled ? 'emerald' : 'amber'}
+          open={sectionIsOpen('marketing', 'marketing-overview')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-overview')}
+          status={renderStatusBadge(programEnabled ? 'ok' : 'warning', programEnabled ? 'активно' : 'выкл')}
+        >
+          {marketingSummaryQuery.isLoading ? (
+            <div className="flex min-h-[120px] items-center justify-center">
+              <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
+            </div>
+          ) : marketingSummaryQuery.isError ? (
+            <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-xs font-semibold text-amber-100">
+              Не удалось загрузить сводку реферальной программы.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              {renderMetricCard('Приглашено', summary?.invited_count ?? 0, 'Клиенты, пришедшие по реферальной ссылке.', 'cyan')}
+              {renderMetricCard('Покупки', summary?.qualified_purchase_events ?? 0, 'Первые квалифицированные оплаты рефералов.', 'emerald')}
+              {renderMetricCard('Рефереры', summary?.active_referrers ?? 0, 'Клиенты, у которых есть оплаченные рефералы.', 'violet')}
+              {renderMetricCard('Матчи', summary?.matches_awarded_total ?? 0, 'Всего матчей начислено пригласившим.', 'amber')}
+            </div>
+          )}
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-referrals"
+          title="Правила скидки"
+          subtitle="Автоматическая скидка пригласившему на абонемент"
+          badge={`${stepPercent}% / ${maxPercent}%`}
+          Icon={Percent}
+          tone={discountEnabled ? 'cyan' : 'amber'}
+          open={sectionIsOpen('marketing', 'marketing-referrals')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-referrals')}
+          dirty={settingsFormDirty}
+        >
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+            {REFERRAL_SWITCH_SETTINGS.slice(0, 2).map(renderSwitchToggle)}
+            {renderMarketingNumberField(
+              REFERRAL_DISCOUNT_STEP_PERCENT_KEY,
+              'Шаг скидки',
+              'Сколько процентов добавлять за каждого приглашенного, который оплатил.',
+              0,
+              100,
+              '5',
+              '%',
+              Percent,
+            )}
+            {renderMarketingNumberField(
+              REFERRAL_DISCOUNT_MAX_PERCENT_KEY,
+              'Максимум скидки',
+              'Потолок автоматической реферальной скидки на абонемент.',
+              0,
+              100,
+              '100',
+              '%',
+              Percent,
+            )}
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-rewards"
+          title="Награды за покупку реферала"
+          subtitle="Матчи сейчас, внутренняя валюта позже"
+          badge={matchRewardEnabled ? `+${matchRewardCount}` : 'manual'}
+          Icon={Ticket}
+          tone={matchRewardEnabled ? 'emerald' : 'violet'}
+          open={sectionIsOpen('marketing', 'marketing-rewards')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-rewards')}
+          dirty={settingsFormDirty}
+        >
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+            {REFERRAL_SWITCH_SETTINGS.slice(2).map(renderSwitchToggle)}
+            {renderMarketingNumberField(
+              REFERRAL_MATCH_REWARD_COUNT_KEY,
+              'Матчей пригласившему',
+              'Начисляется один раз после первой оплаченной покупки приглашенного.',
+              0,
+              1000,
+              '0',
+              '',
+              Ticket,
+            )}
+            <div
+              aria-disabled="true"
+              className="rounded-2xl border border-white/10 bg-white/[0.025] p-4 opacity-70"
+            >
+              <div className="mb-3 flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-500/20 bg-slate-500/10 text-slate-300">
+                  <CreditCard className="h-4 w-4" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-black text-white">Внутренняя валюта</p>
+                  <p className="mt-1 text-[10px] font-semibold leading-relaxed text-slate-500">
+                    Тип награды зарезервирован. Для включения нужен отдельный кошелек и ledger.
+                  </p>
+                </div>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                Скоро
+              </div>
+            </div>
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-widgets"
+          title="Промо-виджеты"
+          subtitle="Включение, лимиты, cooldown и награды"
+          badge={`${marketingWidgetDraftList.filter(widget => widget.is_enabled).length}/${marketingWidgetDraftList.length || 0}`}
+          Icon={Sparkles}
+          tone="cyan"
+          open={sectionIsOpen('marketing', 'marketing-widgets')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-widgets')}
+          dirty={saveMarketingWidgetsMutation.isPending}
+        >
+          {renderMarketingWidgetsManager()}
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-risk"
+          title="Антиабуз"
+          subtitle="Очередь held-событий и журнал промо-наград"
+          badge={`${marketingRiskQueueQuery.data?.held_count ?? 0}`}
+          Icon={ShieldAlert}
+          tone={(marketingRiskQueueQuery.data?.held_count ?? 0) > 0 ? 'amber' : 'emerald'}
+          open={sectionIsOpen('marketing', 'marketing-risk')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-risk')}
+        >
+          {renderMarketingRiskManager()}
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-promos"
+          title="Промокоды"
+          subtitle="Скидки и матчевые промо-коды"
+          badge="promo"
+          Icon={Gift}
+          tone="cyan"
+          open={sectionIsOpen('marketing', 'marketing-promos')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-promos')}
+        >
+          <AdminMarketing />
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-events"
+          title="Последние начисления"
+          subtitle="Аудит первых квалифицированных покупок"
+          badge={`${summary?.recent_events?.length ?? 0}`}
+          Icon={Clock3}
+          tone="violet"
+          open={sectionIsOpen('marketing', 'marketing-events')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-events')}
+        >
+          <div className="space-y-2">
+            {(summary?.recent_events || []).length === 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-center text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Начислений пока нет
+              </div>
+            ) : (
+              summary!.recent_events.map(event => (
+                <div
+                  key={event.id}
+                  className="grid gap-2 rounded-2xl border border-white/10 bg-white/[0.035] p-3 text-xs text-slate-300 md:grid-cols-[minmax(0,1fr)_auto]"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-black text-white">
+                      {event.referrer_label} / {event.referred_label}
+                    </p>
+                    <p className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      {event.source_type} · скидка {event.discount_percent_snapshot}% · {event.status || 'approved'}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                    <span className={`rounded-xl border px-2 py-1 text-[9px] font-black uppercase tracking-wider ${
+                      (event.status || 'approved') === 'approved'
+                        ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
+                        : (event.status || 'approved') === 'held'
+                          ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                          : 'border-rose-300/20 bg-rose-300/10 text-rose-100'
+                    }`}>
+                      {event.status || 'approved'}
+                    </span>
+                    <span className="rounded-xl border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-emerald-100">
+                      +{event.matches_awarded} матч.
+                    </span>
+                    <span className="rounded-xl border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-bold text-slate-400">
+                      {event.created_at ? new Date(event.created_at).toLocaleDateString('ru-RU') : '—'}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </SettingsAccordionSection>
+
+        {renderSettingsSaveFooter('button')}
+        </div>
+      </div>
     );
   };
 
@@ -2611,6 +3395,8 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
         return renderThemeTab();
       case 'monitoring':
         return renderMonitoringTab();
+      case 'marketing':
+        return renderMarketingTab();
       case 'texts':
       default:
         return renderTextTabState();
@@ -2640,7 +3426,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           <div
             role="tablist"
             aria-label="Подвкладки настроек"
-            className="grid w-full min-w-0 grid-cols-2 gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
+            className="grid w-full min-w-0 grid-cols-2 gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
           >
           {SETTINGS_TABS.map(tab => {
             const TabIcon = tab.Icon;

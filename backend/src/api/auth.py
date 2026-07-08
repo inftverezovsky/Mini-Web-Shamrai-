@@ -68,7 +68,7 @@ from src.services.telegram_auth import (
 )
 from src.services.vk_auth_flow import consume_vk_auth_flow, store_vk_auth_flow
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
-from src.services.system_settings import is_system_setting_enabled
+from src.services.system_settings import REFERRAL_PROGRAM_ENABLED_KEY, is_system_setting_enabled
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = logging.getLogger("uvicorn")
@@ -692,12 +692,19 @@ def _clear_auth_cookie(response: Response) -> None:
     )
 
 
+def _should_expose_bearer_auth_compat() -> bool:
+    return bool(settings.ENABLE_BEARER_AUTH_COMPAT and not settings.is_production)
+
+
 def _build_login_response(user: User, response: Optional[Response] = None) -> LoginResponse:
     access_token = create_access_token({"sub": str(user.telegram_id), "role": user.role})
     if response is not None:
         _set_auth_cookie(response, access_token)
         set_csrf_cookie(response)
-    return LoginResponse(access_token=access_token, user=user)
+    return LoginResponse(
+        access_token=access_token if _should_expose_bearer_auth_compat() else None,
+        user=user,
+    )
 
 
 def _registration_report_line(label: str, value: object) -> str:
@@ -780,6 +787,8 @@ async def _resolve_referrer_id(db: AsyncSession, tg_id: int, start_param: Option
 
     candidate_referrer_id = int(match.group(1))
     if candidate_referrer_id == tg_id:
+        return None
+    if not await is_system_setting_enabled(db, REFERRAL_PROGRAM_ENABLED_KEY):
         return None
 
     referrer_res = await db.execute(

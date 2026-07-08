@@ -1,6 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from src.core import csrf
 from src.core.csrf import (
     AUTH_COOKIE_NAME,
     CSRF_COOKIE_NAME,
@@ -53,10 +55,65 @@ class CsrfProtectionTests(unittest.TestCase):
         self.assertTrue(should_check_csrf(request))
         self.assertTrue(validate_csrf_request(request))
 
+    def test_cookie_auth_accepts_valid_csrf_token_with_allowed_origin(self):
+        token = create_csrf_token()
+        request = _request(
+            cookies={AUTH_COOKIE_NAME: "access-token", CSRF_COOKIE_NAME: token},
+            headers={
+                CSRF_HEADER_NAME: token,
+                "Origin": "https://app.example.test",
+            },
+        )
+
+        with (
+            patch.object(csrf.settings, "CORS_ALLOWED_ORIGINS", "https://app.example.test"),
+            patch.object(csrf.settings, "FRONTEND_BASE_URL", "https://app.example.test/app"),
+            patch.object(csrf.settings, "API_BASE_URL", "https://api.example.test"),
+        ):
+            self.assertTrue(should_check_csrf(request))
+            self.assertTrue(validate_csrf_request(request))
+
+    def test_cookie_auth_rejects_valid_csrf_token_with_evil_origin(self):
+        token = create_csrf_token()
+        request = _request(
+            cookies={AUTH_COOKIE_NAME: "access-token", CSRF_COOKIE_NAME: token},
+            headers={
+                CSRF_HEADER_NAME: token,
+                "Origin": "https://evil.example.test",
+            },
+        )
+
+        with (
+            patch.object(csrf.settings, "CORS_ALLOWED_ORIGINS", "https://app.example.test"),
+            patch.object(csrf.settings, "FRONTEND_BASE_URL", "https://app.example.test/app"),
+            patch.object(csrf.settings, "API_BASE_URL", "https://api.example.test"),
+        ):
+            self.assertTrue(should_check_csrf(request))
+            self.assertFalse(validate_csrf_request(request))
+
+    def test_cookie_auth_accepts_valid_csrf_token_with_allowed_referer(self):
+        token = create_csrf_token()
+        request = _request(
+            cookies={AUTH_COOKIE_NAME: "access-token", CSRF_COOKIE_NAME: token},
+            headers={
+                CSRF_HEADER_NAME: token,
+                "Referer": "https://app.example.test/app/profile",
+            },
+        )
+
+        with (
+            patch.object(csrf.settings, "CORS_ALLOWED_ORIGINS", ""),
+            patch.object(csrf.settings, "FRONTEND_BASE_URL", "https://app.example.test/app"),
+            patch.object(csrf.settings, "API_BASE_URL", "https://api.example.test"),
+        ):
+            self.assertTrue(should_check_csrf(request))
+            self.assertTrue(validate_csrf_request(request))
+
     def test_webhook_exemptions_do_not_require_csrf(self):
         request = _request(
             path="/api/payments/yookassa/webhook",
             cookies={AUTH_COOKIE_NAME: "access-token"},
+            headers={"Origin": "https://evil.example.test"},
         )
 
         self.assertFalse(should_check_csrf(request))

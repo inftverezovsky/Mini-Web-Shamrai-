@@ -26,7 +26,7 @@ from src.core.config import settings
 from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.api.deps import get_current_user
-from src.services.referrals import get_referral_discount_percent
+from src.services.referrals import apply_referral_reward_for_purchase, get_referral_discount_percent
 from src.services.match_access import activate_match_subscription
 from src.services.crowd_bets import apply_verified_crowd_contribution
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
@@ -606,6 +606,14 @@ async def _process_payment_attempt(
             "subscription_id": str(subscription.id),
             "matches_added": plan.match_count,
         })
+        referral_event = await apply_referral_reward_for_purchase(
+            db,
+            referred_user=user,
+            payment_attempt=attempt,
+            source_type="subscription",
+        )
+        if referral_event:
+            result["referral_reward_matches"] = referral_event.matches_awarded
     elif bet:
         metadata = attempt.metadata_json or {}
         purchase_type = str(metadata.get("purchase_type") or "single_bet")
@@ -632,6 +640,14 @@ async def _process_payment_attempt(
                 access_type=f"{provider}_single_bet",
             )
             result.update({"bet_id": str(bet.id), "already_unlocked": not unlocked})
+            referral_event = await apply_referral_reward_for_purchase(
+                db,
+                referred_user=user,
+                payment_attempt=attempt,
+                source_type="single_bet",
+            )
+            if referral_event:
+                result["referral_reward_matches"] = referral_event.matches_awarded
 
     attempt.status = "succeeded"
     attempt.processed_at = datetime.now(timezone.utc)

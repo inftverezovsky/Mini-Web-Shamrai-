@@ -4,9 +4,9 @@ services:
     container_name: shamrai-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-shamrai}
-      POSTGRES_USER: ${POSTGRES_USER:-shamrai}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres_password}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -43,8 +43,9 @@ services:
       APP_ENV: ${APP_ENV:-production}
       DEBUG_MODE: ${DEBUG_MODE:-false}
       ALLOW_DEBUG_AUTH_BYPASS: ${ALLOW_DEBUG_AUTH_BYPASS:-false}
+      ENABLE_BEARER_AUTH_COMPAT: ${ENABLE_BEARER_AUTH_COMPAT:-false}
       SECURITY_RATE_LIMIT_MODE: ${SECURITY_RATE_LIMIT_MODE:-enforce}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-shamrai}:${POSTGRES_PASSWORD:-change_me_postgres_password}@postgres:5432/${POSTGRES_DB:-shamrai}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_CACHE_ENABLED: ${REDIS_CACHE_ENABLED:-true}
       REDIS_HOT_CACHE_TTL_SECONDS: ${REDIS_HOT_CACHE_TTL_SECONDS:-300}

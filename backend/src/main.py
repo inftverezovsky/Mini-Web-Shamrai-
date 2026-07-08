@@ -111,6 +111,69 @@ async def run_dev_schema_migrations(conn):
             "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_id ON promo_code_redemptions (user_id)",
             "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_redeemed ON promo_code_redemptions (user_id, redeemed_at)",
             """
+            CREATE TABLE IF NOT EXISTS referral_reward_events (
+                id SERIAL PRIMARY KEY,
+                referrer_user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                referred_user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                source_payment_attempt_id UUID REFERENCES payment_attempts(id) ON DELETE SET NULL,
+                source_type VARCHAR NOT NULL,
+                discount_percent_snapshot INTEGER NOT NULL DEFAULT 0,
+                matches_awarded INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                CONSTRAINT uq_referral_reward_referrer_referred UNIQUE (referrer_user_id, referred_user_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_referrer_user_id ON referral_reward_events (referrer_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_referred_user_id ON referral_reward_events (referred_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_source_payment_attempt_id ON referral_reward_events (source_payment_attempt_id)",
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_referrer_created ON referral_reward_events (referrer_user_id, created_at)",
+            "ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS status VARCHAR NOT NULL DEFAULT 'approved'",
+            "ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS risk_score INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS risk_reasons JSON NOT NULL DEFAULT '[]'::json",
+            "ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL",
+            "ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP WITH TIME ZONE",
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_status_created ON referral_reward_events (status, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_reviewed_by ON referral_reward_events (reviewed_by)",
+            """
+            CREATE TABLE IF NOT EXISTS marketing_widget_configs (
+                key VARCHAR(64) PRIMARY KEY,
+                is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                position INTEGER NOT NULL DEFAULT 0,
+                audience VARCHAR(32) NOT NULL DEFAULT 'all',
+                starts_at TIMESTAMP WITH TIME ZONE,
+                ends_at TIMESTAMP WITH TIME ZONE,
+                cooldown_hours INTEGER NOT NULL DEFAULT 24,
+                per_user_limit INTEGER NOT NULL DEFAULT 0,
+                global_daily_limit INTEGER NOT NULL DEFAULT 0,
+                reward_type VARCHAR(32) NOT NULL DEFAULT 'none',
+                reward_value INTEGER NOT NULL DEFAULT 0,
+                promo_valid_hours INTEGER NOT NULL DEFAULT 24,
+                settings_json JSON NOT NULL DEFAULT '{}'::json,
+                updated_by BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_marketing_widget_configs_updated_by ON marketing_widget_configs (updated_by)",
+            """
+            CREATE TABLE IF NOT EXISTS marketing_reward_events (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                widget_key VARCHAR(64) NOT NULL,
+                reward_type VARCHAR(32) NOT NULL DEFAULT 'none',
+                reward_value INTEGER NOT NULL DEFAULT 0,
+                promo_code_id INTEGER REFERENCES promo_codes(id) ON DELETE SET NULL,
+                risk_status VARCHAR(16) NOT NULL DEFAULT 'approved',
+                risk_reasons JSON NOT NULL DEFAULT '[]'::json,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_user_id ON marketing_reward_events (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_widget_key ON marketing_reward_events (widget_key)",
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_promo_code_id ON marketing_reward_events (promo_code_id)",
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_user_widget_created ON marketing_reward_events (user_id, widget_key, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_widget_created ON marketing_reward_events (widget_key, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_risk_status_created ON marketing_reward_events (risk_status, created_at)",
+            """
             CREATE TABLE IF NOT EXISTS bet_bookmakers (
                 bet_id UUID NOT NULL REFERENCES bets(id) ON DELETE CASCADE,
                 bookmaker_id INTEGER NOT NULL REFERENCES bookmakers(id) ON DELETE CASCADE,
@@ -427,6 +490,119 @@ async def run_dev_schema_migrations(conn):
         )
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_promo_code_redemptions_user_redeemed ON promo_code_redemptions (user_id, redeemed_at)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS referral_reward_events (
+                id INTEGER NOT NULL,
+                referrer_user_id BIGINT NOT NULL,
+                referred_user_id BIGINT NOT NULL,
+                source_payment_attempt_id CHAR(32),
+                source_type VARCHAR NOT NULL,
+                discount_percent_snapshot INTEGER NOT NULL DEFAULT 0,
+                matches_awarded INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_referral_reward_referrer_referred UNIQUE (referrer_user_id, referred_user_id),
+                FOREIGN KEY (referrer_user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (referred_user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (source_payment_attempt_id) REFERENCES payment_attempts(id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_referrer_user_id ON referral_reward_events (referrer_user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_referred_user_id ON referral_reward_events (referred_user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_source_payment_attempt_id ON referral_reward_events (source_payment_attempt_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_referrer_created ON referral_reward_events (referrer_user_id, created_at)"
+        )
+        referral_reward_columns_result = await conn.exec_driver_sql("PRAGMA table_info(referral_reward_events)")
+        referral_reward_columns = {row[1] for row in referral_reward_columns_result.fetchall()}
+        referral_reward_extra_columns = [
+            ("status", "VARCHAR NOT NULL DEFAULT 'approved'"),
+            ("risk_score", "INTEGER NOT NULL DEFAULT 0"),
+            ("risk_reasons", "JSON NOT NULL DEFAULT '[]'"),
+            ("reviewed_by", "BIGINT"),
+            ("reviewed_at", "DATETIME"),
+        ]
+        for column_name, column_definition in referral_reward_extra_columns:
+            if column_name not in referral_reward_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE referral_reward_events ADD COLUMN {column_name} {column_definition}"
+                )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_status_created ON referral_reward_events (status, created_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_referral_reward_events_reviewed_by ON referral_reward_events (reviewed_by)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS marketing_widget_configs (
+                key VARCHAR(64) NOT NULL,
+                is_enabled BOOLEAN NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                audience VARCHAR(32) NOT NULL DEFAULT 'all',
+                starts_at DATETIME,
+                ends_at DATETIME,
+                cooldown_hours INTEGER NOT NULL DEFAULT 24,
+                per_user_limit INTEGER NOT NULL DEFAULT 0,
+                global_daily_limit INTEGER NOT NULL DEFAULT 0,
+                reward_type VARCHAR(32) NOT NULL DEFAULT 'none',
+                reward_value INTEGER NOT NULL DEFAULT 0,
+                promo_valid_hours INTEGER NOT NULL DEFAULT 24,
+                settings_json JSON NOT NULL DEFAULT '{}',
+                updated_by BIGINT,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (key),
+                FOREIGN KEY (updated_by) REFERENCES users(telegram_id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_widget_configs_updated_by ON marketing_widget_configs (updated_by)"
+        )
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS marketing_reward_events (
+                id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
+                widget_key VARCHAR(64) NOT NULL,
+                reward_type VARCHAR(32) NOT NULL DEFAULT 'none',
+                reward_value INTEGER NOT NULL DEFAULT 0,
+                promo_code_id INTEGER,
+                risk_status VARCHAR(16) NOT NULL DEFAULT 'approved',
+                risk_reasons JSON NOT NULL DEFAULT '[]',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE,
+                FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE SET NULL
+            )
+            """
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_user_id ON marketing_reward_events (user_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_widget_key ON marketing_reward_events (widget_key)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_events_promo_code_id ON marketing_reward_events (promo_code_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_user_widget_created ON marketing_reward_events (user_id, widget_key, created_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_widget_created ON marketing_reward_events (widget_key, created_at)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_marketing_reward_risk_status_created ON marketing_reward_events (risk_status, created_at)"
         )
         await conn.exec_driver_sql(
             """

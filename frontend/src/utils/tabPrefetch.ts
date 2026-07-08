@@ -55,6 +55,12 @@ export interface TariffsDashboardData {
   referralDiscountPercent: number;
 }
 
+interface ReferralDiscountPayload {
+  program_enabled?: boolean;
+  discount_enabled?: boolean;
+  referral_discount_percent?: number;
+}
+
 export interface AdminStatsDashboardData {
   authorTimeline: AdminAuthorTimelineResponse;
   shamraiTimeline: PerformanceTimelineResponse;
@@ -109,12 +115,13 @@ export function fetchProfileDashboard() {
 export async function fetchTariffsDashboard(): Promise<TariffsDashboardData> {
   const [plans, referral] = await Promise.all([
     apiFetch<SubscriptionPlanResponse[]>('/subscriptions/plans'),
-    apiFetch<{ referral_discount_percent?: number }>('/users/me/referral'),
+    apiFetch<ReferralDiscountPayload>('/users/me/referral'),
   ]);
+  const referralDiscountEnabled = referral.program_enabled !== false && referral.discount_enabled !== false;
 
   return {
     plans,
-    referralDiscountPercent: referral.referral_discount_percent ?? 0,
+    referralDiscountPercent: referralDiscountEnabled ? referral.referral_discount_percent ?? 0 : 0,
   };
 }
 

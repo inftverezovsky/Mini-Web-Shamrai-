@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Клиентское обучение Shamrai</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07111f;
+        --panel: rgba(15, 23, 42, 0.82);
+        --panel-strong: rgba(2, 6, 23, 0.9);
+        --text: #f8fafc;
+        --muted: #b6c3d8;
+        --line: rgba(148, 163, 184, 0.22);
+        --cyan: #22d3ee;
+        --pink: #f472b6;
+        --green: #86efac;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 15% 0%, rgba(34, 211, 238, 0.18), transparent 28rem),
+          radial-gradient(circle at 88% 12%, rgba(244, 114, 182, 0.16), transparent 24rem),
+          var(--bg);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .shell {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 36px 0 56px;
+      }
+
+      header {
+        display: grid;
+        gap: 18px;
+        padding: 28px 0 18px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        max-width: 760px;
+        font-size: clamp(32px, 7vw, 70px);
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        font-size: clamp(24px, 3vw, 36px);
+        line-height: 1.05;
+      }
+
+      h3 {
+        font-size: 18px;
+      }
+
+      .lead {
+        max-width: 760px;
+        color: var(--muted);
+        font-size: 18px;
+      }
+
+      .badge {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid rgba(34, 211, 238, 0.4);
+        border-radius: 999px;
+        background: rgba(34, 211, 238, 0.1);
+        padding: 7px 11px;
+        color: #cffafe;
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        border-bottom: 1px solid var(--line);
+        background: rgba(7, 17, 31, 0.9);
+        padding: 12px 0;
+        backdrop-filter: blur(16px);
+      }
+
+      .nav a {
+        flex: 0 0 auto;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 999px;
+        padding: 8px 12px;
+        color: #dbeafe;
+        font-size: 13px;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .grid {
+        display: grid;
+        gap: 28px;
+        margin-top: 28px;
+      }
+
+      .section {
+        display: grid;
+        grid-template-columns: minmax(0, 0.92fr) minmax(280px, 390px);
+        gap: 24px;
+        align-items: start;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel);
+        padding: 22px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.26);
+      }
+
+      .copy {
+        display: grid;
+        gap: 14px;
+      }
+
+      .copy ul,
+      .copy ol {
+        margin: 0;
+        padding-left: 20px;
+        color: var(--muted);
+      }
+
+      .copy li + li {
+        margin-top: 6px;
+      }
+
+      .shot {
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 18px;
+        background: var(--panel-strong);
+      }
+
+      .shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .terms {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .term {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 14px;
+        background: rgba(2, 6, 23, 0.36);
+        padding: 14px;
+      }
+
+      .term strong {
+        display: block;
+        color: var(--green);
+      }
+
+      footer {
+        margin-top: 32px;
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 860px) {
+        .section {
+          grid-template-columns: 1fr;
+        }
+
+        .shot {
+          max-width: 390px;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .shell {
+          width: min(100% - 20px, 1120px);
+          padding-top: 20px;
+        }
+
+        .section {
+          border-radius: 14px;
+          padding: 14px;
+        }
+
+        .terms {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <span class="badge">Только для клиентов</span>
+        <h1>Клиентское обучение Shamrai</h1>
+        <p class="lead">Короткий гид по клиентскому кабинету: где смотреть прогнозы, как включить VK и web-уведомления, где читать статистику и как настроить уведомления.</p>
+      </header>
+
+      <nav class="nav" aria-label="Разделы обучения">
+        <a href="#feed">Лента</a>
+        <a href="#chat">Чат</a>
+        <a href="#take">Как взять ставку</a>
+        <a href="#stats">Статистика</a>
+        <a href="#webpush">Web Push</a>
+        <a href="#homescreen">На экран</a>
+        <a href="#vk">VK</a>
+        <a href="#notifications">Уведомления</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <div class="grid">
+        <section class="section" id="feed">
+          <div class="copy">
+            <h2>Лента прогнозов</h2>
+            <p>Здесь клиент видит прогнозы, статус матча, букмекера, ставку и коэффициент.</p>
+            <ul>
+              <li>Карточка показывает вид спорта, статус события и матч.</li>
+              <li>Коэффициент показывает значение, по которому открыт прогноз.</li>
+              <li>Кнопка <strong>Открыть матч</strong> ведёт к подробностям.</li>
+              <li>Нижнее меню переключает ленту, чат, статистику и профиль.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="assets/01-client-feed.png" alt="Лента прогнозов Shamrai с выносками" />
+          </figure>
+        </section>
+
+        <section class="section" id="chat">
+          <div class="copy">
+            <h2>Чат и web-сигналы</h2>
+            <p>Во вкладке чата клиент получает дубли web-сигналов и может написать в поддержку.</p>
+            <ul>
+              <li>Статус <strong>Web канал</strong> показывает, что web-доставка активна.</li>
+              <li>Внутри чата видны сигналы и сообщения поддержки.</li>
+              <li>Если нужен ответ менеджера, клиент остаётся во вкладке <strong>Чат</strong>.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="assets/02-client-chat.png" alt="Чат Shamrai с web-сигналами и поддержкой" />
+          </figure>
+        </section>
+
+        <section class="section" id="take">
+          <div class="copy">
+            <h2>Как взять ставку после анонса</h2>
+            <p>Когда Shamrai отправляет персональный анонс, клиент выбирает, нужен ли ему полный прогноз.</p>
+            <ol>
+              <li>Получить анонс через Telegram, VK, Web Push или web-чат.</li>
+              <li>Открыть <strong>Чат</strong> -> <strong>Личный бот</strong>.</li>
+              <li>Проверить матч, коэффициент и доступные БК.</li>
+              <li>Нажать <strong>Взять</strong>, если нужен полный прогноз.</li>
+              <li>Нажать <strong>Не взять</strong>, если прогноз не подходит.</li>
+              <li>После <strong>Взять</strong> заявка уходит Shamrai, а полный прогноз приходит в подключённый канал.</li>
+            </ol>
+            <p>Обычная открытая публикация в <strong>Ленте</strong> может быть без кнопки <strong>Взять</strong>. Кнопка появляется у персональных анонсов.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/08-take-announcement.png" alt="Как клиент берёт ставку после анонса Shamrai" />
+          </figure>
+        </section>
+
+        <section class="section" id="stats">
+          <div class="copy">
+            <h2>Статистика</h2>
+            <p>Вкладка помогает понять личный результат и сравнить его с общей статистикой Shamrai.</p>
+            <div class="terms">
+              <div class="term"><strong>Фл.</strong>Флэт, условная единица ставки.</div>
+              <div class="term"><strong>ROI</strong>Эффективность ставок в процентах.</div>
+              <div class="term"><strong>Проход</strong>Доля выигранных прогнозов.</div>
+              <div class="term"><strong>Средний КФ</strong>Средний коэффициент за период.</div>
+            </div>
+          </div>
+          <figure class="shot">
+            <img src="assets/03-client-stats.png" alt="Статистика клиента Shamrai с выносками" />
+          </figure>
+        </section>
+
+        <section class="section" id="webpush">
+          <div class="copy">
+            <h2>Подключение Web Push</h2>
+            <ol>
+              <li>Открыть <strong>Профиль</strong>.</li>
+              <li>Раскрыть <strong>Web Push уведомления</strong>.</li>
+              <li>Нажать <strong>Разрешить уведомления</strong>.</li>
+              <li>В системном окне браузера выбрать <strong>Разрешить</strong>.</li>
+              <li>Вернуться в профиль и нажать <strong>Обновить</strong>, если статус не изменился сразу.</li>
+            </ol>
+            <p>Если статус стал <strong>запрещено</strong>, уведомления нужно разрешить в настройках браузера или телефона.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/04-profile-web-push.png" alt="Web Push в профиле Shamrai с выносками" />
+          </figure>
+        </section>
+
+        <section class="section" id="homescreen">
+          <div class="copy">
+            <h2>Иконка Shamrai на главном экране</h2>
+            <p>После подключения Web Push лучше вынести Shamrai на рабочий стол телефона. Клиент открывает сайт с иконки как обычное приложение и быстрее видит анонсы.</p>
+            <h3>Android</h3>
+            <ol>
+              <li>Открыть <strong>https://shamra1.pro/</strong> в Chrome или основном браузере телефона.</li>
+              <li>Нажать меню <strong>⋮</strong> справа от адресной строки.</li>
+              <li>Выбрать <strong>Установить приложение</strong> или <strong>Добавить на главный экран</strong>.</li>
+              <li>Оставить название <strong>Shamrai</strong> и нажать <strong>Добавить</strong>.</li>
+              <li>После этого запускать Shamrai с новой иконки на рабочем столе.</li>
+            </ol>
+            <h3>iPhone</h3>
+            <ol>
+              <li>Открыть <strong>https://shamra1.pro/</strong> именно в Safari.</li>
+              <li>Нажать кнопку <strong>Поделиться</strong>. Если внизу видна кнопка <strong>…</strong>, сначала нажать её, затем <strong>Поделиться</strong>.</li>
+              <li>Прокрутить список и выбрать <strong>На экран «Домой»</strong>.</li>
+              <li>Проверить название <strong>Shamrai</strong> и нажать <strong>Добавить</strong>.</li>
+              <li>Дальше открывать Shamrai с иконки на домашнем экране.</li>
+            </ol>
+            <p>На iPhone web-уведомления обычно работают для web-приложения после добавления на экран «Домой» и запуска Shamrai с этой иконки.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/04-profile-web-push.png" alt="Web Push и установка Shamrai на главный экран телефона" />
+          </figure>
+        </section>
+
+        <section class="section" id="vk">
+          <div class="copy">
+            <h2>Подключение VK</h2>
+            <ol>
+              <li>Открыть <strong>Профиль</strong>.</li>
+              <li>Раскрыть <strong>Синхронизация VK</strong>.</li>
+              <li>Нажать <strong>Синхронизировать VK</strong>.</li>
+              <li>Подтвердить вход через VK ID и вернуться в Shamrai.</li>
+            </ol>
+            <p>Если после привязки остаётся статус <strong>1 нужно</strong>, нужно разрешить личные сообщения от сообщества VK.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/05-profile-vk-connect.png" alt="Подключение VK ID в Shamrai" />
+          </figure>
+        </section>
+
+        <section class="section">
+          <div class="copy">
+            <h2>Разрешение сообщений VK</h2>
+            <ol>
+              <li>В профиле открыть <strong>Синхронизация VK</strong>.</li>
+              <li>Нажать <strong>Открыть диалог VK</strong>.</li>
+              <li>Разрешить сообщения от сообщества.</li>
+              <li>Вернуться в Shamrai и нажать <strong>Проверить доступ</strong>.</li>
+              <li>После подтверждения бейдж VK должен стать <strong>Готово</strong>.</li>
+            </ol>
+          </div>
+          <figure class="shot">
+            <img src="assets/06-profile-vk-delivery.png" alt="Разрешение сообщений VK в Shamrai" />
+          </figure>
+        </section>
+
+        <section class="section" id="notifications">
+          <div class="copy">
+            <h2>Настройки уведомлений</h2>
+            <ul>
+              <li><strong>Мин. коэффициент</strong> задаёт порог для push-сигналов.</li>
+              <li><strong>Падение кэфа</strong> включает уведомления о просадке коэффициента.</li>
+              <li><strong>Ночной режим</strong> задаёт время, когда push-уведомления не беспокоят.</li>
+              <li><strong>Букмекерские конторы</strong> помогают подбирать подходящие прогнозы.</li>
+              <li>После изменений нужно нажать <strong>Сохранить настройки</strong>.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="assets/07-profile-notifications.png" alt="Настройки уведомлений клиента Shamrai" />
+          </figure>
+        </section>
+
+        <section class="section" id="faq">
+          <div class="copy">
+            <h2>Короткий FAQ</h2>
+            <h3>Где подключить VK?</h3>
+            <p>Профиль -> Синхронизация VK -> Синхронизировать VK.</p>
+            <h3>Где включить web-уведомления?</h3>
+            <p>Профиль -> Web Push уведомления -> Разрешить уведомления.</p>
+            <h3>Как вынести Shamrai на главный экран телефона?</h3>
+            <p>Android: открыть <strong>https://shamra1.pro/</strong> в Chrome -> меню <strong>⋮</strong> -> <strong>Установить приложение</strong> или <strong>Добавить на главный экран</strong>. iPhone: открыть сайт в Safari -> <strong>Поделиться</strong> -> <strong>На экран «Домой»</strong> -> <strong>Добавить</strong>.</p>
+            <h3>Где смотреть статистику?</h3>
+            <p>Вкладка <strong>Статистика</strong> в нижнем меню.</p>
+            <h3>Что делать, когда пришёл анонс ставки?</h3>
+            <p>Открыть <strong>Чат</strong> -> <strong>Личный бот</strong> и нажать <strong>Взять</strong>. Если прогноз не нужен, нажать <strong>Не взять</strong>.</p>
+            <h3>Почему VK показывает "1 нужно"?</h3>
+            <p>VK ID привязан, но сообщения от сообщества ещё не разрешены. Откройте диалог VK, разрешите сообщения и нажмите <strong>Проверить доступ</strong>.</p>
+          </div>
+          <figure class="shot">
+            <img src="assets/03-client-stats.png" alt="Пример клиентской статистики Shamrai" />
+          </figure>
+        </section>
+      </div>
+
+      <footer>
+        Версия материала: 04.07.2026. Для обновления скриншотов используйте `node .\scripts\capture-client-training-screenshots.mjs`.
+      </footer>
+    </main>
+  </body>
+</html>

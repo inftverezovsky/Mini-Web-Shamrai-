@@ -70,8 +70,13 @@ interface ReferralInfo {
   referral_link: string;
   invited_count: number;
   purchased_invited_count: number;
+  program_enabled?: boolean;
+  discount_enabled?: boolean;
   discount_step_percent: number;
+  discount_max_percent?: number;
   referral_discount_percent: number;
+  match_reward_enabled?: boolean;
+  match_reward_count?: number;
 }
 
 interface PaymentRecord {
@@ -320,6 +325,7 @@ export default function Profile() {
     ...userProfile,
     vk_messages_allowed: vkMessagesAllowed,
   }));
+  const referralProgramVisible = !isAdminProfile && !loadingRef && referral?.program_enabled !== false;
   const vkMissingPermissionsCount = vkDeliveryReady ? 0 : 1;
   const telegramIdentity = getTelegramIdentityStatus(userProfile);
   const telegramLinked = telegramIdentity.linked;
@@ -1648,7 +1654,7 @@ export default function Profile() {
       </div>}
 
       {/* ━━━━━━━━━━ BLOCK 3 — Referral System ━━━━━━━━━━ */}
-      {!isAdminProfile && <div className={GLASS + ' p-5 space-y-4'} style={{ boxShadow: NEON_GLOW_PINK }}>
+      {referralProgramVisible && <div className={GLASS + ' p-5 space-y-4'} style={{ boxShadow: NEON_GLOW_PINK }}>
         <button
           type="button"
           onClick={() => toggleSettingsSection('referral')}
@@ -1671,7 +1677,11 @@ export default function Profile() {
                   color: ACCENT_PINK,
               }}
             >
-                В разработке
+                {referral.program_enabled === false
+                  ? 'Выключено'
+                  : referral.referral_discount_percent > 0
+                    ? `${referral.referral_discount_percent}%`
+                    : 'Активно'}
               </span>
             )}
             <ChevronDown
@@ -1789,13 +1799,25 @@ export default function Profile() {
                       className="min-h-7 flex items-center justify-center text-[10px] font-black uppercase leading-tight"
                       style={{ color: ACCENT_PINK }}
                     >
-                      В разработке
+                      {referral.program_enabled === false || referral.discount_enabled === false
+                        ? 'Выкл.'
+                        : `${referral.referral_discount_percent}%`}
                     </div>
                     <div className="text-[10px] text-slate-500 font-bold uppercase mt-0.5">
                       Скидка
                     </div>
                   </div>
                 </div>
+                {referral.program_enabled !== false && referral.discount_enabled !== false && (
+                  <p className="text-[10px] font-semibold leading-relaxed text-slate-500">
+                    За каждого приглашенного, который оплатил абонемент или матч, скидка растет на {referral.discount_step_percent}% до {referral.discount_max_percent ?? 100}%.
+                  </p>
+                )}
+                {referral.program_enabled === false && (
+                  <p className="text-[10px] font-semibold leading-relaxed text-slate-500">
+                    Реферальная программа временно выключена администратором.
+                  </p>
+                )}
               </>
             ) : (
               <div className="bg-slate-900/40 border border-slate-800/60 p-4 rounded-xl text-center text-slate-500 text-xs font-semibold uppercase tracking-wider">

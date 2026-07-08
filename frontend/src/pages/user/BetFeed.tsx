@@ -1,13 +1,13 @@
 import React, { Suspense, lazy, memo, useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
-import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
-import { BetResponse, PaginatedResponse } from '../../schemas/schemas';
+import { BetResponse, MarketingWidgetsResponse, PaginatedResponse } from '../../schemas/schemas';
 import { useAuthSelector } from '../../context/AuthContext';
 import { useLayoutMode } from '../../context/LayoutModeContext';
 import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, ExternalLink, Star, Image as ImageIcon } from 'lucide-react';
-import { hasActivePromo, promoFlags } from '../../config/promoFlags';
+import { promoFlags } from '../../config/promoFlags';
 import { BookmakerLogoFrame, SportIconFrame } from '../../components/LogoFrame';
 import { isStaffRole } from '../../utils/roles';
 import { notifyError, notifyInfo, notifyPending, notifySuccess } from '../../utils/notify';
@@ -496,6 +496,30 @@ export default function BetFeed({
     () => feedData?.pages.flatMap((page) => page.items) ?? [],
     [feedData],
   );
+  const marketingWidgetsQuery = useQuery<MarketingWidgetsResponse, Error>({
+    queryKey: ['marketing-widgets'],
+    queryFn: () => apiFetch<MarketingWidgetsResponse>('/marketing/widgets'),
+    staleTime: 60_000,
+    retry: false,
+  });
+  const runtimePromoFlags = useMemo(() => {
+    const data = marketingWidgetsQuery.data;
+    if (!data?.configured) return promoFlags;
+
+    const activeKeys = new Set(
+      data.widgets
+        .filter((widget) => widget.is_enabled)
+        .map((widget) => widget.key),
+    );
+    return {
+      marathon: activeKeys.has('marathon'),
+      swipe: activeKeys.has('swipe'),
+      pvp: activeKeys.has('pvp'),
+      quiz: activeKeys.has('quiz'),
+      crowdBet: activeKeys.has('crowd_bet'),
+    };
+  }, [marketingWidgetsQuery.data]);
+  const runtimeHasActivePromo = Object.values(runtimePromoFlags).some(Boolean);
 
   const loadFeed = useCallback(async () => {
     await refetchFeed();
@@ -688,30 +712,30 @@ export default function BetFeed({
   return (
     <div className={`${isCompact ? 'w-full min-w-0 space-y-3' : 'space-y-4'} pb-8 animate-slide-up`}>
       
-      {promoFlags.marathon && (
+      {runtimePromoFlags.marathon && (
         <PromoBoundary>
           <MarathonWidget />
         </PromoBoundary>
       )}
-      {promoFlags.swipe && (
+      {runtimePromoFlags.swipe && (
         <PromoBoundary>
           <SwipeCard />
         </PromoBoundary>
       )}
 
-      {hasActivePromo && (
+      {runtimeHasActivePromo && (
         <div className="grid grid-cols-1 gap-3">
-          {promoFlags.pvp && (
+          {runtimePromoFlags.pvp && (
             <PromoBoundary>
               <PvPWidget />
             </PromoBoundary>
           )}
-          {promoFlags.quiz && (
+          {runtimePromoFlags.quiz && (
             <PromoBoundary>
               <QuizWidget />
             </PromoBoundary>
           )}
-          {promoFlags.crowdBet && (
+          {runtimePromoFlags.crowdBet && (
             <PromoBoundary>
               <CrowdBetWidget onFunded={loadFeed} />
             </PromoBoundary>

@@ -252,6 +252,39 @@ class MatchBalanceLog(Base):
     subscription = relationship("Subscription")
 
 
+class ReferralRewardEvent(Base):
+    __tablename__ = "referral_reward_events"
+    __table_args__ = (
+        UniqueConstraint("referrer_user_id", "referred_user_id", name="uq_referral_reward_referrer_referred"),
+        Index("ix_referral_reward_referrer_created", "referrer_user_id", "created_at"),
+        Index("ix_referral_reward_status_created", "status", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    referrer_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    referred_user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_payment_attempt_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("payment_attempts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_type = Column(String, nullable=False)
+    discount_percent_snapshot = Column(Integer, default=0, nullable=False)
+    matches_awarded = Column(Integer, default=0, nullable=False)
+    status = Column(String, default="approved", nullable=False)
+    risk_score = Column(Integer, default=0, nullable=False)
+    risk_reasons = Column(JSON, default=list, nullable=False)
+    reviewed_by = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    referrer = relationship("User", foreign_keys=[referrer_user_id])
+    referred_user = relationship("User", foreign_keys=[referred_user_id])
+    source_payment_attempt = relationship("PaymentAttempt")
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+
 class PersonalSignal(Base):
     __tablename__ = "personal_signals"
     __table_args__ = (
@@ -680,6 +713,50 @@ class PromoCodeRedemption(Base):
 
     promo_code = relationship("PromoCode")
     user = relationship("User")
+
+
+class MarketingWidgetConfig(Base):
+    __tablename__ = "marketing_widget_configs"
+
+    key = Column(String(64), primary_key=True, index=True)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    position = Column(Integer, default=0, nullable=False)
+    audience = Column(String(32), default="all", nullable=False)
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    cooldown_hours = Column(Integer, default=24, nullable=False)
+    per_user_limit = Column(Integer, default=0, nullable=False)
+    global_daily_limit = Column(Integer, default=0, nullable=False)
+    reward_type = Column(String(32), default="none", nullable=False)
+    reward_value = Column(Integer, default=0, nullable=False)
+    promo_valid_hours = Column(Integer, default=24, nullable=False)
+    settings_json = Column(JSON, default=dict, nullable=False)
+    updated_by = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+    editor = relationship("User", foreign_keys=[updated_by])
+
+
+class MarketingRewardEvent(Base):
+    __tablename__ = "marketing_reward_events"
+    __table_args__ = (
+        Index("ix_marketing_reward_user_widget_created", "user_id", "widget_key", "created_at"),
+        Index("ix_marketing_reward_widget_created", "widget_key", "created_at"),
+        Index("ix_marketing_reward_risk_status_created", "risk_status", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    widget_key = Column(String(64), nullable=False, index=True)
+    reward_type = Column(String(32), default="none", nullable=False)
+    reward_value = Column(Integer, default=0, nullable=False)
+    promo_code_id = Column(Integer, ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True, index=True)
+    risk_status = Column(String(16), default="approved", nullable=False)
+    risk_reasons = Column(JSON, default=list, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User")
+    promo_code = relationship("PromoCode")
 
 
 class Marathon(Base):

@@ -27,6 +27,12 @@ THEME_SECONDARY_COLOR_KEY = "THEME_SECONDARY_COLOR"
 GLOBAL_PERFORMANCE_MODE_KEY = "GLOBAL_PERFORMANCE_MODE"
 WELCOME_QUIZ_ENABLED_KEY = "WELCOME_QUIZ_ENABLED"
 SUBSCRIPTION_PURCHASES_ENABLED_KEY = "SUBSCRIPTION_PURCHASES_ENABLED"
+REFERRAL_PROGRAM_ENABLED_KEY = "REFERRAL_PROGRAM_ENABLED"
+REFERRAL_DISCOUNT_ENABLED_KEY = "REFERRAL_DISCOUNT_ENABLED"
+REFERRAL_DISCOUNT_STEP_PERCENT_KEY = "REFERRAL_DISCOUNT_STEP_PERCENT"
+REFERRAL_DISCOUNT_MAX_PERCENT_KEY = "REFERRAL_DISCOUNT_MAX_PERCENT"
+REFERRAL_MATCH_REWARD_ENABLED_KEY = "REFERRAL_MATCH_REWARD_ENABLED"
+REFERRAL_MATCH_REWARD_COUNT_KEY = "REFERRAL_MATCH_REWARD_COUNT"
 BRAND_LOGO_URL_KEY = "BRAND_LOGO_URL"
 BRAND_BACKGROUND_URL_KEY = "BRAND_BACKGROUND_URL"
 THEME_GLASS_OPACITY_KEY = "THEME_GLASS_OPACITY"
@@ -50,6 +56,11 @@ _THEME_NUMBER_RANGES: dict[str, tuple[float, float]] = {
     THEME_RADIUS_SCALE_KEY: (0.75, 1.5),
     THEME_FONT_SCALE_KEY: (0.85, 1.2),
     THEME_GLOW_STRENGTH_KEY: (0, 1.6),
+}
+_INTEGER_RANGES: dict[str, tuple[int, int]] = {
+    REFERRAL_DISCOUNT_STEP_PERCENT_KEY: (0, 100),
+    REFERRAL_DISCOUNT_MAX_PERCENT_KEY: (0, 100),
+    REFERRAL_MATCH_REWARD_COUNT_KEY: (0, 1000),
 }
 
 
@@ -94,6 +105,42 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
         default_value="false",
         description="Показывает клиентам покупку абонементов и переход к оплате матчей.",
         value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_PROGRAM_ENABLED_KEY,
+        default_value="false",
+        description="Включает реферальную программу и учет квалифицированных покупок.",
+        value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_DISCOUNT_ENABLED_KEY,
+        default_value="true",
+        description="Включает автоматическую скидку пригласившему за оплаченных рефералов.",
+        value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_DISCOUNT_STEP_PERCENT_KEY,
+        default_value="5",
+        description="Процент скидки за одного приглашенного клиента с квалифицированной покупкой.",
+        value_kind="integer",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_DISCOUNT_MAX_PERCENT_KEY,
+        default_value="100",
+        description="Максимальная автоматическая реферальная скидка на абонемент.",
+        value_kind="integer",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_MATCH_REWARD_ENABLED_KEY,
+        default_value="false",
+        description="Начисляет пригласившему матчи после первой квалифицированной покупки реферала.",
+        value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key=REFERRAL_MATCH_REWARD_COUNT_KEY,
+        default_value="0",
+        description="Количество матчей, начисляемых пригласившему за первую покупку реферала.",
+        value_kind="integer",
     ),
     SystemSettingDefinition(
         key="VK_ACCESS_TOKEN",
@@ -503,6 +550,14 @@ _PUBLIC_THEME_KEYS = (
     THEME_DENSITY_KEY,
     THEME_GLOW_STRENGTH_KEY,
 )
+_REFERRAL_SETTING_KEYS = (
+    REFERRAL_PROGRAM_ENABLED_KEY,
+    REFERRAL_DISCOUNT_ENABLED_KEY,
+    REFERRAL_DISCOUNT_STEP_PERCENT_KEY,
+    REFERRAL_DISCOUNT_MAX_PERCENT_KEY,
+    REFERRAL_MATCH_REWARD_ENABLED_KEY,
+    REFERRAL_MATCH_REWARD_COUNT_KEY,
+)
 _INTEGRATION_GROUP_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET_TOKEN", "TELEGRAM_BOT_USERNAME"),
     "vk": ("VK_ACCESS_TOKEN", "VK_CALLBACK_CONFIRMATION_CODE", "VK_CALLBACK_SECRET", "VK_GROUP_ID"),
@@ -547,6 +602,15 @@ def _normalize_setting_value(definition: SystemSettingDefinition, value: Any) ->
             raise ValueError(f"Значение {definition.key} должно быть в диапазоне {min_value:g}-{max_value:g}")
         normalized = f"{numeric_value:.2f}".rstrip("0").rstrip(".")
         return normalized or "0"
+    if definition.value_kind == "integer":
+        try:
+            numeric_value = int(clean_value)
+        except ValueError as exc:
+            raise ValueError(f"Значение {definition.key} должно быть целым числом") from exc
+        min_value, max_value = _INTEGER_RANGES.get(definition.key, (0, 1_000_000))
+        if numeric_value < min_value or numeric_value > max_value:
+            raise ValueError(f"Значение {definition.key} должно быть в диапазоне {min_value}-{max_value}")
+        return str(numeric_value)
     if definition.value_kind == "enum:theme_density":
         normalized = clean_value.lower() or definition.default_value
         if normalized not in _THEME_DENSITY_VALUES:
@@ -827,6 +891,35 @@ async def get_public_theme_settings(db: AsyncSession) -> dict[str, str | bool | 
         "font_scale": _theme_number_value(stored_settings, THEME_FONT_SCALE_KEY),
         "theme_density": _theme_value(stored_settings, THEME_DENSITY_KEY),
         "glow_strength": _theme_number_value(stored_settings, THEME_GLOW_STRENGTH_KEY),
+    }
+
+
+def _integer_value(stored_settings: dict[str, SystemSetting], key: str) -> int:
+    definition = _DEFINITIONS_BY_KEY[key]
+    stored_setting = stored_settings.get(key)
+    raw_value = stored_setting.value if stored_setting else definition.default_value
+    try:
+        return int(_normalize_setting_value(definition, raw_value))
+    except ValueError:
+        return int(definition.default_value)
+
+
+async def get_referral_program_settings(db: AsyncSession) -> dict[str, bool | int]:
+    stored_settings = await _load_settings_by_key(db, _REFERRAL_SETTING_KEYS)
+
+    def bool_value(key: str) -> bool:
+        definition = _DEFINITIONS_BY_KEY[key]
+        stored_setting = stored_settings.get(key)
+        raw_value = stored_setting.value if stored_setting else definition.default_value
+        return _coerce_boolean_value(raw_value) == "true"
+
+    return {
+        "program_enabled": bool_value(REFERRAL_PROGRAM_ENABLED_KEY),
+        "discount_enabled": bool_value(REFERRAL_DISCOUNT_ENABLED_KEY),
+        "discount_step_percent": _integer_value(stored_settings, REFERRAL_DISCOUNT_STEP_PERCENT_KEY),
+        "discount_max_percent": _integer_value(stored_settings, REFERRAL_DISCOUNT_MAX_PERCENT_KEY),
+        "match_reward_enabled": bool_value(REFERRAL_MATCH_REWARD_ENABLED_KEY),
+        "match_reward_count": _integer_value(stored_settings, REFERRAL_MATCH_REWARD_COUNT_KEY),
     }
 
 

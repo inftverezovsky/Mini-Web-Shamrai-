@@ -183,10 +183,40 @@ export interface ReferralInfoResponse {
   referral_link: string;
   invited_count: number;
   purchased_invited_count: number;
+  program_enabled?: boolean;
+  discount_enabled?: boolean;
   discount_step_percent: number;
+  discount_max_percent?: number;
   referral_discount_percent: number;
+  match_reward_enabled?: boolean;
+  match_reward_count?: number;
   earned_bonus_days?: number;
   pending_rewards?: number;
+}
+
+export interface MarketingWidgetConfigResponse {
+  key: string;
+  title: string;
+  description: string;
+  is_enabled: boolean;
+  position: number;
+  audience: 'all' | 'staff' | 'clients' | 'referrals' | string;
+  starts_at: string | null;
+  ends_at: string | null;
+  cooldown_hours: number;
+  per_user_limit: number;
+  global_daily_limit: number;
+  reward_type: 'none' | 'mixed' | 'discount' | 'matches' | 'free_bet' | string;
+  reward_value: number;
+  promo_valid_hours: number;
+  settings_json: Record<string, unknown>;
+  updated_by?: number | null;
+  updated_at?: string | null;
+}
+
+export interface MarketingWidgetsResponse {
+  configured: boolean;
+  widgets: MarketingWidgetConfigResponse[];
 }
 
 export interface PaymentHistoryResponse {

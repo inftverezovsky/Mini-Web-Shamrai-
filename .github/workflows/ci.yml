@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+# TODO(security): pin third-party actions to full commit SHAs during the next
+# scheduled CI dependency refresh.
+
 jobs:
   backend:
     name: Backend tests
@@ -122,6 +125,12 @@ jobs:
   docker-build:
     name: Docker image build
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: local
+      ENABLE_BEARER_AUTH_COMPAT: "false"
+      POSTGRES_DB: shamrai_ci
+      POSTGRES_USER: shamrai_ci
+      POSTGRES_PASSWORD: shamrai_ci_password
 
     steps:
       - name: Checkout
@@ -181,6 +190,12 @@ jobs:
   compose:
     name: Docker Compose config
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: local
+      ENABLE_BEARER_AUTH_COMPAT: "false"
+      POSTGRES_DB: shamrai_ci
+      POSTGRES_USER: shamrai_ci
+      POSTGRES_PASSWORD: shamrai_ci_password
 
     steps:
       - name: Checkout

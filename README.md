@@ -8,7 +8,7 @@ Full-stack приложение для спортивной аналитики, 
 
 - Пользовательский кабинет: onboarding, профиль, тарифы, лента прогнозов, мои ставки, чат поддержки, уведомления и статистика.
 - Админка: CRM, прогнозы, подписки, рассылки, web-chat, шаблоны сообщений, экспорт статистики и аудит действий.
-- Авторизация: Telegram `initData`, VK ID OAuth, bot-session login, httpOnly cookie, роли `user`, `moderator`, `admin`, `owner`.
+- Авторизация: Telegram `initData`, VK ID OAuth, bot-session login, cookie-only production auth через `HttpOnly` cookie, роли `user`, `moderator`, `admin`, `owner`.
 - Оплаты и доступы: Telegram Stars, YooKassa, Tegro, промокоды, абонементы на матчи и идемпотентная обработка webhook/update.
 - Доставка сигналов: Telegram Bot API, VK Messages API, Web Push, WebSocket и retryable delivery outbox.
 - Инфраструктура: FastAPI backend, React/Vite frontend, PostgreSQL, Redis hot cache, Alembic migrations, Docker Compose preview и host-nginx public deploy.
@@ -72,7 +72,7 @@ flowchart LR
   PUBLIC["https://shamra1.pro"] -->|"host nginx"| WEBROOT["published frontend assets"]
 ```
 
-Backend принимает API под `/api`, проверяет cookie/JWT, работает с PostgreSQL через SQLAlchemy async и отдаёт статические coupon-файлы. Внешняя доставка вынесена в outbox, чтобы Telegram, VK и Web Push можно было ретраить без двойной выдачи доступа.
+Backend принимает API под `/api`, проверяет `HttpOnly` auth cookie, работает с PostgreSQL через SQLAlchemy async и отдаёт статические coupon-файлы. Bearer JWT остаётся только как временная non-production совместимость и в production не возвращается в JSON login-ответов. Внешняя доставка вынесена в outbox, чтобы Telegram, VK и Web Push можно было ретраить без двойной выдачи доступа.
 
 Frontend собирается Vite. В production API вызывается same-origin через `/api`. Важно различать Docker preview и публичный сайт: здоровый контейнер frontend preview не означает, что `https://shamra1.pro/` обновился, потому что публичный домен обслуживается host nginx из отдельного static web root, записанного в private runbook/project registry.
 
@@ -95,6 +95,7 @@ sequenceDiagram
     API->>API: verify Telegram/VK payload
     API->>DB: upsert or merge user
     API-->>UI: httpOnly auth cookie + CSRF cookie
+    Note over API,UI: Login JSON contains user data, not bearer JWT
     Note over API,UI: HTTPS/production cookies use SameSite=None; Secure
     UI->>API: GET /api/users/me with credentials
     API-->>UI: authenticated profile
@@ -256,6 +257,7 @@ VITE_ENABLE_DEBUG_AUTH=true
 APP_ENV=production
 DEBUG_MODE=false
 ALLOW_DEBUG_AUTH_BYPASS=false
+ENABLE_BEARER_AUTH_COMPAT=false
 DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>
 JWT_SECRET_KEY=<at-least-32-random-characters>
 OWNER_TELEGRAM_ID=<telegram-owner-id>
@@ -352,6 +354,12 @@ Do not stop system nginx, unrelated containers, databases or ports `80/443` unle
 ## Security and delivery invariants
 
 - Never commit `.env`, private keys, tokens, passwords, database dumps or generated secret-bearing artifacts.
+- Never commit service account JSON; use runtime environment variables or encoded secret storage instead.
+- Production login is cookie-only: `shamrai_access_token` is `HttpOnly`, CSRF cookie is issued separately and JWT is not returned in JSON.
+- Keep `ENABLE_BEARER_AUTH_COMPAT=false` and `VITE_ENABLE_BEARER_AUTH_COMPAT=false` in production; enable only for temporary local/legacy compatibility.
+- Enable GitHub Secret Scanning and Push Protection on the repository.
+- Rotate any credential immediately after a suspected leak, even if the value was deleted later.
+- Run `gitleaks` or `trufflehog` before publishing sensitive branches or release archives.
 - Validate all external webhook payloads server-side.
 - Activate paid access only after verified provider callback/update.
 - Payment, forecast and delivery flows must be idempotent.
@@ -399,6 +407,7 @@ High-value follow-ups:
 - [docs/backup-restore.md](docs/backup-restore.md) - encrypted Postgres backups, retention, restore drill and production restore runbook.
 - [docs/process-flows.md](docs/process-flows.md) - Mermaid process diagrams for auth, payments, delivery, forecast, chat and deploy.
 - [docs/vk-delivery.md](docs/vk-delivery.md) - required VK ID, Callback API and delivery rules.
+- [docs/client-training/README.md](docs/client-training/README.md) - клиентское обучение по интерфейсу, VK, Web Push, статистике и уведомлениям со скриншотами.
 - [docs/functional-algorithms.md](docs/functional-algorithms.md) - step-by-step functional algorithms.
 - [docs/frontend-infra-optimization.md](docs/frontend-infra-optimization.md) - frontend performance and infra notes.
 - [docs/backend-latency-optimization.md](docs/backend-latency-optimization.md) - backend latency and cache notes.

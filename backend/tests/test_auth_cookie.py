@@ -51,7 +51,7 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("; secure", cookie)
         self.assertIn("path=/api", cookie)
 
-    def test_login_response_sets_cookie_and_returns_bearer_fallback_token(self):
+    def test_login_response_sets_cookie_without_exposing_bearer_token_by_default(self):
         response = Response()
         now = datetime.now(timezone.utc)
         user = User(
@@ -82,13 +82,95 @@ class AuthCookieTests(unittest.IsolatedAsyncioTestCase):
             updated_at=now,
         )
 
-        payload = auth._build_login_response(user, response)
+        with patch.object(auth.settings, "ENABLE_BEARER_AUTH_COMPAT", False):
+            payload = auth._build_login_response(user, response)
 
-        self.assertIsNotNone(payload.access_token)
-        self.assertIn("access_token", payload.model_dump(exclude_none=True))
+        self.assertIsNone(payload.access_token)
+        self.assertNotIn("access_token", payload.model_dump(exclude_none=True))
         cookie = "; ".join(_set_cookie_headers(response)).lower()
         self.assertIn("shamrai_access_token=", cookie)
         self.assertIn("httponly", cookie)
+        self.assertIn("shamrai_csrf_token=", cookie)
+
+    def test_login_response_can_expose_bearer_token_only_for_non_production_compat(self):
+        response = Response()
+        now = datetime.now(timezone.utc)
+        user = User(
+            telegram_id=12345,
+            first_name="Client",
+            role="user",
+            stats_display_mode="percent",
+            bankroll=0.0,
+            is_onboarded=False,
+            favorite_sports=[],
+            vk_group_member=False,
+            vk_messages_allowed=False,
+            vk_notifications_allowed=False,
+            currency_preference="RUB",
+            purchased_bets_balance=0,
+            free_bets_available=0,
+            matches_remaining=0,
+            guarantee_active=False,
+            tg_chat_joined=False,
+            has_used_shield=False,
+            alert_min_coef=1.0,
+            odds_drop_notifications_enabled=True,
+            is_night_mode=False,
+            night_mode_start="23:00",
+            night_mode_end="08:00",
+            preferred_sports=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+        with (
+            patch.object(auth.settings, "APP_ENV", "development"),
+            patch.object(auth.settings, "ENABLE_BEARER_AUTH_COMPAT", True),
+        ):
+            payload = auth._build_login_response(user, response)
+
+        self.assertIsNotNone(payload.access_token)
+        self.assertIn("access_token", payload.model_dump(exclude_none=True))
+
+    def test_production_never_exposes_bearer_token_even_when_compat_is_enabled(self):
+        response = Response()
+        now = datetime.now(timezone.utc)
+        user = User(
+            telegram_id=12345,
+            first_name="Client",
+            role="user",
+            stats_display_mode="percent",
+            bankroll=0.0,
+            is_onboarded=False,
+            favorite_sports=[],
+            vk_group_member=False,
+            vk_messages_allowed=False,
+            vk_notifications_allowed=False,
+            currency_preference="RUB",
+            purchased_bets_balance=0,
+            free_bets_available=0,
+            matches_remaining=0,
+            guarantee_active=False,
+            tg_chat_joined=False,
+            has_used_shield=False,
+            alert_min_coef=1.0,
+            odds_drop_notifications_enabled=True,
+            is_night_mode=False,
+            night_mode_start="23:00",
+            night_mode_end="08:00",
+            preferred_sports=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+        with (
+            patch.object(auth.settings, "APP_ENV", "production"),
+            patch.object(auth.settings, "ENABLE_BEARER_AUTH_COMPAT", True),
+        ):
+            payload = auth._build_login_response(user, response)
+
+        self.assertIsNone(payload.access_token)
+        self.assertNotIn("access_token", payload.model_dump(exclude_none=True))
 
     async def test_logout_clears_auth_cookie(self):
         response = Response()

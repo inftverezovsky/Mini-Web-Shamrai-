@@ -6,6 +6,7 @@ import secrets
 import time
 from hashlib import sha256
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -102,6 +103,70 @@ def clear_csrf_cookie(response: Response) -> None:
     )
 
 
+def _header_value(request: Request, name: str) -> str | None:
+    headers = getattr(request, "headers", {}) or {}
+    value = headers.get(name)
+    if value is None:
+        value = headers.get(name.lower())
+    return value
+
+
+def _normalize_origin(value: str | None) -> str | None:
+    raw_value = (value or "").strip()
+    if not raw_value or raw_value == "null":
+        return None
+
+    try:
+        parsed = urlparse(raw_value)
+    except ValueError:
+        return None
+
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+
+    host = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    if port and not default_port:
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def _allowed_csrf_origins() -> set[str]:
+    candidates = [
+        *settings.cors_allowed_origins,
+        settings.FRONTEND_BASE_URL,
+        settings.API_BASE_URL,
+    ]
+    return {
+        origin
+        for origin in (_normalize_origin(candidate) for candidate in candidates if candidate and candidate != "*")
+        if origin
+    }
+
+
+def _request_origin_allowed(request: Request) -> bool:
+    origin_header = _header_value(request, "Origin")
+    referer_header = _header_value(request, "Referer")
+    allowed_origins = _allowed_csrf_origins()
+
+    if origin_header:
+        origin = _normalize_origin(origin_header)
+        return bool(origin and origin in allowed_origins)
+
+    if referer_header:
+        referer_origin = _normalize_origin(referer_header)
+        return bool(referer_origin and referer_origin in allowed_origins)
+
+    # Some same-origin clients and tests cannot provide Origin/Referer. The signed
+    # double-submit CSRF token remains mandatory when these headers are absent.
+    return True
+
+
 def should_check_csrf(request: Request) -> bool:
     method = request.method.upper()
     path = request.url.path
@@ -119,7 +184,7 @@ def validate_csrf_request(request: Request) -> bool:
         return False
     if not hmac.compare_digest(header_token, cookie_token):
         return False
-    return verify_csrf_token(header_token)
+    return verify_csrf_token(header_token) and _request_origin_allowed(request)
 
 
 class CsrfProtectionMiddleware(BaseHTTPMiddleware):

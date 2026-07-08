@@ -27,11 +27,13 @@ from src.models.models import (
     DailyRewardClaim,
     ForecastRequest,
     Marathon,
+    MarketingRewardEvent,
     MatchBalanceLog,
     PaymentAttempt,
     PromoCode,
     PromoCodeRedemption,
     PvPBattleVote,
+    ReferralRewardEvent,
     Subscription,
     SubscriptionPlan,
     User,
@@ -90,12 +92,16 @@ from src.services.historical_stats import load_active_historical_stats_snapshot,
 from src.services.system_settings import (
     create_integration_unlock_token,
     get_admin_system_settings,
+    get_referral_program_settings,
     get_unlocked_integration_settings,
     run_integration_diagnostics,
     reset_user_session_cache,
     update_admin_system_settings,
     verify_integrations_password,
 )
+from src.services.marketing_risk import RISK_STATUS_APPROVED, RISK_STATUS_HELD, RISK_STATUS_REJECTED
+from src.services.marketing_widgets import list_effective_widget_configs, stored_widget_config_count, upsert_widget_configs
+from src.services.referrals import approve_referral_reward_event, reject_referral_reward_event
 from src.services.presence import count_online_users
 from src.services.stats_export import (
     ClientInfoExportRow,
@@ -144,6 +150,27 @@ class PromoCreate(BaseModel):
     discount_percent: Optional[int] = Field(default=None, ge=0, le=100)
     matches_count: Optional[int] = Field(default=None, ge=0, le=1000)
     valid_until: datetime
+
+
+class MarketingWidgetConfigUpdate(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
+    is_enabled: bool = True
+    position: int = Field(default=0, ge=0, le=1000)
+    audience: str = Field(default="all", pattern="^(all|staff|clients|referrals)$")
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    cooldown_hours: int = Field(default=0, ge=0, le=24 * 365)
+    per_user_limit: int = Field(default=0, ge=0, le=100000)
+    global_daily_limit: int = Field(default=0, ge=0, le=100000)
+    reward_type: str = Field(default="none", pattern="^(none|mixed|discount|matches|free_bet)$")
+    reward_value: int = Field(default=0, ge=0, le=100000)
+    promo_valid_hours: int = Field(default=0, ge=0, le=24 * 365)
+    settings_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketingWidgetConfigUpdatePayload(BaseModel):
+    configs: List[MarketingWidgetConfigUpdate]
+
 
 class MarathonCreateOrUpdate(BaseModel):
     title: Optional[str] = None
@@ -682,6 +709,258 @@ async def admin_monitoring_summary(
         },
         "audit": await _recent_audit_summary(db),
     }
+
+
+def _admin_user_label(user: User | None, fallback_id: int) -> str:
+    if not user:
+        return f"ID {fallback_id}"
+    name = " ".join([item for item in [user.first_name, user.last_name] if item]).strip()
+    return name or (f"@{user.username}" if user.username else f"ID {fallback_id}")
+
+
+@router.get("/referrals/summary")
+async def admin_referrals_summary(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    """Admin control payload for referral program settings, totals, and recent rewards."""
+    referral_settings = await get_referral_program_settings(db)
+
+    invited_count = int((await db.execute(
+        select(func.count(User.telegram_id)).filter(User.referred_by_user_id.is_not(None))
+    )).scalar() or 0)
+    qualified_purchase_events = int((await db.execute(
+        select(func.count(ReferralRewardEvent.id)).filter(ReferralRewardEvent.status == RISK_STATUS_APPROVED)
+    )).scalar() or 0)
+    active_referrers = int((await db.execute(
+        select(func.count(func.distinct(ReferralRewardEvent.referrer_user_id))).filter(
+            ReferralRewardEvent.status == RISK_STATUS_APPROVED
+        )
+    )).scalar() or 0)
+    matches_awarded_total = int((await db.execute(
+        select(func.coalesce(func.sum(ReferralRewardEvent.matches_awarded), 0)).filter(
+            ReferralRewardEvent.status == RISK_STATUS_APPROVED
+        )
+    )).scalar() or 0)
+    held_events = int((await db.execute(
+        select(func.count(ReferralRewardEvent.id)).filter(ReferralRewardEvent.status == RISK_STATUS_HELD)
+    )).scalar() or 0)
+    rejected_events = int((await db.execute(
+        select(func.count(ReferralRewardEvent.id)).filter(ReferralRewardEvent.status == RISK_STATUS_REJECTED)
+    )).scalar() or 0)
+
+    recent_result = await db.execute(
+        select(ReferralRewardEvent)
+        .options(selectinload(ReferralRewardEvent.referrer), selectinload(ReferralRewardEvent.referred_user))
+        .order_by(ReferralRewardEvent.created_at.desc(), ReferralRewardEvent.id.desc())
+        .limit(10)
+    )
+
+    recent_events = []
+    for event in recent_result.scalars().all():
+        recent_events.append({
+            "id": event.id,
+            "referrer_user_id": event.referrer_user_id,
+            "referrer_label": _admin_user_label(event.referrer, event.referrer_user_id),
+            "referred_user_id": event.referred_user_id,
+            "referred_label": _admin_user_label(event.referred_user, event.referred_user_id),
+            "source_payment_attempt_id": str(event.source_payment_attempt_id) if event.source_payment_attempt_id else None,
+            "source_type": event.source_type,
+            "discount_percent_snapshot": event.discount_percent_snapshot,
+            "matches_awarded": event.matches_awarded,
+            "status": event.status,
+            "risk_score": event.risk_score,
+            "risk_reasons": event.risk_reasons or [],
+            "created_at": event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else event.created_at,
+        })
+
+    return {
+        **referral_settings,
+        "invited_count": invited_count,
+        "qualified_purchase_events": qualified_purchase_events,
+        "active_referrers": active_referrers,
+        "matches_awarded_total": matches_awarded_total,
+        "held_events": held_events,
+        "rejected_events": rejected_events,
+        "recent_events": recent_events,
+    }
+
+
+@router.get("/marketing/widgets")
+async def admin_marketing_widgets(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    return {
+        "configured": (await stored_widget_config_count(db)) > 0,
+        "widgets": await list_effective_widget_configs(db),
+    }
+
+
+@router.patch("/marketing/widgets")
+async def admin_update_marketing_widgets(
+    payload: MarketingWidgetConfigUpdatePayload,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    widgets = await upsert_widget_configs(
+        db,
+        configs=[item.model_dump() for item in payload.configs],
+        updated_by=admin.telegram_id,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="marketing_widgets_updated",
+        details={"keys": [item.key for item in payload.configs]},
+    )
+    await db.commit()
+    return {
+        "configured": True,
+        "widgets": widgets,
+    }
+
+
+@router.get("/marketing/reward-events")
+async def admin_marketing_reward_events(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    result = await db.execute(
+        select(MarketingRewardEvent)
+        .options(selectinload(MarketingRewardEvent.user), selectinload(MarketingRewardEvent.promo_code))
+        .order_by(MarketingRewardEvent.created_at.desc(), MarketingRewardEvent.id.desc())
+        .limit(limit)
+    )
+    events = []
+    for event in result.scalars().all():
+        events.append({
+            "id": event.id,
+            "user_id": event.user_id,
+            "user_label": _admin_user_label(event.user, event.user_id),
+            "widget_key": event.widget_key,
+            "reward_type": event.reward_type,
+            "reward_value": event.reward_value,
+            "promo_code_id": event.promo_code_id,
+            "promo_code": event.promo_code.code if event.promo_code else None,
+            "risk_status": event.risk_status,
+            "risk_reasons": event.risk_reasons or [],
+            "created_at": event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else event.created_at,
+        })
+    return {"events": events}
+
+
+def _parse_marketing_risk_event_id(raw_id: str) -> tuple[str, int]:
+    if ":" in raw_id:
+        kind, event_id = raw_id.split(":", 1)
+    else:
+        kind, event_id = "referral", raw_id
+    if kind not in {"referral", "marketing"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный тип события")
+    try:
+        return kind, int(event_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный ID события")
+
+
+@router.get("/marketing/risk-queue")
+async def admin_marketing_risk_queue(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+) -> dict[str, Any]:
+    referral_result = await db.execute(
+        select(ReferralRewardEvent)
+        .options(selectinload(ReferralRewardEvent.referrer), selectinload(ReferralRewardEvent.referred_user))
+        .filter(ReferralRewardEvent.status == RISK_STATUS_HELD)
+        .order_by(ReferralRewardEvent.created_at.desc(), ReferralRewardEvent.id.desc())
+        .limit(50)
+    )
+    marketing_result = await db.execute(
+        select(MarketingRewardEvent)
+        .options(selectinload(MarketingRewardEvent.user), selectinload(MarketingRewardEvent.promo_code))
+        .filter(MarketingRewardEvent.risk_status == RISK_STATUS_HELD)
+        .order_by(MarketingRewardEvent.created_at.desc(), MarketingRewardEvent.id.desc())
+        .limit(50)
+    )
+    items = []
+    for event in referral_result.scalars().all():
+        items.append({
+            "id": f"referral:{event.id}",
+            "kind": "referral",
+            "title": f"{_admin_user_label(event.referrer, event.referrer_user_id)} / {_admin_user_label(event.referred_user, event.referred_user_id)}",
+            "status": event.status,
+            "risk_score": event.risk_score,
+            "risk_reasons": event.risk_reasons or [],
+            "created_at": event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else event.created_at,
+            "payload": {
+                "referrer_user_id": event.referrer_user_id,
+                "referred_user_id": event.referred_user_id,
+                "source_type": event.source_type,
+            },
+        })
+    for event in marketing_result.scalars().all():
+        items.append({
+            "id": f"marketing:{event.id}",
+            "kind": "marketing",
+            "title": f"{_admin_user_label(event.user, event.user_id)} / {event.widget_key}",
+            "status": event.risk_status,
+            "risk_score": 0,
+            "risk_reasons": event.risk_reasons or [],
+            "created_at": event.created_at.isoformat() if hasattr(event.created_at, "isoformat") else event.created_at,
+            "payload": {
+                "user_id": event.user_id,
+                "widget_key": event.widget_key,
+                "reward_type": event.reward_type,
+                "reward_value": event.reward_value,
+            },
+        })
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"items": items, "held_count": len(items)}
+
+
+@router.post("/marketing/risk-queue/{event_id}/approve")
+async def admin_approve_marketing_risk_event(
+    event_id: str,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    kind, parsed_id = _parse_marketing_risk_event_id(event_id)
+    if kind == "referral":
+        event = await db.get(ReferralRewardEvent, parsed_id)
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Событие не найдено")
+        await approve_referral_reward_event(db, event=event, reviewer_user_id=admin.telegram_id)
+    else:
+        event = await db.get(MarketingRewardEvent, parsed_id)
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Событие не найдено")
+        event.risk_status = RISK_STATUS_APPROVED
+    add_admin_audit_log(db, actor=admin, action="marketing_risk_approved", details={"id": event_id})
+    await db.commit()
+    return {"status": "approved", "id": event_id}
+
+
+@router.post("/marketing/risk-queue/{event_id}/reject")
+async def admin_reject_marketing_risk_event(
+    event_id: str,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    kind, parsed_id = _parse_marketing_risk_event_id(event_id)
+    if kind == "referral":
+        event = await db.get(ReferralRewardEvent, parsed_id)
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Событие не найдено")
+        await reject_referral_reward_event(db, event=event, reviewer_user_id=admin.telegram_id)
+    else:
+        event = await db.get(MarketingRewardEvent, parsed_id)
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Событие не найдено")
+        event.risk_status = RISK_STATUS_REJECTED
+    add_admin_audit_log(db, actor=admin, action="marketing_risk_rejected", details={"id": event_id})
+    await db.commit()
+    return {"status": "rejected", "id": event_id}
 
 
 @router.get("/monitoring/logs", response_model=MonitoringLogsResponse)
@@ -2238,6 +2517,12 @@ async def admin_delete_user(
     await db.execute(delete(PvPBattleVote).where(PvPBattleVote.user_id == user.telegram_id))
     await db.execute(delete(PromoCodeRedemption).where(PromoCodeRedemption.user_id == user.telegram_id))
     await db.execute(delete(PromoCode).where(PromoCode.user_id == user.telegram_id))
+    await db.execute(delete(ReferralRewardEvent).where(
+        or_(
+            ReferralRewardEvent.referrer_user_id == user.telegram_id,
+            ReferralRewardEvent.referred_user_id == user.telegram_id,
+        )
+    ))
     await db.execute(delete(UserBadge).where(UserBadge.user_id == user.telegram_id))
     await db.execute(delete(UserNote).where(UserNote.user_id == user.telegram_id))
 

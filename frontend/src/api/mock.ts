@@ -13,6 +13,7 @@ const daysAgoIso = (days: number, hour = 18) => {
 const MOCK_PREFS_STORAGE_KEY = 'bet_tma_mock_preferences';
 const MOCK_MESSAGE_TEMPLATES_STORAGE_KEY = 'bet_tma_mock_message_templates';
 const MOCK_SYSTEM_SETTINGS_STORAGE_KEY = 'bet_tma_mock_system_settings';
+const MOCK_MARKETING_WIDGETS_STORAGE_KEY = 'bet_tma_mock_marketing_widgets';
 const MOCK_SUPPORT_MESSAGES_STORAGE_KEY = 'bet_tma_mock_support_messages';
 const MOCK_AVATAR_CYAN = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23051b2b%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%2380e0f7%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%2320c997%22/%3E%3C/svg%3E';
 const MOCK_AVATAR_GOLD = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23221805%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%23f59e0b%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%23facc15%22/%3E%3C/svg%3E';
@@ -109,6 +110,36 @@ const DEFAULT_MOCK_SYSTEM_SETTINGS = [
     description: 'Показывает клиентам покупку абонементов и переход к оплате матчей.',
   },
   {
+    key: 'REFERRAL_PROGRAM_ENABLED',
+    value: 'false',
+    description: 'Включает реферальную программу и учет квалифицированных покупок.',
+  },
+  {
+    key: 'REFERRAL_DISCOUNT_ENABLED',
+    value: 'true',
+    description: 'Включает автоматическую скидку пригласившему за оплаченных рефералов.',
+  },
+  {
+    key: 'REFERRAL_DISCOUNT_STEP_PERCENT',
+    value: '5',
+    description: 'Процент скидки за одного приглашенного клиента с квалифицированной покупкой.',
+  },
+  {
+    key: 'REFERRAL_DISCOUNT_MAX_PERCENT',
+    value: '100',
+    description: 'Максимальная автоматическая реферальная скидка на абонемент.',
+  },
+  {
+    key: 'REFERRAL_MATCH_REWARD_ENABLED',
+    value: 'false',
+    description: 'Начисляет пригласившему матчи после первой квалифицированной покупки реферала.',
+  },
+  {
+    key: 'REFERRAL_MATCH_REWARD_COUNT',
+    value: '0',
+    description: 'Количество матчей, начисляемых пригласившему за первую покупку реферала.',
+  },
+  {
     key: 'VK_ACCESS_TOKEN',
     value: '',
     description: 'Токен доступа VK для внешних интеграций.',
@@ -193,6 +224,111 @@ const DEFAULT_MOCK_SYSTEM_SETTINGS = [
   { key: 'THEME_GLOW_STRENGTH', value: '1', description: 'Интенсивность свечения.' },
 ];
 
+const DEFAULT_MOCK_MARKETING_WIDGETS = [
+  {
+    key: 'daily_spin',
+    title: 'Daily Spin',
+    description: 'Ежедневный бонус: прогноз или персональный промокод.',
+    is_enabled: true,
+    position: 10,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 24,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'mixed',
+    reward_value: 25,
+    promo_valid_hours: 24,
+    settings_json: { free_bet_weight: 50 },
+  },
+  {
+    key: 'swipe',
+    title: 'Swipe',
+    description: 'Промокод за совпадение с прогнозом.',
+    is_enabled: true,
+    position: 20,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 0,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'discount',
+    reward_value: 50,
+    promo_valid_hours: 24,
+    settings_json: {},
+  },
+  {
+    key: 'quiz',
+    title: 'Quiz',
+    description: 'Аналитический тест с персональным промокодом.',
+    is_enabled: true,
+    position: 30,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 0,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'discount',
+    reward_value: 30,
+    promo_valid_hours: 48,
+    settings_json: {},
+  },
+  {
+    key: 'pvp',
+    title: 'PvP',
+    description: 'Голосование Battle of Minds.',
+    is_enabled: true,
+    position: 40,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 0,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'none',
+    reward_value: 0,
+    promo_valid_hours: 0,
+    settings_json: {},
+  },
+  {
+    key: 'marathon',
+    title: 'Marathon',
+    description: 'Активный марафон ставок.',
+    is_enabled: true,
+    position: 50,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 0,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'none',
+    reward_value: 0,
+    promo_valid_hours: 0,
+    settings_json: {},
+  },
+  {
+    key: 'crowd_bet',
+    title: 'Crowd Bet',
+    description: 'Совместное открытие прогноза.',
+    is_enabled: true,
+    position: 60,
+    audience: 'all',
+    starts_at: null,
+    ends_at: null,
+    cooldown_hours: 0,
+    per_user_limit: 0,
+    global_daily_limit: 0,
+    reward_type: 'none',
+    reward_value: 0,
+    promo_valid_hours: 0,
+    settings_json: {},
+  },
+];
+
 function getMockPreferences() {
   try {
     const stored = localStorage.getItem(MOCK_PREFS_STORAGE_KEY);
@@ -264,6 +400,40 @@ function saveMockSystemSettings(updates: Array<{ key: string; value: string }>) 
   });
   localStorage.setItem(MOCK_SYSTEM_SETTINGS_STORAGE_KEY, JSON.stringify(state));
   return getMockSystemSettings();
+}
+
+function readMockMarketingWidgetsState() {
+  try {
+    const stored = localStorage.getItem(MOCK_MARKETING_WIDGETS_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getMockMarketingWidgets() {
+  const stored = readMockMarketingWidgetsState();
+  const widgets = Array.isArray(stored?.widgets) ? stored.widgets : DEFAULT_MOCK_MARKETING_WIDGETS;
+  return {
+    configured: Boolean(stored?.configured),
+    widgets,
+  };
+}
+
+function saveMockMarketingWidgets(configs: any[]) {
+  const now = nowIso();
+  const byKey = new Map(DEFAULT_MOCK_MARKETING_WIDGETS.map((widget) => [widget.key, widget]));
+  const widgets = configs.map((item) => {
+    const base = byKey.get(item.key) || {};
+    return {
+      ...base,
+      ...item,
+      updated_at: now,
+    };
+  });
+  const payload = { configured: true, widgets };
+  localStorage.setItem(MOCK_MARKETING_WIDGETS_STORAGE_KEY, JSON.stringify(payload));
+  return payload;
 }
 
 function getMockPublicThemeSettings() {
@@ -1288,6 +1458,82 @@ function getMockUser() {
   });
 }
 
+function getMockProfileDashboard() {
+  const user = getMockUser();
+  const preferences = getMockPreferences();
+  const selectedBookmakerIds = user.bookmakers.map((bookmaker: any) => bookmaker.id);
+  const groupId = Number(import.meta.env.VITE_VK_GROUP_ID || 0) || null;
+
+  return {
+    user,
+    bookmakers: MOCK_BOOKMAKERS,
+    selected_bookmaker_ids: selectedBookmakerIds,
+    preferences: {
+      ...preferences,
+      stats_display_mode: user.stats_display_mode,
+    },
+    subscription: {
+      id: 'mock-active-subscription',
+      user_id: user.telegram_id,
+      plan_id: 1,
+      status: 'active',
+      payment_provider: 'mock',
+      payment_id: null,
+      start_date: daysAgoIso(6, 10),
+      end_date: daysAgoIso(-24, 23),
+      created_at: daysAgoIso(6, 10),
+      plan: {
+        id: 1,
+        name: 'Демо абонемент',
+        duration_days: 30,
+        match_count: user.matches_remaining,
+        price: 9900,
+        price_stars: 0,
+        currency: 'RUB',
+        is_active: true,
+      },
+    },
+    payments: {
+      transactions: [
+        {
+          id: 'mock-payment-1',
+          plan_name: 'Демо абонемент',
+          amount: 9900,
+          amount_currency: 'RUB',
+          amount_stars: null,
+          payment_provider: 'mock',
+          status: 'paid',
+          created_at: daysAgoIso(6, 10),
+          start_date: daysAgoIso(6, 10),
+          end_date: daysAgoIso(-24, 23),
+        },
+      ],
+      total: 1,
+    },
+    referral: {
+      referral_code: 'DEBUG2026',
+      referral_link: 'https://t.me/debug?start=DEBUG2026',
+      invited_count: 0,
+      purchased_invited_count: 0,
+      program_enabled: false,
+      discount_enabled: true,
+      discount_step_percent: 5,
+      discount_max_percent: 100,
+      referral_discount_percent: 0,
+      match_reward_enabled: false,
+      match_reward_count: 0,
+    },
+    vk_delivery_status: {
+      vk_user_id: user.vk_user_id,
+      group_id: groupId,
+      configured: Boolean(groupId),
+      group_member: user.vk_group_member,
+      messages_allowed: user.vk_messages_allowed,
+      notifications_allowed: user.vk_notifications_allowed,
+    },
+  };
+}
+
 export function mockApiFetch(endpoint: string, options: RequestInit) {
   const requestUrl = new URL(endpoint, 'http://mock.local');
   const queryParams = requestUrl.searchParams;
@@ -1400,6 +1646,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/chat/conversations/signals/messages') {
     const supportTypes = new Set(['support_staff_message', 'support_client_message']);
     const limit = Math.max(1, Number(queryParams.get('limit')) || 50);
+    const teaserBookmakers = MOCK_BOOKMAKERS.filter((bookmaker) => [1, 4].includes(bookmaker.id));
     const items = [
       {
         id: 1,
@@ -1417,12 +1664,55 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
         data: {},
         created_at: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
       },
+      {
+        id: 3,
+        user_id: getMockUser().telegram_id,
+        text: 'Анонс закрытого прогноза: Зенит - Спартак. Линия подходит под ваш профиль. Нажмите «Взять», если хотите получить ставку.',
+        type: 'forecast_teaser',
+        data: {
+          forecast_request_id: 'mock-request-client-training',
+          forecast_status: localStorage.getItem('bet_tma_mock_forecast_training_status') || 'announced',
+          request_kind: 'forecast',
+          sport_type: 'Футбол',
+          coefficient: 1.92,
+          event_name: 'Зенит - Спартак',
+          bookmakers: teaserBookmakers.map((bookmaker) => ({
+            id: bookmaker.id,
+            name: bookmaker.name,
+            code: bookmaker.code,
+            url: `https://example.com/bookmakers/${bookmaker.code}`,
+          })),
+          message_text: [
+            'Анонс закрытого прогноза',
+            'Матч: Зенит - Спартак',
+            'Коэффициент: 1.92',
+            'Подходит под ваш профиль и выбранные БК.',
+            'Нажмите «Взять», если хотите получить ставку.',
+          ].join('\n'),
+        },
+        created_at: new Date(Date.now() - 90 * 1000).toISOString(),
+      },
     ].filter((signal: any) => !supportTypes.has(signal.type)).slice(-limit);
     return { items, next_before_id: null, has_more: false };
   }
   if (endpoint === '/chat/conversations/signals/read' && options.method === 'POST') {
     const body = typeof options.body === 'string' ? JSON.parse(options.body || '{}') : {};
     return { status: 'ok', last_read_signal_id: body.last_read_signal_id ?? null, last_read_message_id: null };
+  }
+  const forecastActionMatch = endpoint.match(/^\/signals\/forecast-requests\/([^/]+)\/(take|decline)$/);
+  if (forecastActionMatch && options.method === 'POST') {
+    const action = forecastActionMatch[2];
+    const nextStatus = action === 'take' ? 'interested' : 'declined';
+    localStorage.setItem('bet_tma_mock_forecast_training_status', nextStatus);
+    return {
+      status: nextStatus,
+      message: action === 'take'
+        ? 'Заявка отправлена Shamrai. Менеджер подготовит полный прогноз.'
+        : 'Отказ учтен.',
+      forecast_request_id: forecastActionMatch[1],
+      action: 'accepted',
+      contact: null,
+    };
   }
   if (endpoint === '/chat/conversations/support/messages' && (!options.method || options.method === 'GET')) {
     const userId = getMockUser().telegram_id;
@@ -1524,6 +1814,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       vk_display_name: 'Иван VK',
     };
   }
+  if (endpoint === '/users/me/profile-dashboard') return getMockProfileDashboard();
   if (endpoint === '/users/me') return getMockUser();
   if (endpoint === '/users/me/onboard' || /^\/users\/\d+\/onboard$/.test(endpoint)) {
     const linkedVkUserId = localStorage.getItem('bet_tma_mock_vk_user_id');
@@ -1709,6 +2000,23 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       already_stopped: false,
       stopped_requests: stoppedRequests,
       skipped_processing: skippedProcessing,
+    };
+  }
+  if (endpoint.startsWith('/admin/forecast-requests-page') && (!options.method || options.method === 'GET')) {
+    const [, queryString = ''] = endpoint.split('?');
+    const params = new URLSearchParams(queryString);
+    const status = params.get('status');
+    const limit = Math.max(1, Number(params.get('limit')) || 20);
+    const filteredRequests = status
+      ? getMockForecastRequests().filter((request: any) => request.status === status)
+      : getMockForecastRequests();
+    const items = filteredRequests.slice(0, limit);
+    return {
+      items,
+      next_cursor: filteredRequests.length > items.length ? String(items.length) : null,
+      has_more: filteredRequests.length > items.length,
+      total: filteredRequests.length,
+      filtered_total: filteredRequests.length,
     };
   }
   if (endpoint.startsWith('/admin/forecast-requests') && (!options.method || options.method === 'GET')) {
@@ -2177,7 +2485,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       total_users: 128,
     };
   }
-  if (endpoint === '/admin/stats/author-timeline') {
+  if (endpoint.startsWith('/admin/stats/author-timeline')) {
     const period = normalizeMockPeriod(queryParams.get('period'));
     return {
       ...buildMockPerformancePayload([...getMockBets(), ...getMockPrivateForecastBets()], period),
@@ -2188,7 +2496,11 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       },
     };
   }
-  if (endpoint === '/admin/stats/clients') {
+  if (endpoint.startsWith('/admin/stats/shamrai-timeline')) {
+    const period = normalizeMockPeriod(queryParams.get('period'));
+    return buildMockPerformancePayload([...getMockBets(), ...getMockPrivateForecastBets()], period);
+  }
+  if (endpoint === '/admin/stats/clients' || endpoint.startsWith('/admin/stats/clients?')) {
     const period = normalizeMockPeriod(queryParams.get('period'));
     const users = getMockUsers().filter((user: any) => user.role === 'user');
     const clients = users.map((user: any, index: number) => {
@@ -2398,8 +2710,13 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       referral_link: 'https://t.me/debug?start=DEBUG2026',
       invited_count: 0,
       purchased_invited_count: 0,
+      program_enabled: false,
+      discount_enabled: true,
       discount_step_percent: 5,
+      discount_max_percent: 100,
       referral_discount_percent: 0,
+      match_reward_enabled: false,
+      match_reward_count: 0,
     };
   }
   if (endpoint === '/users/me/payments') return [];
@@ -2455,6 +2772,13 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   if (endpoint === '/payments/yookassa/create') return { confirmation_url: 'https://example.com/mock-payment' };
   if (endpoint === '/payments/yookassa/debug-complete') return { status: 'success' };
   if (endpoint === '/marketing/marathon') return { current_day: 3, streak: 3, reward_available: true };
+  if (endpoint === '/marketing/widgets') {
+    const payload = getMockMarketingWidgets();
+    return {
+      configured: payload.configured,
+      widgets: payload.configured ? payload.widgets.filter((widget: any) => widget.is_enabled) : [],
+    };
+  }
   if (endpoint === '/marketing/daily-spin') return { reward: 'Матч в подарок', matches_added: 1 };
   if (endpoint === '/marketing/swipe-candidate') {
     return {
@@ -2950,6 +3274,41 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       return saveMockSystemSettings(Array.isArray(body) ? body : []);
     }
     return getMockSystemSettings();
+  }
+  if (endpoint === '/admin/referrals/summary') {
+    const settings = getMockSystemSettings().settings;
+    const byKey = new Map(settings.map((setting: any) => [setting.key, setting.value]));
+    return {
+      program_enabled: byKey.get('REFERRAL_PROGRAM_ENABLED') === 'true',
+      discount_enabled: byKey.get('REFERRAL_DISCOUNT_ENABLED') !== 'false',
+      discount_step_percent: Number(byKey.get('REFERRAL_DISCOUNT_STEP_PERCENT') || 5),
+      discount_max_percent: Number(byKey.get('REFERRAL_DISCOUNT_MAX_PERCENT') || 100),
+      match_reward_enabled: byKey.get('REFERRAL_MATCH_REWARD_ENABLED') === 'true',
+      match_reward_count: Number(byKey.get('REFERRAL_MATCH_REWARD_COUNT') || 0),
+      invited_count: 0,
+      qualified_purchase_events: 0,
+      active_referrers: 0,
+      matches_awarded_total: 0,
+      held_events: 0,
+      rejected_events: 0,
+      recent_events: [],
+    };
+  }
+  if (endpoint === '/admin/marketing/widgets') {
+    if (options.method === 'PATCH') {
+      const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+      return saveMockMarketingWidgets(Array.isArray(body.configs) ? body.configs : []);
+    }
+    return getMockMarketingWidgets();
+  }
+  if (endpoint.startsWith('/admin/marketing/risk-queue/')) {
+    return { status: endpoint.endsWith('/reject') ? 'rejected' : 'approved' };
+  }
+  if (endpoint === '/admin/marketing/risk-queue') {
+    return { items: [], held_count: 0 };
+  }
+  if (endpoint.startsWith('/admin/marketing/reward-events')) {
+    return { events: [] };
   }
   if (endpoint === '/admin/message-templates') return getMockMessageTemplates();
   if (endpoint.startsWith('/admin/message-templates/')) {

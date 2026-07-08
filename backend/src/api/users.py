@@ -255,8 +255,13 @@ async def build_referral_payload(db: AsyncSession, user: User) -> dict[str, Any]
         "referral_link": f"https://t.me/Shamra1_bot?start=ref_{user.telegram_id}",
         "invited_count": stats["invited_count"],
         "purchased_invited_count": stats["purchased_invited_count"],
+        "program_enabled": stats["program_enabled"],
+        "discount_enabled": stats["discount_enabled"],
         "discount_step_percent": stats["discount_step_percent"],
+        "discount_max_percent": stats["discount_max_percent"],
         "referral_discount_percent": stats["referral_discount_percent"],
+        "match_reward_enabled": stats["match_reward_enabled"],
+        "match_reward_count": stats["match_reward_count"],
         "earned_bonus_days": 0,
         "pending_rewards": 0,
     }
