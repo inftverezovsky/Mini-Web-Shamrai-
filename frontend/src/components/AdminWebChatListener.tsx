@@ -11,6 +11,7 @@ import {
   rememberWebNotificationEvent,
 } from '../utils/webNotificationEvents';
 import { rememberRecentId } from '../utils/realtimeLimits';
+import { supportsServiceWorkerRuntime, supportsWebSocketRuntime } from '../utils/performancePolicy';
 
 interface AdminWebChatListenerProps {
   enabled: boolean;
@@ -75,6 +76,10 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
 
   useEffect(() => {
     if (!enabled || isTelegramMiniApp() || hasTelegramLaunchParams()) return;
+    if (!supportsWebSocketRuntime()) {
+      window.dispatchEvent(new CustomEvent(ADMIN_WEB_CHAT_STATUS_EVENT, { detail: { state: 'offline' } }));
+      return;
+    }
     const token = getStoredAuthToken();
     if (token === MOCK_DEBUG_AUTH_TOKEN) return;
 
@@ -182,7 +187,7 @@ export default function AdminWebChatListener({ enabled }: AdminWebChatListenerPr
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || isTelegramMiniApp() || hasTelegramLaunchParams() || !('serviceWorker' in navigator)) return;
+    if (!enabled || isTelegramMiniApp() || hasTelegramLaunchParams() || !supportsServiceWorkerRuntime()) return;
 
     const handleServiceWorkerMessage = (event: MessageEvent) => {
       if (!isServiceWorkerNotificationMessage(event.data)) return;

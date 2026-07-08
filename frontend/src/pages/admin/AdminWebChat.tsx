@@ -605,11 +605,17 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
   }, []);
 
   useEffect(() => {
+    if (!active) return undefined;
     const timer = window.setTimeout(() => setDebouncedSearchTerm(searchTerm.trim().toLowerCase()), 250);
     return () => window.clearTimeout(timer);
-  }, [searchTerm]);
+  }, [active, searchTerm]);
 
   useEffect(() => {
+    if (!active) {
+      setClientSearchLoading(false);
+      return undefined;
+    }
+
     const cleanSearch = debouncedSearchTerm.trim();
     if (cleanSearch.length < 2) {
       setClientSearchResults([]);
@@ -635,7 +641,7 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
         if (!controller.signal.aborted) setClientSearchLoading(false);
       });
     return () => controller.abort();
-  }, [conversations, debouncedSearchTerm]);
+  }, [active, conversations, debouncedSearchTerm]);
 
   useEffect(() => {
     selectedConversationIdRef.current = selectedConversationId;
@@ -646,6 +652,13 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
       window.clearTimeout(typingClearTimerRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (active || typingClearTimerRef.current === undefined) return;
+    window.clearTimeout(typingClearTimerRef.current);
+    typingClearTimerRef.current = undefined;
+    setTypingText('');
+  }, [active]);
 
   useEffect(() => {
     setReplyTarget(null);

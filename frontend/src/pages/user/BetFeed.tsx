@@ -480,6 +480,7 @@ export default function BetFeed({
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => fetchBetsFeedPage((pageParam as string | null) ?? null, signal),
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
+    enabled: feedActive,
     staleTime: TAB_QUERY_STALE_TIME,
   });
   const {
@@ -498,7 +499,8 @@ export default function BetFeed({
   );
   const marketingWidgetsQuery = useQuery<MarketingWidgetsResponse, Error>({
     queryKey: ['marketing-widgets'],
-    queryFn: () => apiFetch<MarketingWidgetsResponse>('/marketing/widgets'),
+    queryFn: ({ signal }) => apiFetch<MarketingWidgetsResponse>('/marketing/widgets', { signal }),
+    enabled: feedActive,
     staleTime: 60_000,
     retry: false,
   });
@@ -524,6 +526,12 @@ export default function BetFeed({
   const loadFeed = useCallback(async () => {
     await refetchFeed();
   }, [refetchFeed]);
+
+  useEffect(() => {
+    if (feedActive) return;
+    void queryClient.cancelQueries({ queryKey: BETS_FEED_QUERY_KEY, exact: true });
+    void queryClient.cancelQueries({ queryKey: ['marketing-widgets'], exact: true });
+  }, [feedActive, queryClient]);
 
   useEffect(() => {
     const backendTakenIds = bets.filter((bet) => bet.is_taken).map((bet) => bet.id);

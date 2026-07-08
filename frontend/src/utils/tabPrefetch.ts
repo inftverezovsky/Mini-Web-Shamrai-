@@ -100,16 +100,20 @@ export function fetchBetsFeedPage(pageParam: string | null = null, signal?: Abor
   return apiFetch<PaginatedResponse<BetResponse>>(`/bets/feed-page?${params.toString()}`, { signal });
 }
 
-export function fetchMyBetsTimeline(period: PeriodFilter = 'all') {
-  return apiFetch<PerformanceTimelineResponse>(`/users/me/bets/timeline?period=${encodeURIComponent(period)}`);
+export function fetchMyBetsTimeline(period: PeriodFilter = 'all', signal?: AbortSignal) {
+  const endpoint = `/users/me/bets/timeline?period=${encodeURIComponent(period)}`;
+  return signal ? apiFetch<PerformanceTimelineResponse>(endpoint, { signal }) : apiFetch<PerformanceTimelineResponse>(endpoint);
 }
 
-export function fetchGlobalStats(period: GlobalStatsPeriod = 'all') {
-  return apiFetch<GlobalStatsData>(`/stats/global?period=${encodeURIComponent(period)}`);
+export function fetchGlobalStats(period: GlobalStatsPeriod = 'all', signal?: AbortSignal) {
+  const endpoint = `/stats/global?period=${encodeURIComponent(period)}`;
+  return signal ? apiFetch<GlobalStatsData>(endpoint, { signal }) : apiFetch<GlobalStatsData>(endpoint);
 }
 
-export function fetchProfileDashboard() {
-  return apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard');
+export function fetchProfileDashboard(signal?: AbortSignal) {
+  return signal
+    ? apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard', { signal })
+    : apiFetch<ProfileDashboardResponse>('/users/me/profile-dashboard');
 }
 
 export async function fetchTariffsDashboard(): Promise<TariffsDashboardData> {
@@ -150,21 +154,25 @@ export function fetchBookmakers(signal?: AbortSignal) {
   return apiFetch<BookmakerResponse[]>('/bookmakers', { signal });
 }
 
-export function fetchAdminAuthorTimeline(period: PeriodFilter = 'all') {
-  return apiFetch<AdminAuthorTimelineResponse>(`/admin/stats/author-timeline?period=${encodeURIComponent(period)}`);
+export function fetchAdminAuthorTimeline(period: PeriodFilter = 'all', signal?: AbortSignal) {
+  const endpoint = `/admin/stats/author-timeline?period=${encodeURIComponent(period)}`;
+  return signal ? apiFetch<AdminAuthorTimelineResponse>(endpoint, { signal }) : apiFetch<AdminAuthorTimelineResponse>(endpoint);
 }
 
-export function fetchAdminShamraiTimeline(period: PeriodFilter = 'all') {
-  return apiFetch<PerformanceTimelineResponse>(`/admin/stats/shamrai-timeline?period=${encodeURIComponent(period)}`);
+export function fetchAdminShamraiTimeline(period: PeriodFilter = 'all', signal?: AbortSignal) {
+  const endpoint = `/admin/stats/shamrai-timeline?period=${encodeURIComponent(period)}`;
+  return signal ? apiFetch<PerformanceTimelineResponse>(endpoint, { signal }) : apiFetch<PerformanceTimelineResponse>(endpoint);
 }
 
-export async function fetchAdminStatsDashboard(period: PeriodFilter = 'all'): Promise<AdminStatsDashboardData> {
+export async function fetchAdminStatsDashboard(period: PeriodFilter = 'all', signal?: AbortSignal): Promise<AdminStatsDashboardData> {
   const periodQuery = `period=${encodeURIComponent(period)}`;
   const [authorTimeline, shamraiTimeline, clients, bookmakers] = await Promise.all([
-    fetchAdminAuthorTimeline(period),
-    fetchAdminShamraiTimeline(period),
-    apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`),
-    fetchBookmakers(),
+    fetchAdminAuthorTimeline(period, signal),
+    fetchAdminShamraiTimeline(period, signal),
+    signal
+      ? apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`, { signal })
+      : apiFetch<AdminClientsStatsResponse>(`/admin/stats/clients?${periodQuery}`),
+    fetchBookmakers(signal),
   ]);
 
   return {
@@ -194,12 +202,12 @@ export function prefetchUserTab(queryClient: QueryClient, tab: UserTabId, contex
         ? Promise.all([
             queryClient.prefetchQuery({
               queryKey: myBetsTimelineQueryKey('all'),
-              queryFn: () => fetchMyBetsTimeline('all'),
+              queryFn: ({ signal }) => fetchMyBetsTimeline('all', signal),
               staleTime: TAB_QUERY_STALE_TIME,
             }),
             queryClient.prefetchQuery({
               queryKey: globalStatsQueryKey('all'),
-              queryFn: () => fetchGlobalStats('all'),
+              queryFn: ({ signal }) => fetchGlobalStats('all', signal),
               staleTime: TAB_QUERY_STALE_TIME,
             }),
           ]).then(() => undefined)
@@ -214,7 +222,7 @@ export function prefetchUserTab(queryClient: QueryClient, tab: UserTabId, contex
       tab === 'profile' && context.userTelegramId != null
         ? queryClient.prefetchQuery({
             queryKey: profileDashboardQueryKey(context.userTelegramId),
-            queryFn: fetchProfileDashboard,
+            queryFn: ({ signal }) => fetchProfileDashboard(signal),
             staleTime: TAB_QUERY_STALE_TIME,
           })
         : Promise.resolve(),
@@ -229,7 +237,7 @@ export function prefetchAdminTab(queryClient: QueryClient, tab: AdminShellTabId,
       tab === 'stats'
         ? queryClient.prefetchQuery({
             queryKey: adminStatsDashboardQueryKey('all'),
-            queryFn: () => fetchAdminStatsDashboard('all'),
+            queryFn: ({ signal }) => fetchAdminStatsDashboard('all', signal),
             staleTime: ADMIN_TAB_QUERY_STALE_TIME,
           })
         : Promise.resolve(),
@@ -237,7 +245,7 @@ export function prefetchAdminTab(queryClient: QueryClient, tab: AdminShellTabId,
         ? Promise.all([
             queryClient.prefetchQuery({
               queryKey: BOOKMAKERS_QUERY_KEY,
-              queryFn: () => fetchBookmakers(),
+              queryFn: ({ signal }) => fetchBookmakers(signal),
               staleTime: TAB_QUERY_STALE_TIME,
             }),
             queryClient.prefetchInfiniteQuery({

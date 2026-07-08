@@ -394,7 +394,7 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
 
   const statsDashboardQuery = useQuery<AdminStatsDashboardData>({
     queryKey: adminStatsDashboardQueryKey(period),
-    queryFn: () => fetchAdminStatsDashboard(period),
+    queryFn: ({ signal }) => fetchAdminStatsDashboard(period, signal),
     enabled: active,
     staleTime: ADMIN_TAB_QUERY_STALE_TIME,
   });
@@ -406,6 +406,11 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
   const loading = statsDashboardQuery.isLoading || (statsDashboardQuery.isFetching && !statsDashboardQuery.data);
   const error = statsDashboardQuery.error?.message || actionError;
   const refetchStats = statsDashboardQuery.refetch;
+
+  useEffect(() => {
+    if (active) return;
+    void queryClient.cancelQueries({ queryKey: adminStatsDashboardQueryKey(period), exact: true });
+  }, [active, period, queryClient]);
 
   const loadStats = useCallback(() => {
     setActionError(null);

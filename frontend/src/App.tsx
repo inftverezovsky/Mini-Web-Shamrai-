@@ -30,6 +30,7 @@ import { prefetchAdminTab, prefetchUserTab } from './utils/tabPrefetch';
 import { canEnterCabinet } from './utils/identityAccess';
 import { syncConnectionOnboarding } from './utils/connectionOnboarding';
 import { ADMIN_WEB_CHAT_OPEN_EVENT } from './utils/adminWebChatNavigation';
+import { canPrefetchAdminChunk } from './utils/performancePolicy';
 import {
   PROFILE_SETUP_NAVIGATION_EVENT,
   profileSetupIntentFromLocation,
@@ -53,9 +54,6 @@ const loadAdminCRM = () => import('./pages/admin/AdminCRM');
 const loadAdminWebChat = () => import('./pages/admin/AdminWebChat');
 const loadAdminSettings = () => import('./pages/admin/AdminSettings');
 const loadAdminStats = () => import('./pages/admin/AdminStats');
-const loadAdminBets = () => import('./pages/admin/AdminBets');
-const loadAdminBroadcast = () => import('./pages/admin/AdminBroadcast');
-const loadAdminResults = () => import('./pages/admin/AdminResults');
 
 const BetFeed = lazy(loadBetFeed);
 const MyBets = lazy(loadMyBets);
@@ -272,7 +270,7 @@ export default function App() {
   const [introComplete, setIntroComplete] = useState(false);
 
   useWheelScrollBridge();
-  usePresenceHeartbeat(Boolean(isReady && !loading && userProfile));
+  usePresenceHeartbeat(Boolean(isReady && !loading && userProfile && performanceProfile.isAppVisible));
 
   useEffect(() => {
     if (!introComplete) return;
@@ -359,17 +357,7 @@ export default function App() {
     const runsInTelegramMiniApp = isTelegram || isTelegramMiniApp() || hasTelegramLaunchParams();
     const shouldPreloadWebChat = !runsInTelegramMiniApp && !userIsStaff && userProfile.is_onboarded !== false;
     const fullLoaders = userIsStaff
-      ? [
-          loadAdminDashboard,
-          loadAdminBets,
-          loadAdminResults,
-          loadAdminBroadcast,
-          loadAdminStats,
-          loadAdminCRM,
-          loadAdminWebChat,
-          loadAdminSettings,
-          loadProfile,
-        ]
+      ? []
       : [
           loadBetFeed,
           loadMyBets,
@@ -379,10 +367,8 @@ export default function App() {
           ...(userProfile.is_onboarded === false ? [loadOnboarding] : []),
         ];
     const canBulkPreload = performanceProfile.canBulkPreload && !globalPerformanceModeEnabled;
-    const lightLoaders = userIsStaff && globalPerformanceModeEnabled
+    const lightLoaders = userIsStaff
       ? []
-      : userIsStaff
-      ? [loadAdminStats]
       : userProfile.is_onboarded === false
         ? [loadOnboarding]
         : [loadMyBets];
@@ -568,6 +554,11 @@ export default function App() {
     };
 
     if (showAdminInterface) {
+      if (!canPrefetchAdminChunk({
+        userIsStaff: isStaffRole(userProfile.role),
+        currentRouteIsAdmin: showAdminInterface,
+        explicitAdminIntent: true,
+      })) return;
       void prefetchAdminTab(queryClient, tab as AdminShellTabId, context);
       return;
     }
@@ -644,9 +635,9 @@ export default function App() {
       );
     }
     if (tab === 'chat') return <WebBotChat active={active} />;
-    if (tab === 'stats' || tab === 'my_bets') return <MyBets />;
+    if (tab === 'stats' || tab === 'my_bets') return <MyBets active={active} />;
     if (tab === 'billing' && subscriptionPurchasesEnabled) return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
-    return <Profile />;
+    return <Profile active={active} />;
   };
 
   const renderAdminPage = (tab: AdminShellTabId) => {
@@ -656,7 +647,7 @@ export default function App() {
     if (tab === 'clients') return <AdminCRM active={active} />;
     if (tab === 'chats') return <AdminWebChat active={active} />;
     if (tab === 'settings') return <AdminSettings active={active} />;
-    return <Profile />;
+    return <Profile active={active} />;
   };
 
   const renderCurrentPage = () => {
@@ -731,8 +722,8 @@ export default function App() {
         description="Основные разделы продолжают работать, можно спокойно пользоваться приложением дальше."
       >
         <NotificationCenter />
-        <WebSignalListener enabled={showWebChatTab} />
-        <AdminWebChatListener enabled={showAdminInterface} />
+        <WebSignalListener enabled={showWebChatTab && safeActiveUserTab === 'chat' && performanceProfile.isAppVisible} />
+        <AdminWebChatListener enabled={showAdminInterface && activeAdminTab === 'chats' && performanceProfile.isAppVisible} />
         <VkConsentWizard />
       </AppErrorBoundary>
       <div className="ambient-field z-0 isolate" aria-hidden="true">

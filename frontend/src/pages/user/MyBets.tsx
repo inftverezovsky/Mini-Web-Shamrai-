@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import React, { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertCircle,
   BarChart3,
@@ -37,6 +37,10 @@ import {
 } from '../../utils/tabPrefetch';
 
 type ClientStatsView = 'shamrai' | 'mine';
+
+interface MyBetsProps {
+  active?: boolean;
+}
 
 const SHAMRAI_PERIOD_OPTIONS: Array<{ value: GlobalStatsPeriod; label: string }> = [
   { value: 'all', label: 'Все' },
@@ -125,7 +129,8 @@ function globalStatsToTimeline(stats: GlobalStatsData | null): PerformanceTimeli
   };
 }
 
-export default function MyBets() {
+export default function MyBets({ active = true }: MyBetsProps = {}) {
+  const queryClient = useQueryClient();
   const [expandedMonths, setExpandedMonths] = useState<ExpandedMap>({});
   const [expandedDays, setExpandedDays] = useState<ExpandedMap>({});
   const [view, setView] = useState<ClientStatsView>('mine');
@@ -136,15 +141,23 @@ export default function MyBets() {
 
   const timelineQuery = useQuery<PerformanceTimelineResponse>({
     queryKey: myBetsTimelineQueryKey(period),
-    queryFn: () => fetchMyBetsTimeline(period),
+    queryFn: ({ signal }) => fetchMyBetsTimeline(period, signal),
+    enabled: active,
     staleTime: TAB_QUERY_STALE_TIME,
   });
 
   const shamraiStatsQuery = useQuery<GlobalStatsData>({
     queryKey: globalStatsQueryKey(shamraiPeriod),
-    queryFn: () => fetchGlobalStats(shamraiPeriod),
+    queryFn: ({ signal }) => fetchGlobalStats(shamraiPeriod, signal),
+    enabled: active,
     staleTime: TAB_QUERY_STALE_TIME,
   });
+
+  useEffect(() => {
+    if (active) return;
+    void queryClient.cancelQueries({ queryKey: myBetsTimelineQueryKey(period), exact: true });
+    void queryClient.cancelQueries({ queryKey: globalStatsQueryKey(shamraiPeriod), exact: true });
+  }, [active, period, queryClient, shamraiPeriod]);
 
   const data = timelineQuery.data ?? null;
   const loading = timelineQuery.isLoading;

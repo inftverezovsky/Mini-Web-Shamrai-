@@ -30,6 +30,11 @@ import { unlockIncomingSignalSound, playIncomingSupportSound } from '../../utils
 import { isTelegramMiniApp } from '../../utils/telegramSdk';
 import { rememberWebNotificationEvent } from '../../utils/webNotificationEvents';
 import { limitRecent, rememberRecentId } from '../../utils/realtimeLimits';
+import {
+  dataWorkerThresholdForProfile,
+  supportsWebSocketRuntime,
+  type PerformanceProfileName,
+} from '../../utils/performancePolicy';
 import MessageComposer, { ChatComposerAttachment } from './MessageComposer';
 import MessageList from './MessageList';
 import { applyReadReceiptToMessages } from './readReceipts';
@@ -39,6 +44,12 @@ import SupportMessageBubble, { SupportMessageView } from './SupportMessageBubble
 type ActiveConversationKey = 'signals' | 'support';
 type ForecastSignalAction = 'take' | 'decline';
 const CHAT_HISTORY_ITEM_LIMIT = 500;
+
+function currentWorkerThreshold() {
+  if (typeof document === 'undefined') return dataWorkerThresholdForProfile('full');
+  const profile = document.documentElement.dataset.performanceProfile as PerformanceProfileName | undefined;
+  return dataWorkerThresholdForProfile(profile === 'balanced' || profile === 'lowPower' ? profile : 'full');
+}
 
 interface ForecastSignalActionResponse {
   status: string;
@@ -282,7 +293,12 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     signalMergeQueueRef.current = signalMergeQueueRef.current
       .catch(() => undefined)
       .then(async () => {
-        const nextSignals = await mergeSignalsOffThread(signalsRef.current, incomingSignals, CHAT_HISTORY_ITEM_LIMIT);
+        const nextSignals = await mergeSignalsOffThread(
+          signalsRef.current,
+          incomingSignals,
+          CHAT_HISTORY_ITEM_LIMIT,
+          currentWorkerThreshold(),
+        );
         setSignals(nextSignals);
       });
 
@@ -398,22 +414,34 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     }
   }, [supportLoadingMore, supportNextBeforeId]);
 
-  const { enqueue: enqueueSignalStreamMessage } = useThrottledEventBuffer<ChatSignalMessageResponse>((incomingSignals) => {
+  const { enqueue: enqueueSignalStreamMessage, clear: clearSignalStreamMessages } = useThrottledEventBuffer<ChatSignalMessageResponse>((incomingSignals) => {
     void mergeSignalsIntoState(incomingSignals);
     void loadConversations().catch(() => undefined);
   }, 400);
 
-  const { enqueue: enqueueSupportStreamMessage } = useThrottledEventBuffer<SupportMessageView>((incomingMessages) => {
+  const { enqueue: enqueueSupportStreamMessage, clear: clearSupportStreamMessages } = useThrottledEventBuffer<SupportMessageView>((incomingMessages) => {
     setSupportMessages((current) => mergeSupportMessages(current, incomingMessages));
   }, 400);
 
-  const { enqueue: enqueueStreamConversation } = useThrottledEventBuffer<ChatConversationResponse>((incomingConversations) => {
+  const { enqueue: enqueueStreamConversation, clear: clearStreamConversations } = useThrottledEventBuffer<ChatConversationResponse>((incomingConversations) => {
     setConversations((current) => mergeConversations(current, incomingConversations));
   }, 400);
 
   const refreshConversationsThrottled = useThrottledCallback(() => {
     void loadConversations().catch(() => undefined);
   }, 500);
+
+  useEffect(() => {
+    if (active) return;
+    clearSignalStreamMessages();
+    clearSupportStreamMessages();
+    clearStreamConversations();
+    if (typingClearTimerRef.current !== undefined) {
+      window.clearTimeout(typingClearTimerRef.current);
+      typingClearTimerRef.current = undefined;
+    }
+    setSupportTypingText('');
+  }, [active, clearSignalStreamMessages, clearStreamConversations, clearSupportStreamMessages]);
 
   useEffect(() => {
     if (!active || isTma) return;
@@ -469,6 +497,10 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
 
   useEffect(() => {
     if (!active || isTma) return;
+    if (!supportsWebSocketRuntime()) {
+      setSupportStreamState('offline');
+      return;
+    }
     const token = getStoredAuthToken();
     if (token === MOCK_DEBUG_AUTH_TOKEN) {
       setSupportStreamState('online');

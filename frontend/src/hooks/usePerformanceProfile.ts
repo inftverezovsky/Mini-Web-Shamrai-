@@ -5,13 +5,20 @@ import {
   isTelegramMiniApp,
   TELEGRAM_SDK_READY_EVENT,
 } from '../utils/telegramSdk';
+import {
+  canBulkPrefetch,
+  canIntentPrefetch,
+  isConstrainedHardware,
+  isSlowConnectionForPrefetch,
+  isTinyHardware,
+  isVerySlowConnection,
+  readBrowserConnection,
+  readSafeDeviceMemory,
+  readSafeHardwareConcurrency,
+  type BrowserConnectionInfo,
+} from '../utils/performancePolicy';
 
 export type PerformanceProfile = 'full' | 'balanced' | 'lowPower';
-
-interface ConnectionInfo {
-  effectiveType?: string;
-  saveData?: boolean;
-}
 
 interface TelegramWebAppPerformanceInfo {
   isActive?: boolean;
@@ -27,6 +34,8 @@ interface PerformanceSnapshot {
   isAppVisible: boolean;
   isTelegramSurface: boolean;
   prefersReducedMotion: boolean;
+  isConstrainedDevice: boolean;
+  connection: BrowserConnectionInfo | null;
 }
 
 export interface PerformanceProfileState extends PerformanceSnapshot {
@@ -45,11 +54,14 @@ function isPerformanceProfile(value: string | null): value is PerformanceProfile
   return value === 'full' || value === 'balanced' || value === 'lowPower';
 }
 
-function readDevProfileOverride(): PerformanceProfile | null {
-  if (!import.meta.env.DEV || typeof window === 'undefined') return null;
+function readProfileOverride(): PerformanceProfile | null {
+  if (typeof window === 'undefined') return null;
 
   const params = new URLSearchParams(window.location.search);
   const queryOverride = params.get('perf_profile') || params.get('performance_profile');
+  if (queryOverride === 'lowPower') return 'lowPower';
+  if (!import.meta.env.DEV) return null;
+
   if (queryOverride === 'clear') {
     localStorage.removeItem(DEV_OVERRIDE_STORAGE_KEY);
     return null;
@@ -85,15 +97,15 @@ function getPerformanceSnapshot(): PerformanceSnapshot {
       isAppVisible: true,
       isTelegramSurface: false,
       prefersReducedMotion: false,
+      isConstrainedDevice: false,
+      connection: null,
     };
   }
 
   const webApp = getTelegramWebApp<TelegramWebAppPerformanceInfo>();
-  const connection = (navigator as Navigator & { connection?: ConnectionInfo }).connection;
-  const effectiveType = connection?.effectiveType?.toLowerCase() || '';
-  const saveData = Boolean(connection?.saveData);
-  const hardwareConcurrency = navigator.hardwareConcurrency || 8;
-  const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory);
+  const connection = readBrowserConnection();
+  const hardwareConcurrency = readSafeHardwareConcurrency() ?? 8;
+  const deviceMemory = readSafeDeviceMemory();
   const platform = readTelegramPlatform(webApp);
   const userAgent = navigator.userAgent || '';
   const isAndroid = platform === 'android' || /Android/i.test(userAgent);
@@ -102,7 +114,9 @@ function getPerformanceSnapshot(): PerformanceSnapshot {
   const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
   const isDocumentVisible = document.visibilityState !== 'hidden';
   const isTelegramActive = webApp?.isActive !== false;
-  const override = readDevProfileOverride();
+  const override = readProfileOverride();
+  const tinyHardware = isTinyHardware({ hardwareConcurrency, deviceMemory });
+  const constrainedHardware = isConstrainedHardware({ hardwareConcurrency, deviceMemory });
 
   if (override) {
     return {
@@ -110,13 +124,13 @@ function getPerformanceSnapshot(): PerformanceSnapshot {
       isAppVisible: isDocumentVisible && isTelegramActive,
       isTelegramSurface,
       prefersReducedMotion,
+      isConstrainedDevice: constrainedHardware,
+      connection,
     };
   }
 
-  const verySlowNetwork = saveData || effectiveType === 'slow-2g' || effectiveType === '2g';
-  const slowNetwork = verySlowNetwork || effectiveType === '3g';
-  const tinyHardware = hardwareConcurrency <= 2 || (Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= 2);
-  const constrainedHardware = hardwareConcurrency <= 4 || (Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= 4);
+  const verySlowNetwork = isVerySlowConnection(connection);
+  const slowNetwork = isSlowConnectionForPrefetch(connection);
   const weakTelegramDevice = isTelegramSurface && isAndroid && (constrainedHardware || slowNetwork || (telegramPerformanceClass !== null && telegramPerformanceClass <= 1));
 
   let profile: PerformanceProfile = 'full';
@@ -131,6 +145,8 @@ function getPerformanceSnapshot(): PerformanceSnapshot {
     isAppVisible: isDocumentVisible && isTelegramActive,
     isTelegramSurface,
     prefersReducedMotion,
+    isConstrainedDevice: constrainedHardware,
+    connection,
   };
 }
 
@@ -193,8 +209,19 @@ export function usePerformanceProfile(): PerformanceProfileState {
       isLowPower,
       isBalanced,
       shouldReduceMotion,
-      canBulkPreload: snapshot.profile === 'full' && snapshot.isAppVisible && !snapshot.isTelegramSurface,
-      canPreloadOnIntent: !isLowPower && snapshot.isAppVisible,
+      canBulkPreload: canBulkPrefetch({
+        profile: snapshot.profile,
+        isAppVisible: snapshot.isAppVisible,
+        isTelegramSurface: snapshot.isTelegramSurface,
+        connection: snapshot.connection,
+        documentVisibilityState: typeof document === 'undefined' ? 'visible' : document.visibilityState,
+        isConstrainedDevice: snapshot.isConstrainedDevice,
+      }),
+      canPreloadOnIntent: canIntentPrefetch({
+        profile: snapshot.profile,
+        isAppVisible: snapshot.isAppVisible,
+        documentVisibilityState: typeof document === 'undefined' ? 'visible' : document.visibilityState,
+      }),
       canPlayIntroVideo: !isLowPower && snapshot.isAppVisible,
     };
   }, [snapshot]);

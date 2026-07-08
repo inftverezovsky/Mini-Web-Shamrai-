@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
 
 const apiFetchMock = vi.fn();
 
@@ -41,5 +42,26 @@ describe('tab prefetch global stats helpers', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/admin/users-page?limit=50&bookmaker_id=2', {
       signal: undefined,
     });
+  });
+
+  it('deduplicates repeated intent prefetch promises for the same tab', async () => {
+    const { prefetchUserTab } = await import('../src/utils/tabPrefetch');
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let resolveChunk: (() => void) | undefined;
+    const loadChunk = vi.fn(() => new Promise<void>((resolve) => {
+      resolveChunk = resolve;
+    }));
+
+    const firstPrefetch = prefetchUserTab(queryClient, 'profile', { loadChunk });
+    const secondPrefetch = prefetchUserTab(queryClient, 'profile', { loadChunk });
+
+    expect(secondPrefetch).toBe(firstPrefetch);
+    expect(loadChunk).toHaveBeenCalledTimes(1);
+
+    resolveChunk?.();
+    await firstPrefetch;
+    queryClient.clear();
   });
 });

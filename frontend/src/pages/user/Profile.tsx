@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
 import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
 import { getVkIdConfig, isVkRedirectStartedError, linkVkProfile } from '../../utils/vkId';
@@ -55,6 +55,7 @@ import {
 import { useAuthActions, useAuthSelector } from '../../context/AuthContext';
 import { isStaffRole, roleLabel } from '../../utils/roles';
 import { TAB_QUERY_STALE_TIME, fetchProfileDashboard, profileDashboardQueryKey } from '../../utils/tabPrefetch';
+import { getTelegramWebApp } from '../../utils/telegramSdk';
 
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
@@ -238,8 +239,13 @@ const AlertMinCoefSlider = React.memo(function AlertMinCoefSlider({
   );
 });
 
+interface ProfileProps {
+  active?: boolean;
+}
+
 /* ═══════════════════════ Компонент ═══════════════════════ */
-export default function Profile() {
+export default function Profile({ active = true }: ProfileProps = {}) {
+  const queryClient = useQueryClient();
   const userProfile = useAuthSelector((state) => state.user);
   const { setUser, loginWithTelegramBot } = useAuthActions();
   const { isCompact } = useLayoutMode();
@@ -308,7 +314,7 @@ export default function Profile() {
   const [avatarSourceIndex, setAvatarSourceIndex] = useState(0);
 
   /* ── Profile avatar ── */
-  const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+  const tgUser = getTelegramWebApp<{ initDataUnsafe?: { user?: { photo_url?: string | null } | null } }>()?.initDataUnsafe?.user;
   const avatarSources = buildProfileAvatarSources(userProfile, tgUser);
   const avatarSourceKey = avatarSources.join('\n');
   const avatarUrl: string | null = avatarSources[avatarSourceIndex] ?? null;
@@ -333,13 +339,22 @@ export default function Profile() {
   const [profileSetupIntentRevision, setProfileSetupIntentRevision] = useState(0);
   const profileDashboardQuery = useQuery<ProfileDashboardResponse>({
     queryKey: profileDashboardQueryKey(userProfile?.telegram_id),
-    queryFn: fetchProfileDashboard,
-    enabled: Boolean(userProfile && !isAdminProfile),
+    queryFn: ({ signal }) => fetchProfileDashboard(signal),
+    enabled: active && Boolean(userProfile && !isAdminProfile),
     staleTime: TAB_QUERY_STALE_TIME,
   });
   const refetchProfileDashboard = profileDashboardQuery.refetch;
 
   useEffect(() => {
+    if (active) return;
+    void queryClient.cancelQueries({
+      queryKey: profileDashboardQueryKey(userProfile?.telegram_id),
+      exact: true,
+    });
+  }, [active, queryClient, userProfile?.telegram_id]);
+
+  useEffect(() => {
+    if (!active) return undefined;
     if (typeof window === 'undefined') return undefined;
 
     const refreshProfileSetupIntent = (event?: Event) => {
@@ -356,7 +371,7 @@ export default function Profile() {
       window.removeEventListener(PROFILE_SETUP_NAVIGATION_EVENT, refreshProfileSetupIntent);
       window.removeEventListener('popstate', refreshProfileSetupIntent);
     };
-  }, []);
+  }, [active]);
 
   const handleIdentityProfileUpdated = useCallback(async () => {
     await refetchProfileDashboard();
@@ -369,6 +384,7 @@ export default function Profile() {
 
   /* ────────────────── Data loaders ────────────────── */
   useEffect(() => {
+    if (!active) return undefined;
     let cancelled = false;
     detectVkMiniAppRuntime().then((ready) => {
       if (!cancelled) setVkMiniAppRuntime(ready);
@@ -376,7 +392,7 @@ export default function Profile() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (isAdminProfile) return;
@@ -452,12 +468,12 @@ export default function Profile() {
   }, [setUser, userProfile?.vk_user_id]);
 
   useEffect(() => {
-    if (isAdminProfile || !openSettingsSections.vk) return;
+    if (!active || isAdminProfile || !openSettingsSections.vk) return;
     loadVkDeliveryStatus();
-  }, [isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk]);
+  }, [active, isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk]);
 
   useEffect(() => {
-    if (isAdminProfile || !openSettingsSections.vk || !userProfile?.vk_user_id || vkMessagesAllowed) return;
+    if (!active || isAdminProfile || !openSettingsSections.vk || !userProfile?.vk_user_id || vkMessagesAllowed) return;
 
     const checkOnReturn = () => {
       if (document.visibilityState !== 'visible') return;
@@ -472,7 +488,7 @@ export default function Profile() {
       window.removeEventListener('focus', checkOnReturn);
       document.removeEventListener('visibilitychange', checkOnReturn);
     };
-  }, [isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk, userProfile?.vk_user_id, vkMessagesAllowed]);
+  }, [active, isAdminProfile, loadVkDeliveryStatus, openSettingsSections.vk, userProfile?.vk_user_id, vkMessagesAllowed]);
 
   /* ────────────────── Handlers ────────────────── */
   const handleCheckboxChange = async (bkId: number) => {
@@ -566,6 +582,7 @@ export default function Profile() {
   };
 
   useEffect(() => {
+    if (!active) return undefined;
     if (!profileSetupIntent.setup) return;
 
     if (profileSetupIntent.section) {
@@ -582,7 +599,7 @@ export default function Profile() {
       document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [profileSetupIntent.section, profileSetupIntent.setup, profileSetupIntent.targetId]);
+  }, [active, profileSetupIntent.section, profileSetupIntent.setup, profileSetupIntent.targetId]);
 
   const handleAlertMinCoefCommit = useCallback((nextValue: number) => {
     setPrefs((p) => ({
@@ -710,6 +727,7 @@ export default function Profile() {
   }, [setUser]);
 
   useEffect(() => {
+    if (!active) return undefined;
     const action = profileSetupIntent.autoAction;
     if (!action) return;
 
@@ -764,6 +782,7 @@ export default function Profile() {
       if (timer) window.clearTimeout(timer);
     };
   }, [
+    active,
     handleAllowVkMessages,
     handleLinkTelegramProfile,
     handleLinkVkProfile,

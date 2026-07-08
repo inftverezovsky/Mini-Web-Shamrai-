@@ -46,6 +46,9 @@ export async function requestApi<T = any>(endpoint: string, options: RequestInit
       headers,
     });
   } catch (error) {
+    if (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
     throw new Error('Не удалось подключиться к серверу. Проверьте интернет и попробуйте еще раз.');
   }
 

@@ -68,4 +68,17 @@ describe('data worker transforms', () => {
     expect(stats.roi).toBeCloseTo(10);
     expect(stats.averageCoefficient).toBeCloseTo(2.05);
   });
+
+  it('keeps copied worker payloads equivalent to direct aggregation input', () => {
+    const source = Array.from({ length: 80 }, (_, index) => ({
+      id: `bet-${index}`,
+      status: index % 3 === 0 ? 'win' : index % 3 === 1 ? 'loss' : 'refund',
+      coefficient: 1.6 + (index % 5) * 0.1,
+    }));
+
+    expect(calculatePerformanceStats([...source])).toEqual(calculatePerformanceStats(source));
+    expect(sortBetHistory([...source], { sortBy: 'coefficient', sortDirection: 'asc' })).toEqual(
+      sortBetHistory(source, { sortBy: 'coefficient', sortDirection: 'asc' }),
+    );
+  });
 });

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { apiFetch } from '../../utils/api';
 import { Activity, Clock } from 'lucide-react';
+import { supportsIntersectionObserverRuntime } from '../../utils/performancePolicy';
 
 interface LiveTrackerProps {
   apiMatchId: string;
@@ -30,7 +31,7 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
   const pollIntervalMs = performanceModeActive ? 15_000 : 5_000;
 
   useEffect(() => {
-    if (typeof IntersectionObserver === 'undefined') return undefined;
+    if (!supportsIntersectionObserverRuntime()) return undefined;
     const node = rootRef.current;
     if (!node) return undefined;
 

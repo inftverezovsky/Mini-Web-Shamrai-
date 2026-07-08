@@ -11,6 +11,7 @@ import {
   type WebNotificationEvent,
 } from '../utils/webNotificationEvents';
 import { MAX_REALTIME_ITEMS, limitRecent, rememberRecentId } from '../utils/realtimeLimits';
+import { supportsServiceWorkerRuntime, supportsWebSocketRuntime } from '../utils/performancePolicy';
 
 interface PersonalSignal {
   id: number;
@@ -102,6 +103,10 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
 
   useEffect(() => {
     if (!enabled || isTelegramMiniApp()) return;
+    if (!supportsWebSocketRuntime()) {
+      window.dispatchEvent(new CustomEvent(WEB_SIGNAL_STATUS_EVENT, { detail: { state: 'offline' } }));
+      return;
+    }
 
     const token = getStoredAuthToken();
     if (token === MOCK_DEBUG_AUTH_TOKEN) return;
@@ -216,7 +221,7 @@ export default function WebSignalListener({ enabled }: WebSignalListenerProps) {
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || isTelegramMiniApp() || !('serviceWorker' in navigator)) return;
+    if (!enabled || isTelegramMiniApp() || !supportsServiceWorkerRuntime()) return;
 
     const handleServiceWorkerMessage = (event: MessageEvent) => {
       if (!isServiceWorkerNotificationMessage(event.data)) return;

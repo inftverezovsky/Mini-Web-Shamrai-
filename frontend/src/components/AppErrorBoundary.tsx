@@ -12,6 +12,37 @@ type AppErrorBoundaryState = {
   error: Error | null;
 };
 
+const CHUNK_LOAD_ERROR_PATTERNS = [
+  /Failed to fetch dynamically imported module/i,
+  /Importing a module script failed/i,
+  /Loading chunk \d+ failed/i,
+  /ChunkLoadError/i,
+];
+
+function isChunkLoadError(error: Error | null) {
+  if (!error) return false;
+  const text = `${error.name || ''} ${error.message || ''}`;
+  return CHUNK_LOAD_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function currentChunkReloadKey() {
+  if (typeof document === 'undefined') return 'shamrai:chunk-reload:unknown';
+  const entryScript = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/"]')?.src || 'dev';
+  return `shamrai:chunk-reload:${entryScript}`;
+}
+
+function canReloadChunkOnce() {
+  if (typeof window === 'undefined') return false;
+  try {
+    const key = currentChunkReloadKey();
+    if (window.sessionStorage.getItem(key) === '1') return false;
+    window.sessionStorage.setItem(key, '1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export default class AppErrorBoundary extends React.Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
   state: AppErrorBoundaryState = {
     error: null,
@@ -32,6 +63,10 @@ export default class AppErrorBoundary extends React.Component<AppErrorBoundaryPr
   }
 
   private handleRetry = () => {
+    if (isChunkLoadError(this.state.error) && canReloadChunkOnce()) {
+      window.location.reload();
+      return;
+    }
     this.setState({ error: null });
   };
 
