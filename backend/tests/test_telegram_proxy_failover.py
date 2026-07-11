@@ -60,8 +60,8 @@ class TelegramProxyConfigurationTests(unittest.TestCase):
 
     def test_valid_proxy_pool_is_immutable_and_preserves_order(self):
         values = [
-            "http://user-one:pass-one@proxy-one.example:8080",
-            "http://user-two:pass-two@proxy-two.example:8081",
+            "http://user-one:pass-one@8.8.8.8:8080",
+            "http://user-two:pass-two@1.1.1.1:8081",
         ]
         settings = Settings(
             _env_file=None,
@@ -71,11 +71,31 @@ class TelegramProxyConfigurationTests(unittest.TestCase):
 
         self.assertEqual(settings.telegram_proxy_urls, tuple(values))
 
+    def test_proxy_pool_is_redacted_from_settings_repr_and_json(self):
+        settings = Settings(
+            _env_file=None,
+            TELEGRAM_PROXY_URLS_JSON=json.dumps(["http://secret-user:secret-pass@8.8.8.8:8080"]),
+            TELEGRAM_ALLOW_INSECURE_HTTP_PROXY=True,
+        )
+
+        rendered = repr(settings) + settings.model_dump_json()
+        self.assertNotIn("secret-user", rendered)
+        self.assertNotIn("secret-pass", rendered)
+
+    def test_legacy_global_proxy_requires_explicit_pool_migration(self):
+        settings = Settings(
+            _env_file=None,
+            HTTPS_PROXY="http://legacy-user:legacy-pass@legacy.example:8080",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "TELEGRAM_PROXY_URLS_JSON"):
+            settings.validate_runtime_security()
+
 
 class TelegramProxyFailoverTests(unittest.TestCase):
     TOKEN = "987654:unit-test-token-not-a-secret"
-    PROXY_ONE = "http://proxy-user-one:proxy-pass-one@proxy-one.example:8080"
-    PROXY_TWO = "http://proxy-user-two:proxy-pass-two@proxy-two.example:8080"
+    PROXY_ONE = "http://proxy-user-one:proxy-pass-one@8.8.8.8:8080"
+    PROXY_TWO = "http://proxy-user-two:proxy-pass-two@1.1.1.1:8080"
 
     def setUp(self):
         self.preferred_patch = patch.object(
@@ -95,8 +115,15 @@ class TelegramProxyFailoverTests(unittest.TestCase):
             proxy: _RecordingOpener(proxy, outcomes, calls)
             for proxy, outcomes in outcomes_by_proxy.items()
         }
+        openers["direct"] = _RecordingOpener(
+            "direct",
+            outcomes_by_proxy.get("direct", []),
+            calls,
+        )
 
         def proxy_handler(mapping):
+            if not mapping:
+                return "direct"
             self.assertEqual(mapping["http"], mapping["https"])
             return mapping["https"]
 
@@ -117,6 +144,30 @@ class TelegramProxyFailoverTests(unittest.TestCase):
             telegram_proxy_urls=(self.PROXY_ONE, self.PROXY_TWO),
         )
         return patch.object(telegram_bot, "settings", fake_settings)
+
+    def test_direct_mode_retries_only_safe_preconnect_failure(self):
+        calls, opener_patches = self._patch_openers({
+            "direct": [
+                urllib.error.URLError(ConnectionRefusedError(111, "refused")),
+                {"ok": True, "result": {"message_id": 1}},
+            ],
+        })
+        fake_settings = SimpleNamespace(
+            TELEGRAM_BOT_TOKEN=self.TOKEN,
+            TELEGRAM_API_RETRIES=1,
+            TELEGRAM_API_TIMEOUT_SECONDS=3.0,
+            has_real_telegram_token=True,
+            telegram_proxy_urls=(),
+        )
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(telegram_bot, "settings", fake_settings))
+            for active_patch in opener_patches:
+                stack.enter_context(active_patch)
+            result = telegram_bot.call_telegram_api("getMe", {}, retries=1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([proxy for proxy, _ in calls], ["direct", "direct"])
 
     def test_connection_refused_fails_over_and_success_is_sticky(self):
         calls, opener_patches = self._patch_openers({
@@ -153,7 +204,7 @@ class TelegramProxyFailoverTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual([proxy for proxy, _ in calls], [self.PROXY_ONE])
 
-    def test_proxy_auth_407_fails_over_but_telegram_429_does_not(self):
+    def test_proxy_auth_407_fails_over(self):
         proxy_auth_error = urllib.error.HTTPError(
             url="https://api.telegram.org/redacted",
             code=407,
@@ -174,6 +225,29 @@ class TelegramProxyFailoverTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual([proxy for proxy, _ in calls], [self.PROXY_ONE, self.PROXY_TWO])
+
+    def test_telegram_429_does_not_rotate_or_resend(self):
+        rate_limit_error = urllib.error.HTTPError(
+            url="https://api.telegram.org/redacted",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=io.BytesIO(b'{"ok":false,"description":"Too Many Requests: retry later"}'),
+        )
+        calls, opener_patches = self._patch_openers({
+            self.PROXY_ONE: [rate_limit_error],
+            self.PROXY_TWO: [{"ok": True, "result": {"message_id": 2}}],
+        })
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self._settings_patch())
+            for active_patch in opener_patches:
+                stack.enter_context(active_patch)
+            result = telegram_bot.call_telegram_api("sendMessage", {"chat_id": 1, "text": "hello"}, retries=0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["description"], "Too Many Requests: retry later")
+        self.assertEqual([proxy for proxy, _ in calls], [self.PROXY_ONE])
 
     def test_terminal_error_and_logs_never_expose_proxy_credentials(self):
         calls, opener_patches = self._patch_openers({

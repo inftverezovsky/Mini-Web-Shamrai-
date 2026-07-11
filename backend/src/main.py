@@ -1611,14 +1611,15 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
             await run_dev_schema_migrations(conn)
         
-    # Set proxy if configured
-    if settings.HTTPS_PROXY:
+    telegram_proxy_count = len(settings.telegram_proxy_urls)
+    if telegram_proxy_count:
         logger.info(
-            "global_https_proxy_configured",
-            extra={"event": "global_https_proxy_configured"},
+            "telegram_proxy_pool_configured",
+            extra={
+                "event": "telegram_proxy_pool_configured",
+                "proxy_count": telegram_proxy_count,
+            },
         )
-        os.environ["HTTPS_PROXY"] = settings.HTTPS_PROXY
-        os.environ["https_proxy"] = settings.HTTPS_PROXY
  
     polling_task = None
     telegram_startup_task = None
@@ -1820,7 +1821,8 @@ async def telegram_health_check():
             "ok": False,
             "status": "not_configured",
             "polling_enabled": settings.TELEGRAM_USE_POLLING,
-            "proxy_set": bool(settings.HTTPS_PROXY.strip()),
+            "proxy_set": bool(settings.telegram_proxy_urls),
+            "proxy_count": len(settings.telegram_proxy_urls),
             "expected_webhook_url": expected_webhook_url,
             "resolved_addresses": _telegram_api_resolved_addresses(),
             "hosts_entries": _telegram_api_host_entries(),
@@ -1843,7 +1845,8 @@ async def telegram_health_check():
         "delivery_mode": "polling" if settings.TELEGRAM_USE_POLLING else "webhook",
         "duration_ms": round((time.perf_counter() - started_at) * 1000),
         "polling_enabled": settings.TELEGRAM_USE_POLLING,
-        "proxy_set": bool(settings.HTTPS_PROXY.strip()),
+        "proxy_set": bool(settings.telegram_proxy_urls),
+        "proxy_count": len(settings.telegram_proxy_urls),
         "api_timeout_seconds": settings.TELEGRAM_API_TIMEOUT_SECONDS,
         "api_retries": settings.TELEGRAM_API_RETRIES,
         "webhook_ip_forced": bool(settings.TELEGRAM_WEBHOOK_IP_ADDRESS.strip()),

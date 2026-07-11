@@ -268,15 +268,6 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
         integrations_visible=True,
     ),
     SystemSettingDefinition(
-        key="HTTPS_PROXY",
-        default_value="",
-        description="Proxy URL для интеграций, где он нужен.",
-        is_secret=True,
-        value_kind="secret",
-        env_key="HTTPS_PROXY",
-        integrations_visible=True,
-    ),
-    SystemSettingDefinition(
         key="TELEGRAM_BOT_USERNAME",
         default_value="Shamra1_bot",
         description="Username Telegram-бота.",

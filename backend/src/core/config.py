@@ -1,4 +1,9 @@
+import ipaddress
+import json
 from typing import Optional
+from urllib.parse import urlsplit
+
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LOCAL_DEV_JWT_SECRET = "BET_TMA_LOCAL_DEV_SECRET_CHANGE_ME"
@@ -38,6 +43,8 @@ class Settings(BaseSettings):
     TELEGRAM_SPORT_CUSTOM_EMOJI_IDS: str = ""
     TELEGRAM_API_TIMEOUT_SECONDS: float = 3.0
     TELEGRAM_API_RETRIES: int = 2
+    TELEGRAM_PROXY_URLS_JSON: SecretStr = Field(default=SecretStr("[]"), repr=False)
+    TELEGRAM_ALLOW_INSECURE_HTTP_PROXY: bool = False
     TELEGRAM_START_RESPONSE_TIMEOUT_SECONDS: float = 4.0
     TELEGRAM_BROADCAST_CONCURRENCY: int = 12
     TELEGRAM_USE_POLLING: bool = False
@@ -145,6 +152,60 @@ class Settings(BaseSettings):
         )
 
     @property
+    def telegram_proxy_urls(self) -> tuple[str, ...]:
+        raw_value = self.TELEGRAM_PROXY_URLS_JSON.get_secret_value().strip() or "[]"
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("TELEGRAM_PROXY_URLS_JSON must be a JSON array") from exc
+
+        if not isinstance(parsed, list):
+            raise RuntimeError("TELEGRAM_PROXY_URLS_JSON must be a JSON array")
+        if len(parsed) > 8:
+            raise RuntimeError("TELEGRAM_PROXY_URLS_JSON supports at most 8 proxies")
+
+        validated: list[str] = []
+        for proxy_url in parsed:
+            if not isinstance(proxy_url, str) or not proxy_url.strip():
+                raise RuntimeError("Every Telegram proxy must be a non-empty URL string")
+            clean_url = proxy_url.strip()
+            if len(clean_url) > 2048 or any(ord(char) < 32 for char in clean_url):
+                raise RuntimeError("Telegram proxy URL contains invalid characters")
+
+            try:
+                parts = urlsplit(clean_url)
+                port = parts.port
+            except ValueError as exc:
+                raise RuntimeError("Telegram proxy URL has an invalid port") from exc
+
+            if parts.scheme not in {"http", "https"}:
+                raise RuntimeError("Telegram proxy URL scheme must be http or https")
+            if parts.scheme == "http" and not self.TELEGRAM_ALLOW_INSECURE_HTTP_PROXY:
+                raise RuntimeError(
+                    "Set TELEGRAM_ALLOW_INSECURE_HTTP_PROXY=true to use plaintext HTTP proxies"
+                )
+            if not parts.hostname or port is None:
+                raise RuntimeError("Telegram proxy URL must include a host and explicit port")
+            if parts.path not in {"", "/"} or parts.query or parts.fragment:
+                raise RuntimeError("Telegram proxy URL must not include a path, query, or fragment")
+            if bool(parts.username) != bool(parts.password):
+                raise RuntimeError("Telegram proxy URL must include both username and password")
+
+            host = parts.hostname.lower()
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise RuntimeError("Telegram proxy host must be a public IP address") from exc
+            if not address.is_global:
+                raise RuntimeError("Telegram proxy IP address must be globally routable")
+
+            validated.append(clean_url)
+
+        if len(set(validated)) != len(validated):
+            raise RuntimeError("TELEGRAM_PROXY_URLS_JSON must not contain duplicate proxies")
+        return tuple(validated)
+
+    @property
     def has_yookassa_credentials(self) -> bool:
         return bool(self.YOOKASSA_SHOP_ID.strip() and self.YOOKASSA_SECRET_KEY.strip())
 
@@ -177,6 +238,12 @@ class Settings(BaseSettings):
         )
 
     def validate_runtime_security(self) -> None:
+        if self.HTTPS_PROXY.strip():
+            raise RuntimeError(
+                "HTTPS_PROXY is deprecated; migrate Telegram proxies to TELEGRAM_PROXY_URLS_JSON"
+            )
+        _ = self.telegram_proxy_urls
+
         if self.is_production and self.DEBUG_MODE:
             raise RuntimeError("DEBUG_MODE must be false when APP_ENV=production")
 
