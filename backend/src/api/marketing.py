@@ -33,6 +33,7 @@ from src.schemas.schemas import (
     PvPBattleResponse,
     PvPVoteRequest,
     PvPVoteResponse,
+    WheelOfFortuneResponse,
 )
 
 router = APIRouter(prefix="/marketing", tags=["Marketing"])
@@ -656,3 +657,109 @@ async def get_active_marathon(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Нет активного марафона")
         
     return marathon
+
+@router.get("/wheel-of-fortune/status")
+async def get_wheel_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Check if the user can spin the wheel of fortune right now."""
+    from src.models.models import MarketingRewardEvent
+    
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    last_spin = await db.execute(
+        select(MarketingRewardEvent)
+        .filter(
+            MarketingRewardEvent.user_id == current_user.telegram_id,
+            MarketingRewardEvent.widget_key == "wheel_of_fortune"
+        )
+        .order_by(MarketingRewardEvent.created_at.desc())
+    )
+    last_event = last_spin.scalars().first()
+    
+    if last_event and last_event.created_at >= seven_days_ago:
+        next_spin = last_event.created_at + timedelta(days=7)
+        return {"can_spin": False, "next_spin_at": next_spin.isoformat()}
+    return {"can_spin": True, "next_spin_at": None}
+
+@router.post("/wheel-of-fortune", response_model=WheelOfFortuneResponse)
+async def spin_wheel_of_fortune(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    POST /api/marketing/wheel-of-fortune
+    Spins the wheel and returns a random prize based on weighted probabilities.
+    Allowed once per week per user.
+    """
+    from src.models.models import MarketingRewardEvent
+    
+    # Блокируем баланс пользователя, чтобы предотвратить параллельные запросы (рейс-кондишены)
+    await lock_user_balance(db, current_user.telegram_id)
+    
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    last_spin = await db.execute(
+        select(MarketingRewardEvent)
+        .filter(
+            MarketingRewardEvent.user_id == current_user.telegram_id,
+            MarketingRewardEvent.widget_key == "wheel_of_fortune",
+            MarketingRewardEvent.created_at >= seven_days_ago
+        )
+    )
+    if last_spin.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Вы уже получали бонус на этой неделе."
+        )
+
+    # Распределение: Топ Ошибка 50%, Скидка 50% 15%, Скидка 70% 20%, 1000 бонусов 15%
+    r = random.random()
+    if r < 0.50:
+        prize_type = "post_payment_top_error"
+    elif r < 0.65:
+        prize_type = "discount_50"
+    elif r < 0.85:
+        prize_type = "discount_70"
+    else:
+        prize_type = "bonus_1000"
+
+    promo = None
+    message = ""
+    reward_type = prize_type
+
+    if prize_type == "post_payment_top_error":
+        promo = await create_bound_promo(db, current_user, "WHEEL", 0, hours_valid=168)
+        promo.reward_type = "post_payment_match"
+        message = "🎉 Поздравляем! Вы выиграли Топ Ошибку на послеоплату."
+    elif prize_type == "discount_50":
+        promo = await create_bound_promo(db, current_user, "WHEEL", 50, hours_valid=168)
+        message = "🎉 Поздравляем! Вы выиграли скидку 50% на абонемент."
+    elif prize_type == "discount_70":
+        promo = await create_bound_promo(db, current_user, "WHEEL", 70, hours_valid=168)
+        message = "🎉 Поздравляем! Вы выиграли скидку 70% на абонемент."
+    elif prize_type == "bonus_1000":
+        promo = await create_bound_promo(db, current_user, "WHEEL", 0, hours_valid=168)
+        promo.reward_type = "bonus_1000"
+        message = "🎉 Поздравляем! Вы выиграли 1000 бонусов на Топ Ошибку."
+
+    db.add(LivePulseLog(
+        text_message=f"🎡 @{current_user.username[:4] if current_user.username else 'user'}*** крутит Колесо Фортуны и забирает приз!",
+        created_at=datetime.now(timezone.utc),
+    ))
+
+    await record_marketing_reward_event(
+        db,
+        user=current_user,
+        widget_key="wheel_of_fortune",
+        reward_type=prize_type,
+        reward_value=1,
+        promo_code_id=promo.id if promo else None,
+    )
+
+    await db.commit()
+
+    return WheelOfFortuneResponse(
+        reward_type=reward_type,
+        promo_code=promo.code if promo else None,
+        message=message
+    )

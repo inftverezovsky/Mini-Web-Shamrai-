@@ -1778,6 +1778,7 @@ async def stop_forecast_broadcast_from_admin(
         },
     ))
     await db.commit()
+
     return {
         "status": "success",
         "bet_id": str(bet.id),
@@ -1785,6 +1786,91 @@ async def stop_forecast_broadcast_from_admin(
         "stopped_requests": stopped_requests,
         "skipped_processing": skipped_processing,
         "taker_count": taker_count,
+    }
+
+
+@router.post("/admin/forecast-broadcast/{bet_id}/resume")
+async def resume_forecast_broadcast_from_admin(
+    bet_id: UUID,
+    current_admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    await _ensure_broadcasts_are_not_paused(db)
+    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True, for_update=True)
+
+    if bet.status in ("win", "loss", "refund"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Нельзя возобновить рассылку для завершённого прогноза",
+        )
+    if bet.resolved_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Прогноз уже имеет результат, возобновление невозможно",
+        )
+
+    requests_result = await db.execute(
+        select(ForecastRequest).filter(ForecastRequest.bet_id == bet.id)
+    )
+    forecast_requests = requests_result.scalars().all()
+
+    reactivated_count = 0
+    for forecast_request in forecast_requests:
+        if forecast_request.status == FORECAST_STATUS_REMOVED:
+            forecast_request.status = FORECAST_STATUS_ANNOUNCED
+            reactivated_count += 1
+
+    if bet.status == "deleted":
+        bet.status = "pending"
+    bet.auto_send_on_interest = True
+
+    bookmaker_ids = [bm.id for bm in bet.bookmakers] if bet.bookmakers else []
+    if bet.bookmaker_id and bet.bookmaker_id not in bookmaker_ids:
+        bookmaker_ids.append(bet.bookmaker_id)
+
+    target_users = await _get_smart_target_users(
+        db,
+        sport_filter=bet.sport_type,
+        bookmaker_id=None,
+        bookmaker_ids=bookmaker_ids,
+        delivery_channel="any",
+        min_coef=float(bet.coefficient),
+    )
+
+    new_requests = await _create_missing_forecast_requests_for_bet(
+        db,
+        bet=bet,
+        users=target_users,
+    )
+
+    teaser_result = {"sent": 0, "failed": 0, "errors": []}
+    if new_requests:
+        t_res = await _send_forecast_teasers(
+            db,
+            forecast_requests=new_requests,
+            teaser_text=bet.teaser_text or "Есть закрытый прогноз под вашу БК. Берете матч?",
+            log_prefix="ForecastBroadcastResume",
+        )
+        teaser_result = t_res["delivery"]
+
+    db.add(AdminAuditLog(
+        actor_id=current_admin.telegram_id,
+        action="forecast_broadcast_resumed",
+        details={
+            "bet_id": str(bet.id),
+            "event_name": bet.event_name,
+            "reactivated_count": reactivated_count,
+            "new_requests_count": len(new_requests),
+            "sent": teaser_result.get("sent", 0),
+        },
+    ))
+    await db.commit()
+
+    return {
+        "status": "success",
+        "reactivated_requests": reactivated_count,
+        "new_requests": len(new_requests),
+        "delivery": teaser_result,
     }
 
 

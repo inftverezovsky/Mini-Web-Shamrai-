@@ -171,7 +171,7 @@ export default function AdminPlans() {
                 type="button"
                 onClick={() => deletePlan(plan)}
                 disabled={deletingPlanId === plan.id}
-                className="flex items-center space-x-1 rounded-xl bg-rose-500/10 px-3 py-2 font-black text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-50"
+                className="flex items-center space-x-1 rounded-xl bg-slate-500/10 px-3 py-2 font-black text-slate-300 transition hover:bg-slate-500/20 disabled:opacity-50"
               >
                 {deletingPlanId === plan.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                 <span>Удалить</span>

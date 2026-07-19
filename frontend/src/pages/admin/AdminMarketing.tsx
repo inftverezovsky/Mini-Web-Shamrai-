@@ -228,7 +228,7 @@ export default function AdminMarketing() {
                   {p.is_active ? (
                     <button
                       onClick={() => handleDeactivatePromo(p.id)}
-                      className="bg-rose-500/10 border border-rose-500/20 text-rose-450 hover:bg-rose-500 hover:text-white p-1.5 rounded-lg active:scale-95 transition-all shrink-0"
+                      className="bg-slate-500/10 border border-slate-500/20 text-slate-450 hover:bg-slate-500 hover:text-white p-1.5 rounded-lg active:scale-95 transition-all shrink-0"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>

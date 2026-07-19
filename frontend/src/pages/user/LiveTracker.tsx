@@ -78,7 +78,7 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
     return (
       <div ref={rootRef} className="flex items-center justify-center py-3 bg-white/[0.02] border border-white/5 rounded-xl">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider animate-pulse flex items-center">
-          <Activity className="w-3.5 h-3.5 text-rose-500 mr-1.5 animate-spin" />
+          <Activity className="w-3.5 h-3.5 text-slate-500 mr-1.5 animate-spin" />
           Поиск матча...
         </span>
       </div>
@@ -93,13 +93,13 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
     <div ref={rootRef} className="bg-slate-950/70 border border-white/10 p-4 rounded-xl flex flex-col justify-between items-center shadow-lg relative overflow-hidden group">
       
       {/* Visual neon lines */}
-      <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-rose-500 to-transparent shadow-[0_0_8px_#ff007f]"></div>
+      <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-slate-500 to-transparent shadow-[0_0_8px_#ff007f]"></div>
 
       {/* Top Header: Live Pulse indicator and minute */}
       <div className="flex justify-between items-center w-full mb-2">
         <div className="flex items-center space-x-1.5">
-          <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-rose-500 animate-pulse shadow-[0_0_8px_#ff007f]' : 'bg-slate-600'}`}></span>
-          <span className={`text-[9px] font-black uppercase tracking-widest ${isLive ? 'text-rose-500' : 'text-slate-500'}`}>
+          <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-slate-500 animate-pulse shadow-[0_0_8px_#ff007f]' : 'bg-slate-600'}`}></span>
+          <span className={`text-[9px] font-black uppercase tracking-widest ${isLive ? 'text-slate-500' : 'text-slate-500'}`}>
             {isLive ? 'Live репортаж' : 'Завершен'}
           </span>
         </div>
@@ -123,7 +123,7 @@ export default function LiveTracker({ apiMatchId, active = true }: LiveTrackerPr
         <div className="bg-slate-900 border border-white/10 px-3 py-1 rounded-lg flex items-center justify-center space-x-1.5 shadow-[0_0_10px_rgba(0,210,255,0.15)] font-black text-xs text-white">
           <span className="text-[#00d2ff] text-glow-blue">{matchData.score_a}</span>
           <span className="text-slate-600 font-bold">:</span>
-          <span className="text-[#ff007f] text-glow-rose">{matchData.score_b}</span>
+          <span className="text-slate-500 text-glow-slate">{matchData.score_b}</span>
         </div>
 
         {/* Team B */}

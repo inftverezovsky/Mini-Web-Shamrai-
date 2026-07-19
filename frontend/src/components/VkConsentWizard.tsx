@@ -216,12 +216,12 @@ export default function VkConsentWizard() {
                     isDone
                       ? 'border-emerald-300/20 bg-emerald-400/10'
                       : isFailed
-                        ? 'border-rose-300/20 bg-rose-500/10'
+                        ? 'border-slate-300/20 bg-slate-500/10'
                         : 'border-white/10 bg-white/[0.035]'
                   }`}
                 >
                   <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                    isDone ? 'bg-emerald-400/15 text-emerald-200' : isFailed ? 'bg-rose-400/15 text-rose-200' : 'bg-white/[0.08] text-cyan-200'
+                    isDone ? 'bg-emerald-400/15 text-emerald-200' : isFailed ? 'bg-slate-400/15 text-slate-200' : 'bg-white/[0.08] text-cyan-200'
                   }`}>
                     {isDone ? <Check className="h-4 w-4" /> : isFailed ? <AlertTriangle className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
                   </div>
@@ -247,7 +247,7 @@ export default function VkConsentWizard() {
           </div>
 
           {loadError && (
-            <p className="rounded-2xl border border-rose-300/20 bg-rose-500/10 px-3 py-2.5 text-xs font-semibold leading-relaxed text-rose-100">
+            <p className="rounded-2xl border border-slate-300/20 bg-slate-500/10 px-3 py-2.5 text-xs font-semibold leading-relaxed text-slate-100">
               {loadError}
             </p>
           )}

@@ -60,7 +60,7 @@ const resultActions: Array<{
     label: 'Неудача',
     Icon: X,
     className:
-      'border-[#ff007f]/35 bg-[#ff007f]/12 text-[#ff3d9c] hover:bg-[#ff007f] hover:text-white',
+      'border-slate-500/35 bg-slate-500/12 text-slate-400 hover:bg-slate-500 hover:text-white',
   },
   {
     status: 'refund',
@@ -533,7 +533,7 @@ export default function AdminResults() {
                       const bookmakerUrl = getBookmakerLinkUrl(bet, bookmaker.id);
                       const content = (
                         <>
-                          <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="h-7 shrink-0" />
+                          <BookmakerLogoFrame bookmaker={bookmaker} size="badge" className="h-5 shrink-0" />
                           <span className="min-w-0 truncate">{bookmaker.name}</span>
                           {bookmakerUrl && <ExternalLink className="h-3 w-3 shrink-0 text-cyan-200/85" />}
                         </>
@@ -545,14 +545,14 @@ export default function AdminResults() {
                           href={bookmakerUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="inline-flex max-w-full items-center gap-2 rounded-xl border border-cyan-300/20 bg-slate-950/45 px-2.5 py-1.5 text-[10px] font-black text-slate-100 transition-all hover:border-cyan-300/45 hover:bg-cyan-400/10"
+                          className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-cyan-300/20 bg-slate-950/45 px-2 py-1 text-[10px] font-black text-slate-100 transition-all hover:border-cyan-300/45 hover:bg-cyan-400/10"
                         >
                           {content}
                         </a>
                       ) : (
                         <span
                           key={bookmaker.id}
-                          className="inline-flex max-w-full items-center gap-2 rounded-xl border border-white/10 bg-slate-950/35 px-2.5 py-1.5 text-[10px] font-black text-slate-400"
+                          className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-white/10 bg-slate-950/35 px-2 py-1 text-[10px] font-black text-slate-400"
                         >
                           {content}
                         </span>
@@ -679,65 +679,99 @@ export default function AdminResults() {
                         type="button"
                         onClick={() => handleSaveEdit(bet)}
                         disabled={isSavingEdit || bet.isFading}
-                        className="mt-1 flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-300/30 bg-indigo-500/16 px-3 text-[10px] font-black uppercase tracking-wider text-indigo-100 transition-all hover:border-indigo-300/60 hover:bg-indigo-500/24 disabled:cursor-not-allowed disabled:opacity-55"
+                        className="mt-1 flex min-h-[32px] w-full items-center justify-center gap-1.5 rounded-lg border border-indigo-300/30 bg-indigo-500/16 px-3 text-[9px] font-bold uppercase tracking-wider text-indigo-100 transition-all hover:border-indigo-300/60 hover:bg-indigo-500/24 disabled:cursor-not-allowed disabled:opacity-55"
                       >
-                        {isSavingEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                        {isSavingEdit ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
                         <span>Сохранить изменения</span>
                       </button>
                     </div>
                   </div>
                 )}
 
-                <div className="mt-3 rounded-xl border border-emerald-400/15 bg-slate-950/38 p-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[9px] font-black uppercase tracking-wider text-emerald-200">
-                      Упал до
-                    </span>
-                    {bet.odds_drop_notified_at && (
-                      <span className="truncate text-[8.5px] font-bold uppercase tracking-wider text-slate-500">
-                        отправлено {formatDate(bet.odds_drop_notified_at)}
+                <div className="mt-3 flex flex-wrap items-end gap-2">
+                  {/* Odds Drop Block */}
+                  <div className="flex flex-1 gap-1.5 min-w-[220px]">
+                    <div className="flex flex-col gap-1 w-[4.5rem]">
+                      <span className="text-[9px] font-black uppercase tracking-wider text-emerald-200 pl-1">
+                        Упал до
                       </span>
-                    )}
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={oddsDropValue}
+                        onChange={(event) => handleOddsDropInput(bet.id, event.target.value)}
+                        disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || bet.isFading}
+                        placeholder="1.50"
+                        className="h-8 min-w-0 appearance-none rounded-lg border border-emerald-300/20 bg-black/[0.24] px-2 text-xs font-black text-emerald-100 outline-none transition-all [color-scheme:dark] placeholder:text-slate-600 focus:border-emerald-300/55 focus:bg-black/35 disabled:bg-black/[0.24] disabled:text-slate-500 disabled:opacity-55"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[9px] opacity-0 select-none">_</span>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveOddsDrop(bet.id)}
+                        disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || bet.isFading}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-emerald-400/25 bg-emerald-500/10 text-emerald-200 transition-all hover:border-emerald-300/55 hover:bg-emerald-500/18 disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label="Сохранить коэффициент падения"
+                      >
+                        {isSavingOddsDrop ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1 flex-1">
+                      <div className="flex justify-end pr-1 h-[13.5px] items-center">
+                        {bet.odds_drop_notified_at && (
+                          <span className="truncate text-[8.5px] font-bold uppercase tracking-wider text-slate-500">
+                            отправлено {formatDate(bet.odds_drop_notified_at)}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleSendOddsDrop(bet.id)}
+                        disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || !hasOddsDropValue || bet.isFading}
+                        className="flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-cyan-300/22 bg-cyan-400/10 px-2 text-[9px] font-black uppercase tracking-wider text-cyan-100 transition-all hover:border-cyan-300/55 hover:bg-cyan-400/18 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isSendingOddsDrop ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+                        <span className="truncate">Отправить</span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-2 grid grid-cols-[minmax(0,4.5rem)_42px_minmax(0,1fr)] gap-2">
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={oddsDropValue}
-                      onChange={(event) => handleOddsDropInput(bet.id, event.target.value)}
-                      disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || bet.isFading}
-                      placeholder="1.50"
-                      className="h-10 min-w-0 appearance-none rounded-xl border border-emerald-300/20 bg-black/[0.24] px-2.5 text-sm font-black text-emerald-100 outline-none transition-all [color-scheme:dark] placeholder:text-slate-600 focus:border-emerald-300/55 focus:bg-black/35 disabled:bg-black/[0.24] disabled:text-slate-500 disabled:opacity-55"
-                    />
+
+                  {/* Edit & Delete Block */}
+                  <div className="flex flex-1 gap-1.5 min-w-[180px]">
                     <button
                       type="button"
-                      onClick={() => handleSaveOddsDrop(bet.id)}
-                      disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || bet.isFading}
-                      className="flex h-10 items-center justify-center rounded-xl border border-emerald-400/25 bg-emerald-500/10 text-emerald-200 transition-all hover:border-emerald-300/55 hover:bg-emerald-500/18 disabled:cursor-not-allowed disabled:opacity-50"
-                      aria-label="Сохранить коэффициент падения"
+                      onClick={() => handleStartEdit(bet)}
+                      disabled={isBusy || bet.isFading}
+                      className={`flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 text-[9px] font-bold uppercase tracking-wider transition-all disabled:cursor-not-allowed disabled:opacity-55 ${
+                        isEditing
+                          ? 'border-indigo-300/50 bg-indigo-500/22 text-indigo-100'
+                          : 'border-indigo-300/25 bg-indigo-500/10 text-indigo-200 hover:border-indigo-300/45 hover:bg-indigo-500/18'
+                      }`}
                     >
-                      {isSavingOddsDrop ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                      {isSavingEdit ? <Loader2 className="h-3 w-3 animate-spin" /> : <Pencil className="h-3 w-3" />}
+                      <span className="truncate">Редакт.</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleSendOddsDrop(bet.id)}
-                      disabled={isBusy || isSavingOddsDrop || isSendingOddsDrop || !hasOddsDropValue || bet.isFading}
-                      className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-cyan-300/22 bg-cyan-400/10 px-2.5 text-[9px] font-black uppercase tracking-wider text-cyan-100 transition-all hover:border-cyan-300/55 hover:bg-cyan-400/18 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => handleDelete(bet)}
+                      disabled={isBusy || bet.isFading}
+                      className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-500/25 bg-slate-500/10 px-2 text-[9px] font-bold uppercase tracking-wider text-slate-300 transition-all hover:border-slate-400/45 hover:bg-slate-500/18 disabled:cursor-not-allowed disabled:opacity-55"
                     >
-                      {isSendingOddsDrop ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                      <span>Отправить</span>
+                      {isDeleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      <span className="truncate">Удалить</span>
                     </button>
                   </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div className="mt-4 flex flex-wrap gap-2">
                   {resultActions.map(({ status, label, Icon, className }) => (
                     <button
                       key={status}
                       type="button"
+                      disabled={isResolving}
                       onClick={() => handleResolve(bet.id, status)}
-                      disabled={isBusy || bet.isFading}
-                      className={`min-h-[42px] rounded-xl border px-2 text-[10px] font-black transition-all active:scale-95 disabled:cursor-not-allowed disabled:opacity-55 ${className}`}
+                      className={`flex-1 min-h-[32px] rounded-lg border px-2 text-[10px] font-bold tracking-wide transition-all active:scale-95 disabled:cursor-not-allowed disabled:opacity-55 ${className}`}
                     >
                       <span className="flex items-center justify-center gap-1.5">
                         <Icon className={`h-3.5 w-3.5 shrink-0 ${isResolving ? 'animate-pulse' : ''}`} />
@@ -746,30 +780,7 @@ export default function AdminResults() {
                     </button>
                   ))}
                 </div>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={() => handleStartEdit(bet)}
-                    disabled={isBusy || bet.isFading}
-                    className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2 text-[9px] font-black uppercase tracking-wider transition-all disabled:cursor-not-allowed disabled:opacity-55 ${
-                      isEditing
-                        ? 'border-indigo-300/50 bg-indigo-500/22 text-indigo-100'
-                        : 'border-indigo-300/25 bg-indigo-500/10 text-indigo-200 hover:border-indigo-300/45 hover:bg-indigo-500/18'
-                    }`}
-                  >
-                    {isSavingEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
-                    <span className="truncate">Редактировать</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDelete(bet)}
-                    disabled={isBusy || bet.isFading}
-                    className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-2 text-[9px] font-black uppercase tracking-wider text-rose-300 transition-all hover:border-rose-400/45 hover:bg-rose-500/18 disabled:cursor-not-allowed disabled:opacity-55"
-                  >
-                    {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                    <span className="truncate">Удалить прогноз</span>
-                  </button>
-                </div>
+
               </div>
             );
           })}

@@ -64,7 +64,7 @@ export default function PvPWidget() {
             <p className="text-[9px] font-black uppercase tracking-[0.22em] text-[#8eeaff]">Баттл Разумов</p>
             <h3 className="mt-1 text-sm font-black text-white">{battle.match_name}</h3>
           </div>
-          <Swords className="h-7 w-7 text-[#ff007f] drop-shadow-[0_0_12px_rgba(255,0,127,0.62)]" />
+          <Swords className="h-7 w-7 text-slate-500 drop-shadow-[0_0_12px_rgba(255,0,127,0.62)]" />
         </div>
 
         <div className="grid grid-cols-2 gap-2">
@@ -79,9 +79,9 @@ export default function PvPWidget() {
           <button
             onClick={() => vote('b')}
             disabled={!!voting}
-            className="rounded-2xl border border-[#ff007f]/25 bg-[#ff007f]/10 p-3 text-left active:scale-95"
+            className="rounded-2xl border border-slate-500/25 bg-slate-500/10 p-3 text-left active:scale-95"
           >
-            <span className="text-[10px] font-black uppercase text-[#ff8fc7]">{battle.option_b}</span>
+            <span className="text-[10px] font-black uppercase text-slate-400">{battle.option_b}</span>
             <span className="mt-1 block text-lg font-black text-white">{battle.percent_b}%</span>
           </button>
         </div>
@@ -91,7 +91,7 @@ export default function PvPWidget() {
             initial={false}
             animate={{ width: `${battle.percent_a}%` }}
             transition={{ type: 'spring', stiffness: 90, damping: 16 }}
-            className="h-2 rounded-full bg-gradient-to-r from-[#00d2ff] to-[#ff007f] shadow-[0_0_16px_rgba(0,210,255,0.55)]"
+            className="h-2 rounded-full bg-gradient-to-r from-[#00d2ff] to-slate-500 shadow-[0_0_16px_rgba(0,210,255,0.55)]"
           />
         </div>
 

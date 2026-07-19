@@ -188,8 +188,8 @@ export default function MyBets({ active = true }: MyBetsProps = {}) {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-md rounded-[26px] border border-rose-500/25 bg-rose-500/10 p-8 text-center">
-        <AlertCircle className="mx-auto h-8 w-8 text-rose-400" />
+      <div className="mx-auto max-w-md rounded-[26px] border border-slate-500/25 bg-slate-500/10 p-8 text-center">
+        <AlertCircle className="mx-auto h-8 w-8 text-slate-400" />
         <h4 className="mt-3 text-sm font-bold text-white">Ошибка загрузки</h4>
         <p className="mt-2 text-xs text-slate-400">{error}</p>
         <button
@@ -284,8 +284,8 @@ export default function MyBets({ active = true }: MyBetsProps = {}) {
         shamraiLoading ? (
           <StatsSkeleton />
         ) : shamraiError ? (
-          <div className="mx-auto max-w-md rounded-[26px] border border-rose-500/25 bg-rose-500/10 p-8 text-center">
-            <AlertCircle className="mx-auto h-8 w-8 text-rose-400" />
+          <div className="mx-auto max-w-md rounded-[26px] border border-slate-500/25 bg-slate-500/10 p-8 text-center">
+            <AlertCircle className="mx-auto h-8 w-8 text-slate-400" />
             <h4 className="mt-3 text-sm font-bold text-white">Ошибка загрузки Shamrai</h4>
             <p className="mt-2 text-xs text-slate-400">{shamraiError}</p>
             <button

@@ -213,7 +213,7 @@ function ErrorRetryCard({
 }) {
   return (
     <>
-      <WifiOff className="mx-auto h-6 w-6 text-rose-300" />
+      <WifiOff className="mx-auto h-6 w-6 text-slate-300" />
       <p className="mt-2 text-sm font-black text-white">{message}</p>
       <button
         type="button"
@@ -984,7 +984,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
                 <div className="flex min-w-0 items-center justify-between gap-2">
                   <span className="truncate text-xs font-black">{key === 'signals' ? 'Личный бот' : 'Поддержка'}</span>
                   {Boolean(conversation?.unread_count) && (
-                    <span className="grid h-5 min-w-5 place-items-center rounded-full bg-rose-400 px-1.5 text-[10px] font-black text-white">
+                    <span className="grid h-5 min-w-5 place-items-center rounded-full bg-slate-400 px-1.5 text-[10px] font-black text-white">
                       {conversation?.unread_count}
                     </span>
                   )}
@@ -1119,7 +1119,7 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
 
       {(activeConversation === 'signals' ? streamState : supportStreamState) === 'offline' && (
         <div className="flex items-center gap-2 border-t border-white/10 bg-slate-950/45 px-4 py-2 text-[11px] font-bold text-slate-400">
-          <WifiOff className="h-3.5 w-3.5 text-rose-300" />
+          <WifiOff className="h-3.5 w-3.5 text-slate-300" />
           <span className="min-w-0">Переподключение...</span>
         </div>
       )}

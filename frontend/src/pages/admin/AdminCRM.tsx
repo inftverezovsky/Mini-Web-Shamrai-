@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, downloadApiFile } from '../../utils/api';
 import { ADMIN_TAB_QUERY_STALE_TIME, BOOKMAKERS_QUERY_KEY, TAB_QUERY_STALE_TIME, adminUsersPageQueryKey, fetchAdminUsersPage, fetchBookmakers } from '../../utils/tabPrefetch';
-import { BookmakerResponse, ChatConversationResponse, PaginatedResponse, StatsDriveExportJob } from '../../schemas/schemas';
+import { BookmakerResponse, ChatConversationResponse, PaginatedResponse, StatsDriveExportJob, PromoCodeResponse } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
@@ -33,6 +33,7 @@ import {
   Clock,
   Cloud,
   Filter,
+  Gift,
   Layers3,
   Loader2,
   Save,
@@ -164,7 +165,7 @@ function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) 
               result?.status === 'win'
                 ? 'border-emerald-200/30 bg-emerald-300'
                 : result?.status === 'loss'
-                  ? 'border-rose-200/30 bg-rose-300'
+                  ? 'border-slate-200/30 bg-slate-300'
                   : 'border-white/10 bg-white/[0.06]'
             }`}
             aria-label={
@@ -184,11 +185,11 @@ function ClientResultStrip({ results }: { results: ClientRecentMatchResult[] }) 
 const channelToneClasses: Record<CrmChannelTone, string> = {
   ready: 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100',
   warning: 'border-amber-300/25 bg-amber-300/10 text-amber-100',
-  missing: 'border-rose-300/18 bg-rose-300/[0.08] text-rose-100',
+  missing: 'border-slate-300/18 bg-slate-300/[0.08] text-slate-100',
 };
 
 const priorityToneClasses: Record<CrmPriorityTone, string> = {
-  danger: 'border-rose-300/30 bg-rose-400/12 text-rose-100',
+  danger: 'border-slate-300/30 bg-slate-400/12 text-slate-100',
   warning: 'border-amber-300/30 bg-amber-400/12 text-amber-100',
   success: 'border-emerald-300/30 bg-emerald-400/12 text-emerald-100',
   info: 'border-cyan-300/30 bg-cyan-400/12 text-cyan-100',
@@ -441,7 +442,7 @@ function ClientIntelligenceRow({
               matchSummary.streak?.status === 'win'
                 ? 'text-emerald-200'
                 : matchSummary.streak?.status === 'loss'
-                  ? 'text-rose-200'
+                  ? 'text-slate-200'
                   : 'text-slate-500'
             }`}>
               {matchSummary.headline}
@@ -475,6 +476,85 @@ function ClientIntelligenceRow({
 
 interface AdminCRMProps {
   active?: boolean;
+}
+
+function ClientBonusesSection({ userId }: { userId: number }) {
+  const queryClient = useQueryClient();
+  const { data: bonuses, isLoading } = useQuery<PromoCodeResponse[]>({
+    queryKey: ['adminUserBonuses', userId],
+    queryFn: () => apiFetch(`/admin/users/${userId}/bonuses`),
+    staleTime: 0,
+  });
+
+  const markUsedMutation = useMutation({
+    mutationFn: (bonusId: number) => apiFetch(`/admin/bonuses/${bonusId}/mark-used`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['adminUserBonuses', userId] });
+      notifySuccess('Бонус помечен как использованный');
+    },
+    onError: (err: any) => {
+      notifyError(err.message || 'Ошибка');
+    }
+  });
+
+  return (
+    <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.045] p-3 text-xs">
+      <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
+        <Gift className="w-3.5 h-3.5 text-slate-400 mr-1.5 shrink-0" />
+        Активные бонусы
+      </h4>
+      {isLoading ? (
+        <div className="flex justify-center p-2"><Loader2 className="h-4 w-4 animate-spin text-slate-400" /></div>
+      ) : bonuses && bonuses.length > 0 ? (
+        <div className="space-y-2">
+          {bonuses.map(b => {
+            const isActive = b.is_active;
+            const cardBg = isActive ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-slate-500/10 border-slate-500/20 opacity-70 grayscale';
+            const titleColor = isActive ? 'text-emerald-300' : 'text-slate-300';
+            const dateColor = isActive ? 'text-emerald-300/70' : 'text-slate-400/70';
+            const codeBg = isActive ? 'text-emerald-400 bg-emerald-950/40 border-emerald-500/20' : 'text-slate-400 bg-slate-950/40 border-white/5';
+            const btnClass = isActive ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border-emerald-500/30' : 'bg-slate-500/20 text-slate-400 border-slate-500/30 cursor-not-allowed';
+
+            return (
+              <div key={b.id} className={`flex items-center justify-between gap-3 rounded-xl border p-2.5 transition-all ${cardBg}`}>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate font-bold ${titleColor}`}>
+                    {b.reward_type === 'post_payment_match' ? 'Топ Ошибка на послеоплату' : b.reward_type === 'bonus_1000' ? '1000 бонусов на Топ Ошибку' : b.discount_percent ? `Скидка ${b.discount_percent}%` : 'Бонус'}
+                  </div>
+                  <div className={`text-[10px] ${dateColor}`}>До: {new Date(b.valid_until).toLocaleDateString()}</div>
+                </div>
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <div className={`text-right font-mono text-[11px] font-black tracking-wider px-2 py-1 rounded-md border shrink-0 ${codeBg}`}>
+                    {b.code}
+                  </div>
+                  {isActive ? (
+                    <button
+                      type="button"
+                      disabled={markUsedMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        markUsedMutation.mutate(b.id);
+                      }}
+                      className={`text-[9px] px-2 py-0.5 rounded border transition-colors uppercase font-bold tracking-wider disabled:opacity-50 ${btnClass}`}
+                    >
+                      {markUsedMutation.isPending ? 'Загрузка...' : 'Использован'}
+                    </button>
+                  ) : (
+                    <span className="text-[9px] px-2 py-0.5 rounded border uppercase font-bold tracking-wider border-transparent text-slate-500">
+                      Уже использован
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-center p-3 text-slate-500 bg-white/5 rounded-xl border border-white/5">Нет активных бонусов</div>
+      )}
+    </section>
+  );
 }
 
 export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
@@ -851,13 +931,13 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
   if (usersQuery.isError || bookmakersQuery.isError) {
     const message = usersQuery.error?.message || (bookmakersQuery.error as Error | null)?.message || 'Ошибка загрузки клиентов';
     return (
-      <div className="space-y-3 rounded-2xl border border-rose-500/25 bg-rose-500/10 p-4 text-center text-xs text-rose-100">
-        <AlertTriangle className="mx-auto h-6 w-6 text-rose-300" />
+      <div className="space-y-3 rounded-2xl border border-slate-500/25 bg-slate-500/10 p-4 text-center text-xs text-slate-100">
+        <AlertTriangle className="mx-auto h-6 w-6 text-slate-300" />
         <p className="font-bold">{message}</p>
         <button
           type="button"
           onClick={() => void loadCRM()}
-          className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-3 py-2 font-black uppercase tracking-wider text-rose-50"
+          className="rounded-xl border border-slate-300/30 bg-slate-300/10 px-3 py-2 font-black uppercase tracking-wider text-slate-50"
         >
           Повторить
         </button>
@@ -926,7 +1006,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
         <StatTile label="Активные" value={summary.active} hint="с доступом" tone="text-emerald-200" />
         <StatTile label="Без матчей" value={summary.empty} hint="нужен контакт" tone="text-slate-200" />
         <StatTile label="Гарантия" value={summary.guarantee} hint="открыта" tone="text-amber-200" />
-        <StatTile label="Долг" value={summary.debt} hint="минусовой баланс" tone={summary.debt ? 'text-rose-200' : 'text-slate-300'} />
+        <StatTile label="Долг" value={summary.debt} hint="минусовой баланс" tone={summary.debt ? 'text-slate-200' : 'text-slate-300'} />
       </div>
 
       <section className="rounded-[24px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
@@ -1074,7 +1154,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                   label="Баланс"
                   value={`${getMatchBalance(selectedUser)}`}
                   hint="матчей"
-                  tone={getMatchBalance(selectedUser) < 0 ? 'text-rose-200' : getMatchBalance(selectedUser) > 0 ? 'text-emerald-200' : 'text-slate-200'}
+                  tone={getMatchBalance(selectedUser) < 0 ? 'text-slate-200' : getMatchBalance(selectedUser) > 0 ? 'text-emerald-200' : 'text-slate-200'}
                   minHeightClass="min-h-[58px]"
                 />
                 <StatTile
@@ -1133,6 +1213,8 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                 </div>
               </section>
 
+              <ClientBonusesSection userId={selectedUser.telegram_id} />
+
               <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.045] p-3 text-xs">
                 <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
                   <Calendar className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
@@ -1140,7 +1222,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                 </h4>
                 <div className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${
                   getMatchBalance(selectedUser) < 0
-                    ? 'bg-rose-500/10 border-rose-500/25 text-rose-200'
+                    ? 'bg-slate-500/10 border-slate-500/25 text-slate-200'
                     : getMatchBalance(selectedUser) > 0
                       ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200'
                       : 'bg-slate-900/70 border-slate-700/70 text-slate-300'
@@ -1163,7 +1245,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                   <button
                     type="button"
                     onClick={handleRevokeSub}
-                    className="bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
+                    className="bg-slate-500/10 border border-slate-500/20 text-slate-400 hover:bg-slate-500 hover:text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all"
                   >
                     Обнулить
                   </button>
@@ -1297,7 +1379,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                     type="button"
                     onClick={handleDeleteUser}
                     disabled={saving}
-                    className="w-full bg-rose-500/10 hover:bg-rose-500 border border-rose-500/25 hover:border-rose-400 active:scale-[0.98] disabled:opacity-50 text-rose-300 hover:text-white font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all text-xs"
+                    className="w-full bg-slate-500/10 hover:bg-slate-500 border border-slate-500/25 hover:border-slate-400 active:scale-[0.98] disabled:opacity-50 text-slate-300 hover:text-white font-black py-3 rounded-2xl flex items-center justify-center space-x-1.5 transition-all text-xs"
                   >
                     {saving ? (
                       <Loader2 className="w-4 h-4 animate-spin" />

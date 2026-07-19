@@ -488,6 +488,22 @@ class AdminAnalytics(BaseModel):
     average_coefficient: float
 
 # --- MARKETING HUB SCHEMAS ---
+class PromoCodeResponse(BaseModel):
+    id: int
+    code: str
+    reward_type: str
+    discount_percent: int
+    matches_count: int
+    valid_until: datetime
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+class WheelOfFortuneResponse(BaseModel):
+    reward_type: str
+    promo_code: Optional[str] = None
+    message: str
+
 class MarathonResponse(BaseModel):
     id: int
     title: str

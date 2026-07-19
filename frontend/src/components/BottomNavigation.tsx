@@ -8,10 +8,11 @@ import {
   TrendingUp,
   User as UserIcon,
   Users,
+  Gamepad2,
   type LucideIcon,
 } from 'lucide-react';
 
-export type UserTabId = 'feed' | 'chat' | 'stats' | 'my_bets' | 'profile' | 'billing';
+export type UserTabId = 'feed' | 'chat' | 'stats' | 'my_bets' | 'profile' | 'billing' | 'activities';
 export type AdminShellTabId = 'manage_bets' | 'stats' | 'clients' | 'chats' | 'settings' | 'profile';
 type BottomTabId = UserTabId | AdminShellTabId;
 
@@ -27,12 +28,13 @@ interface TabConfig<T extends BottomTabId> {
   id: T;
   label: string;
   Icon: LucideIcon;
-  tone?: 'cyan' | 'emerald' | 'violet' | 'gold' | 'rose';
+  tone?: 'cyan' | 'emerald' | 'violet' | 'gold' | 'slate';
 }
 
 export const userTabs: TabConfig<UserTabId>[] = [
   { id: 'feed', label: 'Лента', Icon: Newspaper, tone: 'emerald' },
   { id: 'chat', label: 'Чат', Icon: MessageCircle, tone: 'cyan' },
+  { id: 'activities', label: 'Бонусы', Icon: Gamepad2, tone: 'slate' },
   { id: 'stats', label: 'Статистика', Icon: TrendingUp, tone: 'gold' },
   { id: 'billing', label: 'Оплата', Icon: CreditCard, tone: 'emerald' },
   { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'violet' },
@@ -46,7 +48,7 @@ export const adminTabs: TabConfig<AdminShellTabId>[] = [
   { id: 'clients', label: 'Клиенты', Icon: Users, tone: 'cyan' },
   { id: 'chats', label: 'Чаты', Icon: MessageCircle, tone: 'cyan' },
   { id: 'settings', label: 'Настройки', Icon: SlidersHorizontal, tone: 'violet' },
-  { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'rose' },
+  { id: 'profile', label: 'Профиль', Icon: UserIcon, tone: 'slate' },
 ];
 
 export default function BottomNavigation({ role, activeTab, onChangeTab, onPreloadTab, showWebChat = false }: BottomNavigationProps) {

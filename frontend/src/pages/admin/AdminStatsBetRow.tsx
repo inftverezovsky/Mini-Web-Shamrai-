@@ -84,8 +84,8 @@ const resultActions: Array<{
     status: 'loss',
     label: 'Неудача',
     Icon: X,
-    className: 'border-rose-300/24 bg-rose-400/10 text-rose-100 hover:bg-rose-400/16',
-    activeClassName: 'border-rose-200/55 bg-rose-300/20 text-rose-50',
+    className: 'border-slate-300/24 bg-slate-400/10 text-slate-100 hover:bg-slate-400/16',
+    activeClassName: 'border-slate-200/55 bg-slate-300/20 text-slate-50',
   },
 ];
 
@@ -230,7 +230,7 @@ export default function AdminStatsBetRow({
             <span className={`rounded-full border px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.08em] ${
               bet.status === 'win'
                 ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100'
-                : 'border-rose-300/25 bg-rose-400/10 text-rose-100'
+                : 'border-slate-300/25 bg-slate-400/10 text-slate-100'
             }`}>
               {resultLabel(bet.status)}
             </span>
@@ -289,7 +289,7 @@ export default function AdminStatsBetRow({
           type="button"
           onClick={() => void handleDelete()}
           disabled={isBusy}
-          className="flex min-h-[36px] items-center justify-center gap-1.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-2 text-[9px] font-black uppercase tracking-wider text-rose-300 transition-all hover:border-rose-400/45 hover:bg-rose-500/18 disabled:cursor-not-allowed disabled:opacity-55"
+          className="flex min-h-[36px] items-center justify-center gap-1.5 rounded-xl border border-slate-500/25 bg-slate-500/10 px-2 text-[9px] font-black uppercase tracking-wider text-slate-300 transition-all hover:border-slate-400/45 hover:bg-slate-500/18 disabled:cursor-not-allowed disabled:opacity-55"
         >
           {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
           <span className="truncate">Удалить</span>

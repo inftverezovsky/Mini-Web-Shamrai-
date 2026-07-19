@@ -670,3 +670,19 @@ export interface BetHintInvoiceResponse {
   price_xtr: number;
   status: 'invoice_created';
 }
+
+export interface PromoCodeResponse {
+  id: number;
+  code: string;
+  reward_type: string;
+  discount_percent: number;
+  matches_count: number;
+  valid_until: string;
+  is_active: boolean;
+}
+
+export interface WheelOfFortuneResponse {
+  reward_type: string;
+  promo_code: string | null;
+  message: string;
+}

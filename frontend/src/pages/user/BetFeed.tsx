@@ -108,8 +108,8 @@ const LiveTimer = memo(function LiveTimer({ endsAt, active = true }: { endsAt: s
   }, [active, updateText]);
 
   return (
-    <span className="shimmer-border relative flex shrink-0 select-none items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-rose-400 shadow-neon-rose animate-pulse">
-      <Flame className="w-3 h-3 fill-rose-500 text-rose-500 animate-bounce" />
+    <span className="shimmer-border relative flex shrink-0 select-none items-center gap-1 rounded-full border border-slate-500/25 bg-slate-500/10 px-2.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider text-slate-400 shadow-neon-slate animate-pulse">
+      <Flame className="w-3 h-3 fill-slate-500 text-slate-500 animate-bounce" />
       <span>Live</span>
       <span ref={textRef} className="ml-1 font-mono text-[9px]">
         {formatLiveTimeLeft(endsAt)}
@@ -174,7 +174,7 @@ const BetFeedCard = memo(function BetFeedCard({
 
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           {bet.sport_type && !isTextPublication && (
-            <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/60 py-0.5 pl-1 pr-2.5 text-[8.5px] font-bold uppercase tracking-wider text-slate-200 shadow-sm transition-all duration-300 hover:border-pink-500/30">
+            <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-slate-900/60 py-0.5 pl-1 pr-2.5 text-[8.5px] font-bold uppercase tracking-wider text-slate-200 shadow-sm transition-all duration-300 hover:border-slate-500/30">
               <SportIconFrame label={bet.sport_type} size="compact" className="rounded-full overflow-hidden" />
               <span className="min-w-0 truncate">{bet.sport_type}</span>
             </span>
@@ -709,7 +709,7 @@ export default function BetFeed({
 
   if (error) {
     return (
-      <div className="text-center p-6 text-rose-400 text-xs flex flex-col items-center space-y-2">
+      <div className="text-center p-6 text-slate-400 text-xs flex flex-col items-center space-y-2">
         <AlertCircle className="w-8 h-8" />
         <span>Ошибка: {error}</span>
         <button onClick={loadFeed} className="underline text-indigo-400">Повторить загрузку</button>

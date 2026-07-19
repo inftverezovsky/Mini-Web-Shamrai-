@@ -155,7 +155,7 @@ function ClientSituationBadge({ client }: { client: AdminClientStatsItem }) {
   const toneClass = {
     success: 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100',
     warning: 'border-amber-300/25 bg-amber-400/10 text-amber-100',
-    danger: 'border-rose-300/25 bg-rose-400/10 text-rose-100',
+    danger: 'border-slate-300/25 bg-slate-400/10 text-slate-100',
     neutral: 'border-white/10 bg-white/[0.05] text-slate-300',
   }[client.situation.tone];
   return (
@@ -174,7 +174,7 @@ function ResultStrip({ results }: { results: Array<'win' | 'loss'> }) {
       {results.slice(0, 8).map((result, index) => (
         <span
           key={`${result}:${index}`}
-          className={`h-2.5 w-2.5 rounded-full shadow-[0_0_12px_rgba(255,255,255,0.08)] ${result === 'win' ? 'bg-emerald-300' : 'bg-rose-300'}`}
+          className={`h-2.5 w-2.5 rounded-full shadow-[0_0_12px_rgba(255,255,255,0.08)] ${result === 'win' ? 'bg-emerald-300' : 'bg-slate-300'}`}
         />
       ))}
     </div>
@@ -285,8 +285,8 @@ function ClientPulse({ clients }: { clients: AdminClientStatsItem[] }) {
       label: 'Нужно внимание',
       value: attentionClients.length,
       hint: attentionClients[0]?.name ?? 'Критичных серий нет',
-      tone: attentionClients.length ? 'text-rose-200' : 'text-emerald-200',
-      icon: <ShieldAlert className="h-4 w-4 text-rose-300" />,
+      tone: attentionClients.length ? 'text-slate-200' : 'text-emerald-200',
+      icon: <ShieldAlert className="h-4 w-4 text-slate-300" />,
     },
     {
       key: 'best',
@@ -301,7 +301,7 @@ function ClientPulse({ clients }: { clients: AdminClientStatsItem[] }) {
       label: 'Серия минусов',
       value: lossRunClient ? streakLabel(lossRunClient.summary) : '-',
       hint: lossRunClient ? lossRunClient.name : 'Нет активной серии',
-      tone: lossRunClient ? 'text-rose-200' : 'text-slate-400',
+      tone: lossRunClient ? 'text-slate-200' : 'text-slate-400',
       icon: <AlertCircle className="h-4 w-4 text-amber-300" />,
     },
   ];
@@ -560,8 +560,8 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-md rounded-[26px] border border-rose-500/25 bg-rose-500/10 p-8 text-center">
-        <AlertCircle className="mx-auto h-8 w-8 text-rose-400" />
+      <div className="mx-auto max-w-md rounded-[26px] border border-slate-500/25 bg-slate-500/10 p-8 text-center">
+        <AlertCircle className="mx-auto h-8 w-8 text-slate-400" />
         <h4 className="mt-3 text-sm font-bold text-white">Ошибка соединения</h4>
         <p className="mt-2 text-xs text-slate-400">{error}</p>
         <button

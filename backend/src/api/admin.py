@@ -61,6 +61,7 @@ from src.schemas.schemas import (
     SystemSettingUpdate,
     SystemSettingsResponse,
     UserResponse,
+    PromoCodeResponse,
 )
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_owner, get_current_privileged_admin
 from src.core.config import settings
@@ -2699,3 +2700,48 @@ async def create_or_update_ab_config(
     await db.commit()
     await db.refresh(config)
     return config
+
+@router.get("/users/{user_id}/bonuses", response_model=List[PromoCodeResponse])
+async def get_user_bonuses(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin_read)
+):
+    """
+    GET /api/admin/users/{user_id}/bonuses
+    Returns all active bonuses (promo codes) for a user.
+    """
+    target_user = await db.get(User, user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(PromoCode)
+        .filter(
+            PromoCode.user_id == target_user.telegram_id,
+            # Return both active and inactive (used) bonuses, maybe filter out old expired ones?
+            # Actually, just returning all for now, or just valid_until > now.
+            PromoCode.valid_until > now
+        )
+        .order_by(PromoCode.valid_until.asc())
+    )
+    return result.scalars().all()
+
+@router.post("/bonuses/{bonus_id}/mark-used")
+async def mark_bonus_used(
+    bonus_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_privileged_admin)
+):
+    """
+    POST /api/admin/bonuses/{bonus_id}/mark-used
+    Marks a promo code (bonus) as used (inactive) so it disappears from the client's profile.
+    """
+    bonus = await db.get(PromoCode, bonus_id)
+    if not bonus:
+        raise HTTPException(status_code=404, detail="Бонус не найден")
+    
+    bonus.is_active = False
+    await db.commit()
+    return {"status": "success", "message": "Бонус отмечен как использованный"}

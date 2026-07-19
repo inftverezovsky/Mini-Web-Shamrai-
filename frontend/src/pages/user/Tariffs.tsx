@@ -314,7 +314,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
           {appliedPromo ? (
             <button
               onClick={handleClearPromo}
-              className="min-h-[40px] rounded-xl border border-rose-500/30 bg-rose-500/20 px-4 py-2.5 text-xs font-bold text-rose-450 transition-all hover:bg-rose-500/30"
+              className="min-h-[40px] rounded-xl border border-slate-500/30 bg-slate-500/20 px-4 py-2.5 text-xs font-bold text-slate-450 transition-all hover:bg-slate-500/30"
             >
               Сбросить
             </button>
@@ -339,7 +339,7 @@ export default function Tariffs({ onSubscriptionActivated }: TariffsProps) {
           </p>
         )}
         {promoError && (
-          <p className="text-[10px] text-rose-400 font-semibold">
+          <p className="text-[10px] text-slate-400 font-semibold">
             ✗ {promoError}
           </p>
         )}

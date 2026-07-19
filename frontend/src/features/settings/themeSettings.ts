@@ -147,7 +147,7 @@ export function applyThemeSettingsToRoot(
   targetRoot.style.setProperty('--color-primary-rgb', primaryRgb);
   targetRoot.style.setProperty('--color-secondary-rgb', secondaryRgb);
   targetRoot.style.setProperty('--brand-cyan', normalizedTheme.primary_color);
-  targetRoot.style.setProperty('--brand-pink', normalizedTheme.secondary_color);
+  targetRoot.style.setProperty('--brand-slate', normalizedTheme.secondary_color);
   targetRoot.style.setProperty('--neon-button-a', `rgb(${primaryRgb} / 0.92)`);
   targetRoot.style.setProperty('--neon-button-b', `rgb(${secondaryRgb} / 0.82)`);
   targetRoot.style.setProperty('--brand-logo-url', cssUrl(normalizedTheme.brand_logo_url));

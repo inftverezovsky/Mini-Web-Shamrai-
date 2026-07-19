@@ -39,7 +39,7 @@
     --theme-font-scale: 1;
     --theme-glow-strength: 1;
     --brand-cyan: var(--color-primary);
-    --brand-pink: var(--color-secondary);
+    --brand-slate: var(--color-secondary);
     --brand-violet: #7c3aed;
     --brand-green: #10b981;
     --brand-gold: #f59e0b;
@@ -676,7 +676,7 @@
   --neon-button-glow: rgba(99, 102, 241, 0.38);
 }
 
-.shamrai-glass-button--rose {
+.shamrai-glass-button--slate {
   --neon-button-a: rgba(255, 0, 127, 1);
   --neon-button-b: rgba(255, 94, 58, 0.96);
   --neon-button-c: rgba(168, 85, 247, 0.92);
@@ -771,7 +771,7 @@
   text-shadow: 0 0 10px rgba(245, 158, 11, 0.35);
 }
 
-.text-glow-rose {
+.text-glow-slate {
   text-shadow: 0 0 10px rgba(244, 63, 94, 0.35);
 }
 
@@ -1572,8 +1572,8 @@
   .bg-emerald-400\/10,
   .bg-emerald-500\/10,
   .bg-emerald-500\/20,
-  .bg-rose-400\/10,
-  .bg-rose-500\/10,
+  .bg-slate-400\/10,
+  .bg-slate-500\/10,
   .bg-indigo-500\/10,
   .bg-amber-400\/10,
   .bg-amber-500\/10,
@@ -1711,9 +1711,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
-  button.bg-rose-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
+  button.bg-slate-500,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -1779,9 +1779,9 @@
 }
 
 .app-shell :is(
-  button.bg-rose-500,
-  button.bg-rose-500\/10,
-  button.bg-rose-500\/20,
+  button.bg-slate-500,
+  button.bg-slate-500\/10,
+  button.bg-slate-500\/20,
   button.bg-\[\#ff007f\],
   button.bg-\[\#ff007f\]\/10,
   button.bg-\[\#ff007f\]\/12
@@ -1900,9 +1900,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -1962,9 +1962,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2025,9 +2025,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2075,9 +2075,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2129,9 +2129,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2174,9 +2174,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2222,9 +2222,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2267,9 +2267,9 @@
   button.bg-cyan-400\/18,
   button.bg-cyan-300\/10,
   button.bg-cyan-300\/15,
-  button.bg-rose-500,
-  button.bg-rose-500\/20,
-  button.bg-rose-500\/10,
+  button.bg-slate-500,
+  button.bg-slate-500\/20,
+  button.bg-slate-500\/10,
   button.bg-amber-500,
   button.bg-amber-500\/10,
   button.bg-amber-500\/20,
@@ -2954,7 +2954,7 @@
   width: var(--splash-progress, 12%);
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--brand-cyan), var(--brand-pink), var(--brand-green));
+  background: linear-gradient(90deg, var(--brand-cyan), var(--brand-slate), var(--brand-green));
   background-size: 220% 100%;
   box-shadow: 0 0 16px rgba(34, 211, 238, 0.55);
   transition: width 0.42s cubic-bezier(0.16, 1, 0.3, 1);
@@ -3051,7 +3051,7 @@
   --nav-button-active-core-b: rgba(255, 74, 216, 0.18);
 }
 
-.bottom-nav-aurora__item--rose {
+.bottom-nav-aurora__item--slate {
   --nav-button-a: rgba(255, 0, 127, 0.95);
   --nav-button-b: rgba(255, 94, 58, 0.84);
   --nav-button-c: rgba(168, 85, 247, 0.68);
@@ -3407,7 +3407,7 @@
     filter: drop-shadow(0 0 7px rgba(34, 211, 238, 0.55));
   }
   38% {
-    color: var(--brand-pink);
+    color: var(--brand-slate);
     filter: drop-shadow(0 0 8px rgba(255, 79, 216, 0.55));
   }
   72% {

@@ -342,15 +342,15 @@ export default function MessageComposer({
       )}
 
       {recording && (
-        <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl border border-rose-300/25 bg-rose-400/10 px-3 py-2 text-rose-100">
+        <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl border border-slate-300/25 bg-slate-400/10 px-3 py-2 text-slate-100">
           <div className="flex items-center gap-2 text-xs font-black">
-            <span className="h-2.5 w-2.5 rounded-full bg-rose-300" />
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-300" />
             <span ref={recordingDurationRef}>0:01</span>
           </div>
           <button
             type="button"
             onClick={stopRecording}
-            className="inline-flex min-h-[34px] items-center gap-2 rounded-xl border border-rose-200/20 bg-rose-200/10 px-3 py-1.5 text-xs font-black transition hover:bg-rose-200/16"
+            className="inline-flex min-h-[34px] items-center gap-2 rounded-xl border border-slate-200/20 bg-slate-200/10 px-3 py-1.5 text-xs font-black transition hover:bg-slate-200/16"
           >
             <Square className="h-3.5 w-3.5" />
             <span>Стоп</span>
@@ -399,7 +399,7 @@ export default function MessageComposer({
           title={recording ? 'Остановить запись' : 'Записать голосовое'}
           className={`flex h-[46px] w-[46px] items-center justify-center rounded-2xl border transition disabled:cursor-not-allowed disabled:opacity-45 ${
             recording
-              ? 'border-rose-300/30 bg-rose-400/15 text-rose-100'
+              ? 'border-slate-300/30 bg-slate-400/15 text-slate-100'
               : 'border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.08]'
           }`}
         >

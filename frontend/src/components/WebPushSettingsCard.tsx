@@ -200,7 +200,7 @@ export default function WebPushSettingsCard({
           )}
 
           {state.status === 'denied' && (
-            <div className="flex gap-2 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-[11px] font-semibold leading-relaxed text-rose-100">
+            <div className="flex gap-2 rounded-xl border border-slate-300/20 bg-slate-400/10 px-3 py-2 text-[11px] font-semibold leading-relaxed text-slate-100">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>Уведомления запрещены системой. Разрешите их в настройках браузера или приложения Shamrai.</span>
             </div>

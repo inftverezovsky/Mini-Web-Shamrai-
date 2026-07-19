@@ -78,13 +78,13 @@ export function pct(value: number) {
 
 export function summaryTone(summary: PerformanceSummary) {
   if (summary.profit_units > 0) return 'text-emerald-300';
-  if (summary.profit_units < 0) return 'text-rose-300';
+  if (summary.profit_units < 0) return 'text-slate-300';
   return 'text-slate-200';
 }
 
 export function profitTone(value: number) {
   if (value > 0) return 'text-emerald-300';
-  if (value < 0) return 'text-rose-300';
+  if (value < 0) return 'text-slate-300';
   return 'text-slate-200';
 }
 
@@ -306,13 +306,13 @@ export function ExecutiveScoreboard({
         value={formatStatsValue(summary.profit_units, valueMode)}
         hint={positive ? 'плюсовая зона' : 'нужно внимание'}
         tone={summaryTone(summary)}
-        icon={positive ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-rose-300" />}
+        icon={positive ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-slate-300" />}
       />
       <ExecutiveMetric
         label="ROI"
         value={pct(summary.roi)}
         hint="эффективность среза"
-        tone={summary.roi >= 0 ? 'text-emerald-200' : 'text-rose-200'}
+        tone={summary.roi >= 0 ? 'text-emerald-200' : 'text-slate-200'}
         icon={<Target className="h-4 w-4 text-cyan-200" />}
       />
       <ExecutiveMetric
@@ -340,7 +340,7 @@ export function ExecutiveScoreboard({
         label="Серия"
         value={riskLabel}
         hint={`макс. побед ${summary.max_win_streak} / минус ${summary.max_loss_streak}`}
-        tone={summary.current_streak_type === 'loss' ? 'text-rose-200' : summary.current_streak_type === 'win' ? 'text-emerald-200' : 'text-slate-200'}
+        tone={summary.current_streak_type === 'loss' ? 'text-slate-200' : summary.current_streak_type === 'win' ? 'text-emerald-200' : 'text-slate-200'}
         icon={<Sparkles className="h-4 w-4 text-amber-200" />}
       />
     </div>
@@ -431,7 +431,7 @@ export function MiniSummary({
     <div className={`flex flex-wrap items-center ${gapClass} text-[8.5px] font-black uppercase tracking-[0.08em]`}>
       <span className="rounded-md border border-white/10 bg-white/[0.05] px-1.5 py-0.5 text-slate-300">{summary.bets} ставок</span>
       <span className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-1.5 py-0.5 text-emerald-100">{resultCountLabel('win', summary.wins)}</span>
-      <span className="rounded-md border border-rose-300/20 bg-rose-300/10 px-1.5 py-0.5 text-rose-100">{resultCountLabel('loss', summary.losses)}</span>
+      <span className="rounded-md border border-slate-300/20 bg-slate-300/10 px-1.5 py-0.5 text-slate-100">{resultCountLabel('loss', summary.losses)}</span>
       <span className="rounded-md border border-cyan-300/20 bg-cyan-300/10 px-1.5 py-0.5 text-cyan-100">Проход {pct(summary.winrate)}</span>
       <span className={`rounded-md border border-white/10 bg-white/[0.05] px-1.5 py-0.5 ${summaryTone(summary)}`}>
         {formatStatsValue(summary.profit_units, valueMode)}
@@ -472,7 +472,7 @@ export function MomentumStrip({
               result === 'win'
                 ? 'bg-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.25)]'
                 : result === 'loss'
-                  ? 'bg-rose-300 shadow-[0_0_14px_rgba(251,113,133,0.22)]'
+                  ? 'bg-slate-300 shadow-[0_0_14px_rgba(251,113,133,0.22)]'
                   : 'bg-white/[0.08]'
             }`}
           />
@@ -506,14 +506,14 @@ export function StatsKpiGrid({
           label="Прибыль"
           value={formatStatsValue(summary.profit_units, valueMode)}
           tone={summaryTone(summary)}
-          icon={summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-rose-300" />}
+          icon={summary.profit_units >= 0 ? <TrendingUp className="h-4 w-4 text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-slate-300" />}
           minHeightClass="min-h-[62px]"
         />
       ) : null}
       <StatTile
         label="ROI"
         value={pct(summary.roi)}
-        tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-rose-300'}
+        tone={summary.roi >= 0 ? 'text-emerald-300' : 'text-slate-300'}
         icon={<Target className="h-4 w-4 text-cyan-200" />}
         minHeightClass="min-h-[62px]"
       />
@@ -560,7 +560,7 @@ export function StatsHero({
   const heroSeriesValue = showPositiveSeries ? positiveStreakLabel(summary) : streakLabel(summary);
   const heroSeriesTone = showPositiveSeries
     ? (heroSeriesCount > 0 ? 'text-emerald-300' : 'text-white')
-    : summary.current_streak_type === 'loss' ? 'text-rose-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white';
+    : summary.current_streak_type === 'loss' ? 'text-slate-300' : summary.current_streak_type === 'win' ? 'text-emerald-300' : 'text-white';
   const heroSeriesHint = showPositiveSeries && summary.max_win_streak > 0
     ? `Макс. плюс ${positiveStreakLabel({ current_streak: summary.max_win_streak, current_streak_type: 'win' })}`
     : !showPositiveSeries
@@ -577,7 +577,7 @@ export function StatsHero({
             {eyebrow}
           </div>
           <h2 className="mt-1.5 min-w-0 break-words text-xl font-black leading-tight text-white sm:text-2xl">{title}</h2>
-          <div className={`mt-3 min-w-0 break-words text-2xl font-black leading-none tabular-nums sm:text-4xl ${positive ? 'text-emerald-200' : 'text-rose-200'}`}>
+          <div className={`mt-3 min-w-0 break-words text-2xl font-black leading-none tabular-nums sm:text-4xl ${positive ? 'text-emerald-200' : 'text-slate-200'}`}>
             {formatStatsValue(summary.profit_units, valueMode)}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
@@ -687,7 +687,7 @@ export function ExportStatusPanel({
   const completed = job?.status === 'completed';
   const Icon = completed ? CheckCircle2 : failed ? AlertCircle : Loader2;
   const toneClass = failed
-    ? 'border-rose-300/20 bg-rose-400/[0.075] text-rose-100'
+    ? 'border-slate-300/20 bg-slate-400/[0.075] text-slate-100'
     : completed
       ? 'border-emerald-300/20 bg-emerald-300/[0.07] text-emerald-100'
       : 'border-cyan-200/18 bg-cyan-200/[0.055] text-cyan-100';
@@ -921,7 +921,7 @@ export function BreakdownBars({
         <span className="flex flex-wrap items-center gap-1.5">
           <span>{visible.length} позиций</span>
           {best ? <span className="text-emerald-200">лидер {best.label}</span> : null}
-          {weak && weak.summary.profit_units < 0 ? <span className="text-rose-200">просадка {weak.label}</span> : null}
+          {weak && weak.summary.profit_units < 0 ? <span className="text-slate-200">просадка {weak.label}</span> : null}
         </span>
       ) : 'Нет данных'}
     >
@@ -938,8 +938,8 @@ export function BreakdownBars({
                 {best ? `${formatStatsValue(best.summary.profit_units, valueMode)} / ROI ${pct(best.summary.roi)}` : 'Пока нет выраженного лидера'}
               </div>
             </div>
-            <div className="rounded-xl border border-rose-300/15 bg-rose-300/[0.055] p-2.5">
-              <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-rose-100">
+            <div className="rounded-xl border border-slate-300/15 bg-slate-300/[0.055] p-2.5">
+              <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-[0.1em] text-slate-100">
                 <TrendingDown className="h-3 w-3" />
                 Зона просадки
               </div>
@@ -967,7 +967,7 @@ export function BreakdownBars({
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-slate-950/60">
                 <div
-                  className={`h-full rounded-full ${positive ? 'bg-emerald-300' : 'bg-rose-300'}`}
+                  className={`h-full rounded-full ${positive ? 'bg-emerald-300' : 'bg-slate-300'}`}
                   style={{ width: `${percent}%` }}
                 />
               </div>
@@ -1037,7 +1037,7 @@ export function BetResultRow({
             <span className={`rounded-full border px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.08em] ${
               bet.status === 'win'
                 ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100'
-                : 'border-rose-300/25 bg-rose-400/10 text-rose-100'
+                : 'border-slate-300/25 bg-slate-400/10 text-slate-100'
             }`}>
               {resultLabel(bet.status)}
             </span>
@@ -1059,7 +1059,7 @@ export function BetResultRow({
             <div className="mt-0.5 truncate text-[9px] font-bold text-slate-600">{bet.bookmaker_names.join(', ')}</div>
           ) : null}
         </div>
-        <div className={`min-w-0 break-words text-left text-sm font-black tabular-nums sm:shrink-0 sm:text-right ${positive ? 'text-emerald-300' : 'text-rose-300'}`}>
+        <div className={`min-w-0 break-words text-left text-sm font-black tabular-nums sm:shrink-0 sm:text-right ${positive ? 'text-emerald-300' : 'text-slate-300'}`}>
           {formatStatsValue(bet.profit_units, valueMode)}
         </div>
       </div>

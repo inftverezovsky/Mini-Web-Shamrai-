@@ -166,12 +166,12 @@ export default function ProfitSimulator() {
   return (
     <div className="bg-slate-900/40 border border-white/10 backdrop-blur-xl p-5 rounded-2xl shadow-xl space-y-4 relative overflow-hidden group">
       {/* Glow highlight */}
-      <div className="absolute -top-12 -right-12 w-24 h-24 bg-[#ff007f]/5 rounded-full blur-xl group-hover:bg-[#ff007f]/10 transition-colors"></div>
+      <div className="absolute -top-12 -right-12 w-24 h-24 bg-slate-500/5 rounded-full blur-xl group-hover:bg-slate-500/10 transition-colors"></div>
 
       <div className="flex justify-between items-start">
         <div>
           <h4 className="text-xs font-black text-white uppercase tracking-wider flex items-center">
-            <TrendingUp className="w-4 h-4 text-[#ff007f] mr-1.5 shrink-0 animate-pulse" />
+            <TrendingUp className="w-4 h-4 text-slate-500 mr-1.5 shrink-0 animate-pulse" />
             Калькулятор потенциальной прибыли
           </h4>
           <p className="text-slate-400 text-[9px] uppercase font-bold tracking-wider mt-0.5">
@@ -195,7 +195,7 @@ export default function ProfitSimulator() {
             step="5000"
             value={bankroll}
             onChange={e => setBankroll(parseInt(e.target.value))}
-            className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-[#ff007f]"
+            className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-slate-500"
           />
         </div>
 
@@ -212,7 +212,7 @@ export default function ProfitSimulator() {
             </div>
           </div>
           <div className="bg-slate-900/60 border border-white/5 p-3 rounded-xl flex flex-col justify-between">
-            <span className="text-[8px] text-[#ff007f] font-extrabold uppercase tracking-wider block">Ожидаемый профит (100 ст.)</span>
+            <span className="text-[8px] text-slate-500 font-extrabold uppercase tracking-wider block">Ожидаемый профит (100 ст.)</span>
             <div className="text-sm font-black text-[#10B981] mt-1.5">
               +{projectedProfit.toLocaleString('ru-RU')} ₽
               <span className="text-[8px] text-slate-550 font-bold ml-1 uppercase">({Math.round((projectedProfit / bankroll) * 100)}%)</span>

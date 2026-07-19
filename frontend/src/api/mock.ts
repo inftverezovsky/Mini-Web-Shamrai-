@@ -1558,6 +1558,31 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       }),
     };
   }
+  if (endpoint === '/marketing/wheel-of-fortune') {
+    return {
+      message: 'Скидка 70% на абонемент',
+      promo_code: 'MOCK-CODE-70',
+      reward_type: 'discount_70',
+      discount_percent: 70
+    };
+  }
+
+  if (endpoint.match(/^\/admin\/users\/\d+\/bonuses$/)) {
+    return [
+      {
+        id: 9991,
+        code: 'MOCK-CODE-70',
+        user_id: 1,
+        status: 'active',
+        created_at: new Date().toISOString(),
+        valid_until: new Date(Date.now() + 7 * 86400000).toISOString(),
+        reward_type: 'discount_70',
+        discount_percent: 70,
+        is_used: false,
+      }
+    ];
+  }
+
 
   if (endpoint === '/users/me/vk-delivery-status') {
     if (options.method === 'PUT') {

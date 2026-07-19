@@ -65,7 +65,7 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
       <div className="relative z-10">
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <p className="text-[9px] font-black uppercase tracking-[0.22em] text-[#ff8fc7]">Crowd-Bet</p>
+            <p className="text-[9px] font-black uppercase tracking-[0.22em] text-slate-400">Crowd-Bet</p>
             <h3 className="mt-1 text-sm font-black text-white">Сбор на VIP-прогноз</h3>
           </div>
           <Users className="h-7 w-7 text-[#00d2ff] drop-shadow-[0_0_12px_rgba(0,210,255,0.65)]" />
@@ -80,7 +80,7 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
             initial={false}
             animate={{ width: `${crowdBet.progress_percent}%` }}
             transition={{ type: 'spring', stiffness: 80, damping: 16 }}
-            className="h-full rounded-full bg-gradient-to-r from-[#ff007f] to-[#00d2ff] shadow-[0_0_18px_rgba(255,0,127,0.4)]"
+            className="h-full rounded-full bg-gradient-to-r from-slate-500 to-[#00d2ff] shadow-[0_0_18px_rgba(255,0,127,0.4)]"
           />
         </div>
 
@@ -95,7 +95,7 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
           <button
             onClick={() => fund(150)}
             disabled={funding || crowdBet.status === 'opened'}
-            className="rounded-xl bg-gradient-to-r from-[#00d2ff] to-[#ff007f] px-3 py-2 text-[10px] font-black text-white active:scale-95 disabled:opacity-45"
+            className="rounded-xl bg-gradient-to-r from-[#00d2ff] to-slate-500 px-3 py-2 text-[10px] font-black text-white active:scale-95 disabled:opacity-45"
           >
             {funding ? <Loader2 className="mx-auto h-3.5 w-3.5 animate-spin" /> : '+150 XTR'}
           </button>

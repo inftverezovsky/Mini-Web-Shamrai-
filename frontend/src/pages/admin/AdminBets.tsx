@@ -381,7 +381,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                   type="button"
                   onClick={() => setCategory('live')}
                   className={`flex-1 py-1.5 rounded-lg font-bold text-[9px] uppercase tracking-wider transition-all ${
-                    category === 'live' ? 'bg-rose-500 text-white shadow-neon-rose' : 'text-slate-500'
+                    category === 'live' ? 'bg-slate-500 text-white shadow-neon-slate' : 'text-slate-500'
                   }`}
                 >
                   Live
@@ -497,7 +497,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                 <button
                   type="button"
                   onClick={handleRemoveFile}
-                  className="p-1.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white transition-all active:scale-95"
+                  className="p-1.5 rounded-lg bg-slate-500/10 border border-slate-500/20 text-slate-400 hover:bg-slate-500 hover:text-white transition-all active:scale-95"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>

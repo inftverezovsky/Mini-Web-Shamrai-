@@ -71,7 +71,7 @@ export default function SwipeCard() {
 
   if (error || !candidate) {
     return (
-      <div className="rounded-3xl border border-rose-500/20 bg-rose-500/10 p-4 text-[11px] font-bold text-rose-200">
+      <div className="rounded-3xl border border-slate-500/20 bg-slate-500/10 p-4 text-[11px] font-bold text-slate-200">
         {error || 'Swipe-кандидат не найден'}
       </div>
     );
@@ -104,7 +104,7 @@ export default function SwipeCard() {
           <button
             onClick={() => submitGuess('П2')}
             disabled={submitting}
-            className="rounded-xl border border-[#ff007f]/30 bg-[#ff007f]/10 px-3 py-2 text-[#ff7fbd] shadow-[0_0_16px_rgba(255,0,127,0.18)] active:scale-95"
+            className="rounded-xl border border-slate-500/30 bg-slate-500/10 px-3 py-2 text-slate-400 shadow-[0_0_16px_rgba(255,0,127,0.18)] active:scale-95"
           >
             Влево: П2
           </button>

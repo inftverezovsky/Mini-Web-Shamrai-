@@ -346,7 +346,7 @@ export default function AdminAccess() {
                   <button
                     onClick={() => requestRoleChange(admin, 'user')}
                     disabled={saving || !canManageAccess || admin.telegram_id === currentAdmin?.telegram_id}
-                    className="min-h-[34px] border border-rose-500/25 bg-rose-500/10 text-rose-400 rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all hover:bg-rose-500 hover:text-white disabled:opacity-35"
+                    className="min-h-[34px] border border-slate-500/25 bg-slate-500/10 text-slate-400 rounded-xl text-[8.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all hover:bg-slate-500 hover:text-white disabled:opacity-35"
                   >
                     <ShieldOff className="w-3.5 h-3.5" />
                     Снять

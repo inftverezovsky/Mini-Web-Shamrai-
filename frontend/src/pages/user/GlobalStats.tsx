@@ -163,7 +163,7 @@ export default function GlobalStats() {
   if (error) {
     return (
       <div className="text-center p-8 bg-white/[0.04] border border-white/15 backdrop-blur-md rounded-3xl max-w-md mx-auto space-y-4">
-        <p className="text-rose-400 text-xs font-semibold">Не удалось загрузить глобальную аналитику: {error}</p>
+        <p className="text-slate-400 text-xs font-semibold">Не удалось загрузить глобальную аналитику: {error}</p>
         <button 
           onClick={loadStats} 
           className="bg-white/10 hover:bg-white/15 text-white active:scale-95 text-xs px-5 py-2.5 rounded-xl flex items-center justify-center mx-auto space-x-1.5 transition-all"
@@ -216,7 +216,7 @@ export default function GlobalStats() {
             <span className="text-[9px] font-bold tracking-wider uppercase">ROI</span>
           </div>
           <div>
-            <h3 className={`text-base font-black ${stats.roi >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <h3 className={`text-base font-black ${stats.roi >= 0 ? 'text-emerald-400' : 'text-slate-400'}`}>
               {stats.roi > 0 ? '+' : ''}{stats.roi}%
             </h3>
             <p className="text-[7.5px] text-slate-500 font-extrabold uppercase mt-0.5">средняя доходность</p>
@@ -225,13 +225,13 @@ export default function GlobalStats() {
 
         {/* Metric 3: Net Profit */}
         <div className="motion-card shimmer-border bg-white/[0.04] border border-white/10 backdrop-blur-md p-3.5 rounded-2xl flex flex-col justify-between space-y-2 relative overflow-hidden shadow-glass">
-          <div className={`absolute top-1 right-1 w-6 h-6 rounded-full blur-sm ${profitIsPositive ? 'bg-emerald-500/5' : 'bg-rose-500/5'}`}></div>
+          <div className={`absolute top-1 right-1 w-6 h-6 rounded-full blur-sm ${profitIsPositive ? 'bg-emerald-500/5' : 'bg-slate-500/5'}`}></div>
           <div className="flex items-center space-x-1.5 text-slate-400">
             <TrendingUp className="iridescent-icon w-3.5 h-3.5" />
             <span className="text-[9px] font-bold tracking-wider uppercase">Прибыль</span>
           </div>
           <div>
-            <h3 className={`text-base font-black ${profitIsPositive ? 'text-emerald-450 text-glow-green' : 'text-rose-450'}`}>
+            <h3 className={`text-base font-black ${profitIsPositive ? 'text-emerald-450 text-glow-green' : 'text-slate-450'}`}>
               {profitIsPositive ? '+' : ''}{stats.net_profit} флэт
             </h3>
             <p className="text-[7.5px] text-slate-500 font-extrabold uppercase mt-0.5">за все время</p>
@@ -279,7 +279,7 @@ export default function GlobalStats() {
           </div>
           <div className="flex justify-between border-r border-white/5 pr-4">
             <span className="text-slate-450">Неудача:</span>
-            <span className="font-bold text-rose-400">{stats.lost_bets}</span>
+            <span className="font-bold text-slate-400">{stats.lost_bets}</span>
           </div>
           <div className="flex justify-between pl-2">
             <span className="text-slate-450">Возвраты:</span>

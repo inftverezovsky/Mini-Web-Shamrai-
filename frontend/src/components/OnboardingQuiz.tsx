@@ -750,7 +750,7 @@ export default function OnboardingQuiz({ userId, welcomeQuizEnabled = false, onC
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
-                className={`rounded-2xl ${GLASS_SURFACE} px-3 py-2 text-center text-[11px] font-bold text-rose-100`}
+                className={`rounded-2xl ${GLASS_SURFACE} px-3 py-2 text-center text-[11px] font-bold text-slate-100`}
               >
                 {errorMessage}
               </motion.div>
@@ -1405,7 +1405,7 @@ function FinalScreen({
 
       <div className={`relative overflow-hidden rounded-2xl ${GLASS_SURFACE} p-4`} style={{ boxShadow: proMode ? GOLD_GLOW : PINK_GLOW }}>
         <div className="relative z-10 space-y-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-pink-100">Ретро-оценка окна</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-100">Ретро-оценка окна</p>
           <div className="grid grid-cols-2 gap-2">
             <Metric label="Потенциал модели" value={`до +${recommendation?.monthly_profit_percent ?? 35}%`} caption="оценка месяца" />
             <Metric label="24 часа" value={`+${recommendation?.missed_profit_percent_24h ?? 7.4}%`} caption={`${amountLabel} к банку`} />

@@ -71,7 +71,7 @@ function signalTime(value: string) {
 }
 
 function signalAccent(type: string) {
-  if (type === 'live_signal') return 'border-rose-400/30 bg-rose-500/10 text-rose-100';
+  if (type === 'live_signal') return 'border-slate-400/30 bg-slate-500/10 text-slate-100';
   if (type === 'forecast_full') return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50';
   if (type === 'forecast_teaser' || type === 'announcement') return 'border-amber-300/25 bg-amber-400/10 text-amber-100';
   if (type === 'connection_setup_guide') return 'border-cyan-300/25 bg-cyan-400/10 text-cyan-50';
@@ -185,14 +185,14 @@ function setupActionIcon(actionId: string, busy: boolean, feedback?: SetupAction
 function setupActionClass(feedback?: SetupActionFeedback) {
   if (feedback?.tone === 'success') return 'border-emerald-300/35 bg-emerald-400/14 hover:border-emerald-200/50';
   if (feedback?.tone === 'warning') return 'border-amber-300/30 bg-amber-400/12 hover:border-amber-200/45';
-  if (feedback?.tone === 'error') return 'border-rose-300/30 bg-rose-400/12 hover:border-rose-200/45';
+  if (feedback?.tone === 'error') return 'border-slate-300/30 bg-slate-400/12 hover:border-slate-200/45';
   return 'border-cyan-200/25 bg-cyan-200/12 hover:border-cyan-200/45 hover:bg-cyan-200/18';
 }
 
 function setupActionIconClass(feedback?: SetupActionFeedback) {
   if (feedback?.tone === 'success') return 'border-emerald-200/30 bg-emerald-300/16 text-emerald-100';
   if (feedback?.tone === 'warning') return 'border-amber-200/30 bg-amber-300/14 text-amber-100';
-  if (feedback?.tone === 'error') return 'border-rose-200/30 bg-rose-300/14 text-rose-100';
+  if (feedback?.tone === 'error') return 'border-slate-200/30 bg-slate-300/14 text-slate-100';
   return 'border-cyan-200/25 bg-slate-950/28 text-cyan-100';
 }
 
@@ -381,7 +381,7 @@ function SignalMessageCard({
       className="flex min-w-0 items-start gap-2 sm:gap-3"
     >
       <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/70 text-emerald-200">
-        {signal.type === 'live_signal' ? <Zap className="h-4 w-4 text-rose-200" /> : <Bot className="h-4 w-4" />}
+        {signal.type === 'live_signal' ? <Zap className="h-4 w-4 text-slate-200" /> : <Bot className="h-4 w-4" />}
       </div>
 
       <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] rounded-2xl rounded-bl-md border px-3 py-3 sm:max-w-[86%] sm:px-3.5 ${signalAccent(signal.type)}`}>

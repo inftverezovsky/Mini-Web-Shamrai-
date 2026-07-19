@@ -270,7 +270,7 @@ function SupportMessageBubble({
         </div>
       )}
 
-      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] rounded-2xl border px-3 py-3 sm:max-w-[86%] sm:px-3.5 ${cornerClass} ${accentClass} ${deliveryState === 'failed' ? 'border-rose-300/35 bg-rose-400/10' : ''}`}>
+      <div className={`min-w-0 max-w-[calc(100%_-_2.5rem)] rounded-2xl border px-3 py-3 sm:max-w-[86%] sm:px-3.5 ${cornerClass} ${accentClass} ${deliveryState === 'failed' ? 'border-slate-300/35 bg-slate-400/10' : ''}`}>
         <p className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-white/45">
           {label}
         </p>
@@ -334,7 +334,7 @@ function SupportMessageBubble({
                 onClick={() => onRetry(message)}
                 title="Повторить отправку"
                 aria-label="Повторить отправку"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-rose-200/25 bg-rose-300/10 text-rose-100 transition hover:bg-rose-300/18"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200/25 bg-slate-300/10 text-slate-100 transition hover:bg-slate-300/18"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </button>

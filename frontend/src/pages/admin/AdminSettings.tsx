@@ -650,7 +650,7 @@ const THEME_PRESETS = [
   { id: 'classic', label: 'Classic', primary: '#00d2ff', secondary: '#d946ef' },
   { id: 'mint', label: 'Mint', primary: '#34d399', secondary: '#22d3ee' },
   { id: 'gold', label: 'Gold', primary: '#facc15', secondary: '#38bdf8' },
-  { id: 'rose', label: 'Rose', primary: '#fb7185', secondary: '#a78bfa' },
+  { id: 'slate', label: 'Rose', primary: '#fb7185', secondary: '#a78bfa' },
 ];
 
 const TAB_SECTION_IDS: Record<SettingsTabId, string[]> = {
@@ -1060,7 +1060,7 @@ interface SettingsAccordionSectionProps {
   open: boolean;
   onToggle: () => void;
   Icon: LucideIcon;
-  tone?: 'cyan' | 'emerald' | 'amber' | 'rose' | 'violet';
+  tone?: 'cyan' | 'emerald' | 'amber' | 'slate' | 'violet';
   dirty?: boolean;
   status?: React.ReactNode;
   rightActions?: React.ReactNode;
@@ -1085,7 +1085,7 @@ function SettingsAccordionSection({
     cyan: 'border-cyan-300/25 bg-cyan-300/[0.075] text-cyan-100',
     emerald: 'border-emerald-300/25 bg-emerald-300/[0.075] text-emerald-100',
     amber: 'border-amber-300/25 bg-amber-300/[0.085] text-amber-100',
-    rose: 'border-rose-300/25 bg-rose-300/[0.085] text-rose-100',
+    slate: 'border-slate-300/25 bg-slate-300/[0.085] text-slate-100',
     violet: 'border-violet-300/25 bg-violet-300/[0.085] text-violet-100',
   }[tone];
 
@@ -1729,7 +1729,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
       : normalizedStatus === 'warning'
         ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
         : normalizedStatus === 'error'
-          ? 'border-rose-300/25 bg-rose-300/10 text-rose-100'
+          ? 'border-slate-300/25 bg-slate-300/10 text-slate-100'
           : 'border-white/10 bg-black/20 text-slate-300';
 
     return (
@@ -1743,13 +1743,13 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     label: string,
     value: React.ReactNode,
     description: string,
-    tone: 'cyan' | 'emerald' | 'amber' | 'rose' | 'violet' = 'cyan',
+    tone: 'cyan' | 'emerald' | 'amber' | 'slate' | 'violet' = 'cyan',
   ) => {
     const toneClass = {
       cyan: 'border-cyan-300/20 bg-cyan-300/[0.075] text-cyan-100',
       emerald: 'border-emerald-300/20 bg-emerald-300/[0.075] text-emerald-100',
       amber: 'border-amber-300/20 bg-amber-300/[0.085] text-amber-100',
-      rose: 'border-rose-300/20 bg-rose-300/[0.085] text-rose-100',
+      slate: 'border-slate-300/20 bg-slate-300/[0.085] text-slate-100',
       violet: 'border-violet-300/20 bg-violet-300/[0.085] text-violet-100',
     }[tone];
 
@@ -1783,14 +1783,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           id={`settings-panel-${tab.id}`}
           role="tabpanel"
           aria-labelledby={`settings-tab-${tab.id}`}
-          className="space-y-3 rounded-2xl border border-rose-500/25 bg-rose-500/10 p-5 text-center text-xs text-rose-100"
+          className="space-y-3 rounded-2xl border border-slate-500/25 bg-slate-500/10 p-5 text-center text-xs text-slate-100"
         >
-          <StateIcon className="mx-auto h-7 w-7 text-rose-300" />
+          <StateIcon className="mx-auto h-7 w-7 text-slate-300" />
           <p className="font-bold">Не удалось загрузить настройки</p>
           <button
             type="button"
             onClick={() => void settingsQuery.refetch()}
-            className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-2 font-black uppercase tracking-wider text-rose-50"
+            className="rounded-xl border border-slate-300/30 bg-slate-300/10 px-4 py-2 font-black uppercase tracking-wider text-slate-50"
           >
             Повторить
           </button>
@@ -1942,7 +1942,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           subtitle="Опасные операции с auth-сессиями пользователей"
           badge="danger"
           Icon={ShieldAlert}
-          tone="rose"
+          tone="slate"
           open={sectionIsOpen('switches', 'switches-sessions')}
           onToggle={() => toggleAccordionSection('switches', 'switches-sessions')}
         >
@@ -1950,14 +1950,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
             type="button"
             onClick={() => void handleResetUserSessions()}
             disabled={resetSessionsMutation.isPending}
-            className="smooth-pressable flex min-h-[116px] w-full items-center gap-4 rounded-2xl border border-rose-400/35 bg-rose-500/[0.12] p-4 text-left text-rose-50 shadow-[0_0_28px_rgba(244,63,94,0.13)] transition-all hover:bg-rose-500/[0.17] active:scale-[0.99] disabled:opacity-60"
+            className="smooth-pressable flex min-h-[116px] w-full items-center gap-4 rounded-2xl border border-slate-400/35 bg-slate-500/[0.12] p-4 text-left text-slate-50 shadow-[0_0_28px_rgba(244,63,94,0.13)] transition-all hover:bg-slate-500/[0.17] active:scale-[0.99] disabled:opacity-60"
           >
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-rose-300/30 bg-rose-300/10 text-rose-100">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-300/30 bg-slate-300/10 text-slate-100">
               {resetSessionsMutation.isPending ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldAlert className="h-5 w-5" />}
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-black text-white">Сбросить все сессии пользователей</span>
-              <span className="mt-1 block text-xs font-semibold leading-relaxed text-rose-100/75">
+              <span className="mt-1 block text-xs font-semibold leading-relaxed text-slate-100/75">
                 Опасное действие: очистка временных auth-сессий в Redis. Пользователям потребуется войти заново.
               </span>
             </span>
@@ -2206,7 +2206,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           {renderMetricCard('На проверке', riskItems.length, 'Held-события, которые не должны начислять бонусы автоматически.', 'amber')}
           {renderMetricCard('Held ref', marketingSummaryQuery.data?.held_events ?? 0, 'Реферальные события на ручной проверке.', 'violet')}
-          {renderMetricCard('Reject', marketingSummaryQuery.data?.rejected_events ?? 0, 'Отклоненные реферальные события.', 'rose')}
+          {renderMetricCard('Reject', marketingSummaryQuery.data?.rejected_events ?? 0, 'Отклоненные реферальные события.', 'slate')}
         </div>
 
         <div className="space-y-2">
@@ -2243,7 +2243,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
                   type="button"
                   onClick={() => reviewMarketingRiskMutation.mutate({ id: item.id, action: 'reject' })}
                   disabled={reviewMarketingRiskMutation.isPending}
-                  className="inline-flex min-h-[34px] items-center justify-center rounded-xl border border-rose-300/25 bg-rose-300/10 px-3 text-[9px] font-black uppercase tracking-wider text-rose-100 disabled:opacity-50"
+                  className="inline-flex min-h-[34px] items-center justify-center rounded-xl border border-slate-300/25 bg-slate-300/10 px-3 text-[9px] font-black uppercase tracking-wider text-slate-100 disabled:opacity-50"
                 >
                   Reject
                 </button>
@@ -2275,7 +2275,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
                   ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
                   : event.risk_status === 'held'
                     ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
-                    : 'border-rose-300/20 bg-rose-300/10 text-rose-100'
+                    : 'border-slate-300/20 bg-slate-300/10 text-slate-100'
               }`}>
                 {event.risk_status}
               </span>
@@ -2527,7 +2527,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
                         ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
                         : (event.status || 'approved') === 'held'
                           ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
-                          : 'border-rose-300/20 bg-rose-300/10 text-rose-100'
+                          : 'border-slate-300/20 bg-slate-300/10 text-slate-100'
                     }`}>
                       {event.status || 'approved'}
                     </span>
@@ -2723,7 +2723,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
               subtitle={group.subtitle}
               badge={`${configuredCount}/${group.fields.length}`}
               Icon={group.Icon}
-              tone={groupStatus === 'error' ? 'rose' : groupStatus === 'warning' ? 'amber' : groupStatus === 'ok' ? 'emerald' : 'cyan'}
+              tone={groupStatus === 'error' ? 'slate' : groupStatus === 'warning' ? 'amber' : groupStatus === 'ok' ? 'emerald' : 'cyan'}
               open={sectionIsOpen('integrations', `integrations-${group.id}`)}
               onToggle={() => toggleAccordionSection('integrations', `integrations-${group.id}`)}
               dirty={settingsFormDirty}
@@ -2818,7 +2818,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           />
         </div>
         {error?.message && (
-          <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-rose-200">
+          <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-slate-200">
             {String(error.message)}
           </p>
         )}
@@ -3187,7 +3187,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
             <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
               <div className="flex items-start gap-4">
                 <span className={`mt-1 h-4 w-4 shrink-0 rounded-full ${
-                  parserActive ? 'animate-pulse bg-green-500 shadow-[0_0_18px_rgba(34,197,94,0.45)]' : 'bg-rose-500 shadow-[0_0_18px_rgba(244,63,94,0.35)]'
+                  parserActive ? 'animate-pulse bg-green-500 shadow-[0_0_18px_rgba(34,197,94,0.45)]' : 'bg-slate-500 shadow-[0_0_18px_rgba(244,63,94,0.35)]'
                 }`} />
                 <div className="min-w-0">
                   <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Статус парсера</p>
@@ -3323,7 +3323,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           subtitle="Последние админские действия из backend-аудита"
           badge={`${auditEntries.length} rows`}
           Icon={ShieldAlert}
-          tone="rose"
+          tone="slate"
           open={sectionIsOpen('monitoring', 'monitoring-audit')}
           onToggle={() => toggleAccordionSection('monitoring', 'monitoring-audit')}
         >
@@ -3367,14 +3367,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           id="settings-panel-texts"
           role="tabpanel"
           aria-labelledby="settings-tab-texts"
-          className="space-y-3 rounded-2xl border border-rose-500/25 bg-rose-500/10 p-5 text-center text-xs text-rose-100"
+          className="space-y-3 rounded-2xl border border-slate-500/25 bg-slate-500/10 p-5 text-center text-xs text-slate-100"
         >
-          <AlertTriangle className="mx-auto h-7 w-7 text-rose-300" />
+          <AlertTriangle className="mx-auto h-7 w-7 text-slate-300" />
           <p className="font-bold">{loadError}</p>
           <button
             type="button"
             onClick={() => void loadTemplates()}
-            className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-2 font-black uppercase tracking-wider text-rose-50"
+            className="rounded-xl border border-slate-300/30 bg-slate-300/10 px-4 py-2 font-black uppercase tracking-wider text-slate-50"
           >
             Повторить
           </button>

@@ -76,9 +76,9 @@ export default class AppErrorBoundary extends React.Component<AppErrorBoundaryPr
     }
 
     return (
-      <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 rounded-3xl border border-rose-400/20 bg-rose-950/20 px-5 py-10 text-center text-slate-50">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-rose-300/20 bg-rose-500/10">
-          <AlertTriangle className="h-7 w-7 text-rose-300" />
+      <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 rounded-3xl border border-slate-400/20 bg-slate-950/20 px-5 py-10 text-center text-slate-50">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-300/20 bg-slate-500/10">
+          <AlertTriangle className="h-7 w-7 text-slate-300" />
         </div>
         <div className="space-y-2">
           <h2 className="text-base font-black text-white">

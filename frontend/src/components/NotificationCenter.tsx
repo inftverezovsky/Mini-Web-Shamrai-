@@ -18,7 +18,7 @@ const toneMap = {
   },
   error: {
     Icon: AlertTriangle,
-    className: 'border-rose-400/35 bg-rose-500/12 text-rose-100',
+    className: 'border-slate-400/35 bg-slate-500/12 text-slate-100',
   },
   warning: {
     Icon: AlertTriangle,
@@ -93,7 +93,7 @@ export default function NotificationCenter() {
     if (!confirm) return 'border-white/10 bg-slate-950/95';
     return confirm.tone === 'warning'
       ? 'border-amber-400/30 bg-slate-950/95'
-      : 'border-rose-400/30 bg-slate-950/95';
+      : 'border-slate-400/30 bg-slate-950/95';
   }, [confirm]);
 
   const resolveConfirm = (value: boolean) => {
@@ -175,7 +175,7 @@ export default function NotificationCenter() {
             className={`w-full max-w-sm rounded-3xl border p-5 shadow-2xl ${confirmTone}`}
           >
             <div className="flex items-start gap-3">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-rose-300">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-300">
                 <AlertTriangle className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
@@ -195,7 +195,7 @@ export default function NotificationCenter() {
               <button
                 type="button"
                 onClick={() => resolveConfirm(true)}
-                className="rounded-xl bg-rose-500 px-3 py-2.5 text-xs font-black text-white shadow-[0_0_22px_rgba(244,63,94,0.24)] transition-colors hover:bg-rose-400"
+                className="rounded-xl bg-slate-500 px-3 py-2.5 text-xs font-black text-white shadow-[0_0_22px_rgba(244,63,94,0.24)] transition-colors hover:bg-slate-400"
               >
                 {confirm.confirmLabel || 'Подтвердить'}
               </button>

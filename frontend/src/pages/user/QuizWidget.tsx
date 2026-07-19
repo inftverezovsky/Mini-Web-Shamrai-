@@ -60,15 +60,15 @@ export default function QuizWidget() {
         className="shimmer-border flex w-full items-center justify-between rounded-3xl border border-white/10 bg-white/[0.045] p-4 text-left shadow-glass backdrop-blur-xl active:scale-[0.99]"
       >
         <span>
-          <span className="block text-[9px] font-black uppercase tracking-[0.22em] text-[#ff8fc7]">
+          <span className="block text-[9px] font-black uppercase tracking-[0.22em] text-slate-400">
             Аналитический тест
           </span>
           <span className="mt-1 block text-sm font-black text-white">
             Докажи логику и забери скидку {quiz?.discount_reward || 30}%
           </span>
-          {error && <span className="mt-1 block text-[10px] font-bold text-rose-300">{error}</span>}
+          {error && <span className="mt-1 block text-[10px] font-bold text-slate-300">{error}</span>}
         </span>
-        <BrainCircuit className="h-8 w-8 text-[#ff007f] drop-shadow-[0_0_14px_rgba(255,0,127,0.72)]" />
+        <BrainCircuit className="h-8 w-8 text-slate-500 drop-shadow-[0_0_14px_rgba(255,0,127,0.72)]" />
       </button>
 
       <AnimatePresence>
@@ -130,7 +130,7 @@ export default function QuizWidget() {
               <button
                 onClick={submitQuiz}
                 disabled={!completed || checking}
-                className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#00d2ff] to-[#ff007f] px-4 py-3 text-xs font-black text-white shadow-[0_0_22px_rgba(0,210,255,0.24)] disabled:opacity-45"
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#00d2ff] to-slate-500 px-4 py-3 text-xs font-black text-white shadow-[0_0_22px_rgba(0,210,255,0.24)] disabled:opacity-45"
               >
                 {checking ? (
                   <>

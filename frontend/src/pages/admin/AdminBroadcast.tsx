@@ -25,6 +25,7 @@ import {
   Megaphone,
   MessageCircle,
   Radio,
+  Play,
   Send,
   Target,
   Upload,
@@ -113,7 +114,7 @@ function UploadDropzone({
     <div className="space-y-2">
       <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider">
         <Image className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
-        {label}{required && <span className="text-rose-400 ml-1">*</span>}
+        {label}{required && <span className="text-slate-400 ml-1">*</span>}
       </label>
 
       {!preview && existingUrl ? (
@@ -147,11 +148,11 @@ function UploadDropzone({
           tabIndex={0}
           className={`relative border-dashed border-2 rounded-xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all ${
             dragging
-              ? 'border-[#ff007f] bg-[#ff007f]/5 scale-[1.01]'
+              ? 'border-slate-500 bg-slate-500/5 scale-[1.01]'
               : 'border-white/15 bg-slate-900/50 hover:border-[#00d2ff]/70 hover:bg-[#00d2ff]/5'
           }`}
         >
-          <Upload className={`w-7 h-7 mb-2 ${dragging ? 'text-[#ff007f]' : 'text-[#00d2ff]/70'}`} />
+          <Upload className={`w-7 h-7 mb-2 ${dragging ? 'text-slate-500' : 'text-[#00d2ff]/70'}`} />
           <input
             ref={inputRef}
             type="file"
@@ -170,7 +171,7 @@ function UploadDropzone({
           <button
             type="button"
             onClick={onRemove}
-            className="absolute top-3 right-3 bg-slate-950/85 border border-white/10 text-slate-300 hover:text-rose-400 hover:border-rose-500/30 rounded-lg px-2 py-1 text-[10px] font-bold transition-all"
+            className="absolute top-3 right-3 bg-slate-950/85 border border-white/10 text-slate-300 hover:text-slate-400 hover:border-slate-500/30 rounded-lg px-2 py-1 text-[10px] font-bold transition-all"
           >
             Удалить
           </button>
@@ -522,6 +523,24 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       await fetchForecastRequests();
     } catch (err: any) {
       notifyError(err.message || 'Не удалось остановить матч');
+    } finally {
+      setRequestActionLoading(null);
+    }
+  };
+
+  const resumeForecastMatch = async (group: ForecastRequestGroup) => {
+    try {
+      resetFeedback();
+      setRequestActionLoading(`resume:${group.bet.id}`);
+      const result = await apiFetch<any>(
+        `/admin/forecast-broadcast/${group.bet.id}/resume`,
+        { method: 'POST' },
+      );
+      const noun = isPaidSetBet(group.bet) ? 'Набор' : 'Матч';
+      notifySuccess(`${noun} успешно возобновлен. Новых рассылок: ${result.new_requests}, реактивировано: ${result.reactivated_requests}`);
+      await fetchForecastRequests();
+    } catch (err: any) {
+      notifyError(err.message || 'Не удалось возобновить матч');
     } finally {
       setRequestActionLoading(null);
     }
@@ -1151,7 +1170,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             {isRequestsPanel ? (
               <Inbox className="w-5 h-5 text-[#00d2ff] mr-2" />
             ) : (
-              <Megaphone className="w-5 h-5 text-[#ff007f] mr-2" />
+              <Megaphone className="w-5 h-5 text-slate-500 mr-2" />
             )}
             {isRequestsPanel ? 'Заявки' : 'Рассылка'}
           </h2>
@@ -1186,7 +1205,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
             }}
             className={`flex items-center justify-center space-x-1.5 text-[10px] font-black uppercase tracking-wider py-2.5 rounded-xl transition-all ${
               mode === 'announcement'
-                ? 'bg-[#ff007f] text-white shadow-[0_0_18px_rgba(255,0,127,0.28)]'
+                ? 'bg-slate-500 text-white shadow-[0_0_18px_rgba(255,0,127,0.28)]'
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
@@ -1233,7 +1252,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                 type="text"
                 value={announcementTitle}
                 onValueChange={setAnnouncementTitle}
-                className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors"
               />
             </div>
 
@@ -1247,7 +1266,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   value={announcementEventName}
                   onValueChange={setAnnouncementEventName}
                   placeholder="Команда A — Команда B"
-                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors"
                 />
               </div>
               <div>
@@ -1259,7 +1278,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   value={announcementOutcome}
                   onValueChange={setAnnouncementOutcome}
                   placeholder="П1 / ТБ 2.5"
-                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors"
                 />
               </div>
             </div>
@@ -1274,7 +1293,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   <select
                     value={announcementSport}
                     onChange={(event) => setAnnouncementSport(event.target.value)}
-                    className="min-w-0 flex-1 bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                    className="min-w-0 flex-1 bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-slate-500/50 transition-colors"
                   >
                     <option value="">Не указывать</option>
                     {SPORT_FILTER_OPTIONS.filter((sport) => sport !== 'Все').map((sport) => (
@@ -1294,7 +1313,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   value={announcementCoef}
                   onChange={(event) => setAnnouncementCoef(event.target.value)}
                   placeholder="3.90"
-                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors"
                 />
               </div>
               <div>
@@ -1308,7 +1327,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   value={announcementPriceRub}
                   onChange={(event) => setAnnouncementPriceRub(event.target.value)}
                   placeholder="1500"
-                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors"
+                  className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors"
                 />
               </div>
             </div>
@@ -1343,7 +1362,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                 onValueChange={setAnnouncementBody}
                 placeholder="Реальный КФ не выше 1.9!&#10;(Вышлю первым 5-ти написавшим)"
                 rows={4}
-                className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-[#ff007f]/50 transition-colors resize-none"
+                className="w-full bg-slate-800/60 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500/50 transition-colors resize-none"
               />
             </div>
           </div>
@@ -1351,7 +1370,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
           <button
             type="submit"
             disabled={submitting}
-            className="w-full bg-[#ff007f] hover:bg-[#ff007f]/90 active:scale-[0.98] disabled:opacity-50 text-white font-black py-3.5 rounded-xl flex items-center justify-center space-x-2 transition-all shadow-[0_0_20px_rgba(255,0,127,0.4)] uppercase tracking-wider text-sm"
+            className="w-full bg-slate-500 hover:bg-slate-500/90 active:scale-[0.98] disabled:opacity-50 text-white font-black py-3.5 rounded-xl flex items-center justify-center space-x-2 transition-all shadow-[0_0_20px_rgba(255,0,127,0.4)] uppercase tracking-wider text-sm"
           >
             {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <BellRing className="w-4 h-4" />}
             <span>{submitting ? 'Отправка...' : 'Отправить набор'}</span>
@@ -1636,19 +1655,38 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                             <Edit3 className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => stopForecastMatch(group)}
-                          disabled={requestActionLoading !== null || groupStopped}
-                          className="rounded-lg border border-rose-500/25 bg-rose-500/10 px-2.5 py-2 text-[9px] font-black uppercase tracking-wider text-rose-300 transition-all hover:bg-rose-500/20 disabled:opacity-50"
-                          title={groupStopped ? (groupIsPaidSet ? 'Набор остановлен' : 'Матч остановлен') : (groupIsPaidSet ? 'Остановить набор' : 'Остановить матч')}
-                        >
-                          {requestActionLoading === stopActionKey ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <span>{groupStopped ? 'Стоп' : 'Остановить'}</span>
-                          )}
-                        </button>
+                        {groupStopped ? (
+                          <button
+                            type="button"
+                            onClick={() => resumeForecastMatch(group)}
+                            disabled={requestActionLoading !== null}
+                            className="flex items-center gap-1.5 rounded-lg border border-indigo-500/25 bg-indigo-500/10 px-2.5 py-2 text-[9px] font-black uppercase tracking-wider text-indigo-300 transition-all hover:bg-indigo-500/20 disabled:opacity-50"
+                            title={groupIsPaidSet ? 'Возобновить набор' : 'Возобновить матч'}
+                          >
+                            {requestActionLoading === `resume:${group.bet.id}` ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <>
+                                <Play className="h-3 w-3" />
+                                <span>Возобновить</span>
+                              </>
+                            )}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => stopForecastMatch(group)}
+                            disabled={requestActionLoading !== null}
+                            className="rounded-lg border border-slate-500/25 bg-slate-500/10 px-2.5 py-2 text-[9px] font-black uppercase tracking-wider text-slate-300 transition-all hover:bg-slate-500/20 disabled:opacity-50"
+                            title={groupIsPaidSet ? 'Остановить набор' : 'Остановить матч'}
+                          >
+                            {requestActionLoading === stopActionKey ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <span>Остановить</span>
+                            )}
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -1699,7 +1737,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                           : request.status === 'removed'
                                             ? 'text-slate-300 border-slate-500/30 bg-slate-500/10'
                                             : request.status === 'declined' || request.status === 'cancelled'
-                                            ? 'text-rose-300 border-rose-500/30 bg-rose-500/10'
+                                            ? 'text-slate-300 border-slate-500/30 bg-slate-500/10'
                                             : request.status === 'processing'
                                               ? 'text-indigo-300 border-indigo-500/30 bg-indigo-500/10'
                                               : 'text-amber-300 border-amber-500/30 bg-amber-500/10'
@@ -1716,7 +1754,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                   </div>
 
                                   {deliveryBlocked && request.status === 'interested' && (
-                                    <div className="mt-2 bg-rose-500/10 border border-rose-500/25 text-rose-200 rounded-lg p-2 text-[10px] font-bold flex items-center space-x-1.5">
+                                    <div className="mt-2 bg-slate-500/10 border border-slate-500/25 text-slate-200 rounded-lg p-2 text-[10px] font-bold flex items-center space-x-1.5">
                                       <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                                       <span>У клиента 0 матчей. Отправка прогноза недоступна до оплаты.</span>
                                     </div>
@@ -1849,7 +1887,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                         type="button"
                                         onClick={() => runRequestAction(request.id, 'cancel', 'Заявка отменена')}
                                         disabled={requestActionLoading !== null}
-                                        className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 disabled:opacity-50 text-slate-300 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
+                                        className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-500/20 disabled:opacity-50 text-slate-300 hover:text-slate-300 border border-white/10 hover:border-slate-500/30 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5"
                                       >
                                         {requestActionLoading === `cancel:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
                                         <span>Отменить</span>
@@ -1861,7 +1899,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                       type="button"
                                       onClick={() => handleRemoveForecastRequest(request)}
                                       disabled={requestActionLoading !== null}
-                                      className={`px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-300 border border-rose-500/25 hover:border-rose-400/45 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5 ${processable ? '' : 'sm:col-span-4'}`}
+                                      className={`px-3 py-2 rounded-xl bg-slate-500/10 hover:bg-slate-500/20 disabled:opacity-50 text-slate-300 border border-slate-500/25 hover:border-slate-400/45 font-black text-[10px] uppercase tracking-wider flex items-center justify-center space-x-1.5 ${processable ? '' : 'sm:col-span-4'}`}
                                     >
                                       {requestActionLoading === `remove-client:${request.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserMinus className="w-3.5 h-3.5" />}
                                       <span>Удалить клиента</span>
@@ -1956,7 +1994,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
 
               <div>
                 <label className="block text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1.5">
-                  Исход <span className="text-rose-400">*</span>
+                  Исход <span className="text-slate-400">*</span>
                 </label>
                 <EmojiTextField
                   type="text"
@@ -2034,7 +2072,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                     type="button"
                     onClick={() => setFullForecastCategory('live')}
                     className={`flex-1 py-2 rounded-lg font-bold text-[10px] uppercase tracking-wider transition-all ${
-                      fullForecastCategory === 'live' ? 'bg-rose-500 text-white shadow-neon-rose' : 'text-slate-500'
+                      fullForecastCategory === 'live' ? 'bg-slate-500 text-white shadow-neon-slate' : 'text-slate-500'
                     }`}
                   >
                     Live
@@ -2085,7 +2123,7 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                           <div
                             key={bookmaker.id}
                             className={`grid grid-cols-1 sm:grid-cols-[190px_minmax(0,1fr)] gap-2 rounded-xl border bg-slate-900/45 p-2 ${
-                              linkError ? 'border-rose-500/40' : 'border-white/10'
+                              linkError ? 'border-slate-500/40' : 'border-white/10'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2 rounded-lg bg-slate-950/40 px-2 py-1.5">
@@ -2112,12 +2150,12 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                 placeholder="https://... (необязательно)"
                                 className={`min-w-0 w-full bg-slate-800/60 border rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none transition-colors ${
                                   linkError
-                                    ? 'border-rose-500/50 focus:border-rose-400'
+                                    ? 'border-slate-500/50 focus:border-slate-400'
                                     : 'border-white/10 focus:border-emerald-500/50'
                                 }`}
                               />
                               {linkError && (
-                                <p className="text-[10px] font-bold text-rose-300">
+                                <p className="text-[10px] font-bold text-slate-300">
                                   {linkError}
                                 </p>
                               )}
@@ -2263,8 +2301,8 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                   </div>
                 </div>
               )}
-              <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-3 text-center">
-                <div className="text-xl font-black text-rose-400">{deliveryResult.failed}</div>
+              <div className="bg-slate-500/10 border border-slate-500/20 rounded-xl p-3 text-center">
+                <div className="text-xl font-black text-slate-400">{deliveryResult.failed}</div>
                 <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">
                   Не доставлено
                 </div>
@@ -2277,21 +2315,21 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                 <div className="rounded-xl border border-sky-400/15 bg-sky-400/10 px-3 py-2">
                   Telegram: <span className="text-emerald-300">{deliveryResult.telegram.sent}</span>
                   <span className="text-slate-500"> / </span>
-                  <span className="text-rose-300">{deliveryResult.telegram.failed}</span>
+                  <span className="text-slate-300">{deliveryResult.telegram.failed}</span>
                 </div>
               )}
               {deliveryResult.vkMessages && (
                 <div className="rounded-xl border border-[#0077ff]/20 bg-[#0077ff]/10 px-3 py-2">
                   VK: <span className="text-emerald-300">{deliveryResult.vkMessages.sent}</span>
                   <span className="text-slate-500"> / </span>
-                  <span className="text-rose-300">{deliveryResult.vkMessages.failed}</span>
+                  <span className="text-slate-300">{deliveryResult.vkMessages.failed}</span>
                 </div>
               )}
               {deliveryResult.webPush && (
                 <div className="rounded-xl border border-emerald-300/15 bg-emerald-300/10 px-3 py-2">
                   Web Push: <span className="text-emerald-300">{deliveryResult.webPush.sent}</span>
                   <span className="text-slate-500"> / </span>
-                  <span className="text-rose-300">{deliveryResult.webPush.failed}</span>
+                  <span className="text-slate-300">{deliveryResult.webPush.failed}</span>
                   {typeof deliveryResult.webPush.missing_permission === 'number' && deliveryResult.webPush.missing_permission > 0 && (
                     <span className="ml-1 text-amber-200">без разрешения: {deliveryResult.webPush.missing_permission}</span>
                   )}
@@ -2303,10 +2341,10 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
       )}
 
       {submitError && (
-        <div className="backdrop-blur-xl bg-slate-950/40 border border-rose-500/20 rounded-2xl p-4 flex items-center space-x-3 animate-slide-up">
-          <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+        <div className="backdrop-blur-xl bg-slate-950/40 border border-slate-500/20 rounded-2xl p-4 flex items-center space-x-3 animate-slide-up">
+          <AlertTriangle className="w-5 h-5 text-slate-400 shrink-0" />
           <div>
-            <p className="text-xs font-bold text-rose-400">Ошибка</p>
+            <p className="text-xs font-bold text-slate-400">Ошибка</p>
             <p className="text-[10px] text-slate-400 mt-0.5">{submitError}</p>
           </div>
         </div>

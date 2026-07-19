@@ -296,7 +296,7 @@ function VirtualConversationList({
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                       {conversation.unread_count > 0 && (
-                        <span className="grid h-5 min-w-5 place-items-center rounded-full bg-rose-400 px-1.5 text-[10px] font-black text-white">
+                        <span className="grid h-5 min-w-5 place-items-center rounded-full bg-slate-400 px-1.5 text-[10px] font-black text-white">
                           {conversation.unread_count}
                         </span>
                       )}
@@ -1129,7 +1129,7 @@ export default function AdminWebChat({ active = true }: AdminWebChatProps) {
                 Чаты
               </h2>
               <div className="mt-1 flex items-center gap-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
-                {streamState === 'offline' ? <WifiOff className="h-3 w-3 text-rose-300" /> : <ShieldCheck className="h-3 w-3 text-emerald-300" />}
+                {streamState === 'offline' ? <WifiOff className="h-3 w-3 text-slate-300" /> : <ShieldCheck className="h-3 w-3 text-emerald-300" />}
                 <span>{streamState}</span>
               </div>
             </div>

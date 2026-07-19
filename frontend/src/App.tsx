@@ -47,6 +47,7 @@ const loadBetFeed = () => import('./pages/user/BetFeed');
 const loadMyBets = () => import('./pages/user/MyBets');
 const loadProfile = () => import('./pages/user/Profile');
 const loadTariffs = () => import('./pages/user/Tariffs');
+const loadActivities = () => import('./pages/user/Activities');
 const loadOnboarding = () => import('./pages/user/Onboarding');
 const loadWebBotChat = () => import('./components/WebBotChat');
 const loadAdminDashboard = () => import('./pages/admin/AdminDashboard');
@@ -59,6 +60,7 @@ const BetFeed = lazy(loadBetFeed);
 const MyBets = lazy(loadMyBets);
 const Profile = lazy(loadProfile);
 const Tariffs = lazy(loadTariffs);
+const Activities = lazy(loadActivities);
 const Onboarding = lazy(loadOnboarding);
 const WebBotChat = lazy(loadWebBotChat);
 const AdminDashboard = lazy(loadAdminDashboard);
@@ -72,6 +74,7 @@ const userTabLoaders: Partial<Record<UserTabId, () => Promise<unknown>>> = {
   chat: loadWebBotChat,
   stats: loadMyBets,
   my_bets: loadMyBets,
+  activities: loadActivities,
   billing: loadTariffs,
   profile: loadProfile,
 };
@@ -528,7 +531,7 @@ export default function App() {
     return (
       <MotionConfig reducedMotion={motionReducedMode}>
         <div className="app-shell compact-ui flex min-h-[100dvh] flex-col items-center justify-center space-y-4 px-6 text-center text-slate-50">
-          <AlertTriangle className="h-16 w-16 text-rose-500" />
+          <AlertTriangle className="h-16 w-16 text-slate-500" />
           <h1 className="text-lg font-bold text-white">Ошибка подключения</h1>
           <p className="max-w-xs text-xs text-slate-400">{error}</p>
           <button
@@ -635,6 +638,7 @@ export default function App() {
       );
     }
     if (tab === 'chat') return <WebBotChat active={active} />;
+    if (tab === 'activities') return <Activities active={active} />;
     if (tab === 'stats' || tab === 'my_bets') return <MyBets active={active} />;
     if (tab === 'billing' && subscriptionPurchasesEnabled) return <Tariffs onSubscriptionActivated={fetchUserProfile} />;
     return <Profile active={active} />;
@@ -675,8 +679,8 @@ export default function App() {
     }
 
     const baseUserPageTabs: UserTabId[] = showWebChatTab
-      ? ['feed', 'chat', 'stats', 'my_bets', 'billing', 'profile']
-      : ['feed', 'stats', 'my_bets', 'billing', 'profile'];
+      ? ['feed', 'chat', 'activities', 'stats', 'my_bets', 'billing', 'profile']
+      : ['feed', 'activities', 'stats', 'my_bets', 'billing', 'profile'];
     const userPageTabs = subscriptionPurchasesEnabled
       ? baseUserPageTabs
       : baseUserPageTabs.filter((tab) => tab !== 'billing');
@@ -708,7 +712,7 @@ export default function App() {
   return (
     <MotionConfig reducedMotion={motionReducedMode}>
       <div
-        className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-pink-500/30 ${
+        className={`app-shell compact-ui relative isolate min-h-[100dvh] overflow-x-hidden overflow-y-auto selection:bg-slate-500/30 ${
           glassOverlayActive ? 'glass-overlay-active' : ''
         } ${
           isCompact
@@ -757,8 +761,8 @@ export default function App() {
               {isAdmin && (
                 <div className="dashboard-blur-root shamrai-glass-panel z-10 mb-3 flex items-center justify-between rounded-xl p-2 text-[11px]">
                   <span className="flex items-center text-slate-300">
-                    <KeyRound className="mr-1.5 h-4 w-4 shrink-0 text-rose-400" />
-                    Вы вошли как <strong className="ml-1 text-rose-400">{roleLabel(userProfile.role)}</strong>
+                    <KeyRound className="mr-1.5 h-4 w-4 shrink-0 text-slate-400" />
+                    Вы вошли как <strong className="ml-1 text-slate-400">{roleLabel(userProfile.role)}</strong>
                   </span>
                   <button
                     onClick={handleToggleAdminPreviewMode}

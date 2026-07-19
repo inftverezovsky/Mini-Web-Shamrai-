@@ -841,8 +841,8 @@ export default function Profile({ active = true }: ProfileProps = {}) {
         label: 'Ожидание',
       },
       failed: {
-        bg: 'bg-red-500/15',
-        text: 'text-red-400',
+        bg: 'bg-slate-500/15',
+        text: 'text-slate-400',
         label: 'Ошибка',
       },
       refunded: {
@@ -1074,7 +1074,7 @@ export default function Profile({ active = true }: ProfileProps = {}) {
               {linkingTelegram && <TelegramAuthAssist botUrl={telegramBotUrl} />}
 
               {telegramLinkError && (
-                <p className="rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
+                <p className="rounded-xl border border-slate-300/15 bg-slate-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-100">
                   {telegramLinkError}
                 </p>
               )}
@@ -1166,7 +1166,7 @@ export default function Profile({ active = true }: ProfileProps = {}) {
               )}
 
               {vkLinkError && (
-                <p className="rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
+                <p className="rounded-xl border border-slate-300/15 bg-slate-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-100">
                   {vkLinkError}
                 </p>
               )}
@@ -1270,10 +1270,10 @@ export default function Profile({ active = true }: ProfileProps = {}) {
                   (b: { id: number | string; title: string }) => (
                     <div
                       key={b.id}
-                      className="bg-white/5 border border-white/10 rounded-xl p-3 flex flex-col items-center justify-center text-center space-y-1.5 hover:border-[#ff007f]/30 transition-all relative overflow-hidden group"
+                      className="bg-white/5 border border-white/10 rounded-xl p-3 flex flex-col items-center justify-center text-center space-y-1.5 hover:border-slate-500/30 transition-all relative overflow-hidden group"
                       style={{ boxShadow: '0 0 8px rgba(255,0,127,0.1)' }}
                     >
-                      <div className="absolute top-0 right-0 w-8 h-8 bg-[#ff007f]/5 rounded-full blur-md" />
+                      <div className="absolute top-0 right-0 w-8 h-8 bg-slate-500/5 rounded-full blur-md" />
                       <span className="text-2xl animate-pulse">🧠</span>
                       <span className="text-[10px] font-black text-white uppercase tracking-wider">
                         {b.title}

@@ -190,7 +190,7 @@ export default function IdentityConnectPanel({
       </div>
 
       {error && (
-        <p className="mt-3 rounded-xl border border-rose-300/15 bg-rose-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-rose-100">
+        <p className="mt-3 rounded-xl border border-slate-300/15 bg-slate-500/10 px-3 py-2 text-center text-[11px] font-bold leading-relaxed text-slate-100">
           {error}
         </p>
       )}
