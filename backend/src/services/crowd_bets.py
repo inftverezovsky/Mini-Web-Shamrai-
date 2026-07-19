@@ -2,11 +2,12 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func
+from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.models.models import CrowdBet, CrowdBetParticipant, User, user_bets
+from src.services.match_access import insert_user_bet_once
 
 
 def _xtr_amount(value: Any) -> int:
@@ -45,16 +46,15 @@ async def unlock_crowd_bet_for_participants(db: AsyncSession, crowd_bet: CrowdBe
         if existing_result.first():
             continue
 
-        await db.execute(
-            user_bets.insert().values(
-                user_id=user_id,
-                bet_id=crowd_bet.bet_id,
-                taken_at=func.now(),
-                access_type="crowd_pool",
-                match_charged=False,
-            )
+        raced_existing = await insert_user_bet_once(
+            db,
+            user_id=user_id,
+            bet_id=crowd_bet.bet_id,
+            access_type="crowd_pool",
+            match_charged=False,
         )
-        unlocked_count += 1
+        if raced_existing is None:
+            unlocked_count += 1
 
     return unlocked_count
 

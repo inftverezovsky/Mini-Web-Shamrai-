@@ -7,14 +7,19 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
 
-from src.api.admin import delete_bet_from_admin, get_pending_bets
+from src.api.admin import admin_update_user, delete_bet_from_admin, get_pending_bets
 from src.api.admin_broadcast import mark_forecast_request_manual, stop_forecast_broadcast_from_admin
 from src.api.deps import get_current_admin
 from src.models.database import Base
 from src.models.models import AdminAuditLog, Bet, DeliveryOutbox, ForecastRequest, MatchBalanceLog, User, user_bets
+from src.schemas.schemas import AdminUpdateUserPreferences
 from src.services import forecast_delivery
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
-from src.services.match_access import REVOKE_USER_BET_ACCESS_EVENT, revoke_user_bet_access
+from src.services.match_access import (
+    REVOKE_USER_BET_ACCESS_EVENT,
+    record_user_bet_access,
+    revoke_user_bet_access,
+)
 
 
 class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
@@ -105,6 +110,65 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.had_access)
             self.assertEqual(result.delta_matches, 1)
             self.assertEqual(user.purchased_bets_balance, 5)
+            self.assertEqual(await self._access_count(session, user=user, bet=bet), 0)
+
+    async def test_admin_balance_clamp_logs_only_the_applied_delta(self):
+        async with self.Session() as session:
+            admin = self._user(900, balance=0, role="admin")
+            user = self._user(103, balance=2)
+            session.add_all([admin, user])
+            await session.commit()
+
+            await admin_update_user(
+                user.telegram_id,
+                AdminUpdateUserPreferences(matches_delta=-5),
+                admin=admin,
+                db=session,
+            )
+
+            await session.refresh(user)
+            ledger = (
+                await session.execute(
+                    select(MatchBalanceLog).filter(
+                        MatchBalanceLog.user_id == user.telegram_id,
+                        MatchBalanceLog.event_type == "admin_match_adjustment",
+                    )
+                )
+            ).scalars().one()
+
+            self.assertEqual(user.matches_remaining, 0)
+            self.assertEqual(ledger.delta_matches, -2)
+
+    async def test_revoke_regrant_revoke_reverses_only_the_current_net_ledger_effect(self):
+        async with self.Session() as session:
+            user = self._user(104, balance=1)
+            bet = self._bet()
+            session.add_all([user, bet])
+            await session.commit()
+
+            await record_user_bet_access(session, user=user, bet=bet, charge_match=True)
+            first_revoke = await revoke_user_bet_access(session, user=user, bet=bet, actor_id=900)
+            await record_user_bet_access(session, user=user, bet=bet, charge_match=True)
+            second_revoke = await revoke_user_bet_access(session, user=user, bet=bet, actor_id=900)
+            await session.commit()
+
+            await session.refresh(user)
+            ledger_total = int(
+                (
+                    await session.execute(
+                        select(func.coalesce(func.sum(MatchBalanceLog.delta_matches), 0)).filter(
+                            MatchBalanceLog.user_id == user.telegram_id,
+                            MatchBalanceLog.bet_id == bet.id,
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+
+            self.assertEqual(first_revoke.delta_matches, 1)
+            self.assertEqual(second_revoke.delta_matches, 1)
+            self.assertEqual(user.matches_remaining, 1)
+            self.assertEqual(ledger_total, 0)
             self.assertEqual(await self._access_count(session, user=user, bet=bet), 0)
 
     async def test_revoking_non_charged_or_declined_request_does_not_change_balance(self):

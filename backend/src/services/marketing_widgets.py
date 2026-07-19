@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -242,7 +243,26 @@ async def ensure_widget_available(db: AsyncSession, widget_key: str, user: User 
     return payload
 
 
+def _marketing_reward_lock_id(widget_key: str) -> int:
+    digest = hashlib.sha256(f"shamrai:marketing-reward:{widget_key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+async def _lock_widget_reward_scope(db: AsyncSession, widget_key: str) -> None:
+    """Serialize reward eligibility and insertion for one widget transaction."""
+    await db.flush()
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        await db.execute(select(func.pg_advisory_xact_lock(_marketing_reward_lock_id(widget_key))))
+    await db.execute(
+        select(MarketingWidgetConfig.key)
+        .filter(MarketingWidgetConfig.key == widget_key)
+        .with_for_update()
+    )
+
+
 async def ensure_widget_reward_allowed(db: AsyncSession, widget_key: str, user: User) -> dict[str, Any]:
+    await _lock_widget_reward_scope(db, widget_key)
     payload = await ensure_widget_available(db, widget_key, user)
     now = datetime.now(timezone.utc)
     cooldown_hours = max(0, int(payload.get("cooldown_hours") or 0))

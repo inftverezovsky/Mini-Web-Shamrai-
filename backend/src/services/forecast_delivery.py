@@ -37,7 +37,13 @@ from src.services.delivery_outbox import (
     CHANNEL_TELEGRAM_MESSAGE,
     enqueue_delivery,
 )
-from src.services.match_access import UserBetAccessResult, record_user_bet_access, user_has_full_forecast_access
+from src.services.match_access import (
+    UserBetAccessResult,
+    load_locked_bet_for_user_access,
+    lock_user_balance,
+    record_user_bet_access,
+    user_has_full_forecast_access,
+)
 from src.services.signals import deliver_personal_signal
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_multipart
 from src.services.vk_delivery import (
@@ -658,6 +664,82 @@ async def load_forecast_request(db: AsyncSession, request_id: UUID) -> ForecastR
             detail="Заявка на прогноз не найдена",
         )
     return forecast_request
+
+
+def _ensure_locked_private_forecast_is_deliverable(
+    forecast_request: ForecastRequest,
+    locked_bet: Bet,
+) -> None:
+    """Validate lifecycle and surface after acquiring the canonical Bet lock."""
+    forecast_request.bet = locked_bet
+    if locked_bet.status == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Прогноз остановлен администратором",
+        )
+
+    live_ends_at = getattr(locked_bet, "live_ends_at", None)
+    if live_ends_at is not None:
+        if live_ends_at.tzinfo is None:
+            live_ends_at = live_ends_at.replace(tzinfo=timezone.utc)
+        if live_ends_at <= _now():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=forecast_request_inactive_message(forecast_request),
+            )
+
+    if locked_bet.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=forecast_request_inactive_message(forecast_request),
+        )
+    if str(getattr(locked_bet, "publication_type", "forecast") or "forecast").strip().lower() != "forecast":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Текстовую публикацию нельзя доставить как прогноз",
+        )
+    if locked_bet.delivery_mode not in {DELIVERY_MODE_SALES_PRIVATE, DELIVERY_MODE_PAID_SET}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Этот прогноз не относится к закрытой рассылке",
+        )
+
+
+async def _lock_forecast_delivery_scope(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> ForecastRequest:
+    """Lock Bet -> User -> ForecastRequest and refresh every mutable decision input."""
+    expected_bet_id = forecast_request.bet_id
+    expected_user_id = forecast_request.user_id
+    locked_bet = await load_locked_bet_for_user_access(db, expected_bet_id)
+    forecast_request.bet = locked_bet
+    await lock_user_balance(db, expected_user_id)
+
+    result = await db.execute(
+        select(ForecastRequest)
+        .filter(ForecastRequest.id == forecast_request.id)
+        .with_for_update()
+        .options(
+            selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
+            selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
+        )
+        .execution_options(populate_existing=True)
+    )
+    locked_request = result.scalars().first()
+    if locked_request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заявка на прогноз не найдена",
+        )
+    if locked_request.bet_id != expected_bet_id or locked_request.user_id != expected_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Заявка уже изменилась",
+        )
+    locked_request.bet = locked_bet
+    return locked_request
 
 
 def build_teaser_message(
@@ -1901,11 +1983,22 @@ async def set_forecast_request_interested(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
-    if forecast_request_is_inactive_for_client(forecast_request):
-        return forecast_request, forecast_request_inactive_message(forecast_request), False
-
+    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен.", False
+    if forecast_request_is_inactive_for_client(forecast_request):
+        return forecast_request, forecast_request_inactive_message(forecast_request), False
+    try:
+        _ensure_locked_private_forecast_is_deliverable(forecast_request, forecast_request.bet)
+    except HTTPException as exc:
+        if exc.detail in {
+            FORECAST_INACTIVE_MESSAGE,
+            PAID_SET_INACTIVE_MESSAGE,
+            "Прогноз остановлен администратором",
+        }:
+            return forecast_request, forecast_request_inactive_message(forecast_request), False
+        raise
+
     if forecast_request.status == FORECAST_STATUS_INTERESTED:
         return forecast_request, "Заявка уже отправлена Shamrai.", False
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
@@ -2014,11 +2107,22 @@ async def set_forecast_request_declined(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
-    if forecast_request_is_inactive_for_client(forecast_request):
-        return forecast_request, forecast_request_inactive_message(forecast_request)
-
+    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен."
+    if forecast_request_is_inactive_for_client(forecast_request):
+        return forecast_request, forecast_request_inactive_message(forecast_request)
+    try:
+        _ensure_locked_private_forecast_is_deliverable(forecast_request, forecast_request.bet)
+    except HTTPException as exc:
+        if exc.detail in {
+            FORECAST_INACTIVE_MESSAGE,
+            PAID_SET_INACTIVE_MESSAGE,
+            "Прогноз остановлен администратором",
+        }:
+            return forecast_request, forecast_request_inactive_message(forecast_request)
+        raise
+
     if forecast_request.status == FORECAST_STATUS_INTERESTED:
         return forecast_request, "Заявка уже у Shamrai."
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
@@ -2044,11 +2148,12 @@ async def deliver_forecast_request(
     commit: bool,
 ) -> tuple[ForecastRequest, UserBetAccessResult]:
     """Deliver a private forecast and own the transaction boundary when commit=True."""
-    if delivery_method == "auto":
-        delivery_method = await refreshed_client_delivery_method(db, forecast_request.user)
+    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, _already_taken_access_result(forecast_request)
+
+    _ensure_locked_private_forecast_is_deliverable(forecast_request, forecast_request.bet)
 
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
         raise HTTPException(
@@ -2067,11 +2172,8 @@ async def deliver_forecast_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Эту заявку нельзя доставить: клиент отказался, заявка отменена или удалена",
         )
-    if getattr(forecast_request.bet, "status", None) == "deleted":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Прогноз остановлен администратором",
-        )
+    if delivery_method == "auto":
+        delivery_method = await refreshed_client_delivery_method(db, forecast_request.user)
 
     if request_is_paid_set(forecast_request):
         if send_to_client:
@@ -2226,12 +2328,23 @@ async def cancel_forecast_request(
     forecast_request: ForecastRequest,
     handled_by: Optional[int],
 ) -> tuple[ForecastRequest, str]:
+    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Заявка уже доставлена."
     if forecast_request.status == FORECAST_STATUS_CANCELLED:
         return forecast_request, "Заявка уже отменена."
     if forecast_request.status == FORECAST_STATUS_REMOVED:
         return forecast_request, "Заявка удалена администратором."
+    try:
+        _ensure_locked_private_forecast_is_deliverable(forecast_request, forecast_request.bet)
+    except HTTPException as exc:
+        if exc.detail in {
+            FORECAST_INACTIVE_MESSAGE,
+            PAID_SET_INACTIVE_MESSAGE,
+            "Прогноз остановлен администратором",
+        }:
+            return forecast_request, "Заявка больше не активна."
+        raise
     if forecast_request.status == FORECAST_STATUS_PROCESSING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

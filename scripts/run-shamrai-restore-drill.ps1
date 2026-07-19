@@ -6,7 +6,13 @@ param(
   [string]$RemotePath = "/opt/shamrai-mini-app",
   [string]$ComposeProject = "shamrai",
   [string]$HealthUrl = "http://127.0.0.1:8082/api/health",
+  [ValidateSet("Vds", "S3")][string]$ArtifactSource = "Vds",
   [string]$BackupFile = "",
+  [string]$OffHostArtifactKey = "",
+  [string]$OffHostS3Bucket = $env:SHAMRAI_BACKUP_S3_BUCKET,
+  [string]$OffHostS3Prefix = $env:SHAMRAI_BACKUP_S3_PREFIX,
+  [string]$OffHostS3EndpointUrl = $env:SHAMRAI_BACKUP_S3_ENDPOINT_URL,
+  [string]$OffHostS3Region = $env:AWS_REGION,
   [string]$AgeIdentityPath = $env:SHAMRAI_BACKUP_AGE_IDENTITY_PATH,
   [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
   [string]$KnownHostsPath = "",
@@ -25,8 +31,10 @@ $script:SensitiveLocalFiles = @()
 $script:RemoteStageToCleanup = ""
 $script:SshTool = ""
 $script:ScpTool = ""
+$script:AwsTool = ""
 
 trap {
+  $originalError = $_
   foreach ($path in $script:SensitiveLocalFiles) {
     if (-not [string]::IsNullOrWhiteSpace($path)) {
       Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
@@ -54,7 +62,7 @@ trap {
     & $script:SshTool @cleanupArgs | Out-Null
   }
 
-  throw
+  throw $originalError
 }
 
 function Get-HomePath {
@@ -113,6 +121,107 @@ function Invoke-NativeOutputChecked {
   return ($output -join "`n")
 }
 
+function Get-AwsArguments {
+  param([string[]]$Arguments = @())
+
+  $result = @()
+  if (-not [string]::IsNullOrWhiteSpace($OffHostS3EndpointUrl)) {
+    $result += @("--endpoint-url", $OffHostS3EndpointUrl)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($OffHostS3Region)) {
+    $result += @("--region", $OffHostS3Region)
+  }
+  $result += $Arguments
+  return $result
+}
+
+function Invoke-AwsChecked {
+  param([string[]]$Arguments = @())
+
+  $awsArguments = @(Get-AwsArguments -Arguments $Arguments)
+  Invoke-NativeChecked -FilePath $script:AwsTool -Arguments $awsArguments
+}
+
+function Invoke-AwsOutputChecked {
+  param([string[]]$Arguments = @())
+
+  $awsArguments = @(Get-AwsArguments -Arguments $Arguments)
+  return Invoke-NativeOutputChecked -FilePath $script:AwsTool -Arguments $awsArguments
+}
+
+function Get-LatestOffHostArtifactPair {
+  $dailyPrefix = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/"
+  $rawKeys = Invoke-AwsOutputChecked -Arguments @(
+    "s3api", "list-objects-v2",
+    "--bucket", $OffHostS3Bucket,
+    "--prefix", $dailyPrefix,
+    "--query", "Contents[].Key",
+    "--output", "json"
+  )
+
+  $decodedKeys = $null
+  if (-not [string]::IsNullOrWhiteSpace($rawKeys)) {
+    $decodedKeys = $rawKeys | ConvertFrom-Json
+  }
+  $manifestPattern = "^$([regex]::Escape($dailyPrefix))shamrai-db\.\d{8}T\d{6}Z\.manifest\.json$"
+  $manifestKey = @($decodedKeys) |
+    Where-Object { $_ -is [string] -and $_ -match $manifestPattern } |
+    Sort-Object -Descending |
+    Select-Object -First 1
+  if ([string]::IsNullOrWhiteSpace($manifestKey)) {
+    throw "No committed off-host backup manifest was found under the configured daily prefix."
+  }
+
+  return [pscustomobject]@{
+    ArtifactKey = $manifestKey -replace '\.manifest\.json$', '.dump.age'
+    ManifestKey = $manifestKey
+  }
+}
+
+function Copy-FromOffHostChecked {
+  param(
+    [Parameter(Mandatory = $true)][string]$ObjectKey,
+    [Parameter(Mandatory = $true)][string]$LocalPath
+  )
+
+  $uri = Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $ObjectKey
+  Invoke-AwsChecked -Arguments @(
+    "s3", "cp", $uri, $LocalPath,
+    "--only-show-errors", "--no-progress"
+  )
+}
+
+function Assert-OffHostObjectMetadata {
+  param(
+    [Parameter(Mandatory = $true)][string]$ObjectKey,
+    [Parameter(Mandatory = $true)][string]$LocalPath
+  )
+
+  $rawMetadata = Invoke-AwsOutputChecked -Arguments @(
+    "s3api", "head-object",
+    "--bucket", $OffHostS3Bucket,
+    "--key", $ObjectKey,
+    "--output", "json"
+  )
+  $metadata = $rawMetadata | ConvertFrom-Json
+  $expectedSize = 0L
+  [long]::TryParse(
+    [string](Get-JsonPropertyValue -Object $metadata -Name "ContentLength" -DefaultValue "0"),
+    [ref]$expectedSize
+  ) | Out-Null
+  $customMetadata = Get-JsonPropertyValue -Object $metadata -Name "Metadata"
+  $expectedHash = [string](Get-JsonPropertyValue -Object $customMetadata -Name "sha256" -DefaultValue "")
+  if ($expectedSize -lt 1 -or $expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "Off-host object is missing required size/hash integrity metadata: $ObjectKey"
+  }
+
+  $actualSize = (Get-Item -LiteralPath $LocalPath).Length
+  $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $LocalPath).Hash.ToLowerInvariant()
+  if ($actualSize -ne $expectedSize -or $actualHash -ne $expectedHash.ToLowerInvariant()) {
+    throw "Downloaded off-host object failed integrity metadata verification: $ObjectKey"
+  }
+}
+
 function Set-Utf8NoBomLfContent {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -135,6 +244,44 @@ function ConvertTo-ShellSingleQuoted {
     "$singleQuote$doubleQuote$singleQuote$doubleQuote$singleQuote"
   )
   return "$singleQuote$escaped$singleQuote"
+}
+
+function Get-OffHostS3Key {
+  param(
+    [string]$Prefix,
+    [Parameter(Mandatory = $true)][string]$RelativeKey
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Prefix)) {
+    return $RelativeKey
+  }
+  return "$Prefix/$RelativeKey"
+}
+
+function Get-OffHostS3Uri {
+  param(
+    [Parameter(Mandatory = $true)][string]$Bucket,
+    [Parameter(Mandatory = $true)][string]$Key
+  )
+
+  return "s3://$Bucket/$Key"
+}
+
+function Get-JsonPropertyValue {
+  param(
+    [AllowNull()][object]$Object,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [AllowNull()][object]$DefaultValue = $null
+  )
+
+  if ($null -eq $Object) {
+    return $DefaultValue
+  }
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    return $DefaultValue
+  }
+  return $property.Value
 }
 
 function Get-SshHostName {
@@ -572,6 +719,75 @@ if ($DrillBackendPort -eq 8082 -or $DrillFrontendPort -eq 8082) {
   throw "Restore drill ports must not use canonical preview port 8082."
 }
 
+$artifactSourceNormalized = $ArtifactSource.ToLowerInvariant()
+if ($artifactSourceNormalized -eq "s3") {
+  if (-not [string]::IsNullOrWhiteSpace($BackupFile)) {
+    throw "BackupFile is only valid with ArtifactSource Vds; use OffHostArtifactKey for S3."
+  }
+  if ([string]::IsNullOrWhiteSpace($OffHostS3Bucket)) {
+    throw "OffHostS3Bucket is required when ArtifactSource is S3."
+  }
+
+  $OffHostS3Bucket = $OffHostS3Bucket.Trim()
+  if (
+    $OffHostS3Bucket.Length -lt 3 -or
+    $OffHostS3Bucket.Length -gt 63 -or
+    $OffHostS3Bucket -notmatch '^[a-z0-9][a-z0-9.-]*[a-z0-9]$' -or
+    $OffHostS3Bucket.Contains("..") -or
+    $OffHostS3Bucket -match '^\d{1,3}(\.\d{1,3}){3}$'
+  ) {
+    throw "OffHostS3Bucket must be a valid S3-compatible bucket name."
+  }
+
+  if ([string]::IsNullOrWhiteSpace($OffHostS3Prefix)) {
+    $OffHostS3Prefix = "shamrai"
+  } else {
+    $OffHostS3Prefix = $OffHostS3Prefix.Trim().Trim("/")
+  }
+  if (
+    $OffHostS3Prefix.Length -gt 256 -or
+    $OffHostS3Prefix -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or
+    $OffHostS3Prefix -match '(^|/)\.\.?(/|$)' -or
+    $OffHostS3Prefix.Contains("//")
+  ) {
+    throw "OffHostS3Prefix must contain only safe key characters and no traversal segments."
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($OffHostS3EndpointUrl)) {
+    $endpointUri = $null
+    if (
+      -not [Uri]::TryCreate($OffHostS3EndpointUrl, [UriKind]::Absolute, [ref]$endpointUri) -or
+      $endpointUri.Scheme -ne "https" -or
+      -not [string]::IsNullOrWhiteSpace($endpointUri.UserInfo) -or
+      -not [string]::IsNullOrWhiteSpace($endpointUri.Query) -or
+      -not [string]::IsNullOrWhiteSpace($endpointUri.Fragment)
+    ) {
+      throw "OffHostS3EndpointUrl must be an absolute HTTPS URL without credentials, query, or fragment."
+    }
+    $OffHostS3EndpointUrl = $endpointUri.AbsoluteUri.TrimEnd("/")
+  } else {
+    $OffHostS3EndpointUrl = ""
+  }
+
+  if ([string]::IsNullOrWhiteSpace($OffHostS3Region)) {
+    $OffHostS3Region = "us-east-1"
+  }
+  if ($OffHostS3Region -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,62}$') {
+    throw "OffHostS3Region contains unsupported characters."
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
+    $OffHostArtifactKey = $OffHostArtifactKey.Trim()
+    $dailyPrefix = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/"
+    $artifactPattern = "^$([regex]::Escape($dailyPrefix))shamrai-db\.\d{8}T\d{6}Z\.dump\.age$"
+    if ($OffHostArtifactKey -notmatch $artifactPattern) {
+      throw "OffHostArtifactKey must identify a generated daily .dump.age object under the configured prefix."
+    }
+  }
+} elseif (-not [string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
+  throw "OffHostArtifactKey requires ArtifactSource S3."
+}
+
 $drillId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 $drillProject = "$DrillProjectPrefix-$drillId"
 
@@ -601,11 +817,29 @@ if ($DryRun) {
   Write-Host "drill_project=$drillProject"
   Write-Host "drill_backend_port=$DrillBackendPort"
   Write-Host "drill_frontend_port=$DrillFrontendPort"
-  $backupSelection = "explicit"
-  if ([string]::IsNullOrWhiteSpace($BackupFile)) {
-    $backupSelection = "latest"
+  Write-Host "artifact_source=$artifactSourceNormalized"
+  if ($artifactSourceNormalized -eq "s3") {
+    $offHostSelection = "latest"
+    if (-not [string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
+      $offHostSelection = "explicit"
+      $offHostManifestKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.json'
+      Write-Host "off_host_artifact=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $OffHostArtifactKey)"
+      Write-Host "off_host_manifest=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $offHostManifestKey)"
+    } else {
+      $artifactPreviewKey = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/<latest>.dump.age"
+      $manifestPreviewKey = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/<latest>.manifest.json"
+      Write-Host "off_host_artifact=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $artifactPreviewKey)"
+      Write-Host "off_host_manifest=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $manifestPreviewKey)"
+    }
+    Write-Host "off_host_selection=$offHostSelection"
+    Write-Host "off_host_credentials=runtime_environment_only"
+  } else {
+    $backupSelection = "explicit"
+    if ([string]::IsNullOrWhiteSpace($BackupFile)) {
+      $backupSelection = "latest"
+    }
+    Write-Host "backup_selection=$backupSelection"
   }
-  Write-Host "backup_selection=$backupSelection"
   Write-Host "age_identity_required=true"
   Write-Host "canonical_health=$HealthUrl"
   exit 0
@@ -638,6 +872,17 @@ if (-not $script:SshTool -or -not $script:ScpTool) {
 if (-not $ageTool) {
   throw "age was not found. Install age before running restore drills."
 }
+if ($artifactSourceNormalized -eq "s3") {
+  if ([string]::IsNullOrWhiteSpace($env:AWS_ACCESS_KEY_ID) -or [string]::IsNullOrWhiteSpace($env:AWS_SECRET_ACCESS_KEY)) {
+    throw "ArtifactSource S3 requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the runtime environment."
+  }
+  $script:AwsTool = Find-Tool @("aws.exe", "aws")
+  if (-not $script:AwsTool) {
+    throw "aws CLI is required when ArtifactSource is S3."
+  }
+  $env:AWS_EC2_METADATA_DISABLED = "true"
+  $env:AWS_PAGER = ""
+}
 
 $hostName = Get-SshHostName -Target $Server
 $KnownHostsPath = Initialize-KnownHosts `
@@ -651,18 +896,35 @@ $deployDir = Join-Path $Workspace ".deploy"
 $localStage = Join-Path $deployDir "restore-drill-$drillId"
 New-Item -ItemType Directory -Force -Path $localStage | Out-Null
 
-$remoteBackup = ""
-$remoteManifest = ""
-Invoke-Step "Select encrypted backup" {
-  $selection = Invoke-RemoteOutputChecked -Command (New-BackupSelectionCommand -RemoteAppPath $RemotePath -RequestedBackup $BackupFile)
-  $lines = @($selection -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($lines.Count -lt 2) {
-    throw "Backup selection did not return both backup and manifest paths."
+$script:remoteBackup = ""
+$script:remoteManifest = ""
+$script:offHostArtifactKey = ""
+$script:offHostManifestKey = ""
+if ($artifactSourceNormalized -eq "s3") {
+  Invoke-Step "Select committed off-host backup" {
+    if ([string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
+      $pair = Get-LatestOffHostArtifactPair
+      $script:offHostArtifactKey = $pair.ArtifactKey
+      $script:offHostManifestKey = $pair.ManifestKey
+    } else {
+      $script:offHostArtifactKey = $OffHostArtifactKey
+      $script:offHostManifestKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.json'
+    }
+    Write-Host "artifact_key=$script:offHostArtifactKey"
+    Write-Host "manifest_key=$script:offHostManifestKey"
   }
-  $script:remoteBackup = $lines[0].Trim()
-  $script:remoteManifest = $lines[1].Trim()
-  Write-Host "backup=$script:remoteBackup"
-  Write-Host "manifest=$script:remoteManifest"
+} else {
+  Invoke-Step "Select encrypted backup" {
+    $selection = Invoke-RemoteOutputChecked -Command (New-BackupSelectionCommand -RemoteAppPath $RemotePath -RequestedBackup $BackupFile)
+    $lines = @($selection -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -lt 2) {
+      throw "Backup selection did not return both backup and manifest paths."
+    }
+    $script:remoteBackup = $lines[0].Trim()
+    $script:remoteManifest = $lines[1].Trim()
+    Write-Host "backup=$script:remoteBackup"
+    Write-Host "manifest=$script:remoteManifest"
+  }
 }
 
 $encryptedLocal = Join-Path $localStage "backup.dump.age"
@@ -671,17 +933,61 @@ $dumpLocal = Join-Path $localStage "restore.dump"
 $script:SensitiveLocalFiles += $dumpLocal
 
 Invoke-Step "Fetch encrypted backup metadata" {
-  Copy-FromRemoteChecked -RemoteFilePath $script:remoteBackup -LocalPath $encryptedLocal
-  Copy-FromRemoteChecked -RemoteFilePath $script:remoteManifest -LocalPath $manifestLocal
+  if ($artifactSourceNormalized -eq "s3") {
+    Copy-FromOffHostChecked -ObjectKey $script:offHostArtifactKey -LocalPath $encryptedLocal
+    Copy-FromOffHostChecked -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
+    Assert-OffHostObjectMetadata -ObjectKey $script:offHostArtifactKey -LocalPath $encryptedLocal
+    Assert-OffHostObjectMetadata -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
+  } else {
+    Copy-FromRemoteChecked -RemoteFilePath $script:remoteBackup -LocalPath $encryptedLocal
+    Copy-FromRemoteChecked -RemoteFilePath $script:remoteManifest -LocalPath $manifestLocal
+  }
 }
 
 Invoke-Step "Decrypt backup locally" {
-  Invoke-NativeChecked -FilePath $ageTool -Arguments @("-d", "-i", $AgeIdentityPath, "-o", $dumpLocal, $encryptedLocal)
   $manifest = Get-Content -Raw -LiteralPath $manifestLocal | ConvertFrom-Json
-  $expectedHash = [string]$manifest.artifact.dump_sha256
-  $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dumpLocal).Hash.ToLowerInvariant()
-  if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
-    throw "Decrypted dump hash mismatch. Expected $expectedHash, got $actualHash."
+  $artifact = Get-JsonPropertyValue -Object $manifest -Name "artifact"
+  if ($null -eq $artifact) {
+    throw "Backup manifest is missing artifact metadata."
+  }
+  $expectedEncryptedHash = [string](Get-JsonPropertyValue -Object $artifact -Name "encrypted_sha256" -DefaultValue "")
+  $expectedEncryptedSize = 0L
+  [long]::TryParse(
+    [string](Get-JsonPropertyValue -Object $artifact -Name "encrypted_size_bytes" -DefaultValue "0"),
+    [ref]$expectedEncryptedSize
+  ) | Out-Null
+  $schemaVersion = 0
+  [int]::TryParse(
+    [string](Get-JsonPropertyValue -Object $manifest -Name "schema_version" -DefaultValue "0"),
+    [ref]$schemaVersion
+  ) | Out-Null
+  if ($artifactSourceNormalized -eq "s3") {
+    if ($schemaVersion -lt 2 -or $expectedEncryptedHash -notmatch '^[0-9a-fA-F]{64}$' -or $expectedEncryptedSize -lt 1) {
+      throw "Off-host restore requires a schema v2 manifest with encrypted artifact integrity fields."
+    }
+    $expectedEncryptedFile = ($script:offHostArtifactKey -split '/')[-1]
+    $manifestEncryptedFile = [string](Get-JsonPropertyValue -Object $artifact -Name "encrypted_file" -DefaultValue "")
+    if ($manifestEncryptedFile -ne $expectedEncryptedFile) {
+      throw "Off-host manifest does not describe the selected encrypted artifact."
+    }
+  }
+
+  if ($expectedEncryptedHash -match '^[0-9a-fA-F]{64}$' -and $expectedEncryptedSize -gt 0) {
+    $actualEncryptedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encryptedLocal).Hash.ToLowerInvariant()
+    $actualEncryptedSize = (Get-Item -LiteralPath $encryptedLocal).Length
+    if ($actualEncryptedHash -ne $expectedEncryptedHash.ToLowerInvariant() -or $actualEncryptedSize -ne $expectedEncryptedSize) {
+      throw "Encrypted backup hash/size does not match the manifest."
+    }
+  }
+
+  Invoke-NativeChecked -FilePath $ageTool -Arguments @("-d", "-i", $AgeIdentityPath, "-o", $dumpLocal, $encryptedLocal)
+  $expectedDumpHash = [string](Get-JsonPropertyValue -Object $artifact -Name "dump_sha256" -DefaultValue "")
+  if ($expectedDumpHash -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "Backup manifest contains an invalid decrypted dump hash."
+  }
+  $actualDumpHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dumpLocal).Hash.ToLowerInvariant()
+  if ($actualDumpHash -ne $expectedDumpHash.ToLowerInvariant()) {
+    throw "Decrypted dump hash does not match the manifest."
   }
 }
 

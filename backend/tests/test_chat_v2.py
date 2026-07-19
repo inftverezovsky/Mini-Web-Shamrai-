@@ -13,10 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.api import chat
-from src.api.deps import get_current_admin, get_current_admin_read
+from src.api.deps import get_current_admin, get_current_admin_read, get_current_user_read
 from src.models.database import Base
 from src.models.models import ChatMessage, ChatReadCursor, DeliveryOutbox, PersonalSignal, PersonalSignalReadCursor, User
 from src.services import chat as chat_service
+from src.services.chat_uploads import resolve_chat_attachment_path
 from src.services.signals import SUPPORT_STAFF_MESSAGE_TYPE
 
 
@@ -190,10 +191,26 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(image_message.payload["mime_type"], "image/png")
                 self.assertEqual(image_message.payload["width"], 1)
                 self.assertEqual(image_message.payload["height"], 1)
-                image_path = os.path.join(temp_dir, *image_message.payload["url"].split("/static/chat/", 1)[1].split("/"))
+                self.assertEqual(
+                    image_message.payload["download_url"],
+                    f"/chat/attachments/{image_message.id}/download",
+                )
+                self.assertNotIn("url", image_message.payload)
+                self.assertNotIn("storage_path", image_message.payload)
+                image_dir = os.path.join(temp_dir, str(image_message.conversation_id))
+                image_path = os.path.join(image_dir, os.listdir(image_dir)[0])
                 self.assertTrue(os.path.exists(image_path))
                 if os.name != "nt":
                     self.assertEqual(stat.S_IMODE(os.stat(image_path).st_mode), 0o644)
+
+                image_download = await chat.download_chat_attachment(
+                    image_message.id,
+                    current_user=client,
+                    db=session,
+                )
+                self.assertEqual(image_download.headers.get("x-content-type-options"), "nosniff")
+                self.assertEqual(image_download.headers.get("cache-control"), "private, no-store")
+                self.assertIn("attachment", image_download.headers.get("content-disposition", ""))
 
                 open_before = await chat.list_admin_chat_conversations(status="open", admin=admin, db=session)
                 self.assertEqual([item.id for item in open_before.items], [image_message.conversation_id])
@@ -214,6 +231,21 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(voice_message.text)
                 self.assertEqual(voice_message.payload["mime_type"], "audio/webm")
                 self.assertEqual(voice_message.payload["duration_ms"], 1500)
+                self.assertEqual(
+                    voice_message.payload["download_url"],
+                    f"/chat/attachments/{voice_message.id}/download",
+                )
+                self.assertNotIn("url", voice_message.payload)
+                self.assertNotIn("storage_path", voice_message.payload)
+
+                voice_download = await chat.download_chat_attachment(
+                    voice_message.id,
+                    current_user=client,
+                    db=session,
+                )
+                self.assertEqual(voice_download.headers.get("x-content-type-options"), "nosniff")
+                self.assertEqual(voice_download.headers.get("cache-control"), "private, no-store")
+                self.assertIn("attachment", voice_download.headers.get("content-disposition", ""))
 
             open_after = await chat.list_admin_chat_conversations(status="open", admin=moderator, db=session)
             self.assertEqual(open_after.items, [])
@@ -312,8 +344,14 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("storage_path", file_message.payload)
 
                 response = await chat.download_chat_attachment(file_message.id, current_user=client, db=session)
-                self.assertEqual(os.path.abspath(response.path), os.path.abspath(os.path.join(temp_dir, str(file_message.conversation_id), os.listdir(os.path.join(temp_dir, str(file_message.conversation_id)))[0])))
+                expected_path = os.path.join(
+                    temp_dir,
+                    str(file_message.conversation_id),
+                    os.listdir(os.path.join(temp_dir, str(file_message.conversation_id)))[0],
+                )
+                self.assertTrue(os.path.samefile(response.path, expected_path))
                 self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
+                self.assertEqual(response.headers.get("cache-control"), "private, no-store")
                 self.assertIn("attachment", response.headers.get("content-disposition", ""))
 
                 with self.assertRaises(HTTPException) as other_raised:
@@ -322,6 +360,7 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
 
                 admin_download = await chat.download_chat_attachment(file_message.id, current_user=admin, db=session)
                 self.assertTrue(os.path.exists(admin_download.path))
+                self.assertEqual(admin_download.headers.get("cache-control"), "private, no-store")
 
                 reply = await chat.create_admin_chat_message(
                     file_message.conversation_id,
@@ -333,7 +372,57 @@ class ChatV2Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(reply.reply_to)
                 self.assertEqual(reply.reply_to["type"], "file")
                 self.assertEqual(reply.reply_to["text"], "Лог ошибки")
+                self.assertNotIn("url", reply.reply_to["payload"])
                 self.assertNotIn("storage_path", reply.reply_to["payload"])
+
+    async def test_attachment_download_requires_authentication(self):
+        async with self.Session() as session:
+            with self.assertRaises(HTTPException) as raised:
+                await get_current_user_read(
+                    authorization=None,
+                    cookie_token=None,
+                    db=session,
+                )
+        self.assertEqual(raised.exception.status_code, 401)
+
+    async def test_attachment_path_resolution_rejects_traversal_and_cross_conversation_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conversation_id = uuid4()
+            other_conversation_id = uuid4()
+            filename = f"{'a' * 32}.bin"
+            conversation_dir = os.path.join(temp_dir, str(conversation_id))
+            os.makedirs(conversation_dir)
+            legacy_path = os.path.join(conversation_dir, filename)
+            with open(legacy_path, "wb") as legacy_file:
+                legacy_file.write(b"legacy")
+            other_conversation_dir = os.path.join(temp_dir, str(other_conversation_id))
+            os.makedirs(other_conversation_dir)
+            with open(os.path.join(other_conversation_dir, filename), "wb") as other_file:
+                other_file.write(b"other conversation")
+
+            resolved_legacy_path = resolve_chat_attachment_path(
+                {"url": f"/static/chat/{conversation_id}/{filename}"},
+                target_root=temp_dir,
+                expected_conversation_id=conversation_id,
+            )
+            self.assertEqual(os.path.realpath(resolved_legacy_path), os.path.realpath(legacy_path))
+
+            unsafe_payloads = [
+                {"storage_path": "../outside.bin"},
+                {"storage_path": f"{conversation_id}/../../outside.bin"},
+                {"url": "/static/chat/../../outside.bin"},
+                {"storage_path": f"{other_conversation_id}/{filename}"},
+            ]
+
+            for payload in unsafe_payloads:
+                with self.subTest(payload=payload):
+                    with self.assertRaises(HTTPException) as raised:
+                        resolve_chat_attachment_path(
+                            payload,
+                            target_root=temp_dir,
+                            expected_conversation_id=conversation_id,
+                        )
+                    self.assertEqual(raised.exception.status_code, 404)
 
     async def test_file_payload_rejects_unsafe_storage_path(self):
         async with self.Session() as session:
@@ -607,6 +696,12 @@ class ChatV2DependencyTests(unittest.TestCase):
         self.assertIs(
             inspect.signature(chat.create_admin_chat_attachment).parameters["admin"].default.dependency,
             get_current_admin,
+        )
+
+    def test_attachment_download_uses_authenticated_read_dependency(self):
+        self.assertIs(
+            inspect.signature(chat.download_chat_attachment).parameters["current_user"].default.dependency,
+            get_current_user_read,
         )
 
 

@@ -480,7 +480,11 @@ async def download_chat_attachment(
 ):
     message = await _load_downloadable_message(db, message_id=message_id, current_user=current_user)
     payload = message.payload or {}
-    absolute_path = resolve_chat_attachment_path(payload, target_root=CHAT_STATIC_DIR)
+    absolute_path = resolve_chat_attachment_path(
+        payload,
+        target_root=CHAT_STATIC_DIR,
+        expected_conversation_id=message.conversation_id,
+    )
     filename = str(payload.get("original_filename") or f"chat-attachment-{message.id}")
     media_type = str(payload.get("mime_type") or "application/octet-stream")
     return FileResponse(
@@ -488,7 +492,10 @@ async def download_chat_attachment(
         media_type=media_type,
         filename=filename,
         content_disposition_type="attachment",
-        headers={"X-Content-Type-Options": "nosniff"},
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
     )
 
 

@@ -2,6 +2,19 @@ name: Restore drill
 
 on:
   workflow_dispatch:
+    inputs:
+      artifact_source:
+        description: Encrypted backup source
+        required: true
+        default: vds
+        type: choice
+        options:
+          - vds
+          - s3
+      off_host_artifact_key:
+        description: Optional exact S3 object key; blank selects the newest committed daily manifest
+        required: false
+        type: string
   schedule:
     # 04:30 Europe/Moscow on Sundays, after the nightly backup window.
     - cron: "30 1 * * 0"
@@ -16,6 +29,7 @@ jobs:
 
     steps:
       - name: Checkout
+        # BLOCKED(pin): the repository has no locally verified full SHA for actions/checkout@v4.
         uses: actions/checkout@v4
 
       - name: Install age
@@ -34,11 +48,41 @@ jobs:
           printf '%s\n' "${{ secrets.SHAMRAI_BACKUP_AGE_IDENTITY }}" > "$RUNNER_TEMP/shamrai-backup-age-identity.txt"
           chmod 0600 "$RUNNER_TEMP/shamrai-backup-age-identity.txt"
 
-      - name: Run restore drill
+      - name: Run restore drill from VDS
+        if: ${{ inputs.artifact_source != 's3' }}
         shell: pwsh
         run: |
           ./scripts/run-shamrai-restore-drill.ps1 `
             -Workspace "$env:GITHUB_WORKSPACE" `
+            -SshKeyPath "$env:HOME/.ssh/shamrai_restore_drill" `
+            -KnownHostsPath "$env:HOME/.ssh/known_hosts" `
+            -NoHostKeyScan `
+            -AgeIdentityPath "$env:RUNNER_TEMP/shamrai-backup-age-identity.txt"
+
+      - name: Verify off-host client
+        if: ${{ inputs.artifact_source == 's3' }}
+        run: |
+          set -euo pipefail
+          command -v aws >/dev/null
+          aws --version
+
+      - name: Run restore drill from off-host S3
+        if: ${{ inputs.artifact_source == 's3' }}
+        shell: pwsh
+        env:
+          SHAMRAI_BACKUP_S3_BUCKET: ${{ vars.SHAMRAI_BACKUP_S3_BUCKET }}
+          SHAMRAI_BACKUP_S3_PREFIX: ${{ vars.SHAMRAI_BACKUP_S3_PREFIX }}
+          SHAMRAI_BACKUP_S3_ENDPOINT_URL: ${{ vars.SHAMRAI_BACKUP_S3_ENDPOINT_URL }}
+          AWS_REGION: ${{ vars.SHAMRAI_BACKUP_S3_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SHAMRAI_BACKUP_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SHAMRAI_BACKUP_S3_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.SHAMRAI_BACKUP_S3_SESSION_TOKEN }}
+          SHAMRAI_OFFHOST_ARTIFACT_KEY: ${{ inputs.off_host_artifact_key }}
+        run: |
+          ./scripts/run-shamrai-restore-drill.ps1 `
+            -Workspace "$env:GITHUB_WORKSPACE" `
+            -ArtifactSource S3 `
+            -OffHostArtifactKey "$env:SHAMRAI_OFFHOST_ARTIFACT_KEY" `
             -SshKeyPath "$env:HOME/.ssh/shamrai_restore_drill" `
             -KnownHostsPath "$env:HOME/.ssh/known_hosts" `
             -NoHostKeyScan `

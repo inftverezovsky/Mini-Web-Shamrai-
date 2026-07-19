@@ -311,6 +311,9 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
                 invited,
                 event,
                 SystemSetting(key="REFERRAL_PROGRAM_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_DISCOUNT_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_DISCOUNT_STEP_PERCENT", value="7"),
+                SystemSetting(key="REFERRAL_DISCOUNT_MAX_PERCENT", value="30"),
                 SystemSetting(key="REFERRAL_MATCH_REWARD_ENABLED", value="true"),
                 SystemSetting(key="REFERRAL_MATCH_REWARD_COUNT", value="2"),
             ])
@@ -332,8 +335,80 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["status"], "approved")
         self.assertEqual(refreshed_event.status, "approved")
         self.assertEqual(refreshed_event.matches_awarded, 2)
+        self.assertEqual(refreshed_event.discount_percent_snapshot, 7)
         self.assertEqual(refreshed_referrer.matches_remaining, 3)
         self.assertEqual(len(balance_logs), 1)
+
+    async def test_referral_approval_refreshes_stale_event_before_awarding(self):
+        async with self.Session() as setup_session:
+            referrer = User(
+                telegram_id=110,
+                username="stale-referrer",
+                purchased_bets_balance=1,
+                matches_remaining=1,
+            )
+            invited = User(telegram_id=211, referred_by_user_id=referrer.telegram_id)
+            event = ReferralRewardEvent(
+                referrer_user_id=referrer.telegram_id,
+                referred_user_id=invited.telegram_id,
+                source_type="subscription",
+                status="held",
+                risk_score=50,
+                risk_reasons=["same_identity_device"],
+            )
+            setup_session.add_all([
+                referrer,
+                invited,
+                event,
+                SystemSetting(key="REFERRAL_PROGRAM_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_MATCH_REWARD_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_MATCH_REWARD_COUNT", value="2"),
+            ])
+            await setup_session.commit()
+            event_id = event.id
+
+        async with self.Session() as stale_session:
+            stale_event = await stale_session.get(ReferralRewardEvent, event_id)
+
+            async with self.Session() as winning_session:
+                winning_event = await winning_session.get(ReferralRewardEvent, event_id)
+                winning_referrer = await winning_session.get(User, referrer.telegram_id)
+                winning_event.status = "approved"
+                winning_event.matches_awarded = 2
+                winning_referrer.purchased_bets_balance = 3
+                winning_referrer.matches_remaining = 3
+                winning_session.add(MatchBalanceLog(
+                    user_id=referrer.telegram_id,
+                    delta_matches=2,
+                    event_type="referral_match_reward",
+                ))
+                await winning_session.commit()
+
+            await referrals.approve_referral_reward_event(
+                stale_session,
+                event=stale_event,
+                reviewer_user_id=1,
+            )
+            await stale_session.commit()
+
+        async with self.Session() as verify_session:
+            refreshed_referrer = await verify_session.get(User, referrer.telegram_id)
+            refreshed_event = await verify_session.get(ReferralRewardEvent, event_id)
+            balance_log_count = int(
+                (
+                    await verify_session.execute(
+                        select(func.count(MatchBalanceLog.id)).filter(
+                            MatchBalanceLog.user_id == referrer.telegram_id,
+                            MatchBalanceLog.event_type == "referral_match_reward",
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+
+        self.assertEqual(refreshed_event.matches_awarded, 2)
+        self.assertEqual(refreshed_referrer.matches_remaining, 3)
+        self.assertEqual(balance_log_count, 1)
 
     async def test_marketing_widget_config_disables_widget_and_limits_rewards(self):
         async with self.Session() as session:

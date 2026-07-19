@@ -428,8 +428,9 @@ async def _load_private_forecast_bet(
     bet_id: UUID,
     *,
     allow_paid_set: bool = False,
+    for_update: bool = False,
 ) -> Bet:
-    result = await db.execute(
+    query = (
         select(Bet)
         .filter(Bet.id == bet_id)
         .options(
@@ -437,6 +438,9 @@ async def _load_private_forecast_bet(
             selectinload(Bet.bookmakers),
         )
     )
+    if for_update:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    result = await db.execute(query)
     bet = result.scalars().first()
     if not bet:
         raise HTTPException(
@@ -1314,7 +1318,7 @@ async def prepare_forecast_broadcast_full(
     Saves the full private forecast after the teaser has been broadcast.
     If enabled, automatically sends it to interested clients and keeps future "take" clicks automatic.
     """
-    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True)
+    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True, for_update=True)
     is_paid_set_bet = bet_is_paid_set(bet)
     form_data = await request.form()
     fair_coefficient_provided = "fair_coefficient" in form_data or fair_coefficient is not None
@@ -1719,7 +1723,7 @@ async def stop_forecast_broadcast_from_admin(
     current_admin: User = Depends(get_current_privileged_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True)
+    bet = await _load_private_forecast_bet(db, bet_id, allow_paid_set=True, for_update=True)
     taker_count = await count_client_bet_takers(db, bet.id)
 
     stoppable_statuses = {

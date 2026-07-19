@@ -21,6 +21,9 @@ CHAT_ATTACHMENT_CHUNK_BYTES = 256 * 1024
 CHAT_MESSAGE_TYPE_IMAGE = "image"
 CHAT_MESSAGE_TYPE_VOICE = "voice"
 CHAT_MESSAGE_TYPE_FILE = "file"
+CHAT_ATTACHMENT_STORAGE_PATH_PATTERN = re.compile(
+    r"^(?P<conversation_id>[0-9a-fA-F-]{36})/(?P<filename>[0-9a-f]{32}\.[a-z0-9][a-z0-9._-]{0,15})$"
+)
 
 
 @dataclass(frozen=True)
@@ -174,19 +177,16 @@ async def store_chat_attachment(
             "mime_type": mime_type,
             "size_bytes": total_size,
             "original_filename": _safe_original_filename(upload.filename),
+            "storage_path": f"{conversation_id}/{filename}",
         }
 
         if message_type == CHAT_MESSAGE_TYPE_IMAGE:
-            payload["url"] = f"/static/chat/{conversation_id}/{filename}"
             width, height = _read_image_size(final_path)
             payload.update({"width": width, "height": height})
         elif message_type == CHAT_MESSAGE_TYPE_VOICE:
-            payload["url"] = f"/static/chat/{conversation_id}/{filename}"
             clean_duration = _validate_duration_ms(duration_ms)
             if clean_duration is not None:
                 payload["duration_ms"] = clean_duration
-        else:
-            payload["storage_path"] = f"{conversation_id}/{filename}"
 
         return StoredChatAttachment(message_type=message_type, payload=payload, absolute_path=final_path)
     except Exception:
@@ -197,35 +197,65 @@ async def store_chat_attachment(
         await upload.close()
 
 
-def remove_chat_attachment(payload: dict[str, object], *, target_root: str) -> None:
+def _attachment_relative_path(
+    payload: dict[str, object],
+    *,
+    expected_conversation_id: UUID | str | None = None,
+) -> str:
     raw_url = payload.get("url") if isinstance(payload, dict) else None
     raw_storage_path = payload.get("storage_path") if isinstance(payload, dict) else None
     if isinstance(raw_storage_path, str) and raw_storage_path:
-        relative_path = raw_storage_path.replace("/", os.sep)
+        candidate = raw_storage_path
     elif isinstance(raw_url, str) and raw_url.startswith("/static/chat/"):
-        relative_path = raw_url.removeprefix("/static/chat/").replace("/", os.sep)
+        candidate = raw_url.removeprefix("/static/chat/")
     else:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+
+    match = CHAT_ATTACHMENT_STORAGE_PATH_PATTERN.fullmatch(candidate)
+    if not match:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+    try:
+        conversation_id = UUID(match.group("conversation_id"))
+        expected_id = UUID(str(expected_conversation_id)) if expected_conversation_id is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+    if expected_id is not None and conversation_id != expected_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
+    return os.path.join(str(conversation_id), match.group("filename"))
+
+
+def remove_chat_attachment(payload: dict[str, object], *, target_root: str) -> None:
+    try:
+        relative_path = _attachment_relative_path(payload)
+    except HTTPException:
         return
-    root = os.path.abspath(target_root)
-    absolute_path = os.path.abspath(os.path.join(root, relative_path))
-    if os.path.commonpath([root, absolute_path]) != root:
+    root = os.path.realpath(target_root)
+    absolute_path = os.path.realpath(os.path.join(root, relative_path))
+    try:
+        if os.path.commonpath([root, absolute_path]) != root:
+            return
+    except ValueError:
         return
     if os.path.exists(absolute_path):
         os.remove(absolute_path)
 
 
-def resolve_chat_attachment_path(payload: dict[str, object], *, target_root: str) -> str:
-    raw_url = payload.get("url") if isinstance(payload, dict) else None
-    raw_storage_path = payload.get("storage_path") if isinstance(payload, dict) else None
-    if isinstance(raw_storage_path, str) and raw_storage_path:
-        relative_path = raw_storage_path.replace("/", os.sep)
-    elif isinstance(raw_url, str) and raw_url.startswith("/static/chat/"):
-        relative_path = raw_url.removeprefix("/static/chat/").replace("/", os.sep)
-    else:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
-
-    root = os.path.abspath(target_root)
-    absolute_path = os.path.abspath(os.path.join(root, relative_path))
-    if os.path.commonpath([root, absolute_path]) != root or not os.path.isfile(absolute_path):
+def resolve_chat_attachment_path(
+    payload: dict[str, object],
+    *,
+    target_root: str,
+    expected_conversation_id: UUID | str | None = None,
+) -> str:
+    relative_path = _attachment_relative_path(
+        payload,
+        expected_conversation_id=expected_conversation_id,
+    )
+    root = os.path.realpath(target_root)
+    absolute_path = os.path.realpath(os.path.join(root, relative_path))
+    try:
+        is_inside_root = os.path.commonpath([root, absolute_path]) == root
+    except ValueError:
+        is_inside_root = False
+    if not is_inside_root or not os.path.isfile(absolute_path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Вложение не найдено")
     return absolute_path

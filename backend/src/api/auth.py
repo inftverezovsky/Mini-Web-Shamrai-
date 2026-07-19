@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import delete, insert, update
+from sqlalchemy import delete, insert, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -44,6 +44,7 @@ from src.models.models import (
     DeliveryOutbox,
     ForecastRequest,
     IdentityDeviceLink,
+    MarketingRewardEvent,
     MatchBalanceLog,
     MessageTemplate,
     PaymentAttempt,
@@ -52,6 +53,7 @@ from src.models.models import (
     PromoCode,
     PromoCodeRedemption,
     PvPBattleVote,
+    ReferralRewardEvent,
     Subscription,
     User,
     UserBadge,
@@ -68,6 +70,7 @@ from src.services.telegram_auth import (
 )
 from src.services.vk_auth_flow import consume_vk_auth_flow, store_vk_auth_flow
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
+from src.services.match_access import current_match_balance, lock_user_balance, lock_user_balances
 from src.services.system_settings import REFERRAL_PROGRAM_ENABLED_KEY, is_system_setting_enabled
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -1042,6 +1045,62 @@ def _copy_web_profile_fields(target: User, source: User) -> None:
         target.client_tag = source.client_tag
 
 
+async def _lock_identity_merge_dependencies(
+    db: AsyncSession,
+    user_ids: set[int],
+) -> None:
+    """Lock PaymentAttempt -> Bet -> referral dependencies before canonical User locks."""
+    clean_ids = sorted({int(user_id) for user_id in user_ids})
+    if not clean_ids:
+        return
+    await db.flush()
+    await db.execute(
+        select(PaymentAttempt.id)
+        .filter(PaymentAttempt.user_id.in_(clean_ids))
+        .order_by(PaymentAttempt.id)
+        .with_for_update()
+    )
+    related_user_bet_ids = select(user_bets.c.bet_id).where(user_bets.c.user_id.in_(clean_ids))
+    related_attempt_bet_ids = select(PaymentAttempt.bet_id).where(
+        PaymentAttempt.user_id.in_(clean_ids),
+        PaymentAttempt.bet_id.isnot(None),
+    )
+    related_forecast_bet_ids = select(ForecastRequest.bet_id).where(
+        ForecastRequest.user_id.in_(clean_ids)
+    )
+    await db.execute(
+        select(Bet.id)
+        .filter(
+            or_(
+                Bet.author_id.in_(clean_ids),
+                Bet.id.in_(related_user_bet_ids),
+                Bet.id.in_(related_attempt_bet_ids),
+                Bet.id.in_(related_forecast_bet_ids),
+            )
+        )
+        .order_by(Bet.id)
+        .with_for_update()
+    )
+    await db.execute(
+        select(ReferralRewardEvent.id)
+        .filter(
+            or_(
+                ReferralRewardEvent.referrer_user_id.in_(clean_ids),
+                ReferralRewardEvent.referred_user_id.in_(clean_ids),
+                ReferralRewardEvent.reviewed_by.in_(clean_ids),
+            )
+        )
+        .order_by(ReferralRewardEvent.id)
+        .with_for_update()
+    )
+    await db.execute(
+        select(MarketingRewardEvent.id)
+        .filter(MarketingRewardEvent.user_id.in_(clean_ids))
+        .order_by(MarketingRewardEvent.id)
+        .with_for_update()
+    )
+
+
 def _new_chat_read_cursor_like(cursor: ChatReadCursor, *, conversation_id: Any, user_id: int) -> ChatReadCursor:
     return ChatReadCursor(
         conversation_id=conversation_id,
@@ -1171,6 +1230,7 @@ async def _merge_personal_signal_read_cursor(db: AsyncSession, source_id: int, t
 
 
 async def _move_user_references(db: AsyncSession, source_id: int, target_id: int) -> None:
+    await _merge_referral_reward_events(db, source_id, target_id)
     await _merge_user_bookmakers(db, source_id, target_id)
     await _merge_user_bets(db, source_id, target_id)
     await _merge_forecast_requests(db, source_id, target_id)
@@ -1189,6 +1249,7 @@ async def _move_user_references(db: AsyncSession, source_id: int, target_id: int
         DeliveryOutbox,
         CrowdBetParticipant,
         PromoCode,
+        MarketingRewardEvent,
         UserBadge,
         UserNote,
     ):
@@ -1203,6 +1264,94 @@ async def _move_user_references(db: AsyncSession, source_id: int, target_id: int
     await db.execute(update(AdminAuditLog).where(AdminAuditLog.target_user_id == source_id).values(target_user_id=target_id))
     await db.execute(update(MessageTemplate).where(MessageTemplate.updated_by == source_id).values(updated_by=target_id))
     await db.execute(update(IdentityDeviceLink).where(IdentityDeviceLink.source_user_id == source_id).values(source_user_id=target_id))
+
+
+_REFERRAL_STATUS_RANK = {"rejected": 0, "held": 1, "approved": 2}
+
+
+def _merge_referral_reward_event_state(
+    target: ReferralRewardEvent,
+    source: ReferralRewardEvent,
+) -> None:
+    target.matches_awarded = int(target.matches_awarded or 0) + int(source.matches_awarded or 0)
+    target.discount_percent_snapshot = max(
+        int(target.discount_percent_snapshot or 0),
+        int(source.discount_percent_snapshot or 0),
+    )
+    if _REFERRAL_STATUS_RANK.get(source.status, -1) > _REFERRAL_STATUS_RANK.get(target.status, -1):
+        target.status = source.status
+    target.risk_score = max(int(target.risk_score or 0), int(source.risk_score or 0))
+    target.risk_reasons = list(dict.fromkeys([
+        *(target.risk_reasons or []),
+        *(source.risk_reasons or []),
+    ]))
+    target.source_payment_attempt_id = (
+        target.source_payment_attempt_id or source.source_payment_attempt_id
+    )
+    target.reviewed_by = target.reviewed_by or source.reviewed_by
+    target.reviewed_at = target.reviewed_at or source.reviewed_at
+
+
+def _reject_merged_self_referral(event: ReferralRewardEvent) -> None:
+    if event.referrer_user_id != event.referred_user_id:
+        return
+    event.status = "rejected"
+    event.risk_score = max(100, int(event.risk_score or 0))
+    event.risk_reasons = list(dict.fromkeys([
+        *(event.risk_reasons or []),
+        "identity_merge_self_referral",
+    ]))
+
+
+async def _merge_referral_reward_events(
+    db: AsyncSession,
+    source_id: int,
+    target_id: int,
+) -> None:
+    result = await db.execute(
+        select(ReferralRewardEvent)
+        .filter(
+            or_(
+                ReferralRewardEvent.referrer_user_id == source_id,
+                ReferralRewardEvent.referred_user_id == source_id,
+                ReferralRewardEvent.reviewed_by == source_id,
+            )
+        )
+        .order_by(ReferralRewardEvent.id)
+    )
+    events = result.scalars().all()
+    for event in events:
+        next_referrer_id = (
+            target_id if event.referrer_user_id == source_id else event.referrer_user_id
+        )
+        next_referred_id = (
+            target_id if event.referred_user_id == source_id else event.referred_user_id
+        )
+        next_reviewer_id = target_id if event.reviewed_by == source_id else event.reviewed_by
+
+        conflict_result = await db.execute(
+            select(ReferralRewardEvent)
+            .filter(
+                ReferralRewardEvent.id != event.id,
+                ReferralRewardEvent.referrer_user_id == next_referrer_id,
+                ReferralRewardEvent.referred_user_id == next_referred_id,
+            )
+            .with_for_update()
+        )
+        conflict = conflict_result.scalars().first()
+        if conflict is not None:
+            event.reviewed_by = next_reviewer_id
+            _merge_referral_reward_event_state(conflict, event)
+            _reject_merged_self_referral(conflict)
+            await db.delete(event)
+            await db.flush()
+            continue
+
+        event.referrer_user_id = next_referrer_id
+        event.referred_user_id = next_referred_id
+        event.reviewed_by = next_reviewer_id
+        _reject_merged_self_referral(event)
+        await db.flush()
 
 
 async def _merge_user_bookmakers(db: AsyncSession, source_id: int, target_id: int) -> None:
@@ -1323,6 +1472,13 @@ async def _promote_web_user_to_telegram(
             detail="Этот телефон уже привязан к другому Telegram-профилю",
         )
 
+    await _lock_identity_merge_dependencies(db, {source.telegram_id})
+    source_balance = await lock_user_balance(db, source.telegram_id)
+    source_match_balance = current_match_balance(source_balance)
+    source.purchased_bets_balance = source_match_balance
+    source.matches_remaining = source_match_balance
+    source.free_bets_available = source_balance.free_bets_available
+
     tg_id = int(tg_data.get("id") or 0)
     source_id = source.telegram_id
     source_vk_user_id = source.vk_user_id
@@ -1379,6 +1535,19 @@ async def _merge_web_only_user_into_telegram(db: AsyncSession, source: User, tar
             status_code=status.HTTP_409_CONFLICT,
             detail="Этот профиль уже привязан к другому Telegram-профилю",
         )
+
+    await _lock_identity_merge_dependencies(db, {source.telegram_id, target.telegram_id})
+    locked_balances = await lock_user_balances(db, {source.telegram_id, target.telegram_id})
+    source_balance = locked_balances[source.telegram_id]
+    target_balance = locked_balances[target.telegram_id]
+    source_match_balance = current_match_balance(source_balance)
+    target_match_balance = current_match_balance(target_balance)
+    source.purchased_bets_balance = source_match_balance
+    source.matches_remaining = source_match_balance
+    source.free_bets_available = source_balance.free_bets_available
+    target.purchased_bets_balance = target_match_balance
+    target.matches_remaining = target_match_balance
+    target.free_bets_available = target_balance.free_bets_available
 
     source_id = source.telegram_id
     target_id = target.telegram_id

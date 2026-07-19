@@ -1,4 +1,6 @@
 import unittest
+from inspect import signature
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
 
 from src.api import admin as admin_api, auth as auth_api
+from src.api.deps import get_current_owner
 from src.main import is_maintenance_exempt_path
 from src.models.database import Base
 from src.models.models import SystemSetting
@@ -46,6 +49,7 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
             await session.flush()
 
             with (
+                patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-token"),
                 patch.object(system_settings, "cache_get_json", new=AsyncMock(return_value=None)),
                 patch.object(system_settings, "cache_set_json", new=AsyncMock()) as cache_set,
             ):
@@ -59,6 +63,8 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
         cached_payload = cache_set.await_args.args[1]
         cached_token = next(item for item in cached_payload["settings"] if item["key"] == "TELEGRAM_BOT_TOKEN")
         self.assertEqual(cached_token["value"], "")
+        self.assertNotIn("runtime-token", str(cached_payload))
+        self.assertNotIn("real-token", str(cached_payload))
 
     async def test_update_persists_settings_and_invalidates_cache(self):
         async with self.Session() as session:
@@ -176,18 +182,107 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
             result = await session.execute(select(SystemSetting).where(SystemSetting.key == "TELEGRAM_BOT_TOKEN"))
             self.assertIsNone(result.scalar_one_or_none())
 
-    async def test_unlocked_integrations_reveal_runtime_and_stored_secret_values(self):
+    async def test_nonempty_secret_update_is_rejected_without_plaintext_persistence(self):
+        async with self.Session() as session:
+            with self.assertRaises(ValueError):
+                await system_settings.update_admin_system_settings(
+                    session,
+                    [{"key": "TELEGRAM_BOT_TOKEN", "value": "must-not-reach-the-database"}],
+                )
+
+            result = await session.execute(select(SystemSetting).where(SystemSetting.key == "TELEGRAM_BOT_TOKEN"))
+
+        self.assertIsNone(result.scalar_one_or_none())
+
+    async def test_unlocked_integrations_reveal_runtime_but_ignore_legacy_plaintext(self):
         async with self.Session() as session:
             session.add(SystemSetting(key="YOOKASSA_SECRET_KEY", value="stored-yookassa-secret", is_secret=True))
             await session.flush()
 
-            with patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-telegram-token"):
-                payload = await system_settings.get_unlocked_integration_settings(session)
+            with (
+                patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-telegram-token"),
+                patch.object(system_settings.settings, "YOOKASSA_SECRET_KEY", "runtime-yookassa-secret"),
+                patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=True)),
+            ):
+                payload = await system_settings.get_unlocked_integration_settings(
+                    session,
+                    unlock_token="valid-owner-token",
+                    admin_id=900,
+                )
 
         settings_by_key = {item["key"]: item for item in payload["settings"]}
         self.assertEqual(settings_by_key["TELEGRAM_BOT_TOKEN"]["value"], "runtime-telegram-token")
-        self.assertEqual(settings_by_key["YOOKASSA_SECRET_KEY"]["value"], "stored-yookassa-secret")
+        self.assertEqual(settings_by_key["YOOKASSA_SECRET_KEY"]["value"], "runtime-yookassa-secret")
+        self.assertNotIn("stored-yookassa-secret", str(payload))
         self.assertTrue(settings_by_key["TELEGRAM_BOT_TOKEN"]["is_secret"])
+
+    async def test_blank_secret_update_cannot_hide_or_erase_runtime_secret(self):
+        async with self.Session() as session:
+            with (
+                patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-telegram-token"),
+                patch.object(system_settings, "cache_delete", new=AsyncMock()),
+            ):
+                await system_settings.update_admin_system_settings(
+                    session,
+                    [{"key": "TELEGRAM_BOT_TOKEN", "value": ""}],
+                )
+                with patch.object(
+                    system_settings,
+                    "validate_integration_unlock_token",
+                    new=AsyncMock(return_value=True),
+                ):
+                    payload = await system_settings.get_unlocked_integration_settings(
+                        session,
+                        unlock_token="valid-owner-token",
+                        admin_id=900,
+                    )
+
+            result = await session.execute(select(SystemSetting).where(SystemSetting.key == "TELEGRAM_BOT_TOKEN"))
+
+        token_setting = next(item for item in payload["settings"] if item["key"] == "TELEGRAM_BOT_TOKEN")
+        self.assertEqual(token_setting["value"], "runtime-telegram-token")
+        self.assertIsNone(result.scalar_one_or_none())
+
+    async def test_unlocked_secret_payload_is_never_written_to_settings_cache(self):
+        async with self.Session() as session:
+            with (
+                patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-telegram-token"),
+                patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=True)),
+                patch.object(system_settings, "cache_set_json", new=AsyncMock()) as cache_set,
+            ):
+                payload = await system_settings.get_unlocked_integration_settings(
+                    session,
+                    unlock_token="valid-owner-token",
+                    admin_id=900,
+                )
+
+        self.assertIn("runtime-telegram-token", str(payload))
+        cache_set.assert_not_awaited()
+
+    async def test_unlocked_secret_payload_requires_valid_owner_token(self):
+        async with self.Session() as session:
+            with patch.object(
+                system_settings,
+                "validate_integration_unlock_token",
+                new=AsyncMock(return_value=False),
+            ):
+                with self.assertRaises(ValueError):
+                    await system_settings.get_unlocked_integration_settings(
+                        session,
+                        unlock_token="invalid-token",
+                        admin_id=900,
+                    )
+
+    def test_integration_secret_unlock_endpoint_requires_owner_dependency(self):
+        admin_dependency = signature(admin_api.admin_unlock_integration_settings).parameters["admin"].default
+
+        self.assertIs(admin_dependency.dependency, get_current_owner)
+
+    async def test_integration_secret_unlock_owner_dependency_rejects_admin(self):
+        with self.assertRaises(HTTPException) as exc:
+            await get_current_owner(SimpleNamespace(role="admin"))
+
+        self.assertEqual(exc.exception.status_code, 403)
 
     async def test_integrations_password_uses_runtime_setting(self):
         with patch.object(system_settings.settings, "ADMIN_INTEGRATIONS_PASSWORD", "test-pin"):
@@ -294,6 +389,33 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(payload["unlock_token"], cache_key)
         self.assertNotIn(payload["unlock_token"], str(cached_payload))
 
+    async def test_unlock_token_is_bound_to_issuing_owner(self):
+        payload = None
+        try:
+            with (
+                patch.object(system_settings, "cache_set_json", new=AsyncMock()),
+                patch.object(system_settings, "cache_get_json", new=AsyncMock(return_value=None)),
+            ):
+                payload = await system_settings.create_integration_unlock_token(admin_id=900)
+                self.assertTrue(
+                    await system_settings.validate_integration_unlock_token(
+                        payload["unlock_token"],
+                        admin_id=900,
+                    )
+                )
+                self.assertFalse(
+                    await system_settings.validate_integration_unlock_token(
+                        payload["unlock_token"],
+                        admin_id=901,
+                    )
+                )
+        finally:
+            if payload is not None:
+                system_settings._IN_MEMORY_UNLOCK_TOKENS.pop(
+                    system_settings._unlock_cache_key(payload["unlock_token"]),
+                    None,
+                )
+
     async def test_integration_diagnostics_require_unlock_token_and_redact_values(self):
         async with self.Session() as session:
             session.add_all([
@@ -303,16 +425,26 @@ class AdminSystemSettingsTests(unittest.IsolatedAsyncioTestCase):
             ])
             await session.flush()
 
-            with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=False)):
-                with self.assertRaises(ValueError):
-                    await system_settings.run_integration_diagnostics(session, unlock_token="bad", group="telegram")
+            with (
+                patch.object(system_settings.settings, "TELEGRAM_BOT_TOKEN", "runtime-telegram-token"),
+                patch.object(system_settings.settings, "TELEGRAM_WEBHOOK_SECRET_TOKEN", "runtime-webhook-secret"),
+            ):
+                with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=False)):
+                    with self.assertRaises(ValueError):
+                        await system_settings.run_integration_diagnostics(
+                            session,
+                            unlock_token="bad",
+                            admin_id=900,
+                            group="telegram",
+                        )
 
-            with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=True)):
-                payload = await system_settings.run_integration_diagnostics(
-                    session,
-                    unlock_token="valid-token",
-                    group="telegram",
-                )
+                with patch.object(system_settings, "validate_integration_unlock_token", new=AsyncMock(return_value=True)):
+                    payload = await system_settings.run_integration_diagnostics(
+                        session,
+                        unlock_token="valid-token",
+                        admin_id=900,
+                        group="telegram",
+                    )
 
         self.assertEqual(payload["overall_status"], "ok")
         self.assertEqual(payload["groups"][0]["group"], "telegram")

@@ -1732,12 +1732,13 @@ async def maintenance_mode_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-# Mount static files directory for serving uploaded coupon images
+# Expose public coupon images without exposing private chat attachments.
 import os
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-os.makedirs(static_dir, exist_ok=True)
+static_coupons_dir = os.path.join(static_dir, "coupons")
+os.makedirs(static_coupons_dir, exist_ok=True)
 mimetypes.add_type("audio/webm", ".webm")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+app.mount("/static/coupons", StaticFiles(directory=static_coupons_dir), name="static-coupons")
 
 # Include endpoint routers under /api prefix
 app.include_router(auth.router, prefix="/api")

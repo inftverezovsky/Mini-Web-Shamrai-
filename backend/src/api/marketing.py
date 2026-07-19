@@ -21,6 +21,7 @@ from src.services.marketing_widgets import (
     record_marketing_reward_event,
     stored_widget_config_count,
 )
+from src.services.match_access import lock_user_balance
 from src.schemas.schemas import (
     MarathonResponse,
     SwipeCandidateResponse,
@@ -267,15 +268,29 @@ async def claim_daily_bonus(
     Randomly awards a promo code or +1 free bet slot.
     """
     now = datetime.now(timezone.utc)
+    claim_date = now.date().isoformat()
+
     try:
         widget_config = await ensure_widget_reward_allowed(db, "daily_spin", current_user)
     except (MarketingWidgetDisabledError, MarketingWidgetLimitError) as exc:
         raise marketing_widget_http_error(exc)
-            
+
+    locked_balance = await lock_user_balance(db, current_user.telegram_id)
+
+    existing_daily_claim = (await db.execute(
+        select(DailyRewardClaim.id).filter(
+            DailyRewardClaim.user_id == current_user.telegram_id,
+            DailyRewardClaim.claimed_date == claim_date,
+        )
+    )).first()
+    if existing_daily_claim is not None:
+        raise marketing_widget_http_error(
+            MarketingWidgetLimitError("Ежедневный бонус уже получен")
+        )
+
     configured_reward = str(widget_config.get("reward_type") or "mixed")
     reward_value = int(widget_config.get("reward_value") or 25)
     promo_valid_hours = int(widget_config.get("promo_valid_hours") or 24)
-    claim_date = now.date().isoformat()
     reward_type = (
         random.choice(["free_bet", "promo_code"])
         if configured_reward == "mixed"
@@ -284,10 +299,14 @@ async def claim_daily_bonus(
     )
     reward_detail = {}
     promo = None
+    db.add(DailyRewardClaim(user_id=current_user.telegram_id, claimed_date=claim_date, claimed_at=now))
+    await db.flush()
     
     if reward_type == "free_bet":
         free_bets_added = max(1, reward_value or 1)
-        current_user.free_bets_available += free_bets_added
+        current_user.free_bets_available = (
+            max(0, locked_balance.free_bets_available) + free_bets_added
+        )
         reward_detail = {
             "type": "free_bet",
             "title": "Бесплатная ставка",
@@ -312,14 +331,6 @@ async def claim_daily_bonus(
         }
         pulse_msg = f"🎟️ @{current_user.username[:4] if current_user.username else 'user'}*** выиграл промокод на скидку {promo.discount_percent}%!"
 
-    existing_daily_claim = (await db.execute(
-        select(DailyRewardClaim).filter(
-            DailyRewardClaim.user_id == current_user.telegram_id,
-            DailyRewardClaim.claimed_date == claim_date,
-        )
-    )).scalars().first()
-    if not existing_daily_claim:
-        db.add(DailyRewardClaim(user_id=current_user.telegram_id, claimed_date=claim_date, claimed_at=now))
     db.add(LivePulseLog(text_message=pulse_msg, created_at=now))
     await record_marketing_reward_event(
         db,

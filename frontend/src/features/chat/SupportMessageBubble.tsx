@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   Bot,
   Check,
@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 import { ChatMessageResponse } from '../../schemas/schemas';
-import { API_BASE_URL } from '../../utils/api';
+import { fetchAuthenticatedChatAttachment } from './authenticatedAttachment';
 import type { ChatComposerAttachment } from './MessageComposer';
 
 export type ChatDeliveryState = 'sent' | 'sending' | 'failed';
@@ -69,14 +69,42 @@ function renderTextWithLinks(text: string) {
   });
 }
 
-function resolveMediaUrl(path?: unknown) {
+function resolveLocalPreviewUrl(path?: unknown) {
   const cleanPath = typeof path === 'string' ? path.trim() : '';
   if (!cleanPath) return '';
-  if (cleanPath.startsWith('blob:') || cleanPath.startsWith('data:')) return cleanPath;
-  if (cleanPath.startsWith('http://') || cleanPath.startsWith('https://')) return cleanPath;
-  const normalizedPath = cleanPath.startsWith('/') ? cleanPath : `/${cleanPath}`;
-  if (normalizedPath.startsWith('/static')) return `${API_BASE_URL}${normalizedPath}`;
-  return normalizedPath;
+  if (cleanPath.startsWith('blob:')) return cleanPath;
+  return '';
+}
+
+function useAuthenticatedMediaUrl(message: SupportMessageView) {
+  const localPreviewUrl = resolveLocalPreviewUrl(message.payload?.url);
+  const downloadUrl = typeof message.payload?.download_url === 'string'
+    ? message.payload.download_url.trim()
+    : '';
+  const shouldLoadRemoteMedia = message.type === 'image' || message.type === 'voice';
+  const [objectUrl, setObjectUrl] = useState('');
+
+  useEffect(() => {
+    setObjectUrl('');
+    if (localPreviewUrl || !shouldLoadRemoteMedia || !downloadUrl) return undefined;
+
+    const controller = new AbortController();
+    let createdObjectUrl = '';
+    void fetchAuthenticatedChatAttachment(downloadUrl, controller.signal)
+      .then((blob) => {
+        if (controller.signal.aborted) return;
+        createdObjectUrl = URL.createObjectURL(blob);
+        setObjectUrl(createdObjectUrl);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      controller.abort();
+      if (createdObjectUrl) URL.revokeObjectURL(createdObjectUrl);
+    };
+  }, [downloadUrl, localPreviewUrl, shouldLoadRemoteMedia]);
+
+  return localPreviewUrl || objectUrl;
 }
 
 function formatBytes(value?: unknown) {
@@ -127,8 +155,7 @@ function renderReplyPreview(message: SupportMessageView) {
   );
 }
 
-function renderMessageBody(message: SupportMessageView) {
-  const mediaUrl = resolveMediaUrl(message.payload?.url);
+function renderMessageBody(message: SupportMessageView, mediaUrl: string) {
   const caption = message.text || '';
 
   if (message.type === 'image') {
@@ -230,7 +257,8 @@ function SupportMessageBubble({
   const AvatarIcon = staff ? Bot : User;
   const showDeliveryReceipt = alignRight;
   const receiptRead = Boolean(message.read_at);
-  const messageBody = useMemo(() => renderMessageBody(message), [message]);
+  const mediaUrl = useAuthenticatedMediaUrl(message);
+  const messageBody = useMemo(() => renderMessageBody(message, mediaUrl), [mediaUrl, message]);
   const canDownload = Boolean(message.payload?.download_url);
   const canCopy = Boolean(message.text?.trim());
 

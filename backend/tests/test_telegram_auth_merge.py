@@ -20,11 +20,13 @@ from src.models.models import (
     ChatReadCursor,
     DeliveryOutbox,
     IdentityDeviceLink,
+    MarketingRewardEvent,
     MatchBalanceLog,
     MessageTemplate,
     PaymentAttempt,
     PersonalSignal,
     PersonalSignalReadCursor,
+    ReferralRewardEvent,
     Subscription,
     User,
 )
@@ -888,6 +890,127 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await db.get(AdminAuditLog, audit_log.id)).target_user_id, target.telegram_id)
             self.assertEqual((await db.get(MessageTemplate, template.key)).updated_by, target.telegram_id)
             self.assertEqual((await db.get(IdentityDeviceLink, device_link.device_key_hash)).source_user_id, target.telegram_id)
+
+    async def test_identity_merge_preserves_and_deduplicates_referral_reward_history(self):
+        async with self.Session() as db:
+            source = User(
+                telegram_id=-5001,
+                first_name="Web duplicate",
+                role="user",
+                stats_display_mode="percent",
+            )
+            target = User(
+                telegram_id=5001,
+                first_name="Telegram target",
+                role="user",
+                stats_display_mode="percent",
+            )
+            invited = User(telegram_id=5002, first_name="Invited", role="user")
+            other_referrer = User(telegram_id=5003, first_name="Other", role="user")
+            db.add_all([source, target, invited, other_referrer])
+            await db.flush()
+
+            source_event = ReferralRewardEvent(
+                referrer_user_id=source.telegram_id,
+                referred_user_id=invited.telegram_id,
+                source_type="single_bet",
+                status="held",
+                risk_score=40,
+                risk_reasons=["source-risk"],
+                matches_awarded=1,
+                reviewed_by=source.telegram_id,
+            )
+            target_event = ReferralRewardEvent(
+                referrer_user_id=target.telegram_id,
+                referred_user_id=invited.telegram_id,
+                source_type="subscription",
+                status="approved",
+                risk_score=0,
+                risk_reasons=[],
+                matches_awarded=2,
+            )
+            referred_event = ReferralRewardEvent(
+                referrer_user_id=other_referrer.telegram_id,
+                referred_user_id=source.telegram_id,
+                source_type="subscription",
+                status="rejected",
+                risk_score=100,
+                risk_reasons=["identity-risk"],
+                matches_awarded=0,
+            )
+            reciprocal_source_event = ReferralRewardEvent(
+                referrer_user_id=source.telegram_id,
+                referred_user_id=target.telegram_id,
+                source_type="identity_overlap",
+                status="held",
+                risk_score=50,
+                risk_reasons=["source-target-overlap"],
+                matches_awarded=1,
+            )
+            reciprocal_target_event = ReferralRewardEvent(
+                referrer_user_id=target.telegram_id,
+                referred_user_id=source.telegram_id,
+                source_type="identity_overlap",
+                status="approved",
+                risk_score=0,
+                risk_reasons=[],
+                matches_awarded=2,
+            )
+            marketing_event = MarketingRewardEvent(
+                user_id=source.telegram_id,
+                widget_key="daily_spin",
+                reward_type="free_bet",
+                reward_value=1,
+                risk_status="approved",
+                risk_reasons=[],
+            )
+            db.add_all([
+                source_event,
+                target_event,
+                referred_event,
+                reciprocal_source_event,
+                reciprocal_target_event,
+                marketing_event,
+            ])
+            await db.commit()
+
+            await auth._merge_web_only_user_into_telegram(db, source, target)
+            await db.commit()
+
+            events = (
+                await db.execute(select(ReferralRewardEvent).order_by(ReferralRewardEvent.id))
+            ).scalars().all()
+            merged_outbound = next(
+                event
+                for event in events
+                if event.referrer_user_id == target.telegram_id
+                and event.referred_user_id == invited.telegram_id
+            )
+            merged_inbound = next(
+                event
+                for event in events
+                if event.referrer_user_id == other_referrer.telegram_id
+                and event.referred_user_id == target.telegram_id
+            )
+            merged_reciprocal = next(
+                event
+                for event in events
+                if event.referrer_user_id == target.telegram_id
+                and event.referred_user_id == target.telegram_id
+            )
+            persisted_marketing_event = await db.get(MarketingRewardEvent, marketing_event.id)
+
+            self.assertIsNone(await db.get(User, source.telegram_id))
+            self.assertEqual(len(events), 3)
+            self.assertEqual(merged_outbound.status, "approved")
+            self.assertEqual(merged_outbound.matches_awarded, 3)
+            self.assertEqual(merged_outbound.reviewed_by, target.telegram_id)
+            self.assertIn("source-risk", merged_outbound.risk_reasons)
+            self.assertEqual(merged_inbound.status, "rejected")
+            self.assertEqual(merged_reciprocal.status, "rejected")
+            self.assertEqual(merged_reciprocal.matches_awarded, 3)
+            self.assertIn("identity_merge_self_referral", merged_reciprocal.risk_reasons)
+            self.assertEqual(persisted_marketing_event.user_id, target.telegram_id)
 
     async def test_promotes_web_only_phone_profile_without_losing_balance(self):
         async with self.Session() as db:

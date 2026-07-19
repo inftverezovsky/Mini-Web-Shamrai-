@@ -27,7 +27,16 @@ from src.core.security import verify_telegram_webhook_secret
 from src.core.telegram_delivery import is_personal_telegram_user_id
 from src.api.deps import get_current_user
 from src.services.referrals import apply_referral_reward_for_purchase, get_referral_discount_percent
-from src.services.match_access import activate_match_subscription
+from src.services.match_access import (
+    activate_match_subscription,
+    current_match_balance,
+    ensure_bet_eligible_for_user,
+    load_locked_bet_for_user_access,
+    lock_bet_row,
+    lock_user_balance,
+    lock_user_balances,
+    record_user_bet_access,
+)
 from src.services.crowd_bets import apply_verified_crowd_contribution
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.observability_alerts import record_payment_mismatch
@@ -497,26 +506,16 @@ async def _unlock_single_bet(
     bet: Bet,
     access_type: str,
 ) -> bool:
-    existing_res = await db.execute(
-        select(user_bets).filter(
-            and_(user_bets.c.user_id == user.telegram_id, user_bets.c.bet_id == bet.id)
-        )
+    access_result = await record_user_bet_access(
+        db,
+        user=user,
+        bet=bet,
+        charge_match=False,
+        free_access_type=access_type,
     )
-    if existing_res.first():
-        return False
-
-    await db.execute(
-        user_bets.insert().values(
-            user_id=user.telegram_id,
-            bet_id=bet.id,
-            taken_at=func.now(),
-            access_type=access_type,
-            match_charged=False,
-        )
-    )
-    if not user.has_used_shield:
+    if not access_result.already_recorded and not user.has_used_shield:
         user.has_used_shield = True
-    return True
+    return not access_result.already_recorded
 
 
 async def _process_payment_attempt(
@@ -587,6 +586,17 @@ async def _process_payment_attempt(
             return {"status": "bet_missing", "attempt_id": str(attempt.id)}
     else:
         return {"status": "attempt_has_no_item", "attempt_id": str(attempt.id)}
+
+    # Canonical mutation lock order: PaymentAttempt -> Bet (when present) ->
+    # all affected User rows in ascending id order. Paid entitlements are
+    # honored after a successful provider charge even if lifecycle changes
+    # after invoice/pre-checkout validation.
+    if bet is not None:
+        await lock_bet_row(db, bet.id)
+    affected_user_ids = {int(user.telegram_id)}
+    if user.referred_by_user_id is not None:
+        affected_user_ids.add(int(user.referred_by_user_id))
+    await lock_user_balances(db, affected_user_ids)
 
     attempt.status = "processing"
     attempt.processing_started_at = datetime.now(timezone.utc)
@@ -725,14 +735,39 @@ async def create_stars_invoice(
     )
 
     if invoice_data.bet_id:
-        bet_res = await db.execute(select(Bet).filter(Bet.id == invoice_data.bet_id))
-        bet = bet_res.scalars().first()
-        if not bet:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Прогноз не найден"
+        bet = await load_locked_bet_for_user_access(db, invoice_data.bet_id)
+        ensure_bet_eligible_for_user(bet=bet, user=current_user)
+        await lock_user_balance(db, current_user.telegram_id)
+
+        existing_access = await db.execute(
+            select(user_bets.c.bet_id).filter(
+                user_bets.c.user_id == current_user.telegram_id,
+                user_bets.c.bet_id == bet.id,
+            )
         )
-        
+        if existing_access.first() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Прогноз уже открыт",
+            )
+
+        active_attempts = await db.execute(
+            select(PaymentAttempt).filter(
+                PaymentAttempt.user_id == current_user.telegram_id,
+                PaymentAttempt.bet_id == bet.id,
+                PaymentAttempt.status.in_(("pending", "processing")),
+            )
+        )
+        has_active_single_bet_attempt = any(
+            str((attempt.metadata_json or {}).get("purchase_type") or "single_bet") == "single_bet"
+            for attempt in active_attempts.scalars().all()
+        )
+        if has_active_single_bet_attempt:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Оплата этого прогноза уже создана",
+            )
+
         price_amount = Decimal(int(bet.price_stars) if bet.price_stars is not None else 50)
         if discount_percent > 0:
             price_amount = _apply_percent_discount(price_amount, discount_percent, minimum=Decimal("1.00"))
@@ -749,12 +784,17 @@ async def create_stars_invoice(
         )
     await db.commit()
 
-    invoice_url = await create_telegram_stars_invoice_link(
-        attempt=attempt,
-        title="Прогноз Shamrai",
-        description=f"Разблокировка прогноза. Событие: {bet.event_name}. Коэффициент: {float(bet.coefficient):.2f}.",
-        label="Прогноз Shamrai" + (" со скидкой" if discount_percent > 0 else ""),
-    )
+    try:
+        invoice_url = await create_telegram_stars_invoice_link(
+            attempt=attempt,
+            title="Прогноз Shamrai",
+            description=f"Разблокировка прогноза. Событие: {bet.event_name}. Коэффициент: {float(bet.coefficient):.2f}.",
+            label="Прогноз Shamrai" + (" со скидкой" if discount_percent > 0 else ""),
+        )
+    except Exception:
+        attempt.status = "failed"
+        await db.commit()
+        raise
 
     return {
         "invoice_url": invoice_url,
@@ -1220,7 +1260,8 @@ async def redeem_promo_code(
             detail="Этот промокод уже применен",
         )
 
-    balance_before = int(current_user.purchased_bets_balance or current_user.matches_remaining or 0)
+    locked_balance = await lock_user_balance(db, current_user.telegram_id)
+    balance_before = current_match_balance(locked_balance)
     balance_after = balance_before + matches_added
     current_user.purchased_bets_balance = balance_after
     current_user.matches_remaining = balance_after
@@ -1271,13 +1312,9 @@ async def complete_debug_single_bet_purchase(
             detail="Debug checkout is disabled"
         )
 
-    bet_res = await db.execute(select(Bet).filter(Bet.id == bet_id))
-    bet = bet_res.scalars().first()
-    if not bet:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Прогноз не найден"
-        )
+    bet = await load_locked_bet_for_user_access(db, bet_id)
+
+    ensure_bet_eligible_for_user(bet=bet, user=current_user)
 
     attempt = await _create_payment_attempt(
         db,
@@ -1321,7 +1358,15 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
             attempt_id = _invoice_attempt_id(query.get("invoice_payload"))
             if not attempt_id:
                 raise ValueError("Invalid invoice payload")
-            attempt_res = await db.execute(select(PaymentAttempt).filter(PaymentAttempt.id == attempt_id))
+            attempt_res = await db.execute(
+                select(PaymentAttempt)
+                .filter(PaymentAttempt.id == attempt_id)
+                .options(
+                    selectinload(PaymentAttempt.user).selectinload(User.bookmakers),
+                    selectinload(PaymentAttempt.bet).selectinload(Bet.bookmakers),
+                )
+                .with_for_update()
+            )
             attempt = attempt_res.scalars().first()
             incoming_amount = Decimal(str(query.get("total_amount", 0)))
             incoming_currency = str(query.get("currency") or "")
@@ -1332,6 +1377,11 @@ async def process_telegram_payment_update(update: dict, db: AsyncSession) -> dic
                 and attempt.currency == incoming_currency
                 and _decimal_eq(Decimal(attempt.amount), incoming_amount)
             )
+            if is_valid and attempt.bet is not None:
+                purchase_type = str((attempt.metadata_json or {}).get("purchase_type") or "single_bet")
+                if purchase_type in {"single_bet", PAYMENT_PURCHASE_BET_HINT}:
+                    bet = await load_locked_bet_for_user_access(db, attempt.bet.id)
+                    ensure_bet_eligible_for_user(bet=bet, user=attempt.user)
         except Exception:
             is_valid = False
 

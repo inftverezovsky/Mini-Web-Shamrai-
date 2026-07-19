@@ -64,7 +64,15 @@ from src.services.forecast_delivery import (
     count_client_bet_takers,
     enqueue_admin_group_forecast_result_notification,
 )
-from src.services.match_access import log_match_balance_event, record_user_bet_access
+from src.services.match_access import (
+    current_match_balance,
+    ensure_bet_eligible_for_user,
+    load_locked_bet_for_user_access,
+    lock_user_balance,
+    log_match_balance_event,
+    record_user_bet_access,
+    record_user_free_bet_access,
+)
 from src.services.statistics import is_paid_client_access
 from src.services.coupon_uploads import store_coupon_image
 from src.services.signals import broadcast_live_signal, deliver_personal_signal
@@ -738,28 +746,8 @@ async def take_bet(
     db: AsyncSession = Depends(get_db)
 ):
     """Adds a bet to the user's tracking list for stats calculation."""
-    bet_res = await db.execute(select(Bet).filter(Bet.id == bet_id))
-    bet = bet_res.scalars().first()
-    if not bet:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Прогноз не найден"
-        )
-    if bet.delivery_mode != "feed" and not is_staff_role(current_user.role):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Прогноз не найден"
-        )
-    if bet.status != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=FORECAST_INACTIVE_MESSAGE,
-        )
-    if not _is_forecast_publication(bet):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Текстовую публикацию нельзя взять как ставку",
-        )
+    bet = await load_locked_bet_for_user_access(db, bet_id)
+    ensure_bet_eligible_for_user(bet=bet, user=current_user)
 
     has_sub = await has_active_subscription(current_user, db)
     is_bet_free = (bet.price_stars is None or bet.price_stars == 0)
@@ -794,47 +782,12 @@ async def unlock_free_bet(
     POST /api/bets/{bet_id}/unlock_free
     Unlocks a single bet using the user's free bet balance.
     """
-    if current_user.free_bets_available <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="У вас нет доступных бесплатных прогнозов"
-        )
-
-    bet_res = await db.execute(select(Bet).filter(Bet.id == bet_id))
-    bet = bet_res.scalars().first()
-    if not bet:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Bet not found"
-        )
-    if not _is_forecast_publication(bet):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Текстовую публикацию нельзя открыть как прогноз",
-        )
-
-    # Check if already unlocked (present in user_bets)
-    check_query = select(user_bets).filter(
-        and_(user_bets.c.user_id == current_user.telegram_id, user_bets.c.bet_id == bet_id)
-    )
-    existing = (await db.execute(check_query)).first()
-    if existing:
-        return {"status": "already_unlocked", "message": "Прогноз уже открыт"}
-
-    # Add to user_bets (this serves as the unlocked list)
-    insert_stmt = user_bets.insert().values(
-        user_id=current_user.telegram_id,
-        bet_id=bet_id,
-        taken_at=func.now(),
-        access_type="free_bet",
-        match_charged=False,
-    )
-    await db.execute(insert_stmt)
-    
-    # Deduct free bet
-    current_user.free_bets_available -= 1
-    
+    bet = await load_locked_bet_for_user_access(db, bet_id)
+    ensure_bet_eligible_for_user(bet=bet, user=current_user)
+    access_result = await record_user_free_bet_access(db, user=current_user, bet=bet)
     await db.commit()
+    if access_result.already_recorded:
+        return {"status": "already_unlocked", "message": "Прогноз уже открыт"}
     return {"status": "success", "message": "Прогноз успешно разблокирован!"}
 
 
@@ -856,17 +809,26 @@ async def buy_bet_hint(
             detail="Стоимость подсказки должна быть больше 0 XTR"
         )
 
-    result = await db.execute(select(Bet).filter(Bet.id == bet_id))
-    bet = result.scalars().first()
-    if not bet:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Прогноз не найден"
+    bet = await load_locked_bet_for_user_access(db, bet_id)
+    ensure_bet_eligible_for_user(bet=bet, user=current_user)
+    await lock_user_balance(db, current_user.telegram_id)
+
+    prior_attempts = await db.execute(
+        select(PaymentAttempt).filter(
+            PaymentAttempt.user_id == current_user.telegram_id,
+            PaymentAttempt.bet_id == bet.id,
+            PaymentAttempt.provider == "telegram_stars",
+            PaymentAttempt.status.in_(("pending", "processing", "succeeded")),
         )
-    if not _is_forecast_publication(bet):
+    )
+    has_hint_attempt = any(
+        (attempt.metadata_json or {}).get("purchase_type") == PAYMENT_PURCHASE_BET_HINT
+        for attempt in prior_attempts.scalars().all()
+    )
+    if has_hint_attempt:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Для текстовой публикации подсказка недоступна",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Оплата подсказки уже создана",
         )
 
     attempt = await _create_payment_attempt(
@@ -883,12 +845,17 @@ async def buy_bet_hint(
         },
     )
     await db.commit()
-    invoice_url = await create_telegram_stars_invoice_link(
-        attempt=attempt,
-        title="Подсказка Shamrai",
-        description=f"Аналитическая подсказка по матчу: {bet.event_name}.",
-        label="Подсказка Shamrai",
-    )
+    try:
+        invoice_url = await create_telegram_stars_invoice_link(
+            attempt=attempt,
+            title="Подсказка Shamrai",
+            description=f"Аналитическая подсказка по матчу: {bet.event_name}.",
+            label="Подсказка Shamrai",
+        )
+    except Exception:
+        attempt.status = "failed"
+        await db.commit()
+        raise
 
     return BetHintInvoiceResponse(
         bet_id=bet.id,
@@ -929,11 +896,9 @@ async def get_paid_bet_hint(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Платеж не относится к подсказке",
         )
-    if not _is_forecast_publication(bet):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Для текстовой публикации подсказка недоступна",
-        )
+    # A verified successful payment is an immutable entitlement. Lifecycle and
+    # audience were checked before invoice/pre-checkout; do not strand paid
+    # content if the forecast resolves immediately after payment approval.
 
     return BetHintResponse(
         bet_id=bet.id,
@@ -1300,6 +1265,7 @@ async def resolve_bet(
     result = await db.execute(
         select(Bet)
         .filter(Bet.id == bet_id)
+        .with_for_update()
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
     )
     bet = result.scalars().first()
@@ -1355,13 +1321,14 @@ async def resolve_bet(
             users_res = await db.execute(select(User).filter(User.telegram_id.in_(taker_ids)))
             users_by_id = {u.telegram_id: u for u in users_res.scalars().all()}
 
-        for user_id, match_charged, access_type in takers:
+        for user_id, match_charged, access_type in sorted(takers, key=lambda row: int(row[0])):
             user = users_by_id.get(user_id)
             if not user or is_staff_role(user.role):
                 continue
 
             if resolution.status == "loss" and match_charged and access_type == "paid_match":
-                current_balance = int(user.purchased_bets_balance or user.matches_remaining or 0)
+                locked_balance = await lock_user_balance(db, user.telegram_id)
+                current_balance = current_match_balance(locked_balance)
                 next_balance = current_balance + 2
                 user.purchased_bets_balance = next_balance
                 user.matches_remaining = next_balance

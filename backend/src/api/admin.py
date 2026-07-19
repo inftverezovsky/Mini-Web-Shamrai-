@@ -62,7 +62,7 @@ from src.schemas.schemas import (
     SystemSettingsResponse,
     UserResponse,
 )
-from src.api.deps import get_current_admin, get_current_admin_read, get_current_privileged_admin
+from src.api.deps import get_current_admin, get_current_admin_read, get_current_owner, get_current_privileged_admin
 from src.core.config import settings
 from src.core.roles import ADMIN_ROLES, ROLE_LABELS, STAFF_ROLES, VALID_ROLES, is_admin_role, is_owner_role, normalize_role
 from src.core.message_templates import (
@@ -74,7 +74,12 @@ from src.core.security_limits import get_security_rate_limit_metrics
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
 from src.services.delivery_outbox import get_delivery_outbox_metrics
 from src.services.observability_alerts import build_observability_alert_payload
-from src.services.match_access import log_match_balance_event, revoke_user_bet_access
+from src.services.match_access import (
+    current_match_balance,
+    lock_user_balance,
+    log_match_balance_event,
+    revoke_user_bet_access,
+)
 from src.services.payment_reconciliation import build_payment_reconciliation_report, build_payment_reconciliation_summary
 from src.services.statistics import (
     build_performance_payload,
@@ -546,10 +551,10 @@ async def admin_update_system_settings(
 @router.post("/settings/integrations/unlock", response_model=IntegrationSettingsUnlockResponse)
 async def admin_unlock_integration_settings(
     payload: IntegrationSettingsUnlockRequest,
-    admin: User = Depends(get_current_privileged_admin),
+    admin: User = Depends(get_current_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reveal integration values only after an extra admin-side password check."""
+    """Reveal runtime integration secrets only to the owner after an extra password check."""
     if not verify_integrations_password(payload.password):
         add_admin_audit_log(
             db,
@@ -563,8 +568,12 @@ async def admin_unlock_integration_settings(
         actor=admin,
         action="integration_settings_unlocked",
     )
-    unlocked_settings = await get_unlocked_integration_settings(db)
     token_payload = await create_integration_unlock_token(admin_id=admin.telegram_id)
+    unlocked_settings = await get_unlocked_integration_settings(
+        db,
+        unlock_token=token_payload["unlock_token"],
+        admin_id=admin.telegram_id,
+    )
     return {
         **unlocked_settings,
         "unlock_token": token_payload["unlock_token"],
@@ -583,6 +592,7 @@ async def admin_integration_diagnostics(
         response = await run_integration_diagnostics(
             db,
             unlock_token=payload.unlock_token,
+            admin_id=admin.telegram_id,
             group=payload.group,
         )
     except ValueError as exc:
@@ -1675,6 +1685,7 @@ async def delete_bet_from_admin(
     result = await db.execute(
         select(Bet)
         .filter(Bet.id == bet_id)
+        .with_for_update()
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
     )
     bet = result.scalars().first()
@@ -1688,6 +1699,7 @@ async def delete_bet_from_admin(
         select(User)
         .join(user_bets, user_bets.c.user_id == User.telegram_id)
         .filter(user_bets.c.bet_id == bet.id)
+        .order_by(User.telegram_id)
     )
     takers = users_result.scalars().all()
     revoke_results = []
@@ -2321,24 +2333,22 @@ async def admin_update_user(
             user.client_tag = next_client_tag
         
     if data.matches_delta is not None and data.matches_delta != 0:
-        previous_matches = int(
-            user.purchased_bets_balance
-            if (user.purchased_bets_balance or 0) != 0
-            else (user.matches_remaining or 0)
-        )
+        locked_balance = await lock_user_balance(db, user.telegram_id)
+        previous_matches = current_match_balance(locked_balance)
         next_matches = max(0, previous_matches + data.matches_delta)
+        applied_delta = next_matches - previous_matches
         user.purchased_bets_balance = next_matches
         user.matches_remaining = next_matches
         audit_changes["matches_remaining"] = {
             "from": previous_matches,
             "to": next_matches,
-            "delta": data.matches_delta,
+            "delta": applied_delta,
         }
         db.add(log_match_balance_event(
             user_id=user.telegram_id,
             event_type="admin_match_adjustment",
-            delta_matches=data.matches_delta,
-            note=f"Admin {admin.telegram_id} adjusted matches by {data.matches_delta}",
+            delta_matches=applied_delta,
+            note=f"Admin {admin.telegram_id} adjusted matches by {applied_delta}",
         ))
 
     if data.close_guarantee:

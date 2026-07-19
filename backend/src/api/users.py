@@ -38,6 +38,7 @@ from src.core.quiet_hours import (
 from src.core.roles import is_staff_role
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.presence import mark_user_presence
+from src.services.match_access import lock_user_balance
 from src.services.referrals import get_referral_stats
 from src.services.vk_delivery import (
     refresh_vk_delivery_status,
@@ -632,6 +633,7 @@ async def save_onboarding_profile(
 ) -> OnboardResponse:
     validate_onboarding_payload(data)
     validate_onboarding_vk_link(user, data)
+    await lock_user_balance(db, user.telegram_id)
     favorite_sports = normalize_onboarding_sports(data.favorite_sports)
     recommendation = await build_onboarding_recommendation(db, data)
     active_bookmakers = await ensure_standard_bookmakers(db)
@@ -797,6 +799,7 @@ async def skip_my_onboarding(
     POST /api/users/me/onboard/skip
     Marks the current user's welcome quiz as skipped while keeping broad feed access.
     """
+    await lock_user_balance(db, current_user.telegram_id)
     active_bookmakers = await ensure_standard_bookmakers(db)
 
     if not current_user.bookmakers:

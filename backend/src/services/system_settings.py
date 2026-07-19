@@ -19,7 +19,7 @@ from src.services.telegram_auth import TELEGRAM_AUTH_SESSION_CACHE_PREFIX
 from src.services.vk_auth_flow import VK_AUTH_FLOW_CACHE_PREFIX
 
 
-SYSTEM_SETTINGS_CACHE_KEY = "admin:system_settings:v1"
+SYSTEM_SETTINGS_CACHE_KEY = "admin:system_settings:v2"
 SYSTEM_SETTINGS_CACHE_TTL_SECONDS = 60
 MAX_SETTING_VALUE_LENGTH = 65536
 THEME_PRIMARY_COLOR_KEY = "THEME_PRIMARY_COLOR"
@@ -48,7 +48,7 @@ INTEGRATION_UNLOCK_CACHE_PREFIX = "admin:integration_unlock:v1"
 INTEGRATION_UNLOCK_TTL_SECONDS = 15 * 60
 _HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 _THEME_DENSITY_VALUES = {"compact", "cozy", "comfortable"}
-_IN_MEMORY_UNLOCK_TOKENS: dict[str, datetime] = {}
+_IN_MEMORY_UNLOCK_TOKENS: dict[str, tuple[datetime, int]] = {}
 
 _THEME_NUMBER_RANGES: dict[str, tuple[float, float]] = {
     THEME_GLASS_OPACITY_KEY: (0.15, 0.9),
@@ -522,6 +522,14 @@ _DEFINITIONS_BY_KEY = {definition.key: definition for definition in SYSTEM_SETTI
 _INTEGRATION_SETTING_KEYS = tuple(
     definition.key for definition in SYSTEM_SETTING_DEFINITIONS if definition.integrations_visible
 )
+_NON_SECRET_SETTING_KEYS = tuple(
+    definition.key for definition in SYSTEM_SETTING_DEFINITIONS if not definition.is_secret
+)
+_INTEGRATION_NON_SECRET_SETTING_KEYS = tuple(
+    definition.key
+    for definition in SYSTEM_SETTING_DEFINITIONS
+    if definition.integrations_visible and not definition.is_secret
+)
 _SESSION_CACHE_PATTERNS = (
     f"{TELEGRAM_AUTH_SESSION_CACHE_PREFIX}:*",
     f"{VK_AUTH_FLOW_CACHE_PREFIX}:*",
@@ -623,6 +631,11 @@ def _setting_value_for_definition(
     definition: SystemSettingDefinition,
     stored_setting: SystemSetting | None,
 ) -> str:
+    if definition.is_secret:
+        # Env-only migration policy: legacy plaintext rows are ignored. Operators
+        # must move required values to the runtime secret store before removing
+        # those rows in a controlled database migration.
+        return _runtime_default_value(definition)
     return stored_setting.value if stored_setting else _runtime_default_value(definition)
 
 
@@ -647,14 +660,17 @@ def _serialize_setting(
 async def _load_settings_by_key(db: AsyncSession, keys: Iterable[str] | None = None) -> dict[str, SystemSetting]:
     statement = select(SystemSetting)
     clean_keys = [key for key in (keys or []) if key]
-    if clean_keys:
+    if keys is not None and not clean_keys:
+        return {}
+    if keys is not None:
         statement = statement.where(SystemSetting.key.in_(clean_keys))
     result = await db.execute(statement)
     return {setting.key: setting for setting in result.scalars().all()}
 
 
 async def _build_admin_settings_payload(db: AsyncSession) -> dict[str, list[dict[str, Any]]]:
-    stored_settings = await _load_settings_by_key(db)
+    # Do not load legacy plaintext secret rows into application memory or Redis.
+    stored_settings = await _load_settings_by_key(db, _NON_SECRET_SETTING_KEYS)
     serialized_settings: list[dict[str, Any]] = []
     for definition in SYSTEM_SETTING_DEFINITIONS:
         stored_setting = stored_settings.get(definition.key)
@@ -690,16 +706,17 @@ def _unlock_cache_key(token: str) -> str:
     return f"{INTEGRATION_UNLOCK_CACHE_PREFIX}:{token_digest}"
 
 
-async def create_integration_unlock_token(admin_id: int | None = None) -> dict[str, str]:
+async def create_integration_unlock_token(admin_id: int) -> dict[str, str]:
     token = secrets.token_urlsafe(32)
+    issuer_id = int(admin_id)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=INTEGRATION_UNLOCK_TTL_SECONDS)
     token_payload = {
         "token_type": "integration_unlock",
-        "admin_id": admin_id,
+        "admin_id": issuer_id,
         "expires_at": expires_at.isoformat(),
     }
     await cache_set_json(_unlock_cache_key(token), token_payload, ttl_seconds=INTEGRATION_UNLOCK_TTL_SECONDS)
-    _IN_MEMORY_UNLOCK_TOKENS[_unlock_cache_key(token)] = expires_at
+    _IN_MEMORY_UNLOCK_TOKENS[_unlock_cache_key(token)] = (expires_at, issuer_id)
     return {
         "token_type": "integration_unlock",
         "unlock_token": token,
@@ -707,31 +724,44 @@ async def create_integration_unlock_token(admin_id: int | None = None) -> dict[s
     }
 
 
-async def validate_integration_unlock_token(unlock_token: str) -> bool:
+async def validate_integration_unlock_token(unlock_token: str, *, admin_id: int) -> bool:
     token = str(unlock_token or "").strip()
     if not token:
         return False
+    expected_admin_id = int(admin_id)
     cache_key = _unlock_cache_key(token)
     payload = await cache_get_json(cache_key)
     if isinstance(payload, dict):
+        if payload.get("token_type") != "integration_unlock":
+            return False
         raw_expires_at = payload.get("expires_at")
         try:
             expires_at = datetime.fromisoformat(str(raw_expires_at))
-        except ValueError:
+            issuer_id = int(payload.get("admin_id"))
+        except (TypeError, ValueError):
             return False
-        return expires_at > datetime.now(timezone.utc)
+        return issuer_id == expected_admin_id and expires_at > datetime.now(timezone.utc)
 
-    expires_at = _IN_MEMORY_UNLOCK_TOKENS.get(cache_key)
-    if expires_at is None:
+    in_memory_token = _IN_MEMORY_UNLOCK_TOKENS.get(cache_key)
+    if in_memory_token is None:
         return False
+    expires_at, issuer_id = in_memory_token
     if expires_at <= datetime.now(timezone.utc):
         _IN_MEMORY_UNLOCK_TOKENS.pop(cache_key, None)
         return False
-    return True
+    return issuer_id == expected_admin_id
 
 
-async def get_unlocked_integration_settings(db: AsyncSession) -> dict[str, list[dict[str, Any]]]:
-    stored_settings = await _load_settings_by_key(db, _INTEGRATION_SETTING_KEYS)
+async def get_unlocked_integration_settings(
+    db: AsyncSession,
+    *,
+    unlock_token: str,
+    admin_id: int,
+) -> dict[str, list[dict[str, Any]]]:
+    if not await validate_integration_unlock_token(unlock_token, admin_id=admin_id):
+        raise ValueError("Неверный или истекший unlock token интеграций")
+
+    stored_settings = await _load_settings_by_key(db, _INTEGRATION_NON_SECRET_SETTING_KEYS)
     serialized_settings: list[dict[str, Any]] = []
     for key in _INTEGRATION_SETTING_KEYS:
         definition = _DEFINITIONS_BY_KEY[key]
@@ -751,9 +781,10 @@ async def run_integration_diagnostics(
     db: AsyncSession,
     *,
     unlock_token: str,
+    admin_id: int,
     group: str | None = None,
 ) -> dict[str, Any]:
-    if not await validate_integration_unlock_token(unlock_token):
+    if not await validate_integration_unlock_token(unlock_token, admin_id=admin_id):
         raise ValueError("Неверный или истекший unlock token интеграций")
 
     requested_groups = [group] if group else list(_INTEGRATION_GROUP_REQUIRED_KEYS)
@@ -761,7 +792,7 @@ async def run_integration_diagnostics(
     if unknown_groups:
         raise ValueError(f"Неизвестная группа интеграций: {', '.join(unknown_groups)}")
 
-    stored_settings = await _load_settings_by_key(db, _INTEGRATION_SETTING_KEYS)
+    stored_settings = await _load_settings_by_key(db, _INTEGRATION_NON_SECRET_SETTING_KEYS)
     group_payloads: list[dict[str, Any]] = []
     for group_id in requested_groups:
         checks: list[dict[str, Any]] = []
@@ -808,20 +839,29 @@ async def update_admin_system_settings(
 ) -> dict[str, list[dict[str, Any]]]:
     pending_updates = list(updates)
     requested_keys = [str(item.get("key") or "").strip() for item in pending_updates]
+    if any(not key for key in requested_keys):
+        raise ValueError("Ключ настройки не может быть пустым")
     unknown_keys = [key for key in requested_keys if key not in _DEFINITIONS_BY_KEY]
     if unknown_keys:
         raise ValueError(f"Неизвестные настройки: {', '.join(unknown_keys)}")
 
-    existing_settings = await _load_settings_by_key(db, requested_keys)
+    normalized_updates: list[tuple[SystemSettingDefinition, str]] = []
     for item in pending_updates:
         key = str(item.get("key") or "").strip()
-        if not key:
-            raise ValueError("Ключ настройки не может быть пустым")
         definition = _DEFINITIONS_BY_KEY[key]
         value = _normalize_setting_value(definition, item.get("value"))
-        if definition.is_secret and not value:
+        if definition.is_secret:
+            if value:
+                raise ValueError(
+                    f"{definition.key} хранится только в runtime environment/secret store; DB override запрещён"
+                )
             continue
+        normalized_updates.append((definition, value))
 
+    persisted_keys = [definition.key for definition, _value in normalized_updates]
+    existing_settings = await _load_settings_by_key(db, persisted_keys)
+    for definition, value in normalized_updates:
+        key = definition.key
         stored_setting = existing_settings.get(key)
         if stored_setting is None:
             stored_setting = SystemSetting(

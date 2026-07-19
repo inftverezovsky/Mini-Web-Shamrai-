@@ -7,8 +7,10 @@ on:
 permissions:
   contents: read
 
-# TODO(security): pin third-party actions to full commit SHAs during the next
-# scheduled CI dependency refresh.
+# BLOCKED(security): local files/history contain no verified full commit SHA, so
+# mutable tags are not replaced with invented values. Pins still required for:
+# actions/checkout@v7, actions/setup-python@v6, actions/setup-node@v6,
+# gitleaks/gitleaks-action@v3, actions/dependency-review-action@v5.
 
 jobs:
   backend:
@@ -238,3 +240,4 @@ jobs:
         run: |
           ./scripts/configure-shamrai-backups.ps1 -DryRun -BackupAgeRecipient age1replacewithpublicrecipient
           ./scripts/run-shamrai-restore-drill.ps1 -DryRun
+          ./scripts/tests/test-backup-ops-dry-run.ps1

@@ -108,15 +108,12 @@ def validate_chat_message_payload(message_type: str, payload: dict[str, Any]) ->
     if message_type == CHAT_MESSAGE_TYPE_TEXT:
         return clean_payload
 
-    raw_url = clean_payload.get("url")
     raw_storage_path = clean_payload.get("storage_path")
     raw_mime_type = clean_payload.get("mime_type")
     raw_size = clean_payload.get("size_bytes")
-    if message_type == CHAT_MESSAGE_TYPE_FILE:
-        if not is_safe_chat_file_storage_path(raw_storage_path):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное вложение")
-    elif not isinstance(raw_url, str) or not raw_url.startswith("/static/chat/"):
+    if not is_safe_chat_file_storage_path(raw_storage_path):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректное вложение")
+    clean_payload.pop("url", None)
     if not isinstance(raw_mime_type, str) or "/" not in raw_mime_type:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный тип вложения")
     try:
@@ -130,8 +127,8 @@ def validate_chat_message_payload(message_type: str, payload: dict[str, Any]) ->
 
 def _public_chat_payload(message: ChatMessage) -> dict[str, Any]:
     payload = dict(message.payload or {})
-    if message.type == CHAT_MESSAGE_TYPE_FILE:
-        payload.pop("storage_path", None)
+    payload.pop("url", None)
+    payload.pop("storage_path", None)
     if message.type in {CHAT_MESSAGE_TYPE_IMAGE, CHAT_MESSAGE_TYPE_VOICE, CHAT_MESSAGE_TYPE_FILE} and message.id:
         payload["download_url"] = f"/chat/attachments/{message.id}/download"
     return payload

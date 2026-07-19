@@ -498,9 +498,16 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.previous_admin_group_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
         delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
+        self.real_lock_forecast_delivery_scope = delivery._lock_forecast_delivery_scope
+
+        async def passthrough_lock_scope(_db, forecast_request):
+            return forecast_request
+
+        delivery._lock_forecast_delivery_scope = passthrough_lock_scope
 
     def tearDown(self):
         delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = self.previous_admin_group_chat_id
+        delivery._lock_forecast_delivery_scope = self.real_lock_forecast_delivery_scope
 
     def _bookmaker(self):
         return SimpleNamespace(id=1, name="Фонбет", code="fonbet")
@@ -523,6 +530,10 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
                 {"bookmaker_id": 1, "url": "https://fonbet.ru/sports/football/12313"},
             ],
             delivery_mode=delivery.DELIVERY_MODE_SALES_PRIVATE,
+            publication_type="forecast",
+            status="pending",
+            live_ends_at=None,
+            auto_send_on_interest=False,
             price_stars=10_000,
         )
 
@@ -551,12 +562,15 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _forecast_request(self, user):
+        bet = self._bet()
         return SimpleNamespace(
             id=uuid4(),
             user_id=user.telegram_id,
             user=user,
-            bet=self._bet(),
+            bet_id=bet.id,
+            bet=bet,
             status=delivery.FORECAST_STATUS_INTERESTED,
+            responded_at=None,
             handled_by=None,
             delivered_at=None,
             balance_before=None,
@@ -564,6 +578,169 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
             no_balance_warning=False,
             delivery_method=None,
         )
+
+    async def test_delivery_scope_locks_bet_then_user_then_request(self):
+        user = self._user()
+        forecast_request = self._forecast_request(user)
+        events = []
+
+        class FakeResult:
+            def scalars(self):
+                return self
+
+            def first(self):
+                return forecast_request
+
+        class FakeDb:
+            async def execute(self, _query):
+                events.append("request")
+                return FakeResult()
+
+        async def fake_load_bet(_db, bet_id):
+            self.assertEqual(bet_id, forecast_request.bet_id)
+            events.append("bet")
+            return forecast_request.bet
+
+        async def fake_lock_user(_db, user_id):
+            self.assertEqual(user_id, forecast_request.user_id)
+            events.append("user")
+
+        original_load_bet = delivery.load_locked_bet_for_user_access
+        original_lock_user = delivery.lock_user_balance
+        try:
+            delivery.load_locked_bet_for_user_access = fake_load_bet
+            delivery.lock_user_balance = fake_lock_user
+            result = await self.real_lock_forecast_delivery_scope(FakeDb(), forecast_request)
+        finally:
+            delivery.load_locked_bet_for_user_access = original_load_bet
+            delivery.lock_user_balance = original_lock_user
+
+        self.assertIs(result, forecast_request)
+        self.assertEqual(events, ["bet", "user", "request"])
+
+    async def test_delivered_request_remains_idempotent_after_bet_lifecycle_closes(self):
+        user = self._user(balance=2)
+        forecast_request = self._forecast_request(user)
+        forecast_request.status = delivery.FORECAST_STATUS_SENT
+        forecast_request.bet.status = "win"
+
+        class FakeResult:
+            def scalars(self):
+                return self
+
+            def first(self):
+                return forecast_request
+
+        class FakeDb:
+            async def execute(self, _query):
+                return FakeResult()
+
+        async def fake_load_bet(_db, _bet_id):
+            return forecast_request.bet
+
+        async def fake_lock_user(_db, _user_id):
+            return None
+
+        original_scope = delivery._lock_forecast_delivery_scope
+        original_load_bet = delivery.load_locked_bet_for_user_access
+        original_lock_user = delivery.lock_user_balance
+        try:
+            delivery._lock_forecast_delivery_scope = self.real_lock_forecast_delivery_scope
+            delivery.load_locked_bet_for_user_access = fake_load_bet
+            delivery.lock_user_balance = fake_lock_user
+            result_request, access_result = await delivery.deliver_forecast_request(
+                FakeDb(),
+                forecast_request=forecast_request,
+                handled_by=111,
+                delivery_method="manual",
+                send_to_client=False,
+                commit=False,
+            )
+        finally:
+            delivery._lock_forecast_delivery_scope = original_scope
+            delivery.load_locked_bet_for_user_access = original_load_bet
+            delivery.lock_user_balance = original_lock_user
+
+        self.assertIs(result_request, forecast_request)
+        self.assertTrue(access_result.already_recorded)
+        self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_SENT)
+
+    async def test_delivery_revalidates_fresh_bet_lifecycle_before_request_or_debit(self):
+        for bet_status, expected_status in (("win", 409), ("deleted", 400)):
+            with self.subTest(bet_status=bet_status):
+                user = self._user(balance=1)
+                forecast_request = self._forecast_request(user)
+                stale_bet = forecast_request.bet
+                fresh_bet = SimpleNamespace(**{**vars(stale_bet), "status": bet_status})
+                record_calls = []
+
+                async def rejecting_scope(_db, request):
+                    delivery._ensure_locked_private_forecast_is_deliverable(request, fresh_bet)
+                    return request
+
+                async def fail_record(*_args, **_kwargs):
+                    record_calls.append(True)
+                    raise AssertionError("inactive forecast must not debit access")
+
+                original_scope = delivery._lock_forecast_delivery_scope
+                original_record = delivery.record_user_bet_access
+                delivery._lock_forecast_delivery_scope = rejecting_scope
+                delivery.record_user_bet_access = fail_record
+                try:
+                    with self.assertRaises(HTTPException) as raised:
+                        await delivery.deliver_forecast_request(
+                            SimpleNamespace(),
+                            forecast_request=forecast_request,
+                            handled_by=111,
+                            delivery_method="manual",
+                            send_to_client=False,
+                            commit=False,
+                        )
+                finally:
+                    delivery._lock_forecast_delivery_scope = original_scope
+                    delivery.record_user_bet_access = original_record
+
+                self.assertEqual(raised.exception.status_code, expected_status)
+                self.assertEqual(forecast_request.status, delivery.FORECAST_STATUS_INTERESTED)
+                self.assertEqual(record_calls, [])
+
+    async def test_decline_and_cancel_do_not_overwrite_a_fresh_delivered_status(self):
+        user = self._user()
+
+        async def refresh_as_delivered(_db, request):
+            request.status = delivery.FORECAST_STATUS_SENT
+            return request
+
+        original_scope = delivery._lock_forecast_delivery_scope
+        original_loader = delivery.load_forecast_request
+        delivery._lock_forecast_delivery_scope = refresh_as_delivered
+        try:
+            decline_request = self._forecast_request(user)
+            decline_request.status = delivery.FORECAST_STATUS_ANNOUNCED
+            delivery.load_forecast_request = AsyncMock(return_value=decline_request)
+            declined, decline_message = await delivery.set_forecast_request_declined(
+                SimpleNamespace(),
+                request_id=decline_request.id,
+                actor_user_id=user.telegram_id,
+            )
+
+            cancel_request = self._forecast_request(user)
+            cancel_request.status = delivery.FORECAST_STATUS_INTERESTED
+            cancelled, cancel_message = await delivery.cancel_forecast_request(
+                SimpleNamespace(),
+                forecast_request=cancel_request,
+                handled_by=111,
+            )
+        finally:
+            delivery._lock_forecast_delivery_scope = original_scope
+            delivery.load_forecast_request = original_loader
+
+        self.assertIs(declined, decline_request)
+        self.assertEqual(decline_request.status, delivery.FORECAST_STATUS_SENT)
+        self.assertEqual(decline_message, "Прогноз уже оформлен.")
+        self.assertIs(cancelled, cancel_request)
+        self.assertEqual(cancel_request.status, delivery.FORECAST_STATUS_SENT)
+        self.assertEqual(cancel_message, "Заявка уже доставлена.")
 
     def test_client_delivery_method_prefers_duplicate_when_both_channels_exist(self):
         self.assertEqual(

@@ -9,6 +9,7 @@ from src.services.marketing_risk import (
     RISK_STATUS_REJECTED,
     evaluate_referral_purchase_risk,
 )
+from src.services.match_access import current_match_balance, lock_user_balance
 from src.services.system_settings import get_referral_program_settings
 
 
@@ -69,6 +70,23 @@ async def get_referral_discount_percent(db: AsyncSession, user_id: int) -> int:
     return int(stats["referral_discount_percent"])
 
 
+async def _lock_referral_reward_event(
+    db: AsyncSession,
+    event_id: int,
+) -> ReferralRewardEvent:
+    await db.flush()
+    result = await db.execute(
+        select(ReferralRewardEvent)
+        .filter(ReferralRewardEvent.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_event = result.scalars().first()
+    if locked_event is None:
+        raise ValueError("Событие реферальной награды не найдено")
+    return locked_event
+
+
 async def apply_referral_reward_for_purchase(
     db: AsyncSession,
     *,
@@ -95,14 +113,10 @@ async def apply_referral_reward_for_purchase(
     if existing:
         return existing
 
-    referrer = referred_user if referrer_id == referred_user.telegram_id else None
-    if not referrer:
-        referrer_res = await db.execute(
-            select(User).filter(User.telegram_id == referrer_id).with_for_update()
-        )
-        referrer = referrer_res.scalars().first()
+    referrer = referred_user if referrer_id == referred_user.telegram_id else await db.get(User, referrer_id)
     if not referrer:
         return None
+    locked_balance = await lock_user_balance(db, referrer_id)
 
     risk_decision = await evaluate_referral_purchase_risk(
         db,
@@ -120,7 +134,7 @@ async def apply_referral_reward_for_purchase(
         )
 
     if matches_awarded > 0:
-        balance_before = int(referrer.purchased_bets_balance or referrer.matches_remaining or 0)
+        balance_before = current_match_balance(locked_balance)
         balance_after = max(0, balance_before) + matches_awarded
         referrer.purchased_bets_balance = balance_after
         referrer.matches_remaining = balance_after
@@ -153,12 +167,16 @@ async def approve_referral_reward_event(
     event: ReferralRewardEvent,
     reviewer_user_id: int | None = None,
 ) -> ReferralRewardEvent:
+    event = await _lock_referral_reward_event(db, event.id)
     if event.status != RISK_STATUS_APPROVED:
         event.status = RISK_STATUS_APPROVED
         event.risk_score = 0
         event.risk_reasons = []
         event.reviewed_by = reviewer_user_id
         event.reviewed_at = datetime.now(timezone.utc)
+    # Production sessions disable autoflush. Persist the approval before the
+    # discount query counts approved referral events.
+    await db.flush()
 
     referral_settings = await get_referral_program_settings(db)
     match_count = int(referral_settings["match_reward_count"])
@@ -169,9 +187,10 @@ async def approve_referral_reward_event(
         and int(event.matches_awarded or 0) <= 0
     )
     if should_award_matches:
+        locked_balance = await lock_user_balance(db, event.referrer_user_id)
         referrer = await db.get(User, event.referrer_user_id)
         if referrer:
-            balance_before = int(referrer.purchased_bets_balance or referrer.matches_remaining or 0)
+            balance_before = current_match_balance(locked_balance)
             balance_after = max(0, balance_before) + match_count
             referrer.purchased_bets_balance = balance_after
             referrer.matches_remaining = balance_after
@@ -195,6 +214,7 @@ async def reject_referral_reward_event(
     event: ReferralRewardEvent,
     reviewer_user_id: int | None = None,
 ) -> ReferralRewardEvent:
+    event = await _lock_referral_reward_event(db, event.id)
     event.status = RISK_STATUS_REJECTED
     event.reviewed_by = reviewer_user_id
     event.reviewed_at = datetime.now(timezone.utc)
