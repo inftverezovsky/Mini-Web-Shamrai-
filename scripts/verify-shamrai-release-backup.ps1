@@ -210,13 +210,20 @@ $sshArguments = @(
   "-o", "UserKnownHostsFile=$KnownHostsPath",
   "-o", "StrictHostKeyChecking=yes"
 )
+function ConvertTo-RemoteBashCommand {
+  param([Parameter(Mandatory = $true)][string]$Command)
+
+  $normalized = ((($Command -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
+  return "printf '%s' '$encoded' | base64 -d | bash"
+}
 function Invoke-RemoteChecked {
   param([string]$Command)
-  Invoke-NativeChecked $ssh @($sshArguments + @($Server, $Command))
+  Invoke-NativeChecked $ssh @($sshArguments + @($Server, (ConvertTo-RemoteBashCommand $Command)))
 }
 function Invoke-RemoteOutputChecked {
   param([string]$Command)
-  return Invoke-NativeOutputChecked $ssh @($sshArguments + @($Server, $Command))
+  return Invoke-NativeOutputChecked $ssh @($sshArguments + @($Server, (ConvertTo-RemoteBashCommand $Command)))
 }
 
 $recipient = Invoke-NativeOutputChecked $ageKeygen @("-y", $AgeIdentityPath)

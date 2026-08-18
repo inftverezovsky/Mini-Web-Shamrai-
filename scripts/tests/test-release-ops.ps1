@@ -96,6 +96,40 @@ if ($fencedCommandFixture.Contains("`r")) {
   throw 'Fenced remote command contains Windows carriage returns.'
 }
 
+$backupTokens = $null
+$backupParseErrors = $null
+$backupAst = [System.Management.Automation.Language.Parser]::ParseFile(
+  $releaseBackupPath,
+  [ref]$backupTokens,
+  [ref]$backupParseErrors
+)
+$remoteBashFunctionAst = $backupAst.Find(
+  {
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -eq 'ConvertTo-RemoteBashCommand'
+  },
+  $true
+)
+if ($null -eq $remoteBashFunctionAst) {
+  throw 'Release backup remote command normalizer was not found.'
+}
+Invoke-Expression $remoteBashFunctionAst.Extent.Text
+$remoteBashFixture = ConvertTo-RemoteBashCommand "set -Eeuo pipefail`r`nprintf 'ok'`r`n"
+$remoteBashMatch = [regex]::Match(
+  $remoteBashFixture,
+  "^printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| bash$"
+)
+if ($remoteBashFixture.Contains("`r") -or -not $remoteBashMatch.Success) {
+  throw 'Release backup remote command wrapper is invalid.'
+}
+$decodedRemoteBashFixture = [Text.Encoding]::UTF8.GetString(
+  [Convert]::FromBase64String($remoteBashMatch.Groups[1].Value)
+)
+if ($decodedRemoteBashFixture -cne "set -Eeuo pipefail`nprintf 'ok'`n") {
+  throw 'Release backup remote command wrapper did not normalize LF safely.'
+}
+
 $jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | ConvertFrom-Json
 if (@($jsonPropertyCountFixture.PSObject.Properties).Count -ne 2) {
   throw 'JSON property enumeration is not stable in this PowerShell runtime.'
