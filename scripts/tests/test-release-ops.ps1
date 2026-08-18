@@ -57,6 +57,23 @@ if ($null -eq $sanitizeFunctionAst) {
 }
 Invoke-Expression $sanitizeFunctionAst.Extent.Text
 
+$invokeStepFunctionAst = $deployAst.Find(
+  {
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -eq 'Invoke-Step'
+  },
+  $true
+)
+if ($null -eq $invokeStepFunctionAst) {
+  throw 'Release step runner function was not found.'
+}
+Invoke-Expression $invokeStepFunctionAst.Extent.Text
+$stepReturnFixture = Invoke-Step 'Capture return fixture' { '/tmp/shamrai-public-release.A1b2C3' }
+if ([string]$stepReturnFixture -cne '/tmp/shamrai-public-release.A1b2C3') {
+  throw 'Release step runner did not preserve its scriptblock return value.'
+}
+
 $jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | ConvertFrom-Json
 if (@($jsonPropertyCountFixture.PSObject.Properties).Count -ne 2) {
   throw 'JSON property enumeration is not stable in this PowerShell runtime.'
@@ -131,6 +148,9 @@ Assert-Contains $deploySource 'Invoke-WebRequest'
 Assert-Contains $deploySource 'CI release attestation must come from a protected branch.'
 Assert-Contains $deploySource '@($jobResults.PSObject.Properties).Count'
 Assert-NotContains $deploySource '$jobResults.PSObject.Properties.Count'
+Assert-Contains $deploySource '$remoteStage = Invoke-Step "Create root-private remote release stage"'
+Assert-Contains $deploySource 'return $stageCandidates[0]'
+Assert-NotContains $deploySource '$remoteStage = $stageCandidates[0]'
 Assert-Contains $deploySource '& $hiddenVerifier'
 Assert-Contains $deploySource '[Guid]::TryParse([string](Get-RequiredJsonProperty $hiddenFlat "flat_subscription_id")'
 Assert-Contains $deploySource 'Restore drill backend SHA does not match the exact release SHA.'

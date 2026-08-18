@@ -1224,15 +1224,16 @@ if ($DryRun) {
 
 $remoteStage = ""
 $remoteStageToken = ""
-Invoke-Step "Create root-private remote release stage" {
+$remoteStage = Invoke-Step "Create root-private remote release stage" {
   $stageOutput = Invoke-RemoteOutputChecked "stage=`$(mktemp -d /tmp/shamrai-public-release.XXXXXX); chmod 0700 `"`$stage`"; realpath -e -- `"`$stage`""
   $stageCandidates = @($stageOutput -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^/tmp/shamrai-public-release\.[A-Za-z0-9]{6}$' })
   if ($stageCandidates.Count -ne 1) {
     throw "Remote mktemp did not return one validated Shamrai release directory."
   }
-  $remoteStage = $stageCandidates[0]
-  $remoteStageToken = Split-Path -Leaf $remoteStage
+  return $stageCandidates[0]
 }
+$remoteStage = ([string]$remoteStage).Trim()
+$remoteStageToken = Split-Path -Leaf $remoteStage
 
 Invoke-Step "Create remote scripts" {
   $remoteGuardContent = New-ServerGuardScript -Repair:$RepairShamraiConflicts
