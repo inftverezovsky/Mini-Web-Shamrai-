@@ -1890,7 +1890,6 @@ if [ "`$post_migration_fail_closed" = "1" ]; then
   echo 'Post-migration rollback retained the new code and database; forward repair is required.' >&2
 else
   curl -fsS http://127.0.0.1:8082/api/health
-  curl -fsS http://127.0.0.1:8082/api/ready
 fi
 "@
   Set-Utf8NoBomLfContent -Path $remoteRollbackScript -Content $remoteRollbackContent
@@ -1917,10 +1916,11 @@ try {
   $finalBackupArtifactKey = ""
   if ($LocalEncryptedBackupGate) {
     Invoke-Step "Prebuild exact candidate images before backend downtime" {
+      $prebuildProjectSuffix = $remoteStageToken.Split('.')[-1].ToLowerInvariant()
       $prebuildCommand = @"
 set -Eeuo pipefail
 prebuild='$remoteStage/prebuild'
-prebuild_project='shamrai-prebuild-$($remoteStageToken.Split('.')[-1])'
+prebuild_project='shamrai-prebuild-$prebuildProjectSuffix'
 cleanup_prebuild() {
   rm -rf -- "`$prebuild"
 }

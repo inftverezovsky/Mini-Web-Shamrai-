@@ -100,6 +100,11 @@ $jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | Conve
 if (@($jsonPropertyCountFixture.PSObject.Properties).Count -ne 2) {
   throw 'JSON property enumeration is not stable in this PowerShell runtime.'
 }
+$prebuildProjectFixture = "shamrai-prebuild-$('N4f6rh'.ToLowerInvariant())"
+if ($prebuildProjectFixture -cne 'shamrai-prebuild-n4f6rh' -or
+    $prebuildProjectFixture -notmatch '^[a-z0-9][a-z0-9_-]+$') {
+  throw 'Temporary Compose project normalization is invalid.'
+}
 
 $secretTestName = 'SHAMRAI_RELEASE_TEST_TOKEN'
 $viteTestName = 'VITE_UNDECLARED_RELEASE_TEST'
@@ -173,6 +178,15 @@ Assert-NotContains $deploySource '$jobResults.PSObject.Properties.Count'
 Assert-Contains $deploySource '$remoteStage = Invoke-Step "Create root-private remote release stage"'
 Assert-Contains $deploySource 'return $stageCandidates[0]'
 Assert-NotContains $deploySource '$remoteStage = $stageCandidates[0]'
+Assert-Contains $deploySource '$prebuildProjectSuffix = $remoteStageToken.Split(''.'')[-1].ToLowerInvariant()'
+$rollbackStart = $deploySource.IndexOf('$remoteRollbackContent = @"', [StringComparison]::Ordinal)
+$rollbackEnd = $deploySource.IndexOf('Set-Utf8NoBomLfContent -Path $remoteRollbackScript', $rollbackStart, [StringComparison]::Ordinal)
+if ($rollbackStart -lt 0 -or $rollbackEnd -le $rollbackStart) {
+  throw 'Remote rollback script source was not found.'
+}
+$rollbackSource = $deploySource.Substring($rollbackStart, $rollbackEnd - $rollbackStart)
+Assert-Contains $rollbackSource 'http://127.0.0.1:8082/api/health'
+Assert-NotContains $rollbackSource 'http://127.0.0.1:8082/api/ready'
 Assert-Contains $deploySource '& $hiddenVerifier'
 Assert-Contains $deploySource '[Guid]::TryParse([string](Get-RequiredJsonProperty $hiddenFlat "flat_subscription_id")'
 Assert-Contains $deploySource 'Restore drill backend SHA does not match the exact release SHA.'
