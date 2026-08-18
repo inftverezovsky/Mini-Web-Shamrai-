@@ -1889,6 +1889,12 @@ fi
 if [ "`$post_migration_fail_closed" = "1" ]; then
   echo 'Post-migration rollback retained the new code and database; forward repair is required.' >&2
 else
+  for attempt in {1..60}; do
+    if curl -fsS http://127.0.0.1:8082/api/health >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
   curl -fsS http://127.0.0.1:8082/api/health
 fi
 "@
@@ -1967,10 +1973,11 @@ chmod 0600 '$remoteStage/prebuilt-backend-image-id' '$remoteStage/prebuilt-front
         -NoHostKeyScan `
         -LeaveBackendStopped
       $localBackupEvidence = Read-ReleaseGateBootstrap $releaseBackupAttestationPath
+      $backupAlembicRevision = [string](Get-RequiredJsonProperty $localBackupEvidence "alembic_revision")
       if ([string](Get-RequiredJsonProperty $localBackupEvidence "status") -cne "passed" -or
           [bool](Get-RequiredJsonProperty $localBackupEvidence "plaintext_dump_persisted") -or
           -not [bool](Get-RequiredJsonProperty $localBackupEvidence "isolated_restore") -or
-          [string](Get-RequiredJsonProperty $localBackupEvidence "alembic_revision") -cne "20260802_0041" -or
+          $backupAlembicRevision -notin @("20260802_0041", "20260802_0043") -or
           [string](Get-RequiredJsonProperty $localBackupEvidence "normalized_schema_hash") -notmatch '^[0-9a-f]{64}$') {
         throw "Local encrypted release backup attestation is invalid."
       }

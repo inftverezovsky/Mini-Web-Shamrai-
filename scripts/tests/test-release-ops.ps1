@@ -227,6 +227,8 @@ if ($rollbackStart -lt 0 -or $rollbackEnd -le $rollbackStart) {
 $rollbackSource = $deploySource.Substring($rollbackStart, $rollbackEnd - $rollbackStart)
 Assert-Contains $rollbackSource 'http://127.0.0.1:8082/api/health'
 Assert-NotContains $rollbackSource 'http://127.0.0.1:8082/api/ready'
+Assert-Contains $rollbackSource 'for attempt in {1..60}; do'
+Assert-Contains $rollbackSource 'sleep 2'
 Assert-Contains $deploySource '& $hiddenVerifier'
 Assert-Contains $deploySource '[Guid]::TryParse([string](Get-RequiredJsonProperty $hiddenFlat "flat_subscription_id")'
 Assert-Contains $deploySource 'Restore drill backend SHA does not match the exact release SHA.'
@@ -357,6 +359,8 @@ Assert-Contains $deploySource 'Prebuild exact candidate images before backend do
 Assert-Contains $deploySource 'Create and restore-drill the final local encrypted production backup'
 Assert-Contains $deploySource 'scripts\verify-shamrai-release-backup.ps1'
 Assert-Contains $deploySource '-LeaveBackendStopped'
+Assert-Contains $deploySource '$backupAlembicRevision -notin @("20260802_0041", "20260802_0043")'
+Assert-NotContains $deploySource 'Get-RequiredJsonProperty $localBackupEvidence "alembic_revision") -cne "20260802_0041"'
 Assert-Contains $deploySource 'prebuilt_candidate_images_match_running_containers'
 Assert-Contains $deploySource 'docker image tag "`$prebuilt_backend_image" shamrai-backend'
 Assert-Contains $deploySource 'Migration backend image differs from the qualified candidate.'
