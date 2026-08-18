@@ -1,5 +1,5 @@
 param(
-  [string]$Workspace = "C:\Users\Sa1z1ngr0z\Desktop\Mini-Web(Shamrai)",
+  [string]$Workspace = "",
   [string]$Server = "root@82.147.67.245",
   [int]$SshPort = 22,
   [string]$HostKeyFingerprint = "SHA256:xdVRtRaXWqK6eAIsE3VwD0o2H6GJDcCm65L1ZUBjuMw",
@@ -26,6 +26,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ([string]::IsNullOrWhiteSpace($Workspace)) {
+  $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
 
 $manifestSignatureModule = Join-Path $PSScriptRoot "lib/BackupManifestSignature.psm1"
 Import-Module -Name $manifestSignatureModule -Force -ErrorAction Stop
