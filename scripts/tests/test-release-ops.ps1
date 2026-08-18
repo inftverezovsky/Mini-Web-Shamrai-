@@ -57,6 +57,11 @@ if ($null -eq $sanitizeFunctionAst) {
 }
 Invoke-Expression $sanitizeFunctionAst.Extent.Text
 
+$jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | ConvertFrom-Json
+if (@($jsonPropertyCountFixture.PSObject.Properties).Count -ne 2) {
+  throw 'JSON property enumeration is not stable in this PowerShell runtime.'
+}
+
 $secretTestName = 'SHAMRAI_RELEASE_TEST_TOKEN'
 $viteTestName = 'VITE_UNDECLARED_RELEASE_TEST'
 $safeTestName = 'SAFE_RELEASE_TEST_VALUE'
@@ -124,6 +129,8 @@ Assert-Contains $deploySource 'Get-AuthenticatedGitHubArtifactJson'
 Assert-Contains $deploySource 'GITHUB_PERSONAL_ACCESS_TOKEN'
 Assert-Contains $deploySource 'Invoke-WebRequest'
 Assert-Contains $deploySource 'CI release attestation must come from a protected branch.'
+Assert-Contains $deploySource '@($jobResults.PSObject.Properties).Count'
+Assert-NotContains $deploySource '$jobResults.PSObject.Properties.Count'
 Assert-Contains $deploySource '& $hiddenVerifier'
 Assert-Contains $deploySource '[Guid]::TryParse([string](Get-RequiredJsonProperty $hiddenFlat "flat_subscription_id")'
 Assert-Contains $deploySource 'Restore drill backend SHA does not match the exact release SHA.'

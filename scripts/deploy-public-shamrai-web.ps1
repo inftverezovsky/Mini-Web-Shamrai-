@@ -618,7 +618,7 @@ function Assert-CiReleaseGateAttestation {
     "alembic-smoke", "postgres-concurrency", "compose", "powershell"
   )
   $jobResults = Get-RequiredJsonProperty $ci "job_results"
-  if ($jobResults.PSObject.Properties.Count -ne $requiredCiJobs.Count) {
+  if (@($jobResults.PSObject.Properties).Count -ne $requiredCiJobs.Count) {
     throw "CI release attestation has an unexpected mandatory job set."
   }
   foreach ($jobName in $requiredCiJobs) {
@@ -731,7 +731,7 @@ function Assert-ReleaseGateAttestations {
     "alembic-smoke", "postgres-concurrency", "compose", "powershell"
   )
   $jobResults = Get-RequiredJsonProperty $ci "job_results"
-  if ($jobResults.PSObject.Properties.Count -ne $requiredCiJobs.Count) {
+  if (@($jobResults.PSObject.Properties).Count -ne $requiredCiJobs.Count) {
     throw "CI release attestation has an unexpected mandatory job set."
   }
   foreach ($jobName in $requiredCiJobs) {
