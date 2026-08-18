@@ -2103,7 +2103,7 @@ curl -fsS http://127.0.0.1:8082/api/ready >/dev/null
 curl -fsS http://127.0.0.1:8082/api/version | python3 -c 'import json, sys; payload = json.load(sys.stdin); assert payload.get("git_sha") == sys.argv[1], payload; assert payload.get("build_time") == sys.argv[2], payload' '$releaseSha' '$releaseBuildTime'
 curl -fsS http://127.0.0.1:8082/api/subscriptions/plans >/dev/null
 curl -fsS http://127.0.0.1:8082/api/stats/global >/dev/null
-docker compose -p '$ComposeProject' exec -T backend alembic current --check-heads
+docker compose -p '$ComposeProject' exec -T backend alembic current | grep -Eq '^20260802_0043 \(head\)$'
 "@
     $previewCommand = New-FencedRemoteCommand `
       -Command $previewVerification `

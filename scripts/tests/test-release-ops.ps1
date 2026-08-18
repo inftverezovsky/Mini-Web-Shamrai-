@@ -361,6 +361,8 @@ Assert-Contains $deploySource 'prebuilt_candidate_images_match_running_container
 Assert-Contains $deploySource 'docker image tag "`$prebuilt_backend_image" shamrai-backend'
 Assert-Contains $deploySource 'Migration backend image differs from the qualified candidate.'
 Assert-Contains $deploySource 'up -d --no-deps --force-recreate --no-build backend frontend'
+Assert-Contains $deploySource "alembic current | grep -Eq '^20260802_0043 \(head\)`$'"
+Assert-NotContains $deploySource 'alembic current --check-heads'
 Assert-Contains $deploySource 'local_encrypted_backup_restore_gate_ok'
 $localCandidatePreparationMatch = [regex]::Match(
   $deploySource,
