@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../utils/api';
-import { BookmakerResponse, ProfileDashboardResponse } from '../../schemas/schemas';
+import { BookmakerResponse, FlatSubscriptionResponse, ProfileDashboardResponse } from '../../schemas/schemas';
 import { getVkIdConfig, isVkRedirectStartedError, linkVkProfile } from '../../utils/vkId';
 import {
   detectVkMiniAppRuntime,
@@ -56,6 +56,7 @@ import { useAuthActions, useAuthSelector } from '../../context/AuthContext';
 import { isStaffRole, roleLabel } from '../../utils/roles';
 import { TAB_QUERY_STALE_TIME, fetchProfileDashboard, profileDashboardQueryKey } from '../../utils/tabPrefetch';
 import { getTelegramWebApp } from '../../utils/telegramSdk';
+import { flatSubscriptionUiState } from '../../utils/flatSubscriptionUi';
 
 /* ─────────────────────── Типы ─────────────────────── */
 interface Preferences {
@@ -251,6 +252,14 @@ export default function Profile({ active = true }: ProfileProps = {}) {
   const { isCompact } = useLayoutMode();
   const isAdminProfile = isStaffRole(userProfile?.role);
   const canManageBilling = isStaffRole(userProfile?.role);
+  const flatSubscriptionQuery = useQuery<FlatSubscriptionResponse | null>({
+    queryKey: ['flat-subscription-current'],
+    queryFn: () => apiFetch<FlatSubscriptionResponse | null>('/subscriptions/flats/current'),
+    enabled: active && !isAdminProfile,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const flatSubscription = flatSubscriptionQuery.data;
 
   /* ── Bookmakers (существующая логика) ── */
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
@@ -803,8 +812,13 @@ export default function Profile({ active = true }: ProfileProps = {}) {
 
   /* ────────────────── Helpers ────────────────── */
   const isSubActive = () => {
-    return (userProfile?.matches_remaining || 0) > 0 || Boolean(userProfile?.guarantee_active);
+    return (userProfile?.matches_remaining || 0) > 0
+      || Boolean(userProfile?.guarantee_active)
+      || flatSubscription?.status === 'active'
+      || flatSubscription?.status === 'closing';
   };
+  const hasLegacyAccess = (userProfile?.matches_remaining || 0) > 0 || Boolean(userProfile?.guarantee_active);
+  const flatSubscriptionUi = flatSubscriptionUiState(flatSubscription, hasLegacyAccess);
 
   const formatDate = (dateStr: string) =>
     new Date(dateStr).toLocaleDateString('ru-RU', {
@@ -969,7 +983,19 @@ export default function Profile({ active = true }: ProfileProps = {}) {
             </div>
           ) : (
             <div className="w-full pt-3 border-t border-white/5 flex flex-col items-center">
-              {dashboardLoadFailed ? (
+              {flatSubscriptionQuery.isError ? (
+                <div className="w-full rounded-xl border border-amber-300/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+                  <p className="font-semibold">Не удалось обновить флетовый абонемент.</p>
+                  <button
+                    type="button"
+                    onClick={() => void flatSubscriptionQuery.refetch()}
+                    className="mt-2 inline-flex min-h-[34px] items-center gap-2 rounded-lg border border-white/10 bg-white/[0.07] px-3 text-[10px] font-black uppercase text-white"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Повторить
+                  </button>
+                </div>
+              ) : dashboardLoadFailed ? (
                 <div className="bg-amber-500/10 border border-amber-300/20 rounded-xl px-4 py-2 flex items-center space-x-2 text-xs font-semibold text-amber-100">
                   <Clock className="w-4 h-4" />
                   <span>Статус абонемента не обновлен</span>
@@ -990,20 +1016,76 @@ export default function Profile({ active = true }: ProfileProps = {}) {
                   }}
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  <span>
-                    Абонемент: {userProfile?.matches_remaining ?? 0} матчей
-                    {userProfile?.guarantee_active ? ' + гарантия до победы' : ''}
-                  </span>
+                  <span>{flatSubscription
+                    ? flatSubscriptionUi.title
+                    : `Абонемент: ${userProfile?.matches_remaining ?? 0} матчей${userProfile?.guarantee_active ? ' + гарантия до победы' : ''}`}</span>
                 </div>
               ) : (
                 <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl px-4 py-2 flex items-center space-x-2 text-xs text-slate-400">
                   <Clock className="w-4 h-4" />
-                  <span>Доступ закрыт (нет матчей в абонементе)</span>
+                  <span>{flatSubscription ? flatSubscriptionUi.title : 'Доступ закрыт (нет активного абонемента)'}</span>
                 </div>
               )}
             </div>
           )}
         </div>
+
+        {!isAdminProfile && flatSubscription && (
+          <div className="rounded-2xl border border-emerald-300/20 bg-gradient-to-br from-emerald-400/10 to-cyan-400/5 p-4 shadow-glass">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-300">Прогресс абонемента</p>
+                <p className="mt-1 text-lg font-black text-white">
+                  {Number(flatSubscription.profit_flats).toFixed(2)} / +{Number(flatSubscription.target_flats).toFixed(2)} флета
+                </p>
+                <p className="mt-1 max-w-xl text-[10px] leading-relaxed text-slate-400">{flatSubscriptionUi.description}</p>
+              </div>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-black uppercase text-slate-300">
+                {flatSubscriptionUi.title}
+              </span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-900/70">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-cyan-300 transition-all"
+                style={{ width: `${Math.min(100, Math.max(0, Number(flatSubscription.profit_flats) / Math.max(Number(flatSubscription.target_flats), 0.01) * 100))}%` }}
+              />
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+              <div className="rounded-xl border border-white/5 bg-black/15 p-2">
+                <p className="text-[9px] font-black uppercase text-slate-500">Один флет</p>
+                <p className="mt-1 font-black text-white">{flatSubscription.flat_amount_rub == null ? 'Не указан' : `${Number(flatSubscription.flat_amount_rub).toLocaleString('ru-RU')} ₽`}</p>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/15 p-2">
+                <p className="text-[9px] font-black uppercase text-slate-500">Прибыль</p>
+                <p className="mt-1 font-black text-emerald-300">{Number(flatSubscription.profit_rub).toLocaleString('ru-RU')} ₽</p>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/15 p-2">
+                <p className="text-[9px] font-black uppercase text-slate-500">Осталось</p>
+                <p className="mt-1 font-black text-white">{Number(flatSubscription.remaining_flats).toFixed(2)} флета</p>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/15 p-2">
+                <p className="text-[9px] font-black uppercase text-slate-500">Открытые</p>
+                <p className="mt-1 font-black text-white">{flatSubscription.pending_bets}</p>
+              </div>
+            </div>
+            {flatSubscription.bets.length > 0 && (
+              <div className="mt-4 space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Учтённые ставки</p>
+                {flatSubscription.bets.slice(0, 8).map((bet) => (
+                  <div key={bet.bet_id} className="flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-black/15 px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="truncate font-bold text-white">{bet.event_name || 'Прогноз'}</p>
+                      <p className="mt-0.5 text-[10px] text-slate-500">{Number(bet.stake_rub).toLocaleString('ru-RU')} ₽ • {Number(bet.stake_flats).toFixed(3)} флета</p>
+                    </div>
+                    <span className={bet.status === 'win' ? 'font-black text-emerald-300' : bet.status === 'loss' ? 'font-black text-rose-300' : 'font-black text-slate-400'}>
+                      {bet.status === 'pending' ? 'Ожидает' : `${Number(bet.profit_flats || 0) >= 0 ? '+' : ''}${Number(bet.profit_flats || 0).toFixed(3)}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div id="connect-telegram" className="rounded-2xl border border-white/10 bg-white/[0.035] p-4 space-y-3">
           <button

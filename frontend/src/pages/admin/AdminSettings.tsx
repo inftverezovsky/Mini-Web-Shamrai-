@@ -6,6 +6,7 @@ import type { MarketingWidgetConfigResponse, MarketingWidgetsResponse, MessageTe
 import { confirmDestructive, notifyError, notifySuccess } from '../../utils/notify';
 import SmoothCollapse from '../../components/SmoothCollapse';
 import AdminMarketing from './AdminMarketing';
+import AdminWheelSettings from './AdminWheelSettings';
 import {
   BRAND_BACKGROUND_URL_KEY,
   BRAND_LOGO_URL_KEY,
@@ -45,6 +46,14 @@ import {
   Cloud,
   CreditCard,
   Database,
+  Disc3,
+  ArrowLeftRight,
+  Brain,
+  CalendarCheck,
+  Swords,
+  TrendingUp,
+  Users2,
+  HelpCircle,
   Download,
   Eye,
   EyeOff,
@@ -101,6 +110,7 @@ type SwitchSettingKey =
   | 'MAINTENANCE_MODE'
   | 'DISABLE_REGISTRATIONS'
   | 'PAUSE_BROADCASTS'
+  | 'BROADCAST_ONLY_ACTIVE_SUBSCRIBERS'
   | 'REFERRAL_PROGRAM_ENABLED'
   | 'REFERRAL_DISCOUNT_ENABLED'
   | 'REFERRAL_MATCH_REWARD_ENABLED'
@@ -252,6 +262,7 @@ interface ReferralSummaryEvent {
   source_type: string;
   discount_percent_snapshot: number;
   matches_awarded: number;
+  target_flats_awarded: number;
   status?: 'approved' | 'held' | 'rejected' | string;
   risk_score?: number;
   risk_reasons?: string[];
@@ -269,6 +280,7 @@ interface MarketingSummaryResponse {
   qualified_purchase_events: number;
   active_referrers: number;
   matches_awarded_total: number;
+  target_flats_awarded_total: number;
   held_events?: number;
   rejected_events?: number;
   recent_events: ReferralSummaryEvent[];
@@ -418,9 +430,9 @@ const REFERRAL_SWITCH_SETTINGS: SwitchSettingConfig[] = [
   },
   {
     key: REFERRAL_MATCH_REWARD_ENABLED_KEY,
-    title: 'Бонус матчами',
-    description: 'Начисляет пригласившему матчи после первой оплаченной покупки реферала.',
-    badge: 'matches',
+    title: 'Бонус флетами',
+    description: 'Начисляет пригласившему целевые флеты после первой оплаченной покупки реферала.',
+    badge: 'flats',
     tone: 'cyan',
   },
 ];
@@ -664,6 +676,7 @@ const TAB_SECTION_IDS: Record<SettingsTabId, string[]> = {
     'marketing-referrals',
     'marketing-rewards',
     'marketing-widgets',
+    'marketing-wheel',
     'marketing-risk',
     'marketing-promos',
     'marketing-events',
@@ -675,6 +688,7 @@ const DEFAULT_ADMIN_SETTINGS_VALUES: AdminSettingsFormValues = {
   MAINTENANCE_MODE: false,
   DISABLE_REGISTRATIONS: false,
   PAUSE_BROADCASTS: false,
+  BROADCAST_ONLY_ACTIVE_SUBSCRIBERS: false,
   WELCOME_QUIZ_ENABLED: DEFAULT_THEME_SETTINGS.welcome_quiz_enabled,
   SUBSCRIPTION_PURCHASES_ENABLED: DEFAULT_THEME_SETTINGS.subscription_purchases_enabled,
   REFERRAL_PROGRAM_ENABLED: false,
@@ -887,6 +901,7 @@ function formValuesFromSettings(data?: AdminSettingsResponse): AdminSettingsForm
     MAINTENANCE_MODE: truthySettingValue(settingsByKey.get('MAINTENANCE_MODE')?.value),
     DISABLE_REGISTRATIONS: truthySettingValue(settingsByKey.get('DISABLE_REGISTRATIONS')?.value),
     PAUSE_BROADCASTS: truthySettingValue(settingsByKey.get('PAUSE_BROADCASTS')?.value),
+    BROADCAST_ONLY_ACTIVE_SUBSCRIBERS: truthySettingValue(settingsByKey.get('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS')?.value),
     WELCOME_QUIZ_ENABLED: truthySettingValue(settingsByKey.get(WELCOME_QUIZ_ENABLED_KEY)?.value),
     SUBSCRIPTION_PURCHASES_ENABLED: truthySettingValue(settingsByKey.get(SUBSCRIPTION_PURCHASES_ENABLED_KEY)?.value),
     REFERRAL_PROGRAM_ENABLED: truthySettingValue(settingsByKey.get(REFERRAL_PROGRAM_ENABLED_KEY)?.value ?? 'false'),
@@ -935,6 +950,10 @@ function buildSettingsPayload(values: AdminSettingsFormValues) {
     {
       key: 'PAUSE_BROADCASTS',
       value: truthySettingValue(values.PAUSE_BROADCASTS) ? 'true' : 'false',
+    },
+    {
+      key: 'BROADCAST_ONLY_ACTIVE_SUBSCRIBERS',
+      value: truthySettingValue(values.BROADCAST_ONLY_ACTIVE_SUBSCRIBERS) ? 'true' : 'false',
     },
     {
       key: WELCOME_QUIZ_ENABLED_KEY,
@@ -1934,6 +1953,35 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
               </span>
             </span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => settingsForm.setValue('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS', !settingsForm.watch('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS'), {
+              shouldDirty: true,
+              shouldTouch: true,
+            })}
+            className={`smooth-pressable mt-3 flex min-h-[116px] w-full items-center gap-4 rounded-2xl border p-4 text-left transition-all ${
+              settingsForm.watch('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS')
+                ? 'border-sky-400/45 bg-sky-400/[0.14] text-sky-50 shadow-[0_0_28px_rgba(56,189,248,0.13)]'
+                : 'border-white/10 bg-white/[0.035] text-slate-300 hover:border-sky-400/25 hover:bg-sky-400/[0.07]'
+            }`}
+          >
+            <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border ${
+              settingsForm.watch('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS')
+                ? 'border-sky-400/30 bg-sky-400/20 text-sky-200'
+                : 'border-white/10 bg-white/[0.05] text-slate-400'
+            }`}>
+              <BellRing className="h-5 w-5" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-black text-white">Только действующие абонементы</span>
+              <span className="mt-1 block text-xs font-semibold leading-relaxed text-slate-400">
+                {settingsForm.watch('BROADCAST_ONLY_ACTIVE_SUBSCRIBERS')
+                  ? 'Анонсы отправляются только клиентам, у которых на балансе есть хотя бы 1 матч.'
+                  : 'Анонсы отправляются всем зарегистрированным клиентам (в том числе без матчей).'}
+              </span>
+            </span>
+          </button>
         </SettingsAccordionSection>
 
         <SettingsAccordionSection
@@ -1996,6 +2044,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     fallback: string,
     suffix: string,
     Icon: LucideIcon,
+    step = 1,
   ) => {
     const rawValue = settingsForm.watch(key);
     const value = rawValue === undefined || rawValue === null || rawValue === '' ? fallback : String(rawValue);
@@ -2020,7 +2069,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           type="number"
           min={min}
           max={max}
-          step={1}
+          step={step}
           value={value}
           onChange={(event) => settingsForm.setValue(key, event.target.value, {
             shouldDirty: true,
@@ -2053,14 +2102,91 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     });
   };
 
-  const renderWidgetNumberInput = (
+  /* ── Widget metadata: human-friendly info per widget ── */
+  const WIDGET_META: Record<string, {
+    icon: LucideIcon;
+    name: string;
+    desc: string;
+    howTo: string;
+    hideReward?: boolean;   // hide reward fields (configured elsewhere)
+    hidePromo?: boolean;    // hide promo lifetime field
+  }> = {
+    wheel_of_fortune: {
+      icon: Disc3,
+      name: '🎡 Колесо Фортуны',
+      desc: 'Рулетка с призами. Пользователь крутит колесо раз в неделю и получает случайный приз.',
+      howTo: 'Призы и вероятности настраиваются ниже в подвкладке «Колесо Фортуны»',
+      hideReward: true,
+    },
+    daily_spin: {
+      icon: CalendarCheck,
+      name: '🎰 Ежедневный бонус',
+      desc: 'Ежедневная награда за вход в приложение. Мотивирует пользователей заходить каждый день.',
+      howTo: 'Включите, выберите тип награды и установите перерыв 24ч',
+    },
+    swipe: {
+      icon: ArrowLeftRight,
+      name: '👆 Свайп-прогноз',
+      desc: 'Свайп карточек матчей влево/вправо. Если пользователь угадал исход — получает промокод.',
+      howTo: 'Включите и настройте награду. Матчи берутся из ленты автоматически',
+    },
+    quiz: {
+      icon: Brain,
+      name: '🧠 Квиз',
+      desc: 'Тест на знание спорта с 3-5 вопросами. За правильные ответы пользователь получает промокод.',
+      howTo: 'Включите и настройте награду. Вопросы генерируются из активных матчей',
+    },
+    pvp: {
+      icon: Swords,
+      name: '⚔️ PvP Голосование',
+      desc: 'Голосование за исход матча между пользователями. Вовлекающая механика без прямой награды.',
+      howTo: 'Включите — работает автоматически на активных матчах',
+      hideReward: true,
+      hidePromo: true,
+    },
+    marathon: {
+      icon: TrendingUp,
+      name: '🏃 Марафон ставок',
+      desc: 'Серия активностей на протяжении нескольких дней. Выполни все этапы — получи приз.',
+      howTo: 'Включите и настройте длительность через поле «Перерыв»',
+    },
+    crowd_bet: {
+      icon: Users2,
+      name: '👥 Совместный прогноз',
+      desc: 'Коллективная активность: пользователи нажимают кнопку, при достижении порога открывается VIP-прогноз.',
+      howTo: 'Включите — порог срабатывания настраивается автоматически',
+      hideReward: true,
+      hidePromo: true,
+    },
+  };
+
+  const FIELD_HINTS: Record<string, string> = {
+    cooldown_hours: 'Сколько часов пользователь ждёт между участиями',
+    per_user_limit: 'Сколько раз один человек может участвовать. 0 = без ограничений',
+    global_daily_limit: 'Сколько раз все пользователи суммарно могут получить награду за день. 0 = без лимита',
+    promo_valid_hours: 'Через сколько часов промокод сгорит',
+    position: 'Чем меньше число — тем выше виджет в ленте',
+    reward_value: 'Если скидка — процент. Если бонусы — количество',
+  };
+
+  const FIELD_LABELS: Record<string, string> = {
+    cooldown_hours: 'Перерыв (часы)',
+    per_user_limit: 'Макс. раз на человека',
+    global_daily_limit: 'Лимит в день (всего)',
+    promo_valid_hours: 'Срок промокода (часы)',
+    position: 'Порядок показа',
+    reward_value: 'Размер скидки / бонуса',
+  };
+
+  const renderWidgetField = (
     widget: MarketingWidgetConfigResponse,
     field: 'position' | 'cooldown_hours' | 'per_user_limit' | 'global_daily_limit' | 'reward_value' | 'promo_valid_hours',
-    label: string,
     max = 100000,
   ) => (
     <label className="min-w-0 space-y-1">
-      <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">{label}</span>
+      <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">
+        {FIELD_LABELS[field] || field}
+      </span>
       <input
         type="number"
         min={0}
@@ -2071,6 +2197,9 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
         })}
         className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-[16px] font-bold text-white outline-none transition-all focus:border-cyan-300/45 sm:text-xs"
       />
+      {FIELD_HINTS[field] && (
+        <span className="block text-[9px] font-medium text-slate-600 leading-tight mt-0.5">{FIELD_HINTS[field]}</span>
+      )}
     </label>
   );
 
@@ -2094,78 +2223,128 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
     return (
       <div className="space-y-3">
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-          {marketingWidgetDraftList.map(widget => (
-            <div
-              key={widget.key}
-              className={`rounded-2xl border p-3 transition-all ${
-                widget.is_enabled
-                  ? 'border-cyan-300/20 bg-cyan-300/[0.06]'
-                  : 'border-white/10 bg-white/[0.025] opacity-75'
-              }`}
-            >
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <p className="truncate text-xs font-black uppercase tracking-wider text-white">{widget.title || widget.key}</p>
-                  <p className="mt-1 line-clamp-2 text-[10px] font-semibold leading-relaxed text-slate-500">
-                    {widget.description || widget.key}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => updateMarketingWidgetDraft(widget.key, { is_enabled: !widget.is_enabled })}
-                  className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-2 rounded-xl border px-3 text-[9px] font-black uppercase tracking-wider transition-all ${
-                    widget.is_enabled
-                      ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
-                      : 'border-slate-500/20 bg-slate-500/10 text-slate-300'
-                  }`}
-                >
-                  <Power className="h-3.5 w-3.5" />
-                  {widget.is_enabled ? 'Вкл' : 'Выкл'}
-                </button>
-              </div>
+          {marketingWidgetDraftList.map(widget => {
+            const meta = WIDGET_META[widget.key];
+            const WidgetIcon = meta?.icon || Sparkles;
+            const widgetName = meta?.name || widget.title || widget.key;
+            const widgetDesc = meta?.desc || widget.description || '';
+            const widgetHowTo = meta?.howTo || '';
+            const hideReward = meta?.hideReward ?? false;
+            const hidePromo = meta?.hidePromo ?? false;
+            // Also hide reward/promo fields when reward_type is 'none'
+            const rewardIsNone = (widget.reward_type || 'none') === 'none';
+            const shouldHideRewardFields = hideReward || rewardIsNone;
+            const shouldHidePromoField = hidePromo || (rewardIsNone && !hideReward);
 
-              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
-                <label className="min-w-0 space-y-1">
-                  <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Аудитория</span>
-                  <select
-                    value={widget.audience || 'all'}
-                    onChange={(event) => updateMarketingWidgetDraft(widget.key, { audience: event.target.value })}
-                    className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
+            return (
+              <div
+                key={widget.key}
+                className={`rounded-2xl border p-4 transition-all ${
+                  widget.is_enabled
+                    ? 'border-cyan-300/20 bg-cyan-300/[0.06]'
+                    : 'border-white/10 bg-white/[0.025] opacity-75'
+                }`}
+              >
+                {/* Header: icon + name + toggle */}
+                <div className="flex items-start gap-3">
+                  <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition-all ${
+                    widget.is_enabled
+                      ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-400'
+                      : 'border-slate-600/30 bg-slate-700/20 text-slate-500'
+                  }`}>
+                    <WidgetIcon className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-black text-white leading-tight">{widgetName}</p>
+                    <p className="mt-0.5 text-[11px] font-medium leading-relaxed text-slate-400">
+                      {widgetDesc}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => updateMarketingWidgetDraft(widget.key, { is_enabled: !widget.is_enabled })}
+                    className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-2 rounded-xl border px-3 text-[9px] font-black uppercase tracking-wider transition-all ${
+                      widget.is_enabled
+                        ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
+                        : 'border-slate-500/20 bg-slate-500/10 text-slate-300'
+                    }`}
                   >
-                    <option value="all">Все</option>
-                    <option value="clients">Клиенты</option>
-                    <option value="referrals">Рефералы</option>
-                    <option value="staff">Команда</option>
-                  </select>
-                </label>
-                <label className="min-w-0 space-y-1">
-                  <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Награда</span>
-                  <select
-                    value={widget.reward_type || 'none'}
-                    onChange={(event) => updateMarketingWidgetDraft(widget.key, { reward_type: event.target.value })}
-                    className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
-                  >
-                    <option value="none">Нет</option>
-                    <option value="mixed">Микс</option>
-                    <option value="discount">Скидка</option>
-                    <option value="free_bet">Прогноз</option>
-                    <option value="matches">Матчи</option>
-                  </select>
-                </label>
-                {renderWidgetNumberInput(widget, 'reward_value', 'Размер')}
-                {renderWidgetNumberInput(widget, 'cooldown_hours', 'Cooldown, ч')}
-                {renderWidgetNumberInput(widget, 'per_user_limit', 'Лимит/user')}
-                {renderWidgetNumberInput(widget, 'global_daily_limit', 'Лимит/день')}
-                {renderWidgetNumberInput(widget, 'promo_valid_hours', 'Промо, ч')}
-                {renderWidgetNumberInput(widget, 'position', 'Позиция', 1000)}
+                    <Power className="h-3.5 w-3.5" />
+                    {widget.is_enabled ? 'Вкл' : 'Выкл'}
+                  </button>
+                </div>
+
+                {/* How-to hint */}
+                {widgetHowTo && (
+                  <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-indigo-500/8 border border-indigo-400/15 px-3 py-2">
+                    <HelpCircle className="h-3.5 w-3.5 shrink-0 text-indigo-400 mt-0.5" />
+                    <span className="text-[10px] font-semibold text-indigo-300/80 leading-tight">{widgetHowTo}</span>
+                  </div>
+                )}
+
+                {/* Settings fields */}
+                <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-3">
+                  {/* Audience */}
+                  <label className="min-w-0 space-y-1">
+                    <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Кто видит</span>
+                    <select
+                      value={widget.audience || 'all'}
+                      onChange={(event) => updateMarketingWidgetDraft(widget.key, { audience: event.target.value })}
+                      className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
+                    >
+                      <option value="all">Все пользователи</option>
+                      <option value="clients">Только клиенты</option>
+                      <option value="referrals">Только рефералы</option>
+                      <option value="staff">Только команда</option>
+                    </select>
+                    <span className="block text-[9px] font-medium text-slate-600 leading-tight mt-0.5">Какие пользователи увидят виджет</span>
+                  </label>
+
+                  {/* Reward type — hidden for wheel/pvp/crowd */}
+                  {!hideReward && (
+                    <label className="min-w-0 space-y-1">
+                      <span className="block truncate text-[9px] font-black uppercase tracking-wider text-slate-500">Тип награды</span>
+                      <select
+                        value={widget.reward_type || 'none'}
+                        onChange={(event) => updateMarketingWidgetDraft(widget.key, { reward_type: event.target.value })}
+                        className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs font-bold text-white outline-none transition-all focus:border-cyan-300/45"
+                      >
+                        <option value="none">Без награды</option>
+                        <option value="discount">Скидка (%)</option>
+                        <option value="mixed">Микс (случайная)</option>
+                        <option value="free_bet">Бесплатный прогноз</option>
+                        <option value="matches">Доступ к матчам</option>
+                      </select>
+                      <span className="block text-[9px] font-medium text-slate-600 leading-tight mt-0.5">Что пользователь получит за участие</span>
+                    </label>
+                  )}
+
+                  {/* Reward value — hidden when no reward */}
+                  {!shouldHideRewardFields && renderWidgetField(widget, 'reward_value')}
+
+                  {/* Cooldown */}
+                  {renderWidgetField(widget, 'cooldown_hours')}
+
+                  {/* Per-user limit */}
+                  {renderWidgetField(widget, 'per_user_limit')}
+
+                  {/* Global daily limit */}
+                  {renderWidgetField(widget, 'global_daily_limit')}
+
+                  {/* Promo lifetime — hidden when no reward */}
+                  {!shouldHidePromoField && renderWidgetField(widget, 'promo_valid_hours')}
+
+                  {/* Position */}
+                  {renderWidgetField(widget, 'position', 1000)}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="flex flex-col gap-2 border-t border-white/10 pt-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-            {marketingWidgetsQuery.data?.configured ? 'Backend-конфиг активен' : 'До первого сохранения лента использует ENV fallback'}
+            {marketingWidgetsQuery.data?.configured ? 'Настройки сохранены и активны' : 'До первого сохранения используются настройки по умолчанию'}
           </p>
           <button
             type="button"
@@ -2366,7 +2545,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
               {renderMetricCard('Приглашено', summary?.invited_count ?? 0, 'Клиенты, пришедшие по реферальной ссылке.', 'cyan')}
               {renderMetricCard('Покупки', summary?.qualified_purchase_events ?? 0, 'Первые квалифицированные оплаты рефералов.', 'emerald')}
               {renderMetricCard('Рефереры', summary?.active_referrers ?? 0, 'Клиенты, у которых есть оплаченные рефералы.', 'violet')}
-              {renderMetricCard('Матчи', summary?.matches_awarded_total ?? 0, 'Всего матчей начислено пригласившим.', 'amber')}
+              {renderMetricCard('Цель, фл.', summary?.target_flats_awarded_total ?? 0, 'Всего целевых флетов начислено пригласившим.', 'amber')}
             </div>
           )}
         </SettingsAccordionSection>
@@ -2410,7 +2589,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
         <SettingsAccordionSection
           id="marketing-rewards"
           title="Награды за покупку реферала"
-          subtitle="Матчи сейчас, внутренняя валюта позже"
+          subtitle="Начисление целевой прибыли во флетах"
           badge={matchRewardEnabled ? `+${matchRewardCount}` : 'manual'}
           Icon={Ticket}
           tone={matchRewardEnabled ? 'emerald' : 'violet'}
@@ -2422,13 +2601,14 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
             {REFERRAL_SWITCH_SETTINGS.slice(2).map(renderSwitchToggle)}
             {renderMarketingNumberField(
               REFERRAL_MATCH_REWARD_COUNT_KEY,
-              'Матчей пригласившему',
+              'Флетов пригласившему',
               'Начисляется один раз после первой оплаченной покупки приглашенного.',
               0,
-              1000,
+              10000,
               '0',
-              '',
+              ' фл.',
               Ticket,
+              0.01,
             )}
             <div
               aria-disabled="true"
@@ -2463,7 +2643,22 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
           onToggle={() => toggleAccordionSection('marketing', 'marketing-widgets')}
           dirty={saveMarketingWidgetsMutation.isPending}
         >
-          {renderMarketingWidgetsManager()}
+          <div className="space-y-6">
+            {renderMarketingWidgetsManager()}
+          </div>
+        </SettingsAccordionSection>
+
+        <SettingsAccordionSection
+          id="marketing-wheel"
+          title="Колесо Фортуны"
+          subtitle="Настройка призов и вероятностей выпадения"
+          badge="🎡"
+          Icon={Disc3}
+          tone="amber"
+          open={sectionIsOpen('marketing', 'marketing-wheel')}
+          onToggle={() => toggleAccordionSection('marketing', 'marketing-wheel')}
+        >
+          <AdminWheelSettings />
         </SettingsAccordionSection>
 
         <SettingsAccordionSection
@@ -2482,7 +2677,7 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
         <SettingsAccordionSection
           id="marketing-promos"
           title="Промокоды"
-          subtitle="Скидки и матчевые промо-коды"
+          subtitle="Скидки и флетовые промо-коды"
           badge="promo"
           Icon={Gift}
           tone="cyan"
@@ -2532,7 +2727,9 @@ export default function AdminSettings({ active = true }: AdminSettingsProps = {}
                       {event.status || 'approved'}
                     </span>
                     <span className="rounded-xl border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-emerald-100">
-                      +{event.matches_awarded} матч.
+                      {event.target_flats_awarded > 0
+                        ? `+${event.target_flats_awarded} фл.`
+                        : `+${event.matches_awarded} матч. (история)`}
                     </span>
                     <span className="rounded-xl border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-bold text-slate-400">
                       {event.created_at ? new Date(event.created_at).toLocaleDateString('ru-RU') : '—'}

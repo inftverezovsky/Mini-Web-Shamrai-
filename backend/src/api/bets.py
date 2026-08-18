@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status, UploadFile, File, Form, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -12,7 +12,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from src.models.database import get_db, get_read_db
-from src.models.models import User, Bookmaker, Bet, ForecastRequest, PaymentAttempt, Subscription, user_bets
+from src.models.models import User, Bookmaker, Bet, FlatSubscription, ForecastRequest, PaymentAttempt, Subscription, user_bets
 from src.schemas.schemas import (
     AdminAnalytics,
     BetCreate,
@@ -24,6 +24,7 @@ from src.schemas.schemas import (
     BetResolve,
     BetResponse,
     BetUpdate,
+    FlatStakeRequest,
     UserStats,
 )
 from src.api.deps import (
@@ -34,8 +35,15 @@ from src.api.deps import (
     get_current_user_read,
 )
 from src.api.payments import (
+    CHECKOUT_STATE_REQUIRES_RECONCILIATION,
     PAYMENT_PURCHASE_BET_HINT,
+    _checkout_request_hash,
     _create_payment_attempt,
+    _create_or_replay_telegram_checkout_url,
+    _load_checkout_attempt,
+    _lock_telegram_purchase_scope,
+    _recover_owner_active_telegram_attempt,
+    _telegram_checkout_replay_or_wait,
     create_telegram_stars_invoice_link,
 )
 from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
@@ -52,7 +60,16 @@ from src.core.message_templates import (
     render_message_template_body,
 )
 from src.core.telegram_delivery import is_personal_telegram_user_id
-from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, CHANNEL_VK_MESSAGE, enqueue_delivery
+from src.core.telegram_custom_emoji_entities import (
+    parse_custom_emoji_entities,
+)
+from src.services.delivery_outbox import (
+    CHANNEL_TELEGRAM_MESSAGE,
+    CHANNEL_VK_MESSAGE,
+    enqueue_delivery,
+)
+from src.services.feed_publication_broadcast import enqueue_feed_publication_broadcast
+from src.services import subscription_notifications
 from src.services.forecast_delivery import (
     FORECAST_STATUS_ANNOUNCED,
     FORECAST_STATUS_CANCELLED,
@@ -73,10 +90,20 @@ from src.services.match_access import (
     record_user_bet_access,
     record_user_free_bet_access,
 )
+from src.services.flat_subscriptions import (
+    FlatSubscriptionState,
+    activate_pending_flat_subscription_if_eligible,
+    flat_subscription_payload,
+    get_open_flat_subscription,
+    record_user_flat_bet_access,
+    refresh_flat_subscriptions_after_terminal_requests,
+    settle_flat_bet_takers,
+)
 from src.services.statistics import is_paid_client_access
 from src.services.coupon_uploads import store_coupon_image
 from src.services.signals import broadcast_live_signal, deliver_personal_signal
 from src.services.vk_delivery import html_to_vk_text, user_can_receive_vk_messages
+from src.services.telegram_custom_emoji_library import load_custom_emoji_library
 
 router = APIRouter(prefix="/bets", tags=["Bets"])
 
@@ -439,10 +466,17 @@ async def _stop_open_forecast_requests_after_result(
         )
     )
     stopped_requests = 0
+    affected_flat_subscription_ids: set[UUID] = set()
     for forecast_request in requests_result.scalars().all():
+        if forecast_request.flat_subscription_id is not None:
+            affected_flat_subscription_ids.add(forecast_request.flat_subscription_id)
         forecast_request.status = FORECAST_STATUS_REMOVED
         forecast_request.handled_by = handled_by
         stopped_requests += 1
+    await refresh_flat_subscriptions_after_terminal_requests(
+        db,
+        affected_flat_subscription_ids,
+    )
     return stopped_requests
 
 
@@ -512,10 +546,12 @@ async def _build_bet_response(
     admin: User,
     *,
     event_name: Optional[str],
+    event_name_entities: Optional[list[dict]] = None,
     coefficient: Decimal,
     bookmaker_id: Optional[int],
     bookmaker_ids: Optional[List[int]],
     description: Optional[str],
+    description_entities: Optional[list[dict]] = None,
     category: str,
     live_ends_at: Optional[datetime],
     price_stars: Optional[int],
@@ -528,6 +564,7 @@ async def _build_bet_response(
     bookmaker_links: Optional[object] = None,
     delivery_mode: str = "feed",
     publication_type: str = PUBLICATION_TYPE_FORECAST,
+    commit: bool = True,
 ) -> BetResponse:
     normalized_publication_type = _normalize_publication_type(publication_type)
     normalized_match_link = normalize_match_url(match_link)
@@ -553,9 +590,11 @@ async def _build_bet_response(
 
     bet = Bet(
         event_name=_event_name_or_placeholder(event_name),
+        event_name_entities=list(event_name_entities or []),
         coefficient=coefficient,
         bookmaker_id=primary_bookmaker_id,
         description=description,
+        description_entities=list(description_entities or []),
         category=category,
         live_ends_at=live_ends_at,
         price_stars=price_stars,
@@ -576,7 +615,10 @@ async def _build_bet_response(
     )
     bet.bookmakers = selected_bookmakers
     db.add(bet)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
 
     result = await db.execute(
         select(Bet)
@@ -587,13 +629,16 @@ async def _build_bet_response(
 
 
 async def has_active_subscription(user: User, db: AsyncSession) -> bool:
-    """Compatibility helper: access is now based on match balance or active guarantee."""
-    return (
+    """Compatibility helper for legacy match and current flat subscriptions."""
+    if (
         is_staff_role(user.role)
         or (user.purchased_bets_balance or 0) > 0
         or (user.matches_remaining or 0) > 0
         or bool(user.guarantee_active)
-    )
+    ):
+        return True
+    flat_subscription = await get_open_flat_subscription(db, user.telegram_id)
+    return bool(flat_subscription and flat_subscription.status == FlatSubscriptionState.ACTIVE.value)
 
 # --- SUBSCRIBER ENDPOINTS ---
 
@@ -742,6 +787,7 @@ async def get_bet_feed_page(
 @router.post("/{bet_id}/take", status_code=status.HTTP_200_OK)
 async def take_bet(
     bet_id: UUID,
+    payload: Optional[FlatStakeRequest] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -749,14 +795,75 @@ async def take_bet(
     bet = await load_locked_bet_for_user_access(db, bet_id)
     ensure_bet_eligible_for_user(bet=bet, user=current_user)
 
-    has_sub = await has_active_subscription(current_user, db)
+    flat_subscription = await get_open_flat_subscription(db, current_user.telegram_id)
+    has_open_flat_access = bool(
+        flat_subscription
+        and flat_subscription.status == FlatSubscriptionState.ACTIVE.value
+    )
+    has_legacy_access = bool(
+        is_staff_role(current_user.role)
+        or (current_user.purchased_bets_balance or 0) > 0
+        or (current_user.matches_remaining or 0) > 0
+        or current_user.guarantee_active
+    )
+    has_flat_access = has_open_flat_access and not has_legacy_access
+    has_sub = has_open_flat_access or has_legacy_access
     is_bet_free = (bet.price_stars is None or bet.price_stars == 0)
 
     if not has_sub and not is_bet_free:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Пополните абонемент матчами или купите этот прогноз за звезды"
+            detail="Оформите флетовый абонемент или купите этот прогноз отдельно"
         )
+
+    if has_flat_access and not is_staff_role(current_user.role):
+        if payload is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Укажите сумму фактической ставки",
+            )
+        request_result = await db.execute(
+            select(ForecastRequest).filter(
+                ForecastRequest.bet_id == bet.id,
+                ForecastRequest.user_id == current_user.telegram_id,
+            )
+        )
+        forecast_request = request_result.scalars().first()
+        if forecast_request is None:
+            forecast_request = ForecastRequest(
+                bet_id=bet.id,
+                user_id=current_user.telegram_id,
+                status="sent",
+                delivery_method="web",
+                responded_at=datetime.now(timezone.utc),
+                delivered_at=datetime.now(timezone.utc),
+            )
+            db.add(forecast_request)
+            await db.flush()
+        access_result = await record_user_flat_bet_access(
+            db,
+            user=current_user,
+            bet=bet,
+            stake_rub=payload.stake_rub,
+            forecast_request=forecast_request,
+            input_channel="web",
+        )
+        if forecast_request.status == FORECAST_STATUS_ANNOUNCED:
+            forecast_request.status = "sent"
+            forecast_request.delivery_method = "web"
+            forecast_request.responded_at = forecast_request.responded_at or datetime.now(timezone.utc)
+            forecast_request.delivered_at = datetime.now(timezone.utc)
+        await db.commit()
+        if access_result.already_recorded:
+            return {"status": "already_taken", "message": "Прогноз уже добавлен", "stake_rub": access_result.stake_rub}
+        await db.refresh(flat_subscription)
+        return {
+            "status": "success",
+            "message": "Прогноз добавлен в Мои ставки",
+            "stake_rub": access_result.stake_rub,
+            "stake_flats": access_result.stake_flats,
+            "flat_subscription": await flat_subscription_payload(db, flat_subscription),
+        }
 
     access_result = await record_user_bet_access(
         db,
@@ -795,6 +902,7 @@ async def unlock_free_bet(
 async def buy_bet_hint(
     bet_id: UUID,
     payload: BetHintRequest,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -809,59 +917,141 @@ async def buy_bet_hint(
             detail="Стоимость подсказки должна быть больше 0 XTR"
         )
 
-    bet = await load_locked_bet_for_user_access(db, bet_id)
-    ensure_bet_eligible_for_user(bet=bet, user=current_user)
-    await lock_user_balance(db, current_user.telegram_id)
+    provider = "telegram_stars"
+    payload_hash = _checkout_request_hash(
+        provider=provider,
+        user_id=current_user.telegram_id,
+        bet_id=bet_id,
+        purchase_type=PAYMENT_PURCHASE_BET_HINT,
+        amount_xtr=int(payload.amount_xtr),
+    )
 
-    prior_attempts = await db.execute(
-        select(PaymentAttempt).filter(
-            PaymentAttempt.user_id == current_user.telegram_id,
-            PaymentAttempt.bet_id == bet.id,
-            PaymentAttempt.provider == "telegram_stars",
-            PaymentAttempt.status.in_(("pending", "processing", "succeeded")),
+    # Keep the financial lock order identical to the single-bet checkout:
+    # PaymentAttempt scope first, then Bet, then User.
+    await _lock_telegram_purchase_scope(
+        db,
+        user_id=current_user.telegram_id,
+        bet_id=bet_id,
+        purchase_type=PAYMENT_PURCHASE_BET_HINT,
+    )
+    existing_checkout = await _load_checkout_attempt(
+        db,
+        user_id=current_user.telegram_id,
+        provider=provider,
+        checkout_intent_id=idempotency_key,
+        payload_hash=payload_hash,
+        for_update=True,
+    )
+    if existing_checkout is not None and existing_checkout.status in ("pending", "processing"):
+        recovered_checkout = await _recover_owner_active_telegram_attempt(
+            db,
+            user_id=current_user.telegram_id,
+            bet_id=bet_id,
+            purchase_type=PAYMENT_PURCHASE_BET_HINT,
+            payload_hash=payload_hash,
         )
+        if recovered_checkout is None or recovered_checkout.id != existing_checkout.id:
+            existing_checkout.checkout_state = CHECKOUT_STATE_REQUIRES_RECONCILIATION
+            if recovered_checkout is not None:
+                recovered_checkout.checkout_state = CHECKOUT_STATE_REQUIRES_RECONCILIATION
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Активные счета требуют ручной сверки",
+            )
+    elif existing_checkout is None:
+        existing_checkout = await _recover_owner_active_telegram_attempt(
+            db,
+            user_id=current_user.telegram_id,
+            bet_id=bet_id,
+            purchase_type=PAYMENT_PURCHASE_BET_HINT,
+            payload_hash=payload_hash,
+        )
+
+    if existing_checkout is not None:
+        attempt = existing_checkout
+        replay = await _telegram_checkout_replay_or_wait(db, attempt)
+        if replay is not None:
+            if not attempt.checkout_url:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Счет требует ручной сверки",
+                )
+            return BetHintInvoiceResponse(
+                bet_id=attempt.bet_id,
+                attempt_id=attempt.id,
+                invoice_url=attempt.checkout_url,
+                price_xtr=int(Decimal(attempt.amount)),
+            )
+        if (
+            attempt.bet_id != bet_id
+            or attempt.purchase_type_snapshot != PAYMENT_PURCHASE_BET_HINT
+        ):
+            attempt.checkout_state = CHECKOUT_STATE_REQUIRES_RECONCILIATION
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Снимок покупки требует ручной сверки",
+            )
+        bet = await load_locked_bet_for_user_access(db, attempt.bet_id)
+        ensure_bet_eligible_for_user(bet=bet, user=current_user)
+    else:
+        completed_attempt = await db.execute(
+            select(PaymentAttempt.id)
+            .filter(
+                PaymentAttempt.user_id == current_user.telegram_id,
+                PaymentAttempt.bet_id == bet_id,
+                PaymentAttempt.provider == provider,
+                PaymentAttempt.purchase_type_snapshot == PAYMENT_PURCHASE_BET_HINT,
+                PaymentAttempt.status == "succeeded",
+            )
+            .with_for_update()
+        )
+        if completed_attempt.first() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Подсказка уже оплачена",
+            )
+
+        bet = await load_locked_bet_for_user_access(db, bet_id)
+        ensure_bet_eligible_for_user(bet=bet, user=current_user)
+        await lock_user_balance(db, current_user.telegram_id)
+        attempt = await _create_payment_attempt(
+            db,
+            user=current_user,
+            provider=provider,
+            checkout_intent_id=idempotency_key,
+            checkout_payload_hash=payload_hash,
+            amount=Decimal(BET_HINT_PRICE_XTR),
+            currency="XTR",
+            bet_id=bet.id,
+            metadata={
+                "purchase_type": PAYMENT_PURCHASE_BET_HINT,
+                "requested_amount_xtr": int(payload.amount_xtr),
+                "price_xtr": BET_HINT_PRICE_XTR,
+            },
+        )
+    await db.commit()
+
+    attempt = await _create_or_replay_telegram_checkout_url(
+        db,
+        attempt=attempt,
+        title="Подсказка Shamrai",
+        description=f"Аналитическая подсказка по матчу: {bet.event_name}.",
+        label="Подсказка Shamrai",
+        invoice_creator=create_telegram_stars_invoice_link,
     )
-    has_hint_attempt = any(
-        (attempt.metadata_json or {}).get("purchase_type") == PAYMENT_PURCHASE_BET_HINT
-        for attempt in prior_attempts.scalars().all()
-    )
-    if has_hint_attempt:
+    if not attempt.checkout_url:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Оплата подсказки уже создана",
+            detail="Счет требует ручной сверки",
         )
-
-    attempt = await _create_payment_attempt(
-        db,
-        user=current_user,
-        provider="telegram_stars",
-        amount=Decimal(BET_HINT_PRICE_XTR),
-        currency="XTR",
-        bet_id=bet.id,
-        metadata={
-            "purchase_type": PAYMENT_PURCHASE_BET_HINT,
-            "requested_amount_xtr": int(payload.amount_xtr),
-            "price_xtr": BET_HINT_PRICE_XTR,
-        },
-    )
-    await db.commit()
-    try:
-        invoice_url = await create_telegram_stars_invoice_link(
-            attempt=attempt,
-            title="Подсказка Shamrai",
-            description=f"Аналитическая подсказка по матчу: {bet.event_name}.",
-            label="Подсказка Shamrai",
-        )
-    except Exception:
-        attempt.status = "failed"
-        await db.commit()
-        raise
 
     return BetHintInvoiceResponse(
         bet_id=bet.id,
         attempt_id=attempt.id,
-        invoice_url=invoice_url,
-        price_xtr=BET_HINT_PRICE_XTR,
+        invoice_url=attempt.checkout_url,
+        price_xtr=int(Decimal(attempt.amount)),
     )
 
 
@@ -1026,6 +1216,9 @@ async def create_bet_with_coupon(
     outcome: Optional[str] = Form(None, max_length=200),
     match_link: Optional[str] = Form(None, max_length=2048),
     publication_type: str = Form(PUBLICATION_TYPE_FORECAST, max_length=40),
+    event_name_entities: Optional[str] = Form(None),
+    description_entities: Optional[str] = Form(None),
+    broadcast_telegram: bool = Form(True),
     live_alarm: Optional[bool] = Form(False),
     coupon_image: Optional[UploadFile] = File(None),
     admin: User = Depends(get_current_admin),
@@ -1041,14 +1234,40 @@ async def create_bet_with_coupon(
         if selected_id not in selected_bookmaker_ids
     )
 
+    normalized_publication_type = _normalize_publication_type(publication_type)
+    parsed_event_name_entities: list[dict] = []
+    parsed_description_entities: list[dict] = []
+    should_broadcast_telegram = bool(broadcast_telegram)
+    if normalized_publication_type == PUBLICATION_TYPE_TEXT:
+        library = await load_custom_emoji_library(db)
+        allowed_custom_emoji_ids = {item.custom_emoji_id for item in library}
+        try:
+            parsed_event_name_entities = parse_custom_emoji_entities(
+                event_name_entities,
+                _event_name_or_placeholder(event_name),
+                allowed_custom_emoji_ids=allowed_custom_emoji_ids,
+            )
+            parsed_description_entities = parse_custom_emoji_entities(
+                description_entities,
+                description or "",
+                allowed_custom_emoji_ids=allowed_custom_emoji_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            )
+
     bet = await _build_bet_response(
         db,
         admin,
         event_name=event_name,
+        event_name_entities=parsed_event_name_entities,
         coefficient=coefficient,
         bookmaker_id=bookmaker_id,
         bookmaker_ids=selected_bookmaker_ids,
         description=description,
+        description_entities=parsed_description_entities,
         category=category,
         live_ends_at=live_ends_at,
         price_stars=price_stars,
@@ -1059,8 +1278,13 @@ async def create_bet_with_coupon(
         coupon_image_url=coupon_image_url,
         match_link=match_link,
         bookmaker_links=_bookmaker_links_from_form(form),
-        publication_type=publication_type,
+        publication_type=normalized_publication_type,
+        commit=not should_broadcast_telegram,
     )
+
+    if should_broadcast_telegram:
+        await enqueue_feed_publication_broadcast(db, bet)
+        await db.commit()
 
     if live_alarm and _is_forecast_publication(bet):
         res_users = await db.execute(select(User))
@@ -1104,6 +1328,7 @@ async def update_bet(
 
     if "event_name" in update_payload:
         bet.event_name = _event_name_or_placeholder(bet_data.event_name)
+        bet.event_name_entities = []
 
     if "coefficient" in update_payload:
         if bet_data.coefficient is None:
@@ -1132,6 +1357,8 @@ async def update_bet(
                         detail="Некорректная ссылка на матч",
                     )
             setattr(bet, field_name, clean_value or None)
+            if field_name == "description":
+                bet.description_entities = []
 
     if "publication_type" in update_payload:
         bet.publication_type = _normalize_publication_type(bet_data.publication_type)
@@ -1294,6 +1521,44 @@ async def resolve_bet(
         bet=bet,
         handled_by=admin.telegram_id,
     )
+    flat_settlement_updates = await settle_flat_bet_takers(
+        db,
+        bet=bet,
+        result_status=resolution.status,
+        actor_id=admin.telegram_id,
+    )
+    if flat_settlement_updates:
+        flat_user_ids = sorted({item.user_id for item in flat_settlement_updates})
+        flat_users = {
+            item.telegram_id: item
+            for item in (
+                await db.execute(select(User).filter(User.telegram_id.in_(flat_user_ids)))
+            ).scalars().all()
+        }
+        flat_subscription_ids = sorted(
+            {item.flat_subscription_id for item in flat_settlement_updates},
+            key=str,
+        )
+        flat_subscriptions = {
+            item.id: item
+            for item in (
+                await db.execute(
+                    select(FlatSubscription).filter(FlatSubscription.id.in_(flat_subscription_ids))
+                )
+            ).scalars().all()
+        }
+        for settlement in flat_settlement_updates:
+            client = flat_users.get(settlement.user_id)
+            client_subscription = flat_subscriptions.get(settlement.flat_subscription_id)
+            if client is None or client_subscription is None or is_staff_role(client.role):
+                continue
+            await subscription_notifications.enqueue_flat_settlement_notification(
+                db,
+                user=client,
+                bet=bet,
+                flat_subscription=client_subscription,
+                settlement=settlement,
+            )
 
     supercompensation_count = 0
     refund_count = 0
@@ -1324,6 +1589,10 @@ async def resolve_bet(
         for user_id, match_charged, access_type in sorted(takers, key=lambda row: int(row[0])):
             user = users_by_id.get(user_id)
             if not user or is_staff_role(user.role):
+                continue
+
+            if access_type == "flat_subscription":
+                await activate_pending_flat_subscription_if_eligible(db, user=user)
                 continue
 
             if resolution.status == "loss" and match_charged and access_type == "paid_match":
@@ -1392,6 +1661,8 @@ async def resolve_bet(
                     status_value="refund",
                     dedupe_suffix="refund",
                 )
+
+            await activate_pending_flat_subscription_if_eligible(db, user=user)
 
         client_taker_count = await count_client_bet_takers(db, bet_id)
         await enqueue_admin_group_forecast_result_notification(

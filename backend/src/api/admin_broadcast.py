@@ -19,7 +19,7 @@ from uuid import UUID
 from typing import Optional, List
 
 from src.models.database import get_db, get_read_db
-from src.models.models import AdminAuditLog, Bookmaker, ForecastRequest, User, Bet
+from src.models.models import AdminAuditLog, Bookmaker, FlatSubscription, ForecastRequest, User, Bet
 from src.api.deps import get_current_admin_read, get_current_privileged_admin
 from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
 from src.core.config import settings
@@ -33,7 +33,7 @@ from src.core.message_templates import (
 from src.core.quiet_hours import current_notification_time, user_is_in_quiet_hours
 from src.core.roles import STAFF_ROLES
 from src.core.telegram_delivery import user_can_receive_personal_telegram
-from src.core.telegram_text import append_contact_footer
+from src.core.telegram_text import append_contact_footer, decor_custom_emoji, sport_custom_emoji
 from src.schemas.schemas import BetResponse, ForecastRequestResponse
 from src.services.forecast_delivery import (
     FORECAST_STATUS_ANNOUNCED,
@@ -63,6 +63,7 @@ from src.services.forecast_delivery import (
 )
 from src.services.telegram_bot import call_telegram_api
 from src.services.match_access import revoke_user_bet_access
+from src.services.flat_subscriptions import refresh_flat_subscriptions_after_terminal_requests
 from src.services.signals import broadcast_personal_signals
 from src.services.system_settings import is_system_setting_enabled
 from src.services.coupon_uploads import store_coupon_image
@@ -566,6 +567,19 @@ async def _get_target_users(
     if delivery_channel == "telegram":
         filters.append(User.telegram_id > 0)
 
+    only_active_subscribers = await is_system_setting_enabled(db, "BROADCAST_ONLY_ACTIVE_SUBSCRIBERS")
+    if only_active_subscribers:
+        active_flat_exists = select(FlatSubscription.id).where(
+            FlatSubscription.user_id == User.telegram_id,
+            FlatSubscription.status == "active",
+        ).exists()
+        filters.append(
+            (User.purchased_bets_balance >= 1)
+            | (User.matches_remaining >= 1)
+            | (User.guarantee_active == True)
+            | active_flat_exists
+        )
+
     query = (
         select(User)
         .filter(*filters)
@@ -848,7 +862,8 @@ async def create_announcement(
         "flash_sale": "⚡",
         "urgent": "🚨"
     }
-    emoji = type_emoji.get(announcement_type, "📢")
+    fallback_emoji = type_emoji.get(announcement_type, "📢")
+    emoji = decor_custom_emoji(announcement_type, fallback_emoji)
     
     body_text = (body or "").strip()
     if not body_text:
@@ -860,17 +875,30 @@ async def create_announcement(
         body_text = " ".join(fallback_parts) + "."
 
     normalized_match_link = normalize_match_url(match_link)
-    bookmaker_line = (
-        f"🏦 БК: <b>{html.escape(selected_bookmaker_names, quote=True)}</b>"
-        if selected_bookmaker_names
-        else ""
-    )
+    context_lines = []
+    if sport_filter:
+        context_lines.append(
+            f"{sport_custom_emoji(sport_filter)} Спорт: "
+            f"<b>{html.escape(str(sport_filter), quote=True)}</b>"
+        )
+    if selected_bookmaker_names:
+        context_lines.append(
+            f"{decor_custom_emoji('bookmaker', '🏦')} БК: "
+            f"<b>{html.escape(selected_bookmaker_names, quote=True)}</b>"
+        )
+    bookmaker_line = "\n".join(context_lines)
     match_link_line = (
-        f"🔗 <a href=\"{html.escape(normalized_match_link, quote=True)}\">Перейти к матчу</a>"
+        f"{decor_custom_emoji('link', '🔗')} "
+        f"<a href=\"{html.escape(normalized_match_link, quote=True)}\">Перейти к матчу</a>"
         if normalized_match_link
         else ""
     )
-    coefficient_line = f"📊 Коэффициент: <b>{html.escape(str(min_coef), quote=True)}</b>" if min_coef else ""
+    coefficient_line = (
+        f"{decor_custom_emoji('coefficient', '📊')} Коэффициент: "
+        f"<b>{html.escape(str(min_coef), quote=True)}</b>"
+        if min_coef
+        else ""
+    )
     message_text = await render_message_template(
         db,
         TEMPLATE_ANNOUNCEMENT,
@@ -883,7 +911,7 @@ async def create_announcement(
             "coefficient_line": coefficient_line,
             "contact_footer": append_contact_footer("").strip(),
         },
-        safe_keys={"bookmaker_line", "match_link_line", "coefficient_line", "contact_footer"},
+        safe_keys={"emoji", "bookmaker_line", "match_link_line", "coefficient_line", "contact_footer"},
     )
 
     # Dispatch to subscribers in limited parallel batches so the admin UI does not wait on every Telegram call serially.
@@ -1461,6 +1489,8 @@ async def list_forecast_requests(
         select(ForecastRequest)
         .options(
             selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
+            selectinload(ForecastRequest.flat_subscription),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
         )
@@ -1504,6 +1534,8 @@ async def list_forecast_requests_page(
         .filter(*filters)
         .options(
             selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
+            selectinload(ForecastRequest.flat_subscription),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
         )
@@ -1751,14 +1783,22 @@ async def stop_forecast_broadcast_from_admin(
 
     stopped_requests = 0
     skipped_processing = 0
+    affected_flat_subscription_ids: set[UUID] = set()
     for forecast_request in forecast_requests:
         if forecast_request.status == FORECAST_STATUS_PROCESSING:
             skipped_processing += 1
             continue
         if forecast_request.status in stoppable_statuses:
+            if forecast_request.flat_subscription_id is not None:
+                affected_flat_subscription_ids.add(forecast_request.flat_subscription_id)
             forecast_request.status = FORECAST_STATUS_REMOVED
             forecast_request.handled_by = current_admin.telegram_id
             stopped_requests += 1
+
+    await refresh_flat_subscriptions_after_terminal_requests(
+        db,
+        affected_flat_subscription_ids,
+    )
 
     await enqueue_admin_group_forecast_stopped_notification(
         db,
@@ -1923,6 +1963,7 @@ async def remove_forecast_request_client_from_admin(
         )
     if forecast_request.status != FORECAST_STATUS_REMOVED:
         previous_status = forecast_request.status
+        affected_flat_subscription_id = forecast_request.flat_subscription_id
         revoke_result = await revoke_user_bet_access(
             db,
             user=forecast_request.user,
@@ -1932,6 +1973,10 @@ async def remove_forecast_request_client_from_admin(
         )
         forecast_request.status = FORECAST_STATUS_REMOVED
         forecast_request.handled_by = current_admin.telegram_id
+        await refresh_flat_subscriptions_after_terminal_requests(
+            db,
+            [affected_flat_subscription_id],
+        )
         if revoke_result.had_access:
             if forecast_request.balance_before is None:
                 forecast_request.balance_before = revoke_result.balance_before

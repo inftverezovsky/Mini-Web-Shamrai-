@@ -1,7 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Gamepad2, Gift, Ticket, Star, Percent, Coins, Send } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Gamepad2, Gift, Ticket, Star, Percent, Coins, Send, Trophy, Zap, Crown, Heart, Flame, Target, Award, Diamond, Sparkles, Tag } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
-import { WheelOfFortuneResponse } from '../../schemas/schemas';
+import { WheelOfFortuneResponse, WheelConfigPayload, WheelPrizeConfig } from '../../schemas/schemas';
 import { notifySuccess, notifyError } from '../../utils/notify';
 import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 
@@ -9,38 +9,76 @@ interface ActivitiesProps {
   active: boolean;
 }
 
-const PRIZE_TYPES: Record<string, { label: string; sub: string; color: string; icon: React.ElementType }> = {
-  'post_payment_top_error': { 
-    label: 'Топ Ошибка', sub: 'на послеоплату', color: 'from-amber-300 to-yellow-600', icon: Star 
-  },
-  'discount_70': { 
-    label: 'Скидка 70%', sub: 'на абонемент', color: 'from-purple-400 to-indigo-600', icon: Percent 
-  },
-  'bonus_1000': { 
-    label: '1000 бонусов', sub: 'на топ ошибку', color: 'from-slate-400 to-slate-600', icon: Coins 
-  },
-  'discount_50': { 
-    label: 'Скидка 50%', sub: 'на абонемент', color: 'from-cyan-400 to-blue-600', icon: Percent 
-  },
-  'discount_30': { 
-    label: 'Скидка 30%', sub: 'на абонемент', color: 'from-emerald-400 to-green-600', icon: Percent 
-  },
-  'match_gift': { 
-    label: 'Матч в подарок', sub: 'к абонементу', color: 'from-slate-300 to-slate-500', icon: Gift 
-  },
+const ICON_MAP: Record<string, React.ElementType> = {
+  Star, Percent, Coins, Gift, Trophy, Zap, Crown, Heart, Flame, Target, Award, Diamond, Sparkles, Tag
 };
 
-const ITEM_WIDTH = 140;
-const ITEM_GAP = 12; 
-const TOTAL_WIDTH = ITEM_WIDTH + ITEM_GAP;
+// Fallback if backend config not loaded
+const DEFAULT_PRIZES: WheelPrizeConfig[] = [
+  { id: 'post_payment_top_error', label: 'Топ Ошибка', sub: 'на послеоплату', color: 'from-amber-300 to-yellow-600', icon: 'Star', probability: 50, reward_type: 'post_payment_match', reward_value: 0 },
+  { id: 'discount_70', label: 'Скидка 70%', sub: 'на абонемент', color: 'from-purple-400 to-indigo-600', icon: 'Percent', probability: 20, reward_type: 'discount', reward_value: 70 },
+  { id: 'bonus_1000', label: '1000 бонусов', sub: 'на топ ошибку', color: 'from-slate-400 to-slate-600', icon: 'Coins', probability: 15, reward_type: 'bonus_1000', reward_value: 1000 },
+  { id: 'discount_50', label: 'Скидка 50%', sub: 'на абонемент', color: 'from-cyan-400 to-blue-600', icon: 'Percent', probability: 15, reward_type: 'discount', reward_value: 50 },
+];
+
 const INITIAL_INDEX = 5;
-const WIN_INDEX = 80; 
+const WIN_INDEX = 80;
 const TOTAL_ITEMS = 100;
 const LOGO_URL = "/brand/shamrai-channel-emblem.png";
 
-const generateRandomItems = () => {
-  const keys = Object.keys(PRIZE_TYPES);
-  return Array.from({ length: TOTAL_ITEMS }).map(() => keys[Math.floor(Math.random() * keys.length)]);
+/** Compute item dimensions from container width so 4-5+ prizes are visible. */
+const computeDims = (containerW: number) => {
+  if (containerW < 360)  return { itemWidth: 72,  itemGap: 6  };
+  if (containerW < 480)  return { itemWidth: 84,  itemGap: 8  };
+  if (containerW < 640)  return { itemWidth: 105, itemGap: 10 };
+  return { itemWidth: 140, itemGap: 12 };
+};
+
+/**
+ * Builds the visual strip for the roulette animation.
+ * Cycles through prizes in a shuffled order so that no two adjacent
+ * items ever show the same prize. The actual winning prize is determined
+ * by the backend (weighted probability) and injected at WIN_INDEX later.
+ */
+const generateRandomItems = (prizes: WheelPrizeConfig[]): string[] => {
+  if (prizes.length === 0) return [];
+  if (prizes.length === 1) return Array.from({ length: TOTAL_ITEMS }, () => prizes[0].id);
+
+  const result: string[] = [];
+
+  // Build a shuffled deck, then deal cards from it round-robin.
+  // When the deck is exhausted, re-shuffle — but guarantee the last
+  // card of the previous deck !== first card of the new one.
+  let deck: string[] = [];
+  const shuffle = (arr: string[]) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  };
+
+  const makeDeck = () => {
+    const d = prizes.map(p => p.id);
+    shuffle(d);
+    return d;
+  };
+
+  deck = makeDeck();
+
+  for (let i = 0; i < TOTAL_ITEMS; i++) {
+    if (deck.length === 0) {
+      deck = makeDeck();
+      // Avoid repeating the last placed item
+      if (result.length > 0 && deck[0] === result[result.length - 1]) {
+        // Swap first element with a random later one
+        const swapIdx = 1 + Math.floor(Math.random() * (deck.length - 1));
+        [deck[0], deck[swapIdx]] = [deck[swapIdx], deck[0]];
+      }
+    }
+    result.push(deck.shift()!);
+  }
+
+  return result;
 };
 
 export default function Activities({ active }: ActivitiesProps) {
@@ -48,20 +86,31 @@ export default function Activities({ active }: ActivitiesProps) {
   const [offset, setOffset] = useState(0);
   const [isSpinning, setIsSpinning] = useState(false);
   const [result, setResult] = useState<WheelOfFortuneResponse | null>(null);
+  const [wheelConfig, setWheelConfig] = useState<WheelPrizeConfig[]>(DEFAULT_PRIZES);
   
   // Status state
-  const [wheelStatus, setWheelStatus] = useState<{ can_spin: boolean; next_spin_at: string | null } | null>(null);
+  const [wheelStatus, setWheelStatus] = useState<{ can_spin: boolean; is_enabled?: boolean; next_spin_at: string | null; disabled_reason?: string } | null>(null);
   const [timeLeftStr, setTimeLeftStr] = useState<string>('');
+  const [dims, setDims] = useState({ itemWidth: 84, itemGap: 8 });
 
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const resetPosition = () => {
-    if (containerRef.current) {
-      const containerW = containerRef.current.offsetWidth;
-      const initialOffset = (INITIAL_INDEX * TOTAL_WIDTH) - (containerW / 2) + (ITEM_WIDTH / 2);
-      setOffset(initialOffset);
-    }
-  };
+  // Recompute item dimensions when container resizes
+  const refreshDims = useCallback(() => {
+    if (!containerRef.current) return;
+    const w = containerRef.current.offsetWidth;
+    setDims(computeDims(w));
+  }, []);
+
+  const resetPosition = useCallback(() => {
+    if (!containerRef.current) return;
+    const containerW = containerRef.current.offsetWidth;
+    const d = computeDims(containerW);
+    setDims(d);
+    const totalW = d.itemWidth + d.itemGap;
+    const initialOffset = (INITIAL_INDEX * totalW) - (containerW / 2) + (d.itemWidth / 2);
+    setOffset(initialOffset);
+  }, []);
 
   useEffect(() => {
     if (active) {
@@ -69,17 +118,29 @@ export default function Activities({ active }: ActivitiesProps) {
         .then(res => setWheelStatus(res))
         .catch(err => {
           console.error(err);
-          // If backend fails (e.g. not reloaded yet), default to allowing spin
-          setWheelStatus({ can_spin: true, next_spin_at: null });
+          // If backend fails, default to allowing spin
+          setWheelStatus({ can_spin: true, is_enabled: true, next_spin_at: null });
         });
+
+      apiFetch<WheelConfigPayload>('/marketing/wheel-config')
+        .then(res => {
+          if (res && res.prizes && res.prizes.length > 0) {
+            setWheelConfig(res.prizes);
+          }
+        })
+        .catch(err => console.error("Failed to load wheel config", err));
     }
-    if (active && items.length === 0) {
-      setItems(generateRandomItems());
+  }, [active]);
+
+  useEffect(() => {
+    if (active && items.length === 0 && wheelConfig.length > 0) {
+      setItems(generateRandomItems(wheelConfig));
       setTimeout(resetPosition, 50);
-      window.addEventListener('resize', resetPosition);
-      return () => window.removeEventListener('resize', resetPosition);
+      const onResize = () => { refreshDims(); resetPosition(); };
+      window.addEventListener('resize', onResize);
+      return () => window.removeEventListener('resize', onResize);
     }
-  }, [active, items.length]);
+  }, [active, items.length, wheelConfig, resetPosition, refreshDims]);
 
   // Update countdown
   useEffect(() => {
@@ -106,7 +167,7 @@ export default function Activities({ active }: ActivitiesProps) {
     setResult(null);
     setIsSpinning(false); 
     resetPosition();
-    setItems(generateRandomItems()); 
+    setItems(generateRandomItems(wheelConfig));
     
     await new Promise(r => setTimeout(r, 50));
 
@@ -114,11 +175,13 @@ export default function Activities({ active }: ActivitiesProps) {
     setIsSpinning(true);
     if (!containerRef.current) return;
     const containerW = containerRef.current.offsetWidth;
+    const d = computeDims(containerW);
+    const totalW = d.itemWidth + d.itemGap;
     const centerPoint = containerW / 2;
-    const itemCenter = ITEM_WIDTH / 2;
+    const itemCenter = d.itemWidth / 2;
     
-    const stopOffset = (Math.random() - 0.5) * (ITEM_WIDTH - 20); 
-    const targetOffset = (WIN_INDEX * TOTAL_WIDTH) - centerPoint + itemCenter + stopOffset;
+    const stopOffset = (Math.random() - 0.5) * (d.itemWidth - 16);
+    const targetOffset = (WIN_INDEX * totalW) - centerPoint + itemCenter + stopOffset;
     
     setOffset(targetOffset);
     const spinStartTime = Date.now();
@@ -129,10 +192,27 @@ export default function Activities({ active }: ActivitiesProps) {
         method: 'POST',
       });
       
-      // 4. Inject winner at index 80 (it is still off-screen)
+      // 4. Inject winner at WIN_INDEX and ensure neighbours differ
       setItems(prev => {
         const newItems = [...prev];
-        newItems[WIN_INDEX] = res.reward_type || 'post_payment_top_error';
+        const winnerId = res.reward_type || 'post_payment_top_error';
+        newItems[WIN_INDEX] = winnerId;
+
+        // Make sure adjacent items are different from the winner
+        const otherPrizes = wheelConfig
+          .map(p => p.id)
+          .filter(id => id !== winnerId);
+        if (otherPrizes.length > 0) {
+          // Fix left neighbour
+          if (WIN_INDEX > 0 && newItems[WIN_INDEX - 1] === winnerId) {
+            newItems[WIN_INDEX - 1] = otherPrizes[Math.floor(Math.random() * otherPrizes.length)];
+          }
+          // Fix right neighbour
+          if (WIN_INDEX < newItems.length - 1 && newItems[WIN_INDEX + 1] === winnerId) {
+            newItems[WIN_INDEX + 1] = otherPrizes[Math.floor(Math.random() * otherPrizes.length)];
+          }
+        }
+
         return newItems;
       });
       
@@ -187,20 +267,21 @@ export default function Activities({ active }: ActivitiesProps) {
             </p>
           </div>
 
-          <div className="relative w-full h-52 sm:h-64 mb-8 bg-slate-900 border-y border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.6)] overflow-hidden rounded-xl" ref={containerRef}>
+          <div className="relative w-full h-36 sm:h-52 md:h-64 mb-8 bg-slate-900 border-y border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.6)] overflow-hidden rounded-xl" ref={containerRef}>
             
             <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] pointer-events-none grayscale">
               <img src={LOGO_URL} alt="" className="w-64 h-64 object-cover" />
             </div>
 
-            <div className="absolute inset-y-0 left-0 w-16 bg-gradient-to-r from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
-            <div className="absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
+            <div className="absolute inset-y-0 left-0 w-12 sm:w-16 bg-gradient-to-r from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
+            <div className="absolute inset-y-0 right-0 w-12 sm:w-16 bg-gradient-to-l from-slate-900 via-slate-900/80 to-transparent z-10 pointer-events-none" />
             
-            <div className="absolute top-0 left-1/2 w-0 h-0 border-l-[10px] border-r-[10px] border-t-[14px] border-l-transparent border-r-transparent border-t-amber-400 z-20 -translate-x-1/2 drop-shadow-[0_2px_5px_rgba(0,0,0,0.5)]" />
-            <div className="absolute bottom-0 left-1/2 w-0 h-0 border-l-[10px] border-r-[10px] border-b-[14px] border-l-transparent border-r-transparent border-b-amber-400 z-20 -translate-x-1/2 drop-shadow-[0_-2px_5px_rgba(0,0,0,0.5)]" />
+            <div className="absolute top-0 left-1/2 w-0 h-0 border-l-[8px] sm:border-l-[10px] border-r-[8px] sm:border-r-[10px] border-t-[11px] sm:border-t-[14px] border-l-transparent border-r-transparent border-t-amber-400 z-20 -translate-x-1/2 drop-shadow-[0_2px_5px_rgba(0,0,0,0.5)]" />
+            <div className="absolute bottom-0 left-1/2 w-0 h-0 border-l-[8px] sm:border-l-[10px] border-r-[8px] sm:border-r-[10px] border-b-[11px] sm:border-b-[14px] border-l-transparent border-r-transparent border-b-amber-400 z-20 -translate-x-1/2 drop-shadow-[0_-2px_5px_rgba(0,0,0,0.5)]" />
 
             <motion.div 
-              className="flex items-center gap-3 h-full"
+              className="flex items-center h-full"
+              style={{ gap: dims.itemGap }}
               animate={{ x: -offset }}
               transition={
                 isSpinning 
@@ -208,30 +289,44 @@ export default function Activities({ active }: ActivitiesProps) {
                   : { duration: 0 }
               }
             >
-              {items.map((key, i) => {
-                const prize = PRIZE_TYPES[key] || PRIZE_TYPES['match_gift'];
-                const Icon = prize.icon;
+              {items.map((item, index) => {
+                const prizeConfig = wheelConfig.find(p => p.id === item) || DEFAULT_PRIZES[0];
+                const IconComponent = ICON_MAP[prizeConfig.icon] || Star;
+                const isCompact = dims.itemWidth < 100;
+
                 return (
                   <div 
-                    key={i} 
-                    style={{ width: ITEM_WIDTH, minWidth: ITEM_WIDTH }} 
-                    className="relative h-40 rounded bg-slate-800/80 border border-slate-700 shrink-0 overflow-hidden shadow-inner flex flex-col items-center justify-center p-3"
+                    key={`${index}-${item}`}
+                    style={{ width: dims.itemWidth, minWidth: dims.itemWidth }}
+                    className={`relative rounded bg-slate-800/80 border border-slate-700 shrink-0 overflow-hidden shadow-inner flex flex-col items-center justify-center ${
+                      isCompact ? 'h-24 p-1.5' : 'h-40 p-3'
+                    }`}
                   >
-                    <div className={`absolute top-0 inset-x-0 h-full bg-gradient-to-b ${prize.color} opacity-[0.15] pointer-events-none mix-blend-screen`} />
+                    <div className={`absolute top-0 inset-x-0 h-full bg-gradient-to-b ${prizeConfig.color} opacity-[0.15] pointer-events-none mix-blend-screen`} />
                     
-                    <div className="relative w-14 h-14 mb-2 z-10 flex items-center justify-center">
-                      <div className={`absolute inset-0 bg-gradient-to-b ${prize.color} blur-xl opacity-40 rounded-full`} />
-                      <Icon className="w-10 h-10 text-white opacity-95 drop-shadow-lg z-10" />
+                    <div className={`relative z-10 flex items-center justify-center ${
+                      isCompact ? 'w-8 h-8 mb-1' : 'w-14 h-14 mb-2'
+                    }`}>
+                      <div className={`absolute inset-0 bg-gradient-to-b ${prizeConfig.color} blur-xl opacity-40 rounded-full`} />
+                      <IconComponent className={`text-white opacity-95 drop-shadow-lg z-10 ${
+                        isCompact ? 'w-6 h-6' : 'w-10 h-10'
+                      }`} />
                     </div>
                     
-                    <span className="text-[12px] font-black text-center text-white leading-tight z-10 drop-shadow-md">
-                      {prize.label}
+                    <span className={`font-black text-center text-white leading-tight z-10 drop-shadow-md ${
+                      isCompact ? 'text-[9px]' : 'text-[12px]'
+                    }`}>
+                      {prizeConfig.label}
                     </span>
-                    <span className="text-[10px] font-semibold text-center text-slate-300 z-10 mt-1 drop-shadow-sm">
-                      {prize.sub}
-                    </span>
+                    {!isCompact && (
+                      <span className="text-[10px] font-semibold text-center text-slate-300 z-10 mt-1 drop-shadow-sm">
+                        {prizeConfig.sub}
+                      </span>
+                    )}
                     
-                    <div className={`absolute bottom-0 left-0 right-0 h-[6px] bg-gradient-to-r ${prize.color} shadow-[0_-2px_10px_rgba(0,0,0,0.3)]`} />
+                    <div className={`absolute bottom-0 left-0 right-0 bg-gradient-to-r ${prizeConfig.color} shadow-[0_-2px_10px_rgba(0,0,0,0.3)] ${
+                      isCompact ? 'h-[4px]' : 'h-[6px]'
+                    }`} />
                   </div>
                 );
               })}
@@ -242,6 +337,16 @@ export default function Activities({ active }: ActivitiesProps) {
           <div className="flex flex-col gap-4">
             {wheelStatus === null ? (
               <div className="h-14 flex items-center justify-center opacity-50">Загрузка...</div>
+            ) : wheelStatus.is_enabled === false ? (
+              <div className="w-full max-w-sm mx-auto p-5 text-center rounded-2xl bg-slate-900/90 border border-slate-700/50 shadow-lg">
+                <div className="mx-auto w-12 h-12 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400 mb-3">
+                  <Gamepad2 className="w-6 h-6 opacity-60" />
+                </div>
+                <h3 className="text-base font-black text-white mb-1">Активность выключена</h3>
+                <p className="text-xs text-slate-400 font-medium leading-relaxed">
+                  {wheelStatus.disabled_reason || 'Колесо Фортуны сейчас недоступно.'}
+                </p>
+              </div>
             ) : (
               <>
                 {/* Timer block, shown if the user cannot spin natively */}

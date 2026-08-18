@@ -11,6 +11,7 @@ from src.api import payments
 from src.models.database import Base
 from src.models.models import (
     Bet,
+    FlatSubscription,
     MarketingWidgetConfig,
     MarketingRewardEvent,
     MatchBalanceLog,
@@ -63,7 +64,7 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     await system_settings.update_admin_system_settings(
                         session,
-                        [{"key": "REFERRAL_MATCH_REWARD_COUNT", "value": "1001"}],
+                        [{"key": "REFERRAL_MATCH_REWARD_COUNT", "value": "10000.01"}],
                     )
 
     async def test_custom_referral_discount_settings_drive_referral_stats(self):
@@ -124,6 +125,9 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
                 amount=Decimal("100.00"),
                 currency="RUB",
                 status="pending",
+                plan_name_snapshot=plan.name,
+                entitlement_type_snapshot="legacy_match",
+                match_count_snapshot=plan.match_count,
                 metadata_json={},
             )
             session.add_all([
@@ -176,6 +180,9 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
                 amount=Decimal("100.00"),
                 currency="RUB",
                 status="pending",
+                plan_name_snapshot=plan.name,
+                entitlement_type_snapshot="legacy_match",
+                match_count_snapshot=plan.match_count,
                 metadata_json={},
             )
             session.add_all([
@@ -230,6 +237,74 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["matches_awarded_total"], 2)
         self.assertEqual(summary["recent_events"][0]["matches_awarded"], 2)
 
+    async def test_new_flat_purchase_awards_referrer_target_flats(self):
+        async with self.Session() as session:
+            referrer = User(telegram_id=110, username="flat_referrer", purchased_bets_balance=0, matches_remaining=0)
+            invited = User(telegram_id=211, referred_by_user_id=referrer.telegram_id)
+            plan = SubscriptionPlan(
+                id=11,
+                name="Flat target",
+                duration_days=0,
+                match_count=0,
+                entitlement_type="flat",
+                target_flats=Decimal("3.00"),
+                price=Decimal("100.00"),
+                currency="RUB",
+                is_active=True,
+            )
+            attempt = PaymentAttempt(
+                user_id=invited.telegram_id,
+                plan_id=plan.id,
+                provider="yookassa",
+                amount=Decimal("100.00"),
+                currency="RUB",
+                status="pending",
+                plan_name_snapshot=plan.name,
+                entitlement_type_snapshot="flat",
+                target_flats_snapshot=Decimal("3.00"),
+                match_count_snapshot=0,
+                metadata_json={},
+            )
+            session.add_all([
+                referrer,
+                invited,
+                plan,
+                attempt,
+                SystemSetting(key="REFERRAL_PROGRAM_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_MATCH_REWARD_ENABLED", value="true"),
+                SystemSetting(key="REFERRAL_MATCH_REWARD_COUNT", value="2.25"),
+            ])
+            await session.commit()
+
+            # A later tariff edit must not alter either the purchased
+            # entitlement or the associated referral reward.
+            plan.entitlement_type = "legacy_match"
+            plan.target_flats = None
+            plan.match_count = 99
+            await session.commit()
+
+            result = await payments._process_payment_attempt(
+                session,
+                attempt_id=attempt.id,
+                provider="yookassa",
+                provider_payment_id="flat-payment-1",
+                amount=Decimal("100.00"),
+                currency="RUB",
+            )
+            await session.commit()
+
+            event = (await session.execute(select(ReferralRewardEvent))).scalars().one()
+            subscriptions = list((await session.execute(select(FlatSubscription))).scalars().all())
+            referrer_subscription = next(item for item in subscriptions if item.user_id == referrer.telegram_id)
+            summary = await admin_api.admin_referrals_summary(admin=referrer, db=session)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(event.matches_awarded, 0)
+        self.assertEqual(event.target_flats_awarded, Decimal("2.25"))
+        self.assertEqual(referrer_subscription.target_flats, Decimal("2.25"))
+        self.assertEqual(referrer_subscription.status, "pending_setup")
+        self.assertEqual(summary["target_flats_awarded_total"], Decimal("2.25"))
+
     async def test_same_device_referral_is_held_and_does_not_increase_discount(self):
         async with self.Session() as session:
             referrer = User(telegram_id=100, username="referrer", purchased_bets_balance=0, matches_remaining=0)
@@ -250,6 +325,9 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
                 amount=Decimal("100.00"),
                 currency="RUB",
                 status="pending",
+                plan_name_snapshot=plan.name,
+                entitlement_type_snapshot="legacy_match",
+                match_count_snapshot=plan.match_count,
                 metadata_json={},
             )
             session.add_all([
@@ -292,7 +370,7 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed_referrer.matches_remaining, 0)
         self.assertEqual(balance_logs, [])
 
-    async def test_admin_approve_held_referral_awards_match_reward_once(self):
+    async def test_admin_approve_held_referral_awards_flat_target_once(self):
         async with self.Session() as session:
             admin = User(telegram_id=1, username="admin", role="admin")
             referrer = User(telegram_id=100, username="referrer", purchased_bets_balance=1, matches_remaining=1)
@@ -325,6 +403,9 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
 
             refreshed_referrer = await session.get(User, referrer.telegram_id)
             refreshed_event = await session.get(ReferralRewardEvent, event.id)
+            flat_subscriptions = list(
+                (await session.execute(select(FlatSubscription))).scalars().all()
+            )
             balance_logs = (
                 await session.execute(
                     select(MatchBalanceLog).filter(MatchBalanceLog.event_type == "referral_match_reward")
@@ -334,10 +415,13 @@ class ReferralProgramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["status"], "approved")
         self.assertEqual(second["status"], "approved")
         self.assertEqual(refreshed_event.status, "approved")
-        self.assertEqual(refreshed_event.matches_awarded, 2)
+        self.assertEqual(refreshed_event.matches_awarded, 0)
+        self.assertEqual(refreshed_event.target_flats_awarded, Decimal("2.00"))
         self.assertEqual(refreshed_event.discount_percent_snapshot, 7)
-        self.assertEqual(refreshed_referrer.matches_remaining, 3)
-        self.assertEqual(len(balance_logs), 1)
+        self.assertEqual(refreshed_referrer.matches_remaining, 1)
+        self.assertEqual(len(balance_logs), 0)
+        self.assertEqual(len(flat_subscriptions), 1)
+        self.assertEqual(flat_subscriptions[0].target_flats, Decimal("2.00"))
 
     async def test_referral_approval_refreshes_stale_event_before_awarding(self):
         async with self.Session() as setup_session:

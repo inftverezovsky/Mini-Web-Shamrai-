@@ -3,6 +3,10 @@ dist
 .vite
 npm-debug.log*
 frontend-vite*.log
+playwright-report
+test-results
+.playwright-cli
+.playwright-mcp
 .env
 .env.*
 !.env.example

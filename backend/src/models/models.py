@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from sqlalchemy import (
     Column,
     Integer,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Table,
     Float,
     func,
+    text,
     JSON,
     Uuid,
     UniqueConstraint,
@@ -39,8 +41,39 @@ user_bets = Table(
     Column("taken_at", DateTime(timezone=True), server_default=func.now()),
     Column("access_type", String, default="paid_match", nullable=False),
     Column("match_charged", Boolean, default=True, nullable=False),
+    Column("flat_subscription_id", Uuid(as_uuid=True), ForeignKey("flat_subscriptions.id", ondelete="RESTRICT"), nullable=True),
+    Column("stake_rub", Numeric(14, 2), nullable=True),
+    Column("flat_amount_rub_snapshot", Numeric(14, 2), nullable=True),
+    Column("stake_flats", Numeric(16, 6), nullable=True),
+    Column("coefficient_snapshot", Numeric(8, 3), nullable=True),
+    Column("settled_status", String(16), nullable=True),
+    Column("profit_rub", Numeric(16, 2), nullable=True),
+    Column("profit_flats", Numeric(16, 6), nullable=True),
+    Column("settled_at", DateTime(timezone=True), nullable=True),
     Index("ix_user_bets_user_taken", "user_id", "taken_at"),
     Index("ix_user_bets_bet_user", "bet_id", "user_id"),
+    Index("ix_user_bets_flat_subscription", "flat_subscription_id", "settled_status"),
+)
+
+# Explicit allowlist for hidden flat-plan checkout gates.  Keeping this as a
+# relational table (instead of JSON on the plan) gives us referential integrity
+# when test users are merged or removed.
+subscription_plan_checkout_allowlist = Table(
+    "subscription_plan_checkout_allowlist",
+    Base.metadata,
+    Column(
+        "plan_id",
+        Integer,
+        ForeignKey("subscription_plans.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_subscription_plan_checkout_allowlist_user", "user_id", "plan_id"),
 )
 
 # Association Table for Bet <-> Bookmaker (one forecast can target several bookmakers)
@@ -114,6 +147,7 @@ class User(Base):
     # Relationships
     bookmakers = relationship("Bookmaker", secondary=user_bookmakers, back_populates="users")
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
+    flat_subscriptions = relationship("FlatSubscription", back_populates="user", cascade="all, delete-orphan")
     bets_taken = relationship("Bet", secondary=user_bets, back_populates="takers")
     personal_signals = relationship("PersonalSignal", back_populates="user", cascade="all, delete-orphan")
     chat_conversations = relationship(
@@ -175,10 +209,23 @@ class SubscriptionPlan(Base):
     name = Column(String, nullable=False, index=True)
     duration_days = Column(Integer, nullable=False)
     match_count = Column(Integer, default=1, nullable=False)
+    entitlement_type = Column(String(24), default="legacy_match", nullable=False)
+    target_flats = Column(Numeric(12, 2), nullable=True)
     price = Column(Numeric(10, 2), nullable=False)
     price_stars = Column(Integer, default=0)
     currency = Column(String, default="RUB")
     is_active = Column(Boolean, default=True)
+    is_hidden = Column(Boolean, default=False, server_default=text("false"), nullable=False)
+
+    allowed_checkout_users = relationship(
+        "User",
+        secondary=subscription_plan_checkout_allowlist,
+        lazy="selectin",
+    )
+
+    @property
+    def allowed_user_ids(self) -> list[int]:
+        return sorted(int(user.telegram_id) for user in self.allowed_checkout_users)
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
@@ -190,6 +237,8 @@ class Subscription(Base):
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     plan_id = Column(Integer, ForeignKey("subscription_plans.id", ondelete="SET NULL"), nullable=True)
+    flat_subscription_id = Column(Uuid(as_uuid=True), ForeignKey("flat_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    target_flats_snapshot = Column(Numeric(12, 2), nullable=True)
     status = Column(String, default="pending")  # "active" | "expired" | "pending"
     start_date = Column(DateTime(timezone=True), nullable=True)
     end_date = Column(DateTime(timezone=True), nullable=True)
@@ -201,12 +250,64 @@ class Subscription(Base):
     # Relationships
     user = relationship("User", back_populates="subscriptions")
     plan = relationship("SubscriptionPlan")
+    flat_subscription = relationship("FlatSubscription", back_populates="purchases")
 
 
 class PaymentAttempt(Base):
     __tablename__ = "payment_attempts"
     __table_args__ = (
         UniqueConstraint("provider", "provider_payment_id", name="uq_payment_attempts_provider_payment"),
+        Index(
+            "uq_payment_attempts_user_provider_checkout_intent",
+            "user_id",
+            "provider",
+            "checkout_intent_id",
+            unique=True,
+        ),
+        Index(
+            "uq_payment_attempts_telegram_pre_checkout_query",
+            "telegram_pre_checkout_query_id",
+            unique=True,
+        ),
+        Index(
+            "uq_payment_attempts_active_telegram_purchase",
+            "user_id",
+            "provider",
+            "bet_id",
+            "purchase_type_snapshot",
+            unique=True,
+            postgresql_where=text(
+                "provider = 'telegram_stars' AND bet_id IS NOT NULL "
+                "AND purchase_type_snapshot IN ('single_bet', 'bet_hint') "
+                "AND status IN ('pending', 'processing') "
+                "AND checkout_state <> 'requires_reconciliation'"
+            ),
+            sqlite_where=text(
+                "provider = 'telegram_stars' AND bet_id IS NOT NULL "
+                "AND purchase_type_snapshot IN ('single_bet', 'bet_hint') "
+                "AND status IN ('pending', 'processing') "
+                "AND checkout_state <> 'requires_reconciliation'"
+            ),
+        ),
+        Index(
+            "uq_payment_attempts_active_telegram_crowd_purchase",
+            "user_id",
+            "provider",
+            "crowd_bet_id_snapshot",
+            unique=True,
+            postgresql_where=text(
+                "provider = 'telegram_stars' AND crowd_bet_id_snapshot IS NOT NULL "
+                "AND purchase_type_snapshot = 'crowd_bet' "
+                "AND status IN ('pending', 'processing') "
+                "AND checkout_state <> 'requires_reconciliation'"
+            ),
+            sqlite_where=text(
+                "provider = 'telegram_stars' AND crowd_bet_id_snapshot IS NOT NULL "
+                "AND purchase_type_snapshot = 'crowd_bet' "
+                "AND status IN ('pending', 'processing') "
+                "AND checkout_state <> 'requires_reconciliation'"
+            ),
+        ),
         Index("ix_payment_attempts_user_status", "user_id", "status"),
         Index("ix_payment_attempts_user_created", "user_id", "created_at"),
     )
@@ -217,10 +318,25 @@ class PaymentAttempt(Base):
     bet_id = Column(Uuid(as_uuid=True), ForeignKey("bets.id", ondelete="SET NULL"), nullable=True, index=True)
     provider = Column(String, nullable=False, index=True)  # "telegram_stars" | "yookassa" | "debug"
     provider_payment_id = Column(String, nullable=True)
+    checkout_intent_id = Column(Uuid(as_uuid=True), nullable=True)
+    checkout_payload_hash = Column(String(64), nullable=True)
+    checkout_state = Column(String(24), default="ready_to_create", server_default="ready_to_create", nullable=False)
+    checkout_url = Column(Text, nullable=True)
+    checkout_creation_started_at = Column(DateTime(timezone=True), nullable=True)
+    telegram_pre_checkout_query_id = Column(String(255), nullable=True)
+    telegram_pre_checkout_user_id = Column(BigInteger, nullable=True)
+    telegram_pre_checkout_reserved_at = Column(DateTime(timezone=True), nullable=True)
+    purchase_type_snapshot = Column(String(32), nullable=True)
+    crowd_bet_id_snapshot = Column(Integer, nullable=True)
     status = Column(String, default="pending", nullable=False, index=True)
     amount = Column(Numeric(10, 2), nullable=False)
     currency = Column(String, default="XTR", nullable=False)
     promo_code = Column(String, nullable=True)
+    plan_name_snapshot = Column(String, nullable=True)
+    entitlement_type_snapshot = Column(String(24), nullable=True)
+    target_flats_snapshot = Column(Numeric(12, 2), nullable=True)
+    match_count_snapshot = Column(Integer, nullable=True)
+    discount_percent_snapshot = Column(Integer, default=0, server_default="0", nullable=False)
     metadata_json = Column(JSON, default=dict, nullable=False)
     processing_started_at = Column(DateTime(timezone=True), nullable=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
@@ -252,6 +368,81 @@ class MatchBalanceLog(Base):
     subscription = relationship("Subscription")
 
 
+class FlatSubscription(Base):
+    __tablename__ = "flat_subscriptions"
+    __table_args__ = (
+        Index("ix_flat_subscriptions_user_status", "user_id", "status"),
+        Index(
+            "uq_flat_subscriptions_one_open_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending_setup', 'active', 'closing')"),
+            sqlite_where=text("status IN ('pending_setup', 'active', 'closing')"),
+        ),
+        CheckConstraint(
+            "status IN ('pending_setup', 'active', 'closing', 'completed', 'cancelled')",
+            name="ck_flat_subscriptions_status",
+        ),
+        CheckConstraint(
+            "flat_amount_rub IS NULL OR (flat_amount_rub >= 1 AND flat_amount_rub <= 100000000)",
+            name="ck_flat_subscriptions_flat_amount_range",
+        ),
+        CheckConstraint("target_flats >= 0.01", name="ck_flat_subscriptions_target_positive"),
+    )
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(24), default="pending_setup", nullable=False, index=True)
+    flat_amount_rub = Column(Numeric(14, 2), nullable=True)
+    target_flats = Column(Numeric(12, 2), default=Decimal("0.01"), nullable=False)
+    profit_rub = Column(Numeric(16, 2), default=0, nullable=False)
+    profit_flats = Column(Numeric(16, 6), default=0, nullable=False)
+    revision = Column(Integer, default=1, server_default="1", nullable=False)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="flat_subscriptions")
+    purchases = relationship("Subscription", back_populates="flat_subscription")
+    credits = relationship("FlatSubscriptionCredit", back_populates="flat_subscription", cascade="all, delete-orphan")
+
+
+class FlatSubscriptionCredit(Base):
+    __tablename__ = "flat_subscription_credits"
+    __table_args__ = (
+        Index("ix_flat_subscription_credits_subscription_created", "flat_subscription_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    flat_subscription_id = Column(Uuid(as_uuid=True), ForeignKey("flat_subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(Uuid(as_uuid=True), ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    delta_target_flats = Column(Numeric(12, 2), nullable=False)
+    event_type = Column(String(48), nullable=False)
+    actor_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    flat_subscription = relationship("FlatSubscription", back_populates="credits")
+    subscription = relationship("Subscription")
+
+
+class ForecastStakeInputSession(Base):
+    __tablename__ = "forecast_stake_input_sessions"
+    __table_args__ = (
+        UniqueConstraint("channel", "user_id", name="uq_forecast_stake_input_channel_user"),
+        Index("ix_forecast_stake_input_expires", "expires_at"),
+        CheckConstraint("channel IN ('telegram', 'vk')", name="ck_forecast_stake_input_channel"),
+    )
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel = Column(String(16), nullable=False)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    forecast_request_id = Column(Uuid(as_uuid=True), ForeignKey("forecast_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class ReferralRewardEvent(Base):
     __tablename__ = "referral_reward_events"
     __table_args__ = (
@@ -272,6 +463,7 @@ class ReferralRewardEvent(Base):
     source_type = Column(String, nullable=False)
     discount_percent_snapshot = Column(Integer, default=0, nullable=False)
     matches_awarded = Column(Integer, default=0, nullable=False)
+    target_flats_awarded = Column(Numeric(12, 2), default=0, nullable=False)
     status = Column(String, default="approved", nullable=False)
     risk_score = Column(Integer, default=0, nullable=False)
     risk_reasons = Column(JSON, default=list, nullable=False)
@@ -294,7 +486,7 @@ class PersonalSignal(Base):
         Index("ix_personal_signals_user_type_id", "user_id", "type", "id"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     text = Column(Text, nullable=False)
     type = Column(String, default="signal", nullable=False, index=True)
@@ -432,7 +624,7 @@ class AdminAuditLog(Base):
 class MessageTemplate(Base):
     __tablename__ = "message_templates"
 
-    key = Column(String, primary_key=True, index=True)
+    key = Column(String, primary_key=True)
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     body = Column(Text, nullable=False)
@@ -447,7 +639,7 @@ class MessageTemplate(Base):
 class SystemSetting(Base):
     __tablename__ = "system_settings"
 
-    key = Column(String(120), primary_key=True, index=True)
+    key = Column(String(120), primary_key=True)
     value = Column(Text, nullable=False, default="")
     description = Column(Text, nullable=True)
     is_secret = Column(Boolean, default=False, nullable=False)
@@ -484,7 +676,7 @@ class HistoricalStatsMonthly(Base):
         Index("ix_historical_stats_monthly_batch_period", "batch_id", "period_key"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
     period_key = Column(String(7), nullable=False)
     period_label = Column(String, nullable=False)
@@ -507,7 +699,7 @@ class HistoricalStatsBreakdown(Base):
         Index("ix_historical_stats_breakdowns_batch_dimension", "batch_id", "dimension"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
     dimension = Column(String(32), nullable=False)  # "bookmaker" | "sport"
     icon = Column(String, nullable=True)
@@ -530,7 +722,7 @@ class HistoricalStatsDetail(Base):
         Index("ix_historical_stats_details_batch_period", "batch_id", "period_key"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     batch_id = Column(Uuid(as_uuid=True), ForeignKey("historical_stats_import_batches.id", ondelete="CASCADE"), nullable=False)
     period_key = Column(String(7), nullable=False)
     period_label = Column(String, nullable=False)
@@ -555,14 +747,17 @@ class Bet(Base):
         Index("ix_bets_status_delivery_created", "status", "delivery_mode", "created_at"),
         Index("ix_bets_status_resolved", "status", "resolved_at"),
         Index("ix_bets_author_status_resolved", "author_id", "status", "resolved_at"),
+        Index("ix_bets_publication_status_created", "publication_type", "status", "created_at"),
     )
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_name = Column(String, nullable=False)
+    event_name_entities = Column(JSON, default=list, nullable=False)
     coefficient = Column(Numeric(5, 2), nullable=False)
     fair_coefficient = Column(Numeric(5, 2), nullable=True)
     bookmaker_id = Column(Integer, ForeignKey("bookmakers.id", ondelete="SET NULL"), nullable=True)
     description = Column(Text, nullable=True)
+    description_entities = Column(JSON, default=list, nullable=False)
     teaser_text = Column(Text, nullable=True)
     status = Column(String, default="pending")  # "pending" | "win" | "loss" | "refund"
     delivery_mode = Column(String, default="feed", nullable=False)  # "feed" | "sales_private"
@@ -616,11 +811,17 @@ class ForecastRequest(Base):
     balance_before = Column(Integer, nullable=True)
     balance_after = Column(Integer, nullable=True)
     no_balance_warning = Column(Boolean, default=False, nullable=False)
+    flat_subscription_id = Column(Uuid(as_uuid=True), ForeignKey("flat_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    stake_rub = Column(Numeric(14, 2), nullable=True)
+    stake_flats = Column(Numeric(16, 6), nullable=True)
+    stake_input_channel = Column(String(16), nullable=True)
+    stake_submitted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
     bet = relationship("Bet")
     user = relationship("User")
+    flat_subscription = relationship("FlatSubscription")
 
 class CrowdBet(Base):
     __tablename__ = "crowd_bets"
@@ -652,9 +853,11 @@ class Quiz(Base):
     __tablename__ = "quizzes"
 
     id = Column(Integer, primary_key=True, index=True)
-    bet_id = Column(Uuid(as_uuid=True), ForeignKey("bets.id", ondelete="CASCADE"), nullable=False, index=True)
+    bet_id = Column(Uuid(as_uuid=True), ForeignKey("bets.id", ondelete="CASCADE"), nullable=True, index=True)
     questions = Column(JSON, nullable=False, default=list)
     discount_reward = Column(Integer, nullable=False, default=30)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, default=True, nullable=False)
 
     bet = relationship("Bet")
 
@@ -694,6 +897,7 @@ class PromoCode(Base):
     reward_type = Column(String, default="discount", nullable=False)
     discount_percent = Column(Integer, default=0, nullable=False)
     matches_count = Column(Integer, default=0, nullable=False)
+    target_flats = Column(Numeric(12, 2), nullable=True)
     valid_until = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
 
@@ -705,10 +909,11 @@ class PromoCodeRedemption(Base):
         Index("ix_promo_code_redemptions_user_redeemed", "user_id", "redeemed_at"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     promo_code_id = Column(Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     matches_added = Column(Integer, default=0, nullable=False)
+    target_flats_added = Column(Numeric(12, 2), default=0, nullable=False)
     redeemed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     promo_code = relationship("PromoCode")

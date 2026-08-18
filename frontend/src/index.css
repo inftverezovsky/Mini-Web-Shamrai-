@@ -2968,6 +2968,8 @@
   left: max(0.5rem, env(safe-area-inset-left, 0px));
   z-index: 2147483000;
   overflow: hidden;
+  box-sizing: border-box;
+  max-inline-size: calc(100vw - max(0.5rem, env(safe-area-inset-left, 0px)) - max(0.5rem, env(safe-area-inset-right, 0px)));
   width: auto;
   min-width: 0;
   max-width: none;
@@ -2989,6 +2991,12 @@
   animation: navFloat 4.8s ease-in-out infinite, navGlassGlow 6.5s ease-in-out infinite;
   transform: scale(calc(1 / var(--shamrai-ui-scale)));
   transform-origin: bottom center;
+}
+
+@supports (width: 100dvw) {
+  .bottom-nav-aurora {
+    max-inline-size: calc(100dvw - max(0.5rem, env(safe-area-inset-left, 0px)) - max(0.5rem, env(safe-area-inset-right, 0px)));
+  }
 }
 
 .bottom-nav-aurora__item {
@@ -4673,7 +4681,6 @@ html.shamrai-global-performance-mode .desktop-navigation-panel {
 
 #root .app-shell :is(
   .content-auto-section,
-  .page-transition-layer,
   .admin-web-chat-shell,
   .web-bot-chat,
   .shamrai-glass-card,

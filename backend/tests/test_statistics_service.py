@@ -9,6 +9,8 @@ from src.services.statistics import (
     filter_items_by_period,
     is_paid_client_access,
     normalize_period,
+    period_end,
+    period_label,
     period_start,
     stat_item_from_bet,
     summarize_items,
@@ -133,9 +135,39 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertTrue(is_paid_client_access("telegram_stars_single_bet", False))
         self.assertTrue(is_paid_client_access("debug_single_bet", False))
         self.assertTrue(is_paid_client_access("unknown", True))
+        self.assertTrue(is_paid_client_access("flat_subscription", False))
         self.assertFalse(is_paid_client_access("free_bet", False))
         self.assertFalse(is_paid_client_access("guarantee_replacement", False))
         self.assertFalse(is_paid_client_access("admin", True))
+
+    def test_client_summary_uses_actual_flat_stakes_and_ruble_profit(self):
+        resolved_at = datetime(2026, 6, 10, 18, tzinfo=timezone.utc)
+        items = [
+            stat_item_from_bet(
+                _bet(status="win", coefficient="1.70", resolved_at=resolved_at),
+                access_type="flat_subscription",
+                stake_rub=Decimal("5000.00"),
+                stake_flats=Decimal("0.500000"),
+                profit_rub=Decimal("3500.00"),
+                profit_flats=Decimal("0.350000"),
+            ),
+            stat_item_from_bet(
+                _bet(status="loss", coefficient="2.20", resolved_at=resolved_at),
+                access_type="flat_subscription",
+                stake_rub=Decimal("15000.00"),
+                stake_flats=Decimal("1.500000"),
+                profit_rub=Decimal("-15000.00"),
+                profit_flats=Decimal("-1.500000"),
+            ),
+        ]
+
+        summary = summarize_items([item for item in items if item])
+
+        self.assertEqual(summary["turnover_units"], 2.0)
+        self.assertEqual(summary["profit_units"], -1.15)
+        self.assertEqual(summary["roi"], -57.5)
+        self.assertEqual(summary["stake_rub"], 20000.0)
+        self.assertEqual(summary["profit_rub"], -11500.0)
 
     def test_timeline_groups_by_resolved_at_in_moscow_timezone(self):
         item = stat_item_from_bet(_bet(
@@ -158,6 +190,29 @@ class StatisticsServiceTests(unittest.TestCase):
         self.assertEqual(period_start("quarter", now=now).isoformat(), "2026-04-01T00:00:00+03:00")
         self.assertIsNone(period_start("all", now=now))
         self.assertEqual(normalize_period("bad-value"), "all")
+
+    def test_exact_month_period_has_closed_calendar_bounds_and_label(self):
+        self.assertEqual(normalize_period("2026-02"), "2026-02")
+        self.assertEqual(period_start("2026-02").isoformat(), "2026-02-01T00:00:00+03:00")
+        self.assertEqual(period_end("2026-02").isoformat(), "2026-03-01T00:00:00+03:00")
+        self.assertEqual(period_label("2026-02"), "Февраль 2026")
+        self.assertEqual(normalize_period("2026-13"), "all")
+
+    def test_exact_month_filter_excludes_neighboring_months(self):
+        items = [
+            {"resolved_at": "2026-01-31T23:59:59+03:00", "status": "loss"},
+            {"resolved_at": "2026-02-01T00:00:00+03:00", "status": "win"},
+            {"resolved_at": "2026-02-28T23:59:59+03:00", "status": "win"},
+            {"resolved_at": "2026-03-01T00:00:00+03:00", "status": "loss"},
+        ]
+
+        filtered = filter_items_by_period(items, "2026-02")
+
+        self.assertEqual([item["status"] for item in filtered], ["win", "win"])
+        payload = build_performance_payload(items, period="2026-02")
+        self.assertEqual(payload["period"], "2026-02")
+        self.assertEqual(payload["period_label"], "Февраль 2026")
+        self.assertEqual(payload["summary"]["bets"], 2)
 
     def test_filter_items_by_period_uses_resolved_at(self):
         now = datetime(2026, 6, 10, 12, tzinfo=timezone.utc)

@@ -8,7 +8,7 @@ from sqlalchemy.future import select
 from src.api import admin as admin_api
 from src.api import payments
 from src.models.database import Base
-from src.models.models import MatchBalanceLog, PromoCode, PromoCodeRedemption, User
+from src.models.models import FlatSubscription, MatchBalanceLog, PromoCode, PromoCodeRedemption, User
 
 
 class PromoCodeTests(unittest.IsolatedAsyncioTestCase):
@@ -41,7 +41,7 @@ class PromoCodeTests(unittest.IsolatedAsyncioTestCase):
             matches_remaining=1,
         )
 
-    async def test_admin_can_create_match_credit_promo(self):
+    async def test_admin_creates_new_credit_promos_in_flats(self):
         async with self.Session() as session:
             admin = self._admin_user()
             session.add(admin)
@@ -49,19 +49,19 @@ class PromoCodeTests(unittest.IsolatedAsyncioTestCase):
 
             promo = await admin_api.create_promo(
                 admin_api.PromoCreate(
-                    code="MATCH3",
-                    reward_type="matches",
-                    matches_count=3,
+                    code="FLAT3",
+                    reward_type="flats",
+                    target_flats=3,
                     valid_until=datetime.now(timezone.utc) + timedelta(days=7),
                 ),
                 admin=admin,
                 db=session,
             )
 
-            self.assertEqual(promo.code, "MATCH3")
-            self.assertEqual(promo.reward_type, "matches")
+            self.assertEqual(promo.code, "FLAT3")
+            self.assertEqual(promo.reward_type, "flats")
             self.assertEqual(promo.discount_percent, 0)
-            self.assertEqual(promo.matches_count, 3)
+            self.assertEqual(promo.target_flats, 3)
 
     async def test_user_can_redeem_match_credit_promo_once(self):
         async with self.Session() as session:
@@ -111,6 +111,35 @@ class PromoCodeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.status_code, 400)
             refreshed_after_retry = await session.get(User, client.telegram_id)
             self.assertEqual(refreshed_after_retry.matches_remaining, 4)
+
+    async def test_user_redeems_new_flat_credit_promo_into_pending_subscription(self):
+        async with self.Session() as session:
+            client = self._client_user()
+            promo = PromoCode(
+                code="FLAT150",
+                reward_type="flats",
+                discount_percent=0,
+                matches_count=0,
+                target_flats=1.5,
+                valid_until=datetime.now(timezone.utc) + timedelta(days=7),
+                is_active=True,
+            )
+            session.add_all([client, promo])
+            await session.commit()
+
+            response = await payments.redeem_promo_code(
+                payments.PromoRedeemRequest(code="flat150"),
+                current_user=client,
+                db=session,
+            )
+
+            self.assertEqual(response["reward_type"], "flats")
+            self.assertEqual(response["target_flats_added"], "1.50")
+            subscription = (await session.execute(select(FlatSubscription))).scalars().one()
+            self.assertEqual(str(subscription.target_flats), "1.50")
+            self.assertEqual(subscription.status, "pending_setup")
+            redemption = (await session.execute(select(PromoCodeRedemption))).scalars().one()
+            self.assertEqual(str(redemption.target_flats_added), "1.50")
 
     async def test_discount_promo_validation_keeps_discount_contract(self):
         async with self.Session() as session:

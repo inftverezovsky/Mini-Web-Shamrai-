@@ -1,4 +1,5 @@
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -112,6 +113,91 @@ class DeliveryOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivery.attempt_count, 2)
         self.assertEqual(delivery.last_error, "still down")
 
+    async def test_invalid_web_push_subscription_is_categorized_and_not_retried(self):
+        delivery = DeliveryOutbox(
+            channel=CHANNEL_WEB_PUSH_SIGNAL,
+            status=STATUS_PENDING,
+            payload={},
+            attempt_count=0,
+            max_attempts=5,
+        )
+
+        await delivery_outbox.mark_delivery_failed(
+            SimpleNamespace(),
+            delivery,
+            {"description": "subscription expired", "invalid_subscription": True, "status_code": 410},
+        )
+
+        self.assertEqual(delivery.status, STATUS_FAILED)
+        self.assertEqual(delivery.attempt_count, 1)
+        self.assertEqual(
+            delivery.payload["terminal_category"],
+            delivery_outbox.TERMINAL_CATEGORY_INVALID_WEB_PUSH_SUBSCRIPTION,
+        )
+
+    async def test_metrics_report_rolling_channel_windows_and_exclude_expected_web_push_invalidations(self):
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+            now = delivery_outbox._now()
+            async with session_factory() as session:
+                session.add_all(
+                    [
+                        DeliveryOutbox(
+                            channel=CHANNEL_TELEGRAM_MESSAGE,
+                            status=STATUS_SENT,
+                            payload={},
+                            updated_at=now - timedelta(minutes=10),
+                        ),
+                        DeliveryOutbox(
+                            channel=CHANNEL_TELEGRAM_MESSAGE,
+                            status=STATUS_FAILED,
+                            payload={},
+                            updated_at=now - timedelta(minutes=5),
+                        ),
+                        DeliveryOutbox(
+                            channel=CHANNEL_WEB_PUSH_SIGNAL,
+                            status=STATUS_FAILED,
+                            payload={
+                                "terminal_category": delivery_outbox.TERMINAL_CATEGORY_INVALID_WEB_PUSH_SUBSCRIPTION
+                            },
+                            updated_at=now - timedelta(minutes=2),
+                        ),
+                        DeliveryOutbox(
+                            channel=CHANNEL_VK_MESSAGE,
+                            status=STATUS_SENT,
+                            payload={},
+                            updated_at=now - timedelta(hours=2),
+                        ),
+                    ]
+                )
+                await session.commit()
+
+                with patch.object(delivery_outbox, "_now", return_value=now):
+                    metrics = await delivery_outbox.get_delivery_outbox_metrics(session)
+
+            one_hour = metrics["windows"]["1h"]
+            twenty_four_hours = metrics["windows"]["24h"]
+            self.assertIn(CHANNEL_TELEGRAM_MESSAGE, one_hour["by_channel"])
+            self.assertIn(CHANNEL_VK_MESSAGE, one_hour["by_channel"])
+            self.assertIn(CHANNEL_WEB_PUSH_SIGNAL, one_hour["by_channel"])
+            self.assertEqual(one_hour["by_channel"][CHANNEL_TELEGRAM_MESSAGE]["fail_rate"], 50.0)
+            self.assertEqual(
+                one_hour["by_channel"][CHANNEL_WEB_PUSH_SIGNAL]["terminal_invalidations"],
+                1,
+            )
+            self.assertEqual(one_hour["by_channel"][CHANNEL_WEB_PUSH_SIGNAL]["fail_rate"], 0.0)
+            self.assertEqual(one_hour["fail_rate"], 50.0)
+            self.assertEqual(twenty_four_hours["by_channel"][CHANNEL_VK_MESSAGE]["sent"], 1)
+            self.assertEqual(metrics["fail_rate"], one_hour["fail_rate"])
+        finally:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
+            await engine.dispose()
+
     async def test_dispatch_telegram_message_uses_stored_api_payload(self):
         delivery = DeliveryOutbox(
             channel=CHANNEL_TELEGRAM_MESSAGE,
@@ -131,6 +217,43 @@ class DeliveryOutboxTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["ok"], True)
         api_mock.assert_awaited_once_with("sendMessage", {"chat_id": 12345, "text": "hello"})
+
+    async def test_dispatch_telegram_message_falls_back_when_custom_emoji_is_denied(self):
+        delivery = DeliveryOutbox(
+            channel=CHANNEL_TELEGRAM_MESSAGE,
+            status=STATUS_PENDING,
+            payload={
+                "method": "sendMessage",
+                "payload": {
+                    "chat_id": 12345,
+                    "text": "🙂 hello",
+                    "entities": [
+                        {
+                            "type": "custom_emoji",
+                            "offset": 0,
+                            "length": 2,
+                            "custom_emoji_id": "1000000000000000001",
+                        }
+                    ],
+                },
+            },
+        )
+
+        with patch.object(
+            delivery_outbox,
+            "call_telegram_api_async",
+            AsyncMock(
+                side_effect=[
+                    {"ok": False, "description": "Bad Request: can't use custom emoji"},
+                    {"ok": True, "result": {"message_id": 10}},
+                ]
+            ),
+        ) as api_mock:
+            result = await delivery_outbox.dispatch_delivery(delivery)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(api_mock.await_count, 2)
+        self.assertNotIn("entities", api_mock.await_args_list[1].args[1])
 
     async def test_dispatch_vk_message_uses_stored_user_and_payload(self):
         user = User(telegram_id=-12345, vk_user_id="456", vk_messages_allowed=True)

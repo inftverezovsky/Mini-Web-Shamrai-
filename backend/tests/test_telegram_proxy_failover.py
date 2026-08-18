@@ -247,6 +247,31 @@ class TelegramProxyFailoverTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["description"], "Too Many Requests: retry later")
+        self.assertEqual(result["http_status"], 429)
+        self.assertEqual([proxy for proxy, _ in calls], [self.PROXY_ONE])
+
+    def test_telegram_http_error_preserves_structured_numeric_code(self):
+        bad_request = urllib.error.HTTPError(
+            url="https://api.telegram.org/redacted",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(b'{"ok":false,"error_code":400,"description":"Bad Request"}'),
+        )
+        calls, opener_patches = self._patch_openers({
+            self.PROXY_ONE: [bad_request],
+            self.PROXY_TWO: [{"ok": True, "result": {"message_id": 2}}],
+        })
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self._settings_patch())
+            for active_patch in opener_patches:
+                stack.enter_context(active_patch)
+            result = telegram_bot.call_telegram_api("sendMessage", {"chat_id": 1, "text": "hello"}, retries=0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], 400)
+        self.assertEqual(result["http_status"], 400)
         self.assertEqual([proxy for proxy, _ in calls], [self.PROXY_ONE])
 
     def test_terminal_error_and_logs_never_expose_proxy_credentials(self):

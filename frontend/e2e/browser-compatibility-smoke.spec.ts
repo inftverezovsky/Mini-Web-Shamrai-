@@ -72,6 +72,10 @@ function collectRuntimeErrors(page: Page) {
     runtimeErrors.push(error.message);
   });
 
+  page.on('requestfailed', (request) => {
+    runtimeErrors.push(`Request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText || 'unknown error'})`);
+  });
+
   return runtimeErrors;
 }
 
@@ -98,6 +102,16 @@ test.describe('@compat browser matrix smoke', () => {
       expect(navBox.x + navBox.width).toBeLessThanOrEqual(viewport.width + 1);
       expect(navBox.y).toBeGreaterThanOrEqual(-1);
       expect(navBox.y + navBox.height).toBeLessThanOrEqual(viewport.height + 1);
+
+      const navButtons = nav.getByRole('button');
+      for (let index = 0; index < await navButtons.count(); index += 1) {
+        const buttonBox = await navButtons.nth(index).boundingBox();
+        expect(buttonBox).not.toBeNull();
+        if (!buttonBox) continue;
+        expect(buttonBox.x).toBeGreaterThanOrEqual(navBox.x - 1);
+        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(navBox.x + navBox.width + 1);
+        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(viewport.width + 1);
+      }
     }
 
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertCircle,
   BarChart3,
+  CalendarDays,
   Loader2,
   Search,
   ShieldAlert,
@@ -45,7 +46,7 @@ import {
   PerformanceBetItem,
   PerformanceSummary,
   PerformanceTimelineResponse,
-  PeriodFilter,
+  StatsPeriodFilter,
   StatsDriveExportJob,
   StatsDriveExportScope,
 } from '../../schemas/schemas';
@@ -59,6 +60,11 @@ import {
   type AdminStatsDashboardData,
 } from '../../utils/tabPrefetch';
 import AdminStatsBetRow from './AdminStatsBetRow';
+import {
+  currentStatsMonthKey,
+  isExactStatsMonth,
+  statsMonthInputValue,
+} from '../../utils/statsPeriod';
 
 type StatsTab = 'all' | 'feed' | 'private' | 'paid_set' | 'clients';
 
@@ -90,7 +96,7 @@ function summarizeClientSide(bets: PerformanceBetItem[]): PerformanceSummary {
   };
 }
 
-async function loadClientTimeline(clientId: number, period: PeriodFilter) {
+async function loadClientTimeline(clientId: number, period: StatsPeriodFilter) {
   return apiFetch<AdminClientTimelineResponse>(`/admin/stats/clients/${clientId}?period=${encodeURIComponent(period)}`);
 }
 
@@ -379,7 +385,7 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
   const queryClient = useQueryClient();
   const [selectedClient, setSelectedClient] = useState<AdminClientTimelineResponse | null>(null);
   const [tab, setTab] = useState<StatsTab>('all');
-  const [period, setPeriod] = useState<PeriodFilter>('all');
+  const [period, setPeriod] = useState<StatsPeriodFilter>('all');
   const [clientQuery, setClientQuery] = useState('');
   const [clientLoading, setClientLoading] = useState(false);
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
@@ -583,7 +589,30 @@ export default function AdminStats({ active = true }: AdminStatsProps = {}) {
         periodLabel={tab === 'clients' ? clientsData?.period_label ?? 'Выбранный период' : selectedTimeline?.period_label ?? 'Выбранный период'}
         summary={summary}
         valueMode={valueMode}
-        controls={<PeriodSelector value={period} onChange={setPeriod} activeTone="cyan" />}
+        controls={(
+          <div className="flex flex-col gap-2">
+            <PeriodSelector value={period} onChange={setPeriod} activeTone="cyan" />
+            <label className={`flex min-h-[34px] items-center gap-2 rounded-xl border px-2.5 transition-colors ${
+              isExactStatsMonth(period)
+                ? 'border-cyan-200/35 bg-cyan-200/10 text-cyan-50'
+                : 'border-white/10 bg-slate-950/35 text-slate-400'
+            }`}>
+              <CalendarDays className="h-3.5 w-3.5 shrink-0" />
+              <span className="text-[8px] font-black uppercase tracking-[0.1em]">Конкретный месяц</span>
+              <input
+                type="month"
+                aria-label="Конкретный месяц статистики"
+                max={currentStatsMonthKey()}
+                value={statsMonthInputValue(period)}
+                onChange={(event) => {
+                  const nextMonth = event.target.value;
+                  setPeriod(isExactStatsMonth(nextMonth) ? nextMonth : 'all');
+                }}
+                className="ml-auto min-w-0 max-w-[125px] bg-transparent text-[10px] font-bold text-white outline-none [color-scheme:dark]"
+              />
+            </label>
+          </div>
+        )}
         actions={<ExportActions exporting={exporting} onCsv={() => void exportStats('csv')} onXlsx={() => void exportStats('xlsx')} />}
       />
 

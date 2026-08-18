@@ -45,6 +45,9 @@ class PaymentOutboxTests(unittest.IsolatedAsyncioTestCase):
                     amount=Decimal("100.00"),
                     currency="RUB",
                     status="pending",
+                    plan_name_snapshot=plan.name,
+                    entitlement_type_snapshot="legacy_match",
+                    match_count_snapshot=plan.match_count,
                     metadata_json={},
                 )
                 session.add_all([user, plan, attempt])
@@ -154,6 +157,9 @@ class PaymentOutboxTests(unittest.IsolatedAsyncioTestCase):
                     amount=Decimal("100.00"),
                     currency="RUB",
                     status="pending",
+                    plan_name_snapshot=plan.name,
+                    entitlement_type_snapshot="legacy_match",
+                    match_count_snapshot=plan.match_count,
                     metadata_json={},
                 )
                 session.add_all([user, plan, attempt])

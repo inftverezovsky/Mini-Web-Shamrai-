@@ -44,6 +44,18 @@ describe('tab prefetch global stats helpers', () => {
     });
   });
 
+  it('uses the exact selected month for every admin statistics request', async () => {
+    apiFetchMock.mockResolvedValue({});
+    const { adminStatsDashboardQueryKey, fetchAdminStatsDashboard } = await import('../src/utils/tabPrefetch');
+
+    expect(adminStatsDashboardQueryKey('2026-02')).toEqual(['admin-stats-dashboard', '2026-02']);
+    await fetchAdminStatsDashboard('2026-02');
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/admin/stats/author-timeline?period=2026-02');
+    expect(apiFetchMock).toHaveBeenCalledWith('/admin/stats/shamrai-timeline?period=2026-02');
+    expect(apiFetchMock).toHaveBeenCalledWith('/admin/stats/clients?period=2026-02');
+  });
+
   it('deduplicates repeated intent prefetch promises for the same tab', async () => {
     const { prefetchUserTab } = await import('../src/utils/tabPrefetch');
     const queryClient = new QueryClient({

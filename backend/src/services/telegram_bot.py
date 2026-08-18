@@ -75,13 +75,24 @@ def _build_telegram_opener(proxy_url: Optional[str]):
     return urllib.request.build_opener(urllib.request.ProxyHandler(proxy_mapping))
 
 
-def _telegram_http_error_description(error: urllib.error.HTTPError) -> str:
+def _telegram_http_error_result(error: urllib.error.HTTPError) -> dict:
+    error_payload: dict = {}
     try:
         error_payload = json.loads(error.read().decode("utf-8"))
+        if not isinstance(error_payload, dict):
+            error_payload = {}
         description = error_payload.get("description") or f"HTTP {error.code}"
     except Exception:
         description = f"HTTP {error.code}"
-    return _redact_url_userinfo(str(description))
+    result = {
+        "ok": False,
+        "description": _redact_url_userinfo(str(description)),
+        "http_status": int(error.code),
+    }
+    error_code = error_payload.get("error_code")
+    if isinstance(error_code, int) and not isinstance(error_code, bool):
+        result["error_code"] = error_code
+    return result
 
 
 def _perform_telegram_request(
@@ -111,11 +122,10 @@ def _perform_telegram_request(
                 return {"ok": False, "description": "Telegram API returned an invalid response"}
             return result
         except urllib.error.HTTPError as error:
-            last_description = (
-                "Telegram proxy authentication failed"
-                if error.code == 407
-                else _telegram_http_error_description(error)
-            )
+            error_result = _telegram_http_error_result(error)
+            if error.code == 407:
+                error_result["description"] = "Telegram proxy authentication failed"
+            last_description = error_result["description"]
             can_fail_over = (
                 _is_safe_preconnect_failure(error)
                 and attempt_index + 1 < attempt_count
@@ -149,7 +159,7 @@ def _perform_telegram_request(
                     "description": last_description,
                 },
             )
-            return {"ok": False, "description": last_description}
+            return error_result
         except Exception as error:
             last_description = _safe_network_description(error)
             can_fail_over = (
@@ -207,6 +217,56 @@ def call_telegram_api(
         retries=retries,
         event_prefix="telegram_api_call",
     )
+
+
+def download_telegram_file(
+    file_id: str,
+    *,
+    max_bytes: int = 2 * 1024 * 1024,
+    timeout: Optional[float] = None,
+) -> tuple[bytes, str]:
+    """Download a Telegram file without exposing the bot token or remote file path."""
+    file_response = call_telegram_api(
+        "getFile",
+        {"file_id": str(file_id or "").strip()},
+        timeout=timeout,
+    )
+    if not file_response.get("ok"):
+        raise RuntimeError(str(file_response.get("description") or "Telegram getFile failed"))
+    file_path = str((file_response.get("result") or {}).get("file_path") or "").strip()
+    if not file_path or ".." in file_path or file_path.startswith(("/", "\\")):
+        raise RuntimeError("Telegram returned an invalid file path")
+
+    candidates = _ordered_proxy_candidates()
+    attempt_count = max(1, len(candidates))
+    request_timeout = timeout or settings.TELEGRAM_API_TIMEOUT_SECONDS
+    last_error: BaseException | None = None
+    url = f"https://api.telegram.org/file/bot{settings.TELEGRAM_BOT_TOKEN}/{file_path}"
+
+    for attempt_index in range(attempt_count):
+        proxy_url = candidates[attempt_index % len(candidates)]
+        try:
+            request = urllib.request.Request(url, method="GET")
+            with _build_telegram_opener(proxy_url).open(request, timeout=request_timeout) as response:
+                declared_length = int(response.headers.get("Content-Length") or 0)
+                if declared_length > max_bytes:
+                    raise RuntimeError("Telegram file is too large")
+                contents = response.read(max_bytes + 1)
+                if len(contents) > max_bytes:
+                    raise RuntimeError("Telegram file is too large")
+                content_type = str(
+                    response.headers.get_content_type()
+                    or mimetypes.guess_type(file_path)[0]
+                    or "application/octet-stream"
+                )
+            _mark_proxy_available(proxy_url)
+            return contents, content_type
+        except Exception as error:
+            last_error = error
+            if _is_safe_preconnect_failure(error) and attempt_index + 1 < attempt_count:
+                continue
+            break
+    raise RuntimeError(_safe_network_description(last_error or RuntimeError("download failed")))
 
 
 async def call_telegram_api_async(

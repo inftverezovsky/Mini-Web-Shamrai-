@@ -11,6 +11,8 @@ from src.models.models import (
     Bet,
     CrowdBet,
     CrowdBetParticipant,
+    FlatSubscription,
+    FlatSubscriptionCredit,
     MatchBalanceLog,
     PaymentAttempt,
     Subscription,
@@ -21,6 +23,7 @@ from src.models.models import (
 from src.services.payment_reconciliation import (
     ISSUE_LOCAL_SUCCEEDED_ENTITLEMENT_MISMATCH,
     ISSUE_LOCAL_SUCCEEDED_MISSING_ENTITLEMENT,
+    ISSUE_CHECKOUT_REQUIRES_RECONCILIATION,
     ISSUE_PENDING_STALE,
     ISSUE_PROCESSING_STALE,
     ISSUE_PROVIDER_LOCAL_AMOUNT_MISMATCH,
@@ -126,6 +129,18 @@ class PaymentReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(ISSUE_PENDING_STALE, issue_codes)
         self.assertIn(ISSUE_PROCESSING_STALE, issue_codes)
         self.assertEqual(issue_codes.count(ISSUE_PENDING_STALE), 1)
+
+    async def test_reports_orphaned_checkout_for_manual_reconciliation(self):
+        async with self.Session() as session:
+            user = self._user()
+            attempt = self._attempt(plan_id=None, minutes_ago=1)
+            attempt.checkout_state = "requires_reconciliation"
+            session.add_all([user, attempt])
+            await session.commit()
+
+            report = await build_payment_reconciliation_report(session, include_provider_checks=False)
+
+        self.assertEqual([issue.code for issue in report.issues], [ISSUE_CHECKOUT_REQUIRES_RECONCILIATION])
 
     async def test_reports_succeeded_plan_without_subscription_or_ledger(self):
         async with self.Session() as session:
@@ -301,6 +316,54 @@ class PaymentReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.total_issues, 1)
         self.assertEqual(summary.by_code[ISSUE_PENDING_STALE], 1)
         self.assertFalse(summary.provider_checks_included)
+
+    async def test_flat_entitlement_is_compared_with_immutable_attempt_snapshot(self):
+        async with self.Session() as session:
+            user = self._user()
+            plan = self._plan()
+            plan.entitlement_type = "flat"
+            plan.target_flats = Decimal("9.00")
+            attempt = self._attempt(
+                provider_payment_id="snapshot-flat-payment",
+                status="succeeded",
+                minutes_ago=1,
+            )
+            attempt.plan_name_snapshot = "Original +3"
+            attempt.entitlement_type_snapshot = "flat"
+            attempt.target_flats_snapshot = Decimal("3.00")
+            attempt.match_count_snapshot = 1
+            flat_subscription = FlatSubscription(
+                user_id=user.telegram_id,
+                status="active",
+                flat_amount_rub=Decimal("10000.00"),
+                target_flats=Decimal("3.00"),
+                profit_rub=Decimal("0.00"),
+                profit_flats=Decimal("0.000000"),
+            )
+            session.add_all([user, plan, attempt, flat_subscription])
+            await session.flush()
+            subscription = Subscription(
+                user_id=user.telegram_id,
+                plan_id=plan.id,
+                flat_subscription_id=flat_subscription.id,
+                target_flats_snapshot=Decimal("3.00"),
+                status="active",
+                payment_provider="yookassa",
+                payment_id="snapshot-flat-payment",
+            )
+            session.add(subscription)
+            await session.flush()
+            session.add(FlatSubscriptionCredit(
+                flat_subscription_id=flat_subscription.id,
+                subscription_id=subscription.id,
+                delta_target_flats=Decimal("3.00"),
+                event_type="subscription_purchase",
+            ))
+            await session.commit()
+
+            report = await build_payment_reconciliation_report(session, include_provider_checks=False)
+
+        self.assertEqual(report.issues, [])
 
 
 if __name__ == "__main__":

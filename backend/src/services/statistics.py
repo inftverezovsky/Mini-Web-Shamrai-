@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -11,9 +12,10 @@ from src.models.models import Bet
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 RESULT_STATUSES = {"win", "loss"}
-PAID_ACCESS_TYPES = {"paid_match", "single_bet_purchase", "manual_paid_set"}
+PAID_ACCESS_TYPES = {"paid_match", "single_bet_purchase", "manual_paid_set", "flat_subscription"}
 EXCLUDED_CLIENT_ACCESS_TYPES = {"admin", "free_bet", "guarantee_replacement", "crowd_pool"}
 PERIOD_OPTIONS = {"week", "month", "quarter", "all"}
+EXACT_MONTH_RE = re.compile(r"^[1-9]\d{3}-(0[1-9]|1[0-2])$")
 PERIOD_LABELS = {
     "week": "Текущая неделя",
     "month": "Текущий месяц",
@@ -77,13 +79,29 @@ def current_period_keys() -> dict[str, str]:
 
 def normalize_period(period: Optional[str]) -> str:
     clean = str(period or "all").strip().lower()
-    return clean if clean in PERIOD_OPTIONS else "all"
+    return clean if clean in PERIOD_OPTIONS or EXACT_MONTH_RE.fullmatch(clean) else "all"
+
+
+def is_exact_month_period(period: Optional[str]) -> bool:
+    return bool(EXACT_MONTH_RE.fullmatch(normalize_period(period)))
+
+
+def period_label(period: Optional[str]) -> str:
+    normalized = normalize_period(period)
+    if normalized in PERIOD_LABELS:
+        return PERIOD_LABELS[normalized]
+    year, month = (int(part) for part in normalized.split("-"))
+    return f"{MONTH_LABELS[month]} {year}"
 
 
 def period_start(period: Optional[str], *, now: Optional[datetime] = None) -> Optional[datetime]:
     normalized = normalize_period(period)
     if normalized == "all":
         return None
+
+    if is_exact_month_period(normalized):
+        year, month = (int(part) for part in normalized.split("-"))
+        return datetime(year, month, 1, tzinfo=MOSCOW_TZ)
 
     current = as_moscow_datetime(now or datetime.now(MOSCOW_TZ))
     if not current:
@@ -99,6 +117,16 @@ def period_start(period: Optional[str], *, now: Optional[datetime] = None) -> Op
     return current.replace(month=quarter_month, day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def period_end(period: Optional[str]) -> Optional[datetime]:
+    normalized = normalize_period(period)
+    if not is_exact_month_period(normalized):
+        return None
+    year, month = (int(part) for part in normalized.split("-"))
+    if month == 12:
+        return datetime(year + 1, 1, 1, tzinfo=MOSCOW_TZ)
+    return datetime(year, month + 1, 1, tzinfo=MOSCOW_TZ)
+
+
 def filter_items_by_period(
     items: Iterable[dict[str, Any]],
     period: Optional[str],
@@ -106,6 +134,7 @@ def filter_items_by_period(
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     start = period_start(period, now=now)
+    end = period_end(period)
     item_list = list(items)
     if not start:
         return item_list
@@ -116,7 +145,8 @@ def filter_items_by_period(
             resolved_at = datetime.fromisoformat(item["resolved_at"])
         except (KeyError, TypeError, ValueError):
             continue
-        if as_moscow_datetime(resolved_at) >= start:
+        resolved_at_moscow = as_moscow_datetime(resolved_at)
+        if resolved_at_moscow and resolved_at_moscow >= start and (not end or resolved_at_moscow < end):
             filtered.append(item)
     return filtered
 
@@ -167,6 +197,10 @@ def stat_item_from_bet(
     access_type: Optional[str] = None,
     match_charged: Optional[bool] = None,
     taken_at: Optional[datetime] = None,
+    stake_rub: Optional[Decimal] = None,
+    stake_flats: Optional[Decimal] = None,
+    profit_rub: Optional[Decimal] = None,
+    profit_flats: Optional[Decimal] = None,
 ) -> Optional[dict[str, Any]]:
     if str(getattr(bet, "publication_type", "forecast") or "forecast") != "forecast":
         return None
@@ -180,7 +214,8 @@ def stat_item_from_bet(
         return None
 
     coefficient = Decimal(str(bet.coefficient or "0"))
-    profit = bet_profit_units(str(bet.status), coefficient)
+    profit = Decimal(str(profit_flats)) if profit_flats is not None else bet_profit_units(str(bet.status), coefficient)
+    turnover_units = Decimal(str(stake_flats)) if stake_flats is not None else Decimal("1")
     bookmakers = _bookmaker_items_for_bet(bet)
     delivery_mode = str(getattr(bet, "delivery_mode", None) or "feed")
     if delivery_mode == "feed":
@@ -198,6 +233,9 @@ def stat_item_from_bet(
         "bookmaker_id": getattr(bet, "bookmaker_id", None),
         "description": getattr(bet, "description", None),
         "profit_units": _round_decimal(profit),
+        "turnover_units": _round_decimal(turnover_units, "0.000001"),
+        "stake_rub": _round_decimal(Decimal(str(stake_rub))) if stake_rub is not None else None,
+        "profit_rub": _round_decimal(Decimal(str(profit_rub))) if profit_rub is not None else None,
         "resolved_at": resolved_at_msk.isoformat(),
         "created_at": created_at_msk.isoformat() if created_at_msk else None,
         "taken_at": taken_at_msk.isoformat() if taken_at_msk else None,
@@ -222,6 +260,9 @@ def _empty_summary() -> dict[str, Any]:
         "winrate": 0.0,
         "roi": 0.0,
         "profit_units": 0.0,
+        "turnover_units": 0.0,
+        "stake_rub": 0.0,
+        "profit_rub": 0.0,
         "average_coefficient": 0.0,
         "max_win_streak": 0,
         "max_loss_streak": 0,
@@ -239,6 +280,9 @@ def summarize_items(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
     wins = sum(1 for item in resolved_items if item["status"] == "win")
     losses = sum(1 for item in resolved_items if item["status"] == "loss")
     profit = sum((Decimal(str(item.get("profit_units") or 0)) for item in resolved_items), Decimal("0"))
+    turnover = sum((Decimal(str(item.get("turnover_units") or 1)) for item in resolved_items), Decimal("0"))
+    stake_rub = sum((Decimal(str(item.get("stake_rub") or 0)) for item in resolved_items), Decimal("0"))
+    profit_rub = sum((Decimal(str(item.get("profit_rub") or 0)) for item in resolved_items), Decimal("0"))
     coefficient_sum = sum((Decimal(str(item.get("coefficient") or 0)) for item in resolved_items), Decimal("0"))
 
     current_type = None
@@ -267,8 +311,11 @@ def summarize_items(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "wins": wins,
         "losses": losses,
         "winrate": _round_percent((wins / total * 100) if total else 0),
-        "roi": _round_percent((float(profit) / total * 100) if total else 0),
+        "roi": _round_percent((float(profit) / float(turnover) * 100) if turnover else 0),
         "profit_units": _round_decimal(profit),
+        "turnover_units": _round_decimal(turnover),
+        "stake_rub": _round_decimal(stake_rub),
+        "profit_rub": _round_decimal(profit_rub),
         "average_coefficient": _round_decimal(coefficient_sum / Decimal(total)) if total else 0.0,
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
@@ -361,13 +408,13 @@ def build_performance_payload(
     period_keys = current_period_keys()
     return {
         "period": normalized_period,
-        "period_label": PERIOD_LABELS[normalized_period],
+        "period_label": period_label(normalized_period),
         "summary": summarize_items(item_list),
         "source_split": build_source_split(item_list),
         "timeline": build_timeline(item_list, include_bets=include_bets),
         "bookmaker_breakdown": build_breakdown(item_list, key_name="bookmaker_names", empty_label="Без БК"),
         "sport_breakdown": build_breakdown(item_list, key_name="sport_type", empty_label="Без спорта"),
-        "default_expanded_month_key": period_keys["month"],
+        "default_expanded_month_key": normalized_period if is_exact_month_period(normalized_period) else period_keys["month"],
         "default_expanded_day_key": period_keys["day"],
     }
 

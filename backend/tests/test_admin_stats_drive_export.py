@@ -282,6 +282,33 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
             formats=["xlsx", "google_sheet"],
         )
 
+    async def test_drive_export_keeps_an_exact_month(self):
+        with patch("src.api.admin.start_drive_export_job") as start_job:
+            start_job.return_value = {
+                "id": "job-month",
+                "status": "pending",
+                "scope": "shamrai",
+                "period": "2026-02",
+                "formats": ["google_sheet"],
+                "links": [],
+                "error": None,
+            }
+
+            await create_admin_stats_drive_export(
+                AdminStatsDriveExportRequest(
+                    scope="shamrai",
+                    period="2026-02",
+                    formats=["google_sheet"],
+                ),
+                admin=object(),
+            )
+
+        start_job.assert_called_once_with(
+            scope="shamrai",
+            period="2026-02",
+            formats=["google_sheet"],
+        )
+
     async def test_clients_drive_export_can_start_google_sheet_only_job(self):
         with patch("src.api.admin.start_drive_export_job") as start_job:
             start_job.return_value = {
@@ -348,6 +375,26 @@ class AdminStatsDriveExportTests(unittest.IsolatedAsyncioTestCase):
         load_items.assert_awaited_once_with(db, "all")
         build_workbook.assert_called_once()
         self.assertIn("shamrai_stats_shamrai_all.xlsx", response.headers["content-disposition"])
+
+    async def test_direct_xlsx_export_uses_exact_month_label_and_filename(self):
+        db = object()
+        with (
+            patch("src.api.admin.load_shamrai_export_items", new=AsyncMock(return_value=[])) as load_items,
+            patch("src.api.admin.load_active_historical_stats_snapshot", new=AsyncMock(return_value=None)),
+            patch("src.api.admin.build_stats_export_workbook", return_value=b"fake-xlsx") as build_workbook,
+        ):
+            response = await export_admin_stats(
+                scope="shamrai",
+                format="xlsx",
+                period="2026-02",
+                source="all",
+                admin=object(),
+                db=db,
+            )
+
+        load_items.assert_awaited_once_with(db, "2026-02")
+        self.assertEqual(build_workbook.call_args.kwargs["period_label"], "Февраль 2026")
+        self.assertIn("shamrai_stats_shamrai_2026-02.xlsx", response.headers["content-disposition"])
 
     async def test_direct_xlsx_export_clients_scope_downloads_client_info_workbook(self):
         db = object()

@@ -12,6 +12,13 @@ from src.api import payments
 from src.core import telegram_text
 from src.core.bookmaker_links import normalize_bookmaker_links, normalize_match_url
 from src.core.bookmakers import STANDARD_BOOKMAKERS
+from src.core.telegram_emoji_catalog import (
+    EmojiCatalogSnapshot,
+    clear_emoji_catalog,
+    current_emoji_catalog,
+    emoji_catalog_is_loaded,
+    replace_emoji_catalog,
+)
 from src.models.models import DeliveryOutbox
 from src.services import forecast_delivery as delivery
 from src.services import telegram_bot
@@ -330,6 +337,33 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>Фонбет</b>", message)
         self.assertIn("<b>Пари</b>", message)
 
+    def test_full_forecast_message_has_one_consistent_icon_per_section(self):
+        original_catalog = current_emoji_catalog()
+        catalog_was_loaded = emoji_catalog_is_loaded()
+        replace_emoji_catalog(
+            EmojiCatalogSnapshot.from_values(
+                bookmakers={"fonbet": "111"},
+            )
+        )
+        try:
+            forecast_request = SimpleNamespace(user_id=123456789, bet=self._bet())
+            message = delivery._build_full_forecast_message(forecast_request)
+        finally:
+            if catalog_was_loaded:
+                replace_emoji_catalog(original_catalog)
+            else:
+                clear_emoji_catalog()
+
+        self.assertIn("⚔️ <b>ПРОГНОЗ SHAMRAI</b>", message)
+        self.assertIn("🏆 Матч:", message)
+        self.assertIn("🎯 Исход:", message)
+        self.assertIn("📈 Коэффициент:", message)
+        self.assertIn("⚽ Спорт:", message)
+        self.assertIn('БК: <tg-emoji emoji-id="111">', message)
+        self.assertEqual(message.count('emoji-id="111"'), 1)
+        self.assertNotIn("🏦 БК:", message)
+        self.assertNotIn("🏟️", message)
+
     def test_coupon_delivery_keeps_bookmaker_button_on_coupon_when_caption_fits(self):
         bet = self._bet(coupon_image_url="https://example.com/coupon.jpg", description="")
         forecast_request = SimpleNamespace(user_id=123456789, bet=bet)
@@ -493,21 +527,61 @@ class ForecastDeliveryLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(raised.exception.detail, "Сократите текст полного прогноза до 4096 символов")
 
+    def test_paid_feed_forecast_broadcast_does_not_reveal_locked_details(self):
+        bet = self._bet(
+            coupon_image_url="https://example.com/coupon.jpg",
+            description="Секретное обоснование",
+        )
+        bet.price_stars = 25
+        calls = []
+        original_call_telegram_api = delivery.call_telegram_api
+
+        def fake_call_telegram_api(method, payload):
+            calls.append((method, payload))
+            return {"ok": True}
+
+        try:
+            delivery.call_telegram_api = fake_call_telegram_api
+            result = delivery.send_feed_forecast_to_telegram_chat(
+                bet,
+                chat_id=123456789,
+            )
+        finally:
+            delivery.call_telegram_api = original_call_telegram_api
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual([method for method, _ in calls], ["sendMessage"])
+        self.assertIn("Новый платный прогноз", calls[0][1]["text"])
+        self.assertIn("25 Stars", calls[0][1]["text"])
+        self.assertNotIn(bet.outcome, calls[0][1]["text"])
+        self.assertNotIn(bet.description, calls[0][1]["text"])
+        self.assertEqual(
+            calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["url"],
+            delivery.settings.FRONTEND_BASE_URL,
+        )
+
 
 class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.previous_admin_group_chat_id = delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID
         delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = -100555
         self.real_lock_forecast_delivery_scope = delivery._lock_forecast_delivery_scope
+        self.real_lock_forecast_interest_scope = delivery._lock_forecast_interest_scope
 
         async def passthrough_lock_scope(_db, forecast_request):
             return forecast_request
 
         delivery._lock_forecast_delivery_scope = passthrough_lock_scope
 
+        async def passthrough_interest_scope(_db, forecast_request):
+            return forecast_request, None
+
+        delivery._lock_forecast_interest_scope = passthrough_interest_scope
+
     def tearDown(self):
         delivery.settings.TELEGRAM_ADMIN_GROUP_CHAT_ID = self.previous_admin_group_chat_id
         delivery._lock_forecast_delivery_scope = self.real_lock_forecast_delivery_scope
+        delivery._lock_forecast_interest_scope = self.real_lock_forecast_interest_scope
 
     def _bookmaker(self):
         return SimpleNamespace(id=1, name="Фонбет", code="fonbet")
@@ -712,8 +786,10 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
             return request
 
         original_scope = delivery._lock_forecast_delivery_scope
+        original_terminal_scope = delivery._lock_forecast_terminal_scope
         original_loader = delivery.load_forecast_request
         delivery._lock_forecast_delivery_scope = refresh_as_delivered
+        delivery._lock_forecast_terminal_scope = refresh_as_delivered
         try:
             decline_request = self._forecast_request(user)
             decline_request.status = delivery.FORECAST_STATUS_ANNOUNCED
@@ -733,6 +809,7 @@ class ForecastDeliveryMethodTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             delivery._lock_forecast_delivery_scope = original_scope
+            delivery._lock_forecast_terminal_scope = original_terminal_scope
             delivery.load_forecast_request = original_loader
 
         self.assertIs(declined, decline_request)

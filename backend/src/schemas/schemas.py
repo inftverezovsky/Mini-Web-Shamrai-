@@ -52,6 +52,96 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     role: str = "user"
 
+
+class FlatSubscriptionSummaryResponse(BaseModel):
+    id: UUID
+    user_id: int
+    status: str
+    flat_amount_rub: Optional[Decimal] = None
+    target_flats: Decimal
+    profit_rub: Decimal
+    profit_flats: Decimal
+    remaining_flats: Decimal = Decimal("0")
+    pending_bets: int = 0
+    revision: int = 1
+    activated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FlatSubscriptionBetResponse(BaseModel):
+    bet_id: UUID
+    event_name: Optional[str] = None
+    outcome: Optional[str] = None
+    taken_at: Optional[datetime] = None
+    stake_rub: Decimal
+    stake_flats: Decimal
+    coefficient: Decimal
+    status: str
+    profit_rub: Optional[Decimal] = None
+    profit_flats: Optional[Decimal] = None
+    settled_at: Optional[datetime] = None
+
+
+class FlatSubscriptionCreditResponse(BaseModel):
+    id: int
+    event_type: str
+    delta_target_flats: Decimal
+    actor_id: Optional[int] = None
+    note: Optional[str] = None
+    created_at: datetime
+
+
+class FlatSubscriptionResponse(FlatSubscriptionSummaryResponse):
+    created_at: datetime
+    updated_at: datetime
+    bets: List[FlatSubscriptionBetResponse] = Field(default_factory=list)
+    credits: List[FlatSubscriptionCreditResponse] = Field(default_factory=list)
+
+
+class FlatSubscriptionConfigureRequest(BaseModel):
+    flat_amount_rub: Decimal = Field(ge=Decimal("1.00"), le=Decimal("100000000.00"), decimal_places=2)
+    expected_revision: Optional[int] = Field(default=None, ge=1)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class FlatSubscriptionCreditRequest(BaseModel):
+    target_flats: Decimal = Field(ge=Decimal("0.01"), le=Decimal("10000.00"), decimal_places=2)
+    flat_amount_rub: Optional[Decimal] = Field(default=None, ge=Decimal("1.00"), le=Decimal("100000000.00"), decimal_places=2)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class FlatStakeRequest(BaseModel):
+    stake_rub: Decimal = Field(ge=Decimal("1.00"), le=Decimal("100000000.00"), decimal_places=2)
+
+
+class FlatStakeCorrectionRequest(FlatStakeRequest):
+    note: Optional[str] = Field(default=None, max_length=500)
+    expected_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class PaymentAttemptStatusResponse(BaseModel):
+    attempt_id: UUID
+    provider: str
+    payment_status: str
+    checkout_state: str
+    checkout_url: Optional[str] = None
+    purchase_type: str
+    plan_id: Optional[int] = None
+    plan_name: Optional[str] = None
+    entitlement_type: Optional[str] = None
+    target_flats: Optional[Decimal] = None
+    match_count: Optional[int] = None
+    amount: Decimal
+    currency: str
+    flat_setup_required: bool = False
+    flat_subscription: Optional[FlatSubscriptionSummaryResponse] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 class UserResponse(UserBase):
     role: str
     identity_complete: bool = False
@@ -76,6 +166,7 @@ class UserResponse(UserBase):
     guarantee_active: bool = False
     guarantee_opened_from_bet_id: Optional[UUID] = None
     guarantee_closed_at: Optional[datetime] = None
+    flat_subscription: Optional[FlatSubscriptionSummaryResponse] = None
     onboarding_goal: Optional[str] = None
     ab_group: Optional[str] = None
     tg_chat_joined: bool = False
@@ -154,27 +245,78 @@ class SubscriptionPlanBase(BaseModel):
     name: str = Field(max_length=120)
     duration_days: int = Field(default=0, ge=0, le=3650)
     match_count: int = Field(default=1, ge=1, le=10000)
+    entitlement_type: str = Field(default="flat", pattern="^(flat|legacy_match)$")
+    target_flats: Optional[Decimal] = Field(default=None, ge=Decimal("0.01"), le=Decimal("10000.00"), decimal_places=2)
     price: Decimal = Field(ge=0, le=Decimal("10000000"))
     price_stars: int = Field(default=0, ge=0, le=1000000)
     currency: str = Field(default="RUB", max_length=12)
     is_active: bool = True
+    is_hidden: bool = False
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
 class SubscriptionPlanCreate(SubscriptionPlanBase):
-    pass
+    name: str = Field(min_length=1, max_length=120)
+    allowed_user_ids: List[int] = Field(default_factory=list, max_length=100)
+
+    @field_validator("allowed_user_ids")
+    @classmethod
+    def normalize_allowed_user_ids(cls, value: List[int]) -> List[int]:
+        return list(dict.fromkeys(int(user_id) for user_id in value))
 
 
 class SubscriptionPlanUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=120)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     match_count: Optional[int] = Field(default=None, ge=1, le=10000)
+    entitlement_type: Optional[str] = Field(default=None, pattern="^(flat|legacy_match)$")
+    target_flats: Optional[Decimal] = Field(default=None, ge=Decimal("0.01"), le=Decimal("10000.00"), decimal_places=2)
     price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("10000000"))
     price_stars: Optional[int] = Field(default=None, ge=0, le=1000000)
     currency: Optional[str] = Field(default=None, max_length=12)
     is_active: Optional[bool] = None
+    is_hidden: Optional[bool] = None
+    allowed_user_ids: Optional[List[int]] = Field(default=None, max_length=100)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_optional_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            raise ValueError("Укажите название тарифа")
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("allowed_user_ids")
+    @classmethod
+    def normalize_optional_allowed_user_ids(cls, value: Optional[List[int]]) -> Optional[List[int]]:
+        if value is None:
+            return None
+        return list(dict.fromkeys(int(user_id) for user_id in value))
 
 class SubscriptionPlanResponse(SubscriptionPlanBase):
     id: int
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SubscriptionPlanAdminResponse(SubscriptionPlanResponse):
+    allowed_user_ids: List[int] = Field(default_factory=list)
+
+
+class SubscriptionPlanAllowlistUpdate(BaseModel):
+    allowed_user_ids: List[int] = Field(default_factory=list, max_length=100)
+
+    @field_validator("allowed_user_ids")
+    @classmethod
+    def normalize_allowed_user_ids(cls, value: List[int]) -> List[int]:
+        return list(dict.fromkeys(int(user_id) for user_id in value))
+
+
+class SubscriptionPlanAllowlistResponse(BaseModel):
+    plan_id: int
+    is_hidden: bool
+    allowed_user_ids: List[int] = Field(default_factory=list)
 
 # --- SUBSCRIPTION SCHEMAS ---
 class SubscriptionBase(BaseModel):
@@ -200,6 +342,7 @@ class SubscriptionManualAssign(BaseModel):
     user_id: int
     plan_id: int
     duration_days: Optional[int] = None  # Override plan duration if specified
+    flat_amount_rub: Optional[Decimal] = Field(default=None, ge=Decimal("1.00"), le=Decimal("100000000.00"), decimal_places=2)
 
 # --- BET SCHEMAS ---
 class BookmakerLink(BaseModel):
@@ -214,11 +357,13 @@ class BookmakerLink(BaseModel):
 
 class BetBase(BaseModel):
     event_name: Optional[str] = Field(default=None, max_length=200)
+    event_name_entities: List[dict] = Field(default_factory=list, max_length=100)
     coefficient: Decimal = Field(ge=Decimal("1.0"), le=Decimal("999.99"))
     fair_coefficient: Optional[Decimal] = Field(default=None, ge=Decimal("1.0"), le=Decimal("999.99"))
     bookmaker_id: Optional[int] = None
     bookmaker_ids: List[int] = Field(default_factory=list, max_length=50)
     description: Optional[str] = Field(default=None, max_length=4000)
+    description_entities: List[dict] = Field(default_factory=list, max_length=100)
     teaser_text: Optional[str] = Field(default=None, max_length=4000)
     category: str = Field(default="prematch", max_length=40)
     live_ends_at: Optional[datetime] = None
@@ -329,6 +474,7 @@ class ForecastRequestUserResponse(BaseModel):
     is_web_only: bool = False
     matches_remaining: int = 0
     guarantee_active: bool = False
+    flat_subscription: Optional[FlatSubscriptionSummaryResponse] = None
     bookmakers: List[BookmakerResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
@@ -346,6 +492,12 @@ class ForecastRequestResponse(BaseModel):
     balance_before: Optional[int] = None
     balance_after: Optional[int] = None
     no_balance_warning: bool = False
+    flat_subscription_id: Optional[UUID] = None
+    stake_rub: Optional[Decimal] = None
+    stake_flats: Optional[Decimal] = None
+    stake_input_channel: Optional[str] = None
+    stake_submitted_at: Optional[datetime] = None
+    flat_subscription: Optional[FlatSubscriptionSummaryResponse] = None
     created_at: datetime
     updated_at: datetime
     bet: BetResponse
@@ -415,6 +567,36 @@ class SwipeResponse(BaseModel):
     discount: int
     promo_code: Optional[str] = Field(default=None, max_length=80)
     message: str
+
+
+# --- PROMO WIDGETS ADMIN SCHEMAS ---
+class QuizQuestionCreate(BaseModel):
+    question: str = Field(..., max_length=400)
+    options: List[str] = Field(..., min_length=2, max_length=10)
+    correct_answer_index: int = Field(..., ge=0, description="Индекс правильного ответа (от 0)")
+
+class QuizCreate(BaseModel):
+    bet_id: Optional[UUID] = Field(default=None, description="Опциональная привязка к ставке")
+    discount_reward: int = Field(default=30, ge=1, le=100)
+    questions: List[QuizQuestionCreate] = Field(..., min_length=1)
+
+class QuizResponse(BaseModel):
+    id: int
+    bet_id: Optional[UUID]
+    discount_reward: int
+    created_at: datetime
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+class PvPBattleCreate(BaseModel):
+    match_name: str = Field(..., max_length=200)
+    option_a: str = Field(..., max_length=200)
+    option_b: str = Field(..., max_length=200)
+
+class CrowdBetCreate(BaseModel):
+    bet_id: UUID = Field(..., description="ID ставки, которую будем открывать")
+    target_amount: int = Field(..., ge=1, description="Сумма XTR для сбора")
 
 
 class QuizQuestionResponse(BaseModel):
@@ -494,6 +676,7 @@ class PromoCodeResponse(BaseModel):
     reward_type: str
     discount_percent: int
     matches_count: int
+    target_flats: Optional[Decimal] = None
     valid_until: datetime
     is_active: bool
 
@@ -596,6 +779,7 @@ class AdminUserListResponse(BaseModel):
     guarantee_active: bool = False
     guarantee_opened_from_bet_id: Optional[UUID] = None
     guarantee_closed_at: Optional[datetime] = None
+    flat_subscription: Optional[FlatSubscriptionSummaryResponse] = None
     bookmakers: List[BookmakerResponse]
     other_bookmaker_name: Optional[str] = None
     client_group: Optional[str] = None
@@ -811,3 +995,15 @@ class AnnouncementDeliveryResponse(BaseModel):
     total_audience: int
     sent: int
     failed: int
+class WheelPrizeConfig(BaseModel):
+    id: str
+    label: str
+    sub: str
+    probability: int
+    reward_type: str
+    reward_value: int
+    color: str
+    icon: str
+
+class WheelConfigPayload(BaseModel):
+    prizes: list[WheelPrizeConfig]

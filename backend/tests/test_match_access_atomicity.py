@@ -314,13 +314,20 @@ class MatchAccessPostgresConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.engine = create_async_engine(
             postgres_url,
             future=True,
-            connect_args={"server_settings": {"search_path": f'"{self.schema}",public'}},
+            connect_args={
+                "server_settings": {
+                    "search_path": f'"{self.schema}",public',
+                    "application_name": self.schema,
+                }
+            },
         )
         required_tables = {
             "bookmakers",
             "users",
             "user_bookmakers",
             "subscription_plans",
+            "subscription_plan_checkout_allowlist",
+            "flat_subscriptions",
             "subscriptions",
             "bets",
             "bet_bookmakers",
@@ -335,9 +342,32 @@ class MatchAccessPostgresConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.engine.dispose()
+        leaked_connection_count = 0
         async with self.admin_engine.begin() as connection:
+            leaked_connection_count = int(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE application_name = :application_name "
+                            "AND pid <> pg_backend_pid()"
+                        ),
+                        {"application_name": self.schema},
+                    )
+                ).scalar_one()
+            )
+            if leaked_connection_count:
+                await connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE application_name = :application_name "
+                        "AND pid <> pg_backend_pid()"
+                    ),
+                    {"application_name": self.schema},
+                )
             await connection.execute(text(f'DROP SCHEMA "{self.schema}" CASCADE'))
         await self.admin_engine.dispose()
+        self.assertEqual(leaked_connection_count, 0, "PostgreSQL test leaked a connection")
 
     @staticmethod
     def _bet() -> Bet:

@@ -19,6 +19,7 @@ from src.models.models import (
     ChatMessage,
     ChatReadCursor,
     DeliveryOutbox,
+    FlatSubscription,
     IdentityDeviceLink,
     MarketingRewardEvent,
     MatchBalanceLog,
@@ -29,6 +30,7 @@ from src.models.models import (
     ReferralRewardEvent,
     Subscription,
     User,
+    user_bets,
 )
 from src.services import telegram_auth
 from src.services import vk_auth_flow
@@ -48,6 +50,60 @@ class TelegramAuthMergeTests(unittest.IsolatedAsyncioTestCase):
         telegram_auth._sessions.clear()
         vk_auth_flow._flows.clear()
         await self.engine.dispose()
+
+    async def test_identity_merge_combines_open_flat_targets_and_preserves_stake_snapshots(self):
+        async with self.Session() as db:
+            source = User(telegram_id=-501, matches_remaining=0, purchased_bets_balance=0)
+            target = User(telegram_id=501, matches_remaining=0, purchased_bets_balance=0)
+            bet = Bet(
+                id=uuid.uuid4(),
+                event_name="А — Б",
+                outcome="П1",
+                coefficient=Decimal("1.70"),
+                status="pending",
+            )
+            source_subscription = FlatSubscription(
+                user=source,
+                status="active",
+                flat_amount_rub=Decimal("5000.00"),
+                target_flats=Decimal("2.00"),
+            )
+            target_subscription = FlatSubscription(
+                user=target,
+                status="active",
+                flat_amount_rub=Decimal("10000.00"),
+                target_flats=Decimal("1.00"),
+            )
+            db.add_all([source, target, bet, source_subscription, target_subscription])
+            await db.flush()
+            await db.execute(
+                user_bets.insert().values(
+                    user_id=source.telegram_id,
+                    bet_id=bet.id,
+                    access_type="flat_subscription",
+                    match_charged=False,
+                    flat_subscription_id=source_subscription.id,
+                    stake_rub=Decimal("2500.00"),
+                    flat_amount_rub_snapshot=Decimal("5000.00"),
+                    stake_flats=Decimal("0.500000"),
+                    coefficient_snapshot=Decimal("1.700"),
+                )
+            )
+
+            await auth._merge_flat_subscriptions(db, source.telegram_id, target.telegram_id)
+            await auth._merge_user_bets(db, source.telegram_id, target.telegram_id)
+            await db.flush()
+
+            subscriptions = list((await db.execute(select(FlatSubscription))).scalars().all())
+            stake = (await db.execute(select(user_bets))).mappings().one()
+
+            self.assertEqual(len(subscriptions), 1)
+            self.assertEqual(subscriptions[0].user_id, target.telegram_id)
+            self.assertEqual(subscriptions[0].target_flats, Decimal("3.00"))
+            self.assertEqual(stake["user_id"], target.telegram_id)
+            self.assertEqual(stake["flat_subscription_id"], subscriptions[0].id)
+            self.assertEqual(stake["stake_rub"], Decimal("2500.00"))
+            self.assertEqual(stake["coefficient_snapshot"], Decimal("1.700"))
 
     def test_vk_oauth_urlopen_bypasses_process_proxy_environment(self):
         request = auth.urllib.request.Request("https://id.vk.ru/oauth2/auth")

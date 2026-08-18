@@ -109,6 +109,26 @@ class TelegramStarsProviderErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("access_token", context.exception.detail)
         self.assertNotIn("secret", context.exception.detail.lower())
 
+    async def test_telegram_stars_server_error_is_ambiguous(self):
+        attempt = PaymentAttempt(id=uuid4(), amount=Decimal("10"))
+
+        with (
+            patch.object(payments.settings, "DEBUG_MODE", False),
+            patch.object(payments.settings, "TELEGRAM_BOT_TOKEN", "987654:real-token"),
+            patch.object(
+                payments,
+                "call_telegram_api_async",
+                AsyncMock(return_value={"ok": False, "error_code": 500, "description": "internal error"}),
+            ),
+        ):
+            with self.assertRaises(payments.TelegramInvoiceCreationAmbiguousError):
+                await payments.create_telegram_stars_invoice_link(
+                    attempt=attempt,
+                    title="Forecast",
+                    description="Forecast access",
+                    label="Forecast",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

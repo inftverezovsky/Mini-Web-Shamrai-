@@ -3,14 +3,15 @@ import { apiFetch } from '../../utils/api';
 import { Gift, Trash2, Plus, Loader2, Calendar, Percent, Ticket } from 'lucide-react';
 import { notifyError, notifySuccess } from '../../utils/notify';
 
-type PromoRewardType = 'discount' | 'matches';
+type PromoRewardType = 'discount' | 'flats';
 
 interface PromoCodeData {
   id: number;
   code: string;
-  reward_type?: PromoRewardType;
+  reward_type?: PromoRewardType | 'matches';
   discount_percent: number;
   matches_count?: number;
+  target_flats?: number | string | null;
   valid_until: string;
   is_active: boolean;
 }
@@ -23,7 +24,7 @@ export default function AdminMarketing() {
   const [promoCode, setPromoCode] = useState('');
   const [promoRewardType, setPromoRewardType] = useState<PromoRewardType>('discount');
   const [discountPercent, setDiscountPercent] = useState('');
-  const [matchesCount, setMatchesCount] = useState('');
+  const [targetFlats, setTargetFlats] = useState('');
   const [validUntil, setValidUntil] = useState('');
   const [submittingPromo, setSubmittingPromo] = useState(false);
 
@@ -45,7 +46,7 @@ export default function AdminMarketing() {
 
   const handleCreatePromo = async (e: React.FormEvent) => {
     e.preventDefault();
-    const valueField = promoRewardType === 'discount' ? discountPercent : matchesCount;
+    const valueField = promoRewardType === 'discount' ? discountPercent : targetFlats;
     if (!promoCode || !valueField || !validUntil) {
       notifyError('Заполните все поля промокода');
       return;
@@ -58,7 +59,8 @@ export default function AdminMarketing() {
         code: promoCode,
         reward_type: promoRewardType,
         discount_percent: promoRewardType === 'discount' ? Number.parseInt(discountPercent, 10) : 0,
-        matches_count: promoRewardType === 'matches' ? Number.parseInt(matchesCount, 10) : 0,
+        matches_count: 0,
+        target_flats: promoRewardType === 'flats' ? targetFlats.replace(',', '.') : undefined,
         valid_until: new Date(validUntil).toISOString(),
       };
 
@@ -70,7 +72,7 @@ export default function AdminMarketing() {
       notifySuccess('Промокод успешно создан');
       setPromoCode('');
       setDiscountPercent('');
-      setMatchesCount('');
+      setTargetFlats('');
       setValidUntil('');
 
       // Refresh list
@@ -130,15 +132,15 @@ export default function AdminMarketing() {
             </button>
             <button
               type="button"
-              onClick={() => setPromoRewardType('matches')}
+              onClick={() => setPromoRewardType('flats')}
               className={`min-h-[34px] rounded-lg px-3 text-[10px] font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
-                promoRewardType === 'matches'
+                promoRewardType === 'flats'
                   ? 'bg-indigo-500 text-white shadow-glass'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               <Ticket className="w-3.5 h-3.5" />
-              <span>Матчи</span>
+              <span>Флеты</span>
             </button>
           </div>
 
@@ -155,16 +157,17 @@ export default function AdminMarketing() {
             </div>
             <div>
               <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
-                {promoRewardType === 'discount' ? 'Скидка (%)' : 'Матчей'}
+                {promoRewardType === 'discount' ? 'Скидка (%)' : 'Цель, флетов'}
               </label>
               <input
                 type="number"
                 min="1"
-                value={promoRewardType === 'discount' ? discountPercent : matchesCount}
+                step={promoRewardType === 'discount' ? '1' : '0.01'}
+                value={promoRewardType === 'discount' ? discountPercent : targetFlats}
                 onChange={e => (
                   promoRewardType === 'discount'
                     ? setDiscountPercent(e.target.value)
-                    : setMatchesCount(e.target.value)
+                    : setTargetFlats(e.target.value)
                 )}
                 placeholder={promoRewardType === 'discount' ? '50' : '3'}
                 className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2.5 px-3 text-white focus:outline-none focus:border-indigo-500/50 transition-all font-bold"
@@ -215,9 +218,11 @@ export default function AdminMarketing() {
                       {p.code}
                     </span>
                     <p className="text-[9px] text-slate-450 font-semibold uppercase">
-                      {(p.reward_type || 'discount') === 'matches'
-                        ? `Матчи: +${p.matches_count || 0}`
-                        : `Скидка: ${p.discount_percent}%`}
+                      {(p.reward_type || 'discount') === 'flats'
+                        ? `Цель: +${Number(p.target_flats || 0).toFixed(2)} флета`
+                        : p.reward_type === 'matches'
+                          ? `Старый бонус: +${Number(p.matches_count || 0)} матч.`
+                          : `Скидка: ${p.discount_percent}%`}
                     </p>
                     <p className="text-[8px] text-slate-500 flex items-center uppercase font-bold">
                       <Calendar className="w-2.5 h-2.5 mr-0.5" />

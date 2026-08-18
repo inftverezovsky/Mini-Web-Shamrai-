@@ -484,6 +484,9 @@ if [ -f backend/.env ]; then cp -a backend/.env "`$backup_root/backend.env"; els
             "--exclude=./backend/.env" `
             "--exclude=./backend/.env.local" `
             "--exclude=./backend/.env.*" `
+            "--exclude=./backend/check.py" `
+            "--exclude=./backend/get_export.py" `
+            "--exclude=./backend/export_with_bonuses.xlsx" `
             "--exclude=./backend/static/coupons" `
             "--exclude=./backend/static/coupons/*" `
             "-czf" $archive "backend"

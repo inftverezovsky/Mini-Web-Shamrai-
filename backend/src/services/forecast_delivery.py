@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -27,9 +28,14 @@ from src.core.message_templates import (
 )
 from src.core.roles import STAFF_ROLES, is_admin_role
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
-from src.core.telegram_text import append_contact_footer, bookmaker_custom_emoji
+from src.core.telegram_text import (
+    append_contact_footer,
+    bookmaker_custom_emoji,
+    decorate_forecast_html,
+    sport_custom_emoji,
+)
 from src.models.database import AsyncSessionLocal
-from src.models.models import Bet, ForecastRequest, User, user_bets
+from src.models.models import Bet, FlatSubscription, ForecastRequest, User, user_bets
 from src.services.delivery_outbox import (
     CHANNEL_FORECAST_ADMIN_FULL_COPY,
     CHANNEL_FORECAST_AUTO_DELIVERY,
@@ -43,6 +49,14 @@ from src.services.match_access import (
     lock_user_balance,
     record_user_bet_access,
     user_has_full_forecast_access,
+)
+from src.services.flat_subscriptions import (
+    FlatSubscriptionState,
+    get_open_flat_subscription,
+    lock_flat_subscription_financial_rows,
+    prepare_forecast_request_flat_stake,
+    record_user_flat_bet_access,
+    refresh_flat_subscriptions_after_terminal_requests,
 )
 from src.services.signals import deliver_personal_signal
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_multipart
@@ -214,6 +228,13 @@ def _bookmaker_labels_for_bet(bet: Bet) -> str:
     if not bookmakers:
         return "<b>не указана</b>"
     return ", ".join(_bookmaker_label(bookmaker) for bookmaker in bookmakers)
+
+
+def _sport_line_for_bet(bet: Bet) -> str:
+    sport_type = str(getattr(bet, "sport_type", None) or "").strip()
+    if not sport_type:
+        return ""
+    return f"{sport_custom_emoji(sport_type)} Спорт: <b>{_html(sport_type)}</b>"
 
 
 def _normalize_match_url(raw_url: Optional[object]) -> str:
@@ -640,7 +661,15 @@ def user_match_balance(user: User) -> int:
 
 
 def forecast_request_has_full_access(forecast_request: ForecastRequest) -> bool:
-    return request_is_paid_set(forecast_request) or user_has_full_forecast_access(forecast_request.user)
+    if request_is_paid_set(forecast_request) or user_has_full_forecast_access(forecast_request.user):
+        return True
+    if getattr(forecast_request, "flat_subscription_id", None) is not None:
+        return True
+    loaded_flat_subscriptions = getattr(forecast_request.user, "__dict__", {}).get("flat_subscriptions", ())
+    return any(
+        item.status == FlatSubscriptionState.ACTIVE.value and item.flat_amount_rub is not None
+        for item in loaded_flat_subscriptions
+    )
 
 
 def forecast_request_requires_contact(forecast_request: ForecastRequest) -> bool:
@@ -653,6 +682,8 @@ async def load_forecast_request(db: AsyncSession, request_id: UUID) -> ForecastR
         .filter(ForecastRequest.id == request_id)
         .options(
             selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
+            selectinload(ForecastRequest.flat_subscription),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
         )
@@ -722,6 +753,7 @@ async def _lock_forecast_delivery_scope(
         .with_for_update()
         .options(
             selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+            selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
             selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
         )
@@ -742,6 +774,156 @@ async def _lock_forecast_delivery_scope(
     return locked_request
 
 
+async def _lock_forecast_terminal_scope(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> ForecastRequest:
+    """Lock Bet -> User -> FlatSubscription -> UserBet -> ForecastRequest."""
+    expected_request_id = forecast_request.id
+    expected_bet_id = forecast_request.bet_id
+    expected_user_id = forecast_request.user_id
+    locked_bet = await load_locked_bet_for_user_access(db, expected_bet_id)
+    await lock_user_balance(db, expected_user_id)
+
+    with db.no_autoflush:
+        snapshot = (
+            await db.execute(
+                select(
+                    ForecastRequest.bet_id,
+                    ForecastRequest.user_id,
+                    ForecastRequest.flat_subscription_id,
+                ).filter(ForecastRequest.id == expected_request_id)
+            )
+        ).first()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заявка на прогноз не найдена",
+        )
+    if snapshot.bet_id != expected_bet_id or snapshot.user_id != expected_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Заявка уже изменилась",
+        )
+
+    expected_flat_subscription_id = snapshot.flat_subscription_id
+    await lock_flat_subscription_financial_rows(
+        db,
+        [expected_flat_subscription_id],
+    )
+    with db.no_autoflush:
+        result = await db.execute(
+            select(ForecastRequest)
+            .filter(ForecastRequest.id == expected_request_id)
+            .with_for_update()
+            .options(
+                selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+                selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
+                selectinload(ForecastRequest.flat_subscription),
+                selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
+                selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
+            )
+            .execution_options(populate_existing=True)
+        )
+    locked_request = result.scalars().first()
+    if locked_request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заявка на прогноз не найдена",
+        )
+    if (
+        locked_request.bet_id != expected_bet_id
+        or locked_request.user_id != expected_user_id
+        or locked_request.flat_subscription_id != expected_flat_subscription_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Заявка уже изменилась",
+        )
+    locked_request.bet = locked_bet
+    return locked_request
+
+
+async def _lock_forecast_interest_scope(
+    db: AsyncSession,
+    forecast_request: ForecastRequest,
+) -> tuple[ForecastRequest, Optional[FlatSubscription]]:
+    """Lock Bet -> User -> FlatSubscription -> UserBet -> ForecastRequest for stake input."""
+    expected_request_id = forecast_request.id
+    expected_bet_id = forecast_request.bet_id
+    expected_user_id = forecast_request.user_id
+    locked_bet = await load_locked_bet_for_user_access(db, expected_bet_id)
+    await lock_user_balance(db, expected_user_id)
+
+    with db.no_autoflush:
+        snapshot = (
+            await db.execute(
+                select(
+                    ForecastRequest.bet_id,
+                    ForecastRequest.user_id,
+                    ForecastRequest.flat_subscription_id,
+                ).filter(ForecastRequest.id == expected_request_id)
+            )
+        ).first()
+        open_flat_subscription = await get_open_flat_subscription(db, expected_user_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заявка на прогноз не найдена",
+        )
+    if snapshot.bet_id != expected_bet_id or snapshot.user_id != expected_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Заявка уже изменилась",
+        )
+
+    open_flat_subscription_id = (
+        open_flat_subscription.id if open_flat_subscription is not None else None
+    )
+    locked_flat_subscriptions = await lock_flat_subscription_financial_rows(
+        db,
+        [snapshot.flat_subscription_id, open_flat_subscription_id],
+    )
+    locked_flat_subscriptions_by_id = {
+        item.id: item for item in locked_flat_subscriptions
+    }
+
+    with db.no_autoflush:
+        result = await db.execute(
+            select(ForecastRequest)
+            .filter(ForecastRequest.id == expected_request_id)
+            .with_for_update()
+            .options(
+                selectinload(ForecastRequest.user).selectinload(User.bookmakers),
+                selectinload(ForecastRequest.user).selectinload(User.flat_subscriptions),
+                selectinload(ForecastRequest.flat_subscription),
+                selectinload(ForecastRequest.bet).selectinload(Bet.bookmaker),
+                selectinload(ForecastRequest.bet).selectinload(Bet.bookmakers),
+            )
+            .execution_options(populate_existing=True)
+        )
+    locked_request = result.scalars().first()
+    if locked_request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Заявка на прогноз не найдена",
+        )
+    if (
+        locked_request.bet_id != expected_bet_id
+        or locked_request.user_id != expected_user_id
+        or locked_request.flat_subscription_id != snapshot.flat_subscription_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Заявка уже изменилась",
+        )
+    locked_request.bet = locked_bet
+    return (
+        locked_request,
+        locked_flat_subscriptions_by_id.get(open_flat_subscription_id),
+    )
+
+
 def build_teaser_message(
     forecast_request: ForecastRequest,
     teaser_text: Optional[str],
@@ -753,16 +935,18 @@ def build_teaser_message(
     teaser = (
         (teaser_text if teaser_text is not None else stored_teaser_text) or ""
     ).strip() or "Есть закрытый прогноз под вашу БК. Нажмите, если хотите взять матч."
-    return render_message_template_body(
-        template_body or default_message_template_body(TEMPLATE_FORECAST_TEASER),
-        {
-            "bookmaker_labels": _bookmaker_labels_for_bet(bet),
-            "coefficient": _coefficient_text(bet),
-            "fair_coefficient_line": _fair_coefficient_line(bet),
-            "teaser_text": teaser,
-            "contact_footer": append_contact_footer("").strip(),
-        },
-        safe_keys={"bookmaker_labels", "fair_coefficient_line", "contact_footer"},
+    return decorate_forecast_html(
+        render_message_template_body(
+            template_body or default_message_template_body(TEMPLATE_FORECAST_TEASER),
+            {
+                "bookmaker_labels": _bookmaker_labels_for_bet(bet),
+                "coefficient": _coefficient_text(bet),
+                "fair_coefficient_line": _fair_coefficient_line(bet),
+                "teaser_text": teaser,
+                "contact_footer": append_contact_footer("").strip(),
+            },
+            safe_keys={"bookmaker_labels", "fair_coefficient_line", "contact_footer"},
+        )
     )
 
 
@@ -778,17 +962,19 @@ def build_paid_set_teaser_message(
     clean_title = (title or bet.event_name or PAID_SET_PLACEHOLDER_EVENT_NAME).strip() or PAID_SET_PLACEHOLDER_EVENT_NAME
     teaser = (teaser_text or bet.description or "").strip() or "Реальный КФ не выше 1.9!"
     price_text = _format_rub_price(price_rub if price_rub is not None else bet.price_stars)
-    return render_message_template_body(
-        template_body or default_message_template_body(TEMPLATE_PAID_SET_TEASER),
-        {
-            "title": clean_title,
-            "coefficient": _coefficient_text(bet),
-            "bookmaker_line": _paid_set_bookmaker_line(bet),
-            "body": teaser,
-            "price_text": price_text,
-            "contact_footer": append_contact_footer("").strip(),
-        },
-        safe_keys={"bookmaker_line", "contact_footer"},
+    return decorate_forecast_html(
+        render_message_template_body(
+            template_body or default_message_template_body(TEMPLATE_PAID_SET_TEASER),
+            {
+                "title": clean_title,
+                "coefficient": _coefficient_text(bet),
+                "bookmaker_line": _paid_set_bookmaker_line(bet),
+                "body": teaser,
+                "price_text": price_text,
+                "contact_footer": append_contact_footer("").strip(),
+            },
+            safe_keys={"bookmaker_line", "contact_footer"},
+        )
     )
 
 
@@ -827,6 +1013,33 @@ def send_forecast_teaser(forecast_request: ForecastRequest, teaser_text: Optiona
     return call_telegram_api("sendMessage", build_forecast_teaser_payload(forecast_request, teaser_text))
 
 
+def _build_full_forecast_message_for_bet(
+    bet: Bet,
+    *,
+    include_bookmaker: bool = True,
+    include_bookmaker_links: bool = False,
+    template_body: Optional[str] = None,
+) -> str:
+    detail_lines = [_sport_line_for_bet(bet)]
+    if include_bookmaker:
+        detail_lines.append(f"БК: {_bookmaker_labels_for_bet(bet)}")
+    return decorate_forecast_html(
+        render_message_template_body(
+            template_body or default_message_template_body(TEMPLATE_FORECAST_FULL),
+            {
+                "event_name": bet.event_name,
+                "outcome": bet.outcome or "уточняется",
+                "coefficient": _coefficient_text(bet),
+                "bookmaker_line": _join_forecast_lines(detail_lines),
+                "description": bet.description or "",
+                "bookmaker_links_block": _join_forecast_lines(_bookmaker_link_lines(bet)) if include_bookmaker_links else "",
+                "contact_footer": append_contact_footer("").strip(),
+            },
+            safe_keys={"bookmaker_line", "bookmaker_links_block", "contact_footer"},
+        )
+    )
+
+
 def _build_full_forecast_message(
     forecast_request: ForecastRequest,
     *,
@@ -834,32 +1047,26 @@ def _build_full_forecast_message(
     include_bookmaker_links: bool = False,
     template_body: Optional[str] = None,
 ) -> str:
-    bet = forecast_request.bet
-    return render_message_template_body(
-        template_body or default_message_template_body(TEMPLATE_FORECAST_FULL),
-        {
-            "event_name": bet.event_name,
-            "outcome": bet.outcome or "уточняется",
-            "coefficient": _coefficient_text(bet),
-            "bookmaker_line": f"БК: {_bookmaker_labels_for_bet(bet)}" if include_bookmaker else "",
-            "description": bet.description or "",
-            "bookmaker_links_block": _join_forecast_lines(_bookmaker_link_lines(bet)) if include_bookmaker_links else "",
-            "contact_footer": append_contact_footer("").strip(),
-        },
-        safe_keys={"bookmaker_line", "bookmaker_links_block", "contact_footer"},
+    return _build_full_forecast_message_for_bet(
+        forecast_request.bet,
+        include_bookmaker=include_bookmaker,
+        include_bookmaker_links=include_bookmaker_links,
+        template_body=template_body,
     )
 
 
-def send_full_forecast_to_telegram_chat(
-    forecast_request: ForecastRequest,
+def _send_forecast_bet_to_telegram_chat(
+    bet: Bet,
     *,
     chat_id: int,
     template_body: Optional[str] = None,
 ) -> dict:
-    bet = forecast_request.bet
-    base_full_message = _build_full_forecast_message(forecast_request, template_body=template_body)
-    full_message_with_links = _build_full_forecast_message(
-        forecast_request,
+    base_full_message = _build_full_forecast_message_for_bet(
+        bet,
+        template_body=template_body,
+    )
+    full_message_with_links = _build_full_forecast_message_for_bet(
+        bet,
         include_bookmaker_links=True,
         template_body=template_body,
     )
@@ -963,6 +1170,56 @@ def send_full_forecast_to_telegram_chat(
         if links_result and not links_result.get("ok"):
             return links_result
     return text_result
+
+
+def send_feed_forecast_to_telegram_chat(
+    bet: Bet,
+    *,
+    chat_id: int,
+    template_body: Optional[str] = None,
+) -> dict:
+    price_stars = max(0, int(getattr(bet, "price_stars", 0) or 0))
+    if price_stars > 0:
+        payload = {
+            "chat_id": chat_id,
+            "text": (
+                "<b>🔒 Новый платный прогноз в Shamrai</b>\n\n"
+                f"Стоимость доступа: <b>{price_stars} Stars</b>\n\n"
+                "Откройте Ленту в приложении, чтобы посмотреть и приобрести прогноз."
+            ),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        frontend_url = str(settings.FRONTEND_BASE_URL or "").strip()
+        if frontend_url:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[
+                    {
+                        "text": "Открыть Ленту",
+                        "url": frontend_url,
+                    }
+                ]]
+            }
+        return call_telegram_api("sendMessage", payload)
+
+    return _send_forecast_bet_to_telegram_chat(
+        bet,
+        chat_id=chat_id,
+        template_body=template_body,
+    )
+
+
+def send_full_forecast_to_telegram_chat(
+    forecast_request: ForecastRequest,
+    *,
+    chat_id: int,
+    template_body: Optional[str] = None,
+) -> dict:
+    return _send_forecast_bet_to_telegram_chat(
+        forecast_request.bet,
+        chat_id=chat_id,
+        template_body=template_body,
+    )
 
 
 def send_full_forecast_to_client(
@@ -1112,14 +1369,17 @@ def build_paid_set_sale_message(forecast_request: ForecastRequest) -> str:
         f"КФ: <b>{_html(_coefficient_text(bet))}</b>",
         f"Стоимость: <b>{_html(_format_rub_price(getattr(bet, 'price_stars', None)))}</b>",
         f"БК: {_bookmaker_labels_for_bet(bet)}",
-        f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>",
+        (
+            f"{sport_custom_emoji(bet.sport_type)} "
+            f"Спорт: <b>{_html(bet.sport_type or 'не указан')}</b>"
+        ),
     ]
     if description:
         lines.append(_html(description))
     contact_footer = append_contact_footer("").strip()
     if contact_footer:
         lines.append(contact_footer)
-    return "\n\n".join(lines)
+    return decorate_forecast_html("\n\n".join(lines))
 
 
 def build_web_paid_set_sale_text(forecast_request: ForecastRequest) -> str:
@@ -1419,6 +1679,20 @@ def _build_take_admin_notification_content(forecast_request: ForecastRequest) ->
     warning = ""
     if delivery_blocked and not is_paid_set:
         warning = "\n\n⚠️ У клиента 0 матчей. Отправка прогноза недоступна до оплаты."
+    flat_subscription = forecast_request.__dict__.get("flat_subscription")
+    flat_details = ""
+    stake_rub = getattr(forecast_request, "stake_rub", None)
+    if stake_rub is not None:
+        unit_value = getattr(flat_subscription, "flat_amount_rub", None)
+        progress_value = getattr(flat_subscription, "profit_flats", None)
+        target_value = getattr(flat_subscription, "target_flats", None)
+        flat_details = (
+            f"Сумма ставки: <b>{_html(_format_rub_price(stake_rub))}</b>\n"
+            f"Объём: <b>{_html(getattr(forecast_request, 'stake_flats', None))} флета</b>\n"
+            f"Размер флета: <b>{_html(_format_rub_price(unit_value))}</b>\n"
+            f"Прогресс: <b>{_html(progress_value)} / +{_html(target_value)} флета</b>\n"
+        )
+    access_details = flat_details or f"Баланс матчей: <b>{balance}</b>\n"
 
     if is_paid_set:
         message = (
@@ -1437,7 +1711,7 @@ def _build_take_admin_notification_content(forecast_request: ForecastRequest) ->
             "<b>Клиент хочет взять закрытый прогноз</b>\n\n"
             f"Клиент: <b>{_html(_client_display(user))}</b>\n"
             f"Telegram ID: <code>{user.telegram_id}</code>\n"
-            f"Баланс матчей: <b>{balance}</b>\n\n"
+            f"{access_details}\n"
             f"Прогноз: <b>{_html(bet.event_name or PLACEHOLDER_EVENT_NAME)}</b>\n"
             f"Исход: <b>{_html(bet.outcome or 'уточняется')}</b>\n"
             f"КФ: <b>{_html(_coefficient_text(bet))}</b>\n"
@@ -1976,6 +2250,8 @@ async def set_forecast_request_interested(
     notify_sales_manager_now: bool = True,
     auto_delivery_method: str = "auto",
     auto_delivery_now: bool = True,
+    stake_rub: Optional[Decimal] = None,
+    input_channel: str = "web",
 ) -> tuple[ForecastRequest, str, bool]:
     forecast_request = await load_forecast_request(db, request_id)
     if forecast_request.user_id != actor_user_id:
@@ -1983,7 +2259,10 @@ async def set_forecast_request_interested(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Эта кнопка привязана к другому клиенту",
         )
-    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
+    forecast_request, open_flat_subscription = await _lock_forecast_interest_scope(
+        db,
+        forecast_request,
+    )
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Прогноз уже оформлен.", False
     if forecast_request_is_inactive_for_client(forecast_request):
@@ -2005,6 +2284,25 @@ async def set_forecast_request_interested(
         return forecast_request, "Заявка уже обрабатывается.", False
     if forecast_request.status == FORECAST_STATUS_DECLINED:
         return forecast_request, "Отказ уже учтен.", False
+
+    if open_flat_subscription is not None and not user_has_full_forecast_access(forecast_request.user):
+        if open_flat_subscription.status != FlatSubscriptionState.ACTIVE.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Флетовый абонемент пока не принимает новые ставки",
+            )
+        if stake_rub is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Укажите сумму фактической ставки",
+            )
+        await prepare_forecast_request_flat_stake(
+            db,
+            forecast_request=forecast_request,
+            flat_subscription=open_flat_subscription,
+            stake_rub=stake_rub,
+            input_channel=input_channel,
+        )
 
     if forecast_request_requires_contact(forecast_request):
         return forecast_request, FORECAST_CONTACT_REQUIRED_MESSAGE, False
@@ -2148,7 +2446,10 @@ async def deliver_forecast_request(
     commit: bool,
 ) -> tuple[ForecastRequest, UserBetAccessResult]:
     """Deliver a private forecast and own the transaction boundary when commit=True."""
-    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
+    if getattr(forecast_request, "flat_subscription_id", None) is not None:
+        forecast_request, _ = await _lock_forecast_interest_scope(db, forecast_request)
+    else:
+        forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
 
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, _already_taken_access_result(forecast_request)
@@ -2288,14 +2589,36 @@ async def deliver_forecast_request(
     forecast_request.handled_by = handled_by
 
     try:
-        access_result = await record_user_bet_access(
-            db,
-            user=forecast_request.user,
-            bet=forecast_request.bet,
-            charge_match=True,
-            allow_negative_balance=False,
-            note=f"Private forecast activated via {delivery_method}",
-        )
+        flat_subscription_id = getattr(forecast_request, "flat_subscription_id", None)
+        stake_rub = getattr(forecast_request, "stake_rub", None)
+        if flat_subscription_id is not None and stake_rub is not None:
+            flat_access = await record_user_flat_bet_access(
+                db,
+                user=forecast_request.user,
+                bet=forecast_request.bet,
+                stake_rub=stake_rub,
+                forecast_request=forecast_request,
+                input_channel=getattr(forecast_request, "stake_input_channel", None) or delivery_method,
+            )
+            current_balance = user_match_balance(forecast_request.user)
+            access_result = UserBetAccessResult(
+                status="already_taken" if flat_access.already_recorded else "success",
+                already_recorded=flat_access.already_recorded,
+                access_type="flat_subscription",
+                match_charged=False,
+                balance_before=current_balance,
+                balance_after=current_balance,
+                no_balance_warning=False,
+            )
+        else:
+            access_result = await record_user_bet_access(
+                db,
+                user=forecast_request.user,
+                bet=forecast_request.bet,
+                charge_match=True,
+                allow_negative_balance=False,
+                note=f"Private forecast activated via {delivery_method}",
+            )
         forecast_request.status = _status_for_delivery_method(delivery_method)
         forecast_request.delivery_method = delivery_method
         forecast_request.handled_by = handled_by
@@ -2328,7 +2651,7 @@ async def cancel_forecast_request(
     forecast_request: ForecastRequest,
     handled_by: Optional[int],
 ) -> tuple[ForecastRequest, str]:
-    forecast_request = await _lock_forecast_delivery_scope(db, forecast_request)
+    forecast_request = await _lock_forecast_terminal_scope(db, forecast_request)
     if forecast_request.status in DELIVERED_STATUSES:
         return forecast_request, "Заявка уже доставлена."
     if forecast_request.status == FORECAST_STATUS_CANCELLED:
@@ -2353,6 +2676,10 @@ async def cancel_forecast_request(
 
     forecast_request.status = FORECAST_STATUS_CANCELLED
     forecast_request.handled_by = handled_by
+    await refresh_flat_subscriptions_after_terminal_requests(
+        db,
+        [forecast_request.flat_subscription_id],
+    )
     return forecast_request, "Заявка отменена."
 
 

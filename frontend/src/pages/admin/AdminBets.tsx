@@ -5,7 +5,10 @@ import { Send, X, Loader2, ListFilter, Upload, Link as LinkIcon } from 'lucide-r
 import { SPORT_OPTIONS } from '../../constants/sports';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import BookmakerMultiSelect from '../../components/BookmakerMultiSelect';
-import EmojiTextField from '../../components/EmojiTextField';
+import EmojiTextField, {
+  TelegramCustomEmojiEntity,
+  TelegramCustomEmojiOption,
+} from '../../components/EmojiTextField';
 import { notifyError, notifySuccess } from '../../utils/notify';
 import { getClipboardImageFile } from '../../utils/clipboardImages';
 
@@ -17,7 +20,28 @@ const COUPON_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const TEXT_PUBLICATION_SPORT_TYPE = 'Текст';
 const TEXT_PUBLICATION_FALLBACK_TITLE = 'Публикация Shamrai';
 
-type FeedPublicationMode = 'forecast' | 'text';
+type FeedPublicationMode = 'forecast' | 'text' | 'promo';
+
+import AdminPromoContent from './AdminPromoContent';
+
+function trimTextAndEntities(
+  value: string,
+  entities: TelegramCustomEmojiEntity[],
+) {
+  const trimmedStart = value.trimStart();
+  const leadingLength = value.length - trimmedStart.length;
+  const trimmed = value.trim();
+  const end = leadingLength + trimmed.length;
+  return {
+    text: trimmed,
+    entities: entities
+      .filter((entity) => (
+        entity.offset >= leadingLength
+        && entity.offset + entity.length <= end
+      ))
+      .map((entity) => ({ ...entity, offset: entity.offset - leadingLength })),
+  };
+}
 
 export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [bookmakers, setBookmakers] = useState<BookmakerResponse[]>([]);
@@ -33,6 +57,11 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const [description, setDescription] = useState('');
   const [textTitle, setTextTitle] = useState('');
   const [textBody, setTextBody] = useState('');
+  const [textTitleEntities, setTextTitleEntities] = useState<TelegramCustomEmojiEntity[]>([]);
+  const [textBodyEntities, setTextBodyEntities] = useState<TelegramCustomEmojiEntity[]>([]);
+  const [customEmojis, setCustomEmojis] = useState<TelegramCustomEmojiOption[]>([]);
+  const [customEmojisRefreshing, setCustomEmojisRefreshing] = useState(false);
+  const [customEmojiPollAttempt, setCustomEmojiPollAttempt] = useState(0);
   const [category, setCategory] = useState<'prematch' | 'live'>('prematch');
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
@@ -92,8 +121,12 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   const loadData = async () => {
     try {
       setLoading(true);
-      const bkList = await apiFetch('/bookmakers');
+      const [bkList, emojiLibrary] = await Promise.all([
+        apiFetch('/bookmakers'),
+        apiFetch<TelegramCustomEmojiOption[]>('/admin/custom-emojis').catch(() => []),
+      ]);
       setBookmakers(bkList);
+      setCustomEmojis(emojiLibrary);
     } catch (err) {
       console.error('Failed to load bets data:', err);
     } finally {
@@ -104,6 +137,48 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
   useEffect(() => {
     loadData();
   }, []);
+
+  const readyCustomEmojiCount = customEmojis.filter((emoji) => emoji.preview_ready).length;
+
+  useEffect(() => {
+    if (!customEmojis.length || readyCustomEmojiCount === customEmojis.length) {
+      return undefined;
+    }
+    if (customEmojiPollAttempt >= 120) return undefined;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const emojiLibrary = await apiFetch<TelegramCustomEmojiOption[]>('/admin/custom-emojis');
+        setCustomEmojis(emojiLibrary);
+      } catch (error) {
+        console.error('Failed to poll custom emoji previews:', error);
+      } finally {
+        setCustomEmojiPollAttempt((current) => current + 1);
+      }
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [customEmojis.length, readyCustomEmojiCount, customEmojiPollAttempt]);
+
+  const refreshCustomEmojis = async () => {
+    try {
+      setCustomEmojisRefreshing(true);
+      setCustomEmojiPollAttempt(0);
+      await apiFetch('/admin/custom-emojis/refresh', { method: 'POST' });
+      const emojiLibrary = await apiFetch<TelegramCustomEmojiOption[]>('/admin/custom-emojis');
+      setCustomEmojis(emojiLibrary);
+      const readyCount = emojiLibrary.filter((emoji) => emoji.preview_ready).length;
+      notifySuccess(
+        readyCount === emojiLibrary.length
+          ? `Библиотека готова: ${readyCount}`
+          : `Обновление запущено: готово ${readyCount} из ${emojiLibrary.length}`,
+      );
+    } catch (error) {
+      console.error('Failed to refresh custom emojis:', error);
+      notifyError('Не удалось обновить библиотеку эмодзи');
+    } finally {
+      setCustomEmojisRefreshing(false);
+    }
+  };
 
   const selectedBookmakers = bookmakers.filter((bookmaker) => selectedBkIds.includes(bookmaker.id));
   const selectedBookmakerNames = selectedBookmakers.map((bookmaker) => bookmaker.name);
@@ -125,6 +200,11 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       return;
     }
 
+    if (!isTextPublication && !eventName.trim()) {
+      notifyError('Укажите матч / событие');
+      return;
+    }
+
     if (!isTextPublication && !coefficient) {
       notifyError('Укажите коэффициент');
       return;
@@ -137,11 +217,18 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       const formData = new FormData();
 
       if (isTextPublication) {
-        formData.append('event_name', textTitle.trim() || TEXT_PUBLICATION_FALLBACK_TITLE);
+        const titlePayload = trimTextAndEntities(textTitle, textTitleEntities);
+        const bodyPayload = trimTextAndEntities(textBody, textBodyEntities);
+        formData.append('event_name', titlePayload.text || TEXT_PUBLICATION_FALLBACK_TITLE);
         formData.append('coefficient', '1.00');
         formData.append('publication_type', 'text');
         formData.append('sport_type', TEXT_PUBLICATION_SPORT_TYPE);
-        formData.append('description', textBody.trim());
+        formData.append('description', bodyPayload.text);
+        formData.append(
+          'event_name_entities',
+          JSON.stringify(titlePayload.text ? titlePayload.entities : []),
+        );
+        formData.append('description_entities', JSON.stringify(bodyPayload.entities));
         formData.append('category', 'prematch');
         formData.append('brain_score', '0');
       } else {
@@ -183,6 +270,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
         }
         formData.append('brain_score', '5');
       }
+      formData.append('broadcast_telegram', 'true');
 
       if (couponImage) {
         formData.append('coupon_image', couponImage);
@@ -194,13 +282,15 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
       });
 
       const nextSuccessMsg = isTextPublication
-        ? 'Текстовая публикация добавлена в Ленту!'
-        : 'Прогноз опубликован успешно!';
+        ? 'Публикация добавлена в Ленту и поставлена в очередь Telegram!'
+        : 'Прогноз опубликован и поставлен в очередь Telegram!';
       setSuccessMsg(nextSuccessMsg);
 
       if (isTextPublication) {
         setTextTitle('');
         setTextBody('');
+        setTextTitleEntities([]);
+        setTextBodyEntities([]);
       } else {
         setEventName('');
         setCoefficient('');
@@ -243,7 +333,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           Новая публикация
         </h3>
 
-        <div className="grid grid-cols-2 rounded-xl border border-slate-700/60 bg-slate-900/50 p-0.5 text-[9px] font-black uppercase tracking-wider">
+        <div className="grid grid-cols-3 rounded-xl border border-slate-700/60 bg-slate-900/50 p-0.5 text-[9px] font-black uppercase tracking-wider">
           <button
             type="button"
             onClick={() => setPublicationMode('forecast')}
@@ -266,17 +356,34 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
           >
             Текстовый
           </button>
+          <button
+            type="button"
+            onClick={() => setPublicationMode('promo')}
+            className={`rounded-lg py-1.5 transition-all ${
+              publicationMode === 'promo'
+                ? 'bg-purple-500 text-white shadow-neon-purple'
+                : 'text-slate-500 hover:text-slate-200'
+            }`}
+          >
+            Промо-контент
+          </button>
         </div>
 
+        {publicationMode === 'promo' ? (
+          <div className="pt-2">
+            <AdminPromoContent />
+          </div>
+        ) : (
         <form onSubmit={handlePublish} onPaste={handleCouponPaste} className="space-y-2.5 text-[11px] text-slate-300">
           {publicationMode === 'forecast' ? (
             <>
           <div>
             <label className="block text-slate-450 font-bold mb-1 uppercase tracking-wider text-[9px]">
-              Событие <span className="text-slate-600 normal-case tracking-normal">(необязательно)</span>
+              Матч / событие <span className="text-rose-400">*</span>
             </label>
             <EmojiTextField
               type="text"
+              required
               value={eventName}
               onValueChange={setEventName}
               placeholder="Реал Мадрид - Барселона"
@@ -432,6 +539,9 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                   type="text"
                   value={textTitle}
                   onValueChange={setTextTitle}
+                  customEmojis={customEmojis}
+                  customEmojiEntities={textTitleEntities}
+                  onCustomEmojiEntitiesChange={setTextTitleEntities}
                   placeholder="Обновление Shamrai"
                   className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-emerald-500/50 transition-all font-semibold"
                 />
@@ -445,10 +555,32 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
                   multiline
                   value={textBody}
                   onValueChange={setTextBody}
+                  customEmojis={customEmojis}
+                  customEmojiEntities={textBodyEntities}
+                  onCustomEmojiEntitiesChange={setTextBodyEntities}
                   placeholder="Напишите текст для Ленты"
                   rows={5}
                   className="w-full bg-slate-900/60 border border-slate-700/60 rounded-xl py-2 px-2.5 text-white focus:outline-none focus:border-emerald-500/50 transition-all"
                 />
+                <div className="mt-1.5 flex items-start justify-between gap-2 text-[9px] leading-relaxed text-slate-500">
+                  <p>
+                    Загруженные эмодзи находятся в кнопке выбора справа. Новые можно отправить боту без подписи.
+                    Публикация появится в Ленте и уйдёт пользователям в Telegram.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={refreshCustomEmojis}
+                    disabled={customEmojisRefreshing}
+                    className="shrink-0 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 font-bold text-cyan-300 transition hover:border-cyan-300/40 disabled:opacity-50"
+                  >
+                    {customEmojisRefreshing ? 'Обновление…' : 'Обновить эмодзи'}
+                  </button>
+                </div>
+                {customEmojis.length > 0 && readyCustomEmojiCount < customEmojis.length && (
+                  <p className="mt-1 text-[9px] font-semibold text-amber-300/80">
+                    Подготавливаем изображения: {readyCustomEmojiCount} из {customEmojis.length}
+                  </p>
+                )}
               </div>
             </>
           )}
@@ -532,6 +664,7 @@ export default function AdminBets({ onBetsUpdated }: AdminBetsProps) {
             </p>
           )}
         </form>
+        )}
       </div>
 
     </div>

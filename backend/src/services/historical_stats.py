@@ -19,7 +19,7 @@ from src.models.models import (
     HistoricalStatsImportBatch,
     HistoricalStatsMonthly,
 )
-from src.services.statistics import normalize_period
+from src.services.statistics import is_exact_month_period, normalize_period
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -665,11 +665,90 @@ def _snapshot_summary(batch: HistoricalStatsImportBatch) -> dict[str, Any]:
     }
 
 
+def _monthly_snapshot_summary(
+    monthly: list[HistoricalStatsMonthly],
+    *,
+    unit_stake_rub: Decimal,
+) -> dict[str, Any]:
+    bets = sum(int(row.bets or 0) for row in monthly)
+    wins = sum(int(row.wins or 0) for row in monthly)
+    losses = sum(int(row.losses or 0) for row in monthly)
+    refunds = sum(int(row.refunds or 0) for row in monthly)
+    turnover_rub = _money(sum((_money(row.turnover_rub) for row in monthly), Decimal("0")))
+    profit_rub = _money(sum((_money(row.profit_rub) for row in monthly), Decimal("0")))
+    resolved = wins + losses
+    return {
+        "bets": bets,
+        "wins": wins,
+        "losses": losses,
+        "refunds": refunds,
+        "turnover_rub": turnover_rub,
+        "profit_rub": profit_rub,
+        "profit_units": _money(profit_rub / unit_stake_rub if unit_stake_rub else 0),
+        "winrate": (Decimal(wins) / Decimal(resolved)) if resolved else Decimal("0"),
+        "roi": (profit_rub / turnover_rub) if turnover_rub else Decimal("0"),
+    }
+
+
+def _breakdown_snapshot_rows_from_details(
+    details: list[HistoricalStatsDetail],
+    *,
+    dimension: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in details:
+        is_bookmaker = dimension == "bookmaker"
+        label = str((row.bookmaker_name if is_bookmaker else row.sport_type) or "").strip() or "Без данных"
+        key = _normalise_key(label) or "none"
+        aggregate = grouped.setdefault(key, {
+            "icon": (row.bookmaker_icon if is_bookmaker else row.sport_icon) or "",
+            "label": label,
+            "normalized_key": key,
+            "bookmaker_code": (row.bookmaker_code or "") if is_bookmaker else "",
+            "bets": 0,
+            "wins": 0,
+            "losses": 0,
+            "refunds": 0,
+            "turnover": Decimal("0"),
+            "profit": Decimal("0"),
+            "coefficient_sum": Decimal("0"),
+        })
+        aggregate["bets"] += 1
+        if row.status == "win":
+            aggregate["wins"] += 1
+        elif row.status == "loss":
+            aggregate["losses"] += 1
+        elif row.status == "refund":
+            aggregate["refunds"] += 1
+        aggregate["turnover"] += _money(row.turnover_rub)
+        aggregate["profit"] += _money(row.profit_rub)
+        aggregate["coefficient_sum"] += _decimal(row.coefficient)
+
+    return [
+        {
+            **{key: value for key, value in aggregate.items() if key != "coefficient_sum"},
+            "turnover": _money(aggregate["turnover"]),
+            "profit": _money(aggregate["profit"]),
+            "average_coefficient": _decimal(
+                aggregate["coefficient_sum"] / Decimal(aggregate["bets"])
+                if aggregate["bets"]
+                else 0
+            ),
+        }
+        for aggregate in sorted(
+            grouped.values(),
+            key=lambda value: (-int(value["bets"]), str(value["label"])),
+        )
+    ]
+
+
 async def load_active_historical_stats_snapshot(
     db: AsyncSession,
     period: str,
 ) -> Optional[HistoricalStatsSnapshot]:
-    if normalize_period(period) != "all":
+    normalized_period = normalize_period(period)
+    exact_month = is_exact_month_period(normalized_period)
+    if normalized_period != "all" and not exact_month:
         return None
     if not hasattr(db, "execute"):
         return None
@@ -684,37 +763,55 @@ async def load_active_historical_stats_snapshot(
     if not batch:
         return None
 
+    monthly_query = select(HistoricalStatsMonthly).filter(HistoricalStatsMonthly.batch_id == batch.id)
+    details_query = select(HistoricalStatsDetail).filter(HistoricalStatsDetail.batch_id == batch.id)
+    if exact_month:
+        monthly_query = monthly_query.filter(HistoricalStatsMonthly.period_key == normalized_period)
+        details_query = details_query.filter(HistoricalStatsDetail.period_key == normalized_period)
     monthly = (
-        await db.execute(
-            select(HistoricalStatsMonthly)
-            .filter(HistoricalStatsMonthly.batch_id == batch.id)
-            .order_by(HistoricalStatsMonthly.period_key.asc())
-        )
-    ).scalars().all()
-    breakdowns = (
-        await db.execute(
-            select(HistoricalStatsBreakdown)
-            .filter(HistoricalStatsBreakdown.batch_id == batch.id)
-            .order_by(HistoricalStatsBreakdown.dimension.asc(), HistoricalStatsBreakdown.bets.desc(), HistoricalStatsBreakdown.label.asc())
-        )
+        await db.execute(monthly_query.order_by(HistoricalStatsMonthly.period_key.asc()))
     ).scalars().all()
     details = (
-        await db.execute(
-            select(HistoricalStatsDetail)
-            .filter(HistoricalStatsDetail.batch_id == batch.id)
-            .order_by(HistoricalStatsDetail.period_key.asc(), HistoricalStatsDetail.source_row_number.asc())
-        )
+        await db.execute(details_query.order_by(HistoricalStatsDetail.period_key.asc(), HistoricalStatsDetail.source_row_number.asc()))
     ).scalars().all()
+    if exact_month and not monthly:
+        return None
+
+    breakdowns = []
+    if not exact_month:
+        breakdowns = (
+            await db.execute(
+                select(HistoricalStatsBreakdown)
+                .filter(HistoricalStatsBreakdown.batch_id == batch.id)
+                .order_by(HistoricalStatsBreakdown.dimension.asc(), HistoricalStatsBreakdown.bets.desc(), HistoricalStatsBreakdown.label.asc())
+            )
+        ).scalars().all()
 
     cutoff_at = batch.cutoff_at
     if cutoff_at and cutoff_at.tzinfo is None:
         cutoff_at = cutoff_at.replace(tzinfo=MOSCOW_TZ)
 
+    unit_stake_rub = _money(batch.unit_stake_rub or DEFAULT_UNIT_STAKE_RUB)
+    bookmaker_breakdowns = (
+        _breakdown_snapshot_rows_from_details(details, dimension="bookmaker")
+        if exact_month
+        else [_breakdown_snapshot_row(row) for row in breakdowns if row.dimension == "bookmaker"]
+    )
+    sport_breakdowns = (
+        _breakdown_snapshot_rows_from_details(details, dimension="sport")
+        if exact_month
+        else [_breakdown_snapshot_row(row) for row in breakdowns if row.dimension == "sport"]
+    )
+
     return HistoricalStatsSnapshot(
         batch_id=batch.id,
         cutoff_at=cutoff_at,
-        unit_stake_rub=_money(batch.unit_stake_rub or DEFAULT_UNIT_STAKE_RUB),
-        summary=_snapshot_summary(batch),
+        unit_stake_rub=unit_stake_rub,
+        summary=(
+            _monthly_snapshot_summary(monthly, unit_stake_rub=unit_stake_rub)
+            if exact_month
+            else _snapshot_summary(batch)
+        ),
         monthly=[
             {
                 "period_key": row.period_key,
@@ -732,16 +829,8 @@ async def load_active_historical_stats_snapshot(
             }
             for row in monthly
         ],
-        bookmaker_breakdowns=[
-            _breakdown_snapshot_row(row)
-            for row in breakdowns
-            if row.dimension == "bookmaker"
-        ],
-        sport_breakdowns=[
-            _breakdown_snapshot_row(row)
-            for row in breakdowns
-            if row.dimension == "sport"
-        ],
+        bookmaker_breakdowns=bookmaker_breakdowns,
+        sport_breakdowns=sport_breakdowns,
         details=[
             {
                 "period_key": row.period_key,

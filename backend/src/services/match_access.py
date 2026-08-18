@@ -13,6 +13,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from src.core.roles import is_staff_role
 from src.models.models import Bet, MatchBalanceLog, Subscription, SubscriptionPlan, User, user_bets
+from src.services.flat_subscriptions import lock_flat_subscription_financial_rows
 
 
 @dataclass
@@ -179,10 +180,11 @@ async def lock_user_balance(db: AsyncSession, user_id: int) -> UserBalanceSnapsh
 
 
 def _synchronize_tracked_user_balance(user: User, snapshot: UserBalanceSnapshot) -> None:
-    """Refresh only balance attributes while preserving unrelated pending User fields."""
+    """Refresh access attributes while preserving unrelated pending User fields."""
     set_committed_value(user, "purchased_bets_balance", snapshot.purchased_bets_balance)
     set_committed_value(user, "matches_remaining", snapshot.matches_remaining)
     set_committed_value(user, "free_bets_available", snapshot.free_bets_available)
+    set_committed_value(user, "guarantee_active", snapshot.guarantee_active)
 
 
 async def lock_user_balances(
@@ -412,6 +414,10 @@ async def record_user_bet_access(
             delta_matches=-1,
             note=note or "Match debited when user added bet to My Bets",
         ))
+        if next_balance <= 0 and not user.guarantee_active:
+            from src.services.flat_subscriptions import activate_pending_flat_subscription_if_eligible
+
+            await activate_pending_flat_subscription_if_eligible(db, user=user)
 
     balance_after = next_balance if match_charged else balance_before
     return UserBetAccessResult(
@@ -487,10 +493,21 @@ async def revoke_user_bet_access(
     await lock_bet_row(db, bet.id)
     locked_balance = await lock_user_balance(db, user.telegram_id)
     balance_before = current_match_balance(locked_balance)
-    existing_res = await db.execute(
-        select(user_bets).filter(
+    located_res = await db.execute(
+        select(user_bets.c.flat_subscription_id).filter(
             and_(user_bets.c.user_id == user.telegram_id, user_bets.c.bet_id == bet.id)
         )
+    )
+    located_flat_subscription_id = located_res.scalar_one_or_none()
+    if located_flat_subscription_id is not None:
+        await lock_flat_subscription_financial_rows(
+            db,
+            [located_flat_subscription_id],
+        )
+    existing_res = await db.execute(
+        select(user_bets)
+        .filter(and_(user_bets.c.user_id == user.telegram_id, user_bets.c.bet_id == bet.id))
+        .with_for_update()
     )
     existing = existing_res.first()
     if not existing:

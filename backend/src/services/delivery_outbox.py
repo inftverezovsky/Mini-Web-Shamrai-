@@ -25,6 +25,7 @@ STATUS_RETRY = "retry"
 STATUS_SENT = "sent"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
+TERMINAL_CATEGORY_INVALID_WEB_PUSH_SUBSCRIPTION = "invalid_web_push_subscription"
 
 CHANNEL_TELEGRAM_MESSAGE = "telegram_message"
 CHANNEL_VK_MESSAGE = "vk_message"
@@ -33,12 +34,14 @@ CHANNEL_CONNECTION_SETUP_REMINDER = "connection_setup_reminder"
 CHANNEL_FORECAST_AUTO_DELIVERY = "forecast_auto_delivery"
 CHANNEL_FORECAST_FULL_DELIVERY = "forecast_full_delivery"
 CHANNEL_FORECAST_ADMIN_FULL_COPY = "forecast_admin_full_copy"
+CHANNEL_FEED_FORECAST_BROADCAST = "feed_forecast_broadcast"
 PAUSABLE_DELIVERY_CHANNELS = {
     CHANNEL_TELEGRAM_MESSAGE,
     CHANNEL_VK_MESSAGE,
     CHANNEL_FORECAST_AUTO_DELIVERY,
     CHANNEL_FORECAST_FULL_DELIVERY,
     CHANNEL_FORECAST_ADMIN_FULL_COPY,
+    CHANNEL_FEED_FORECAST_BROADCAST,
 }
 
 
@@ -168,6 +171,127 @@ async def enqueue_delivery(
     return delivery
 
 
+async def enqueue_telegram_copy_batch(
+    db: AsyncSession,
+    *,
+    source_chat_id: int,
+    source_message_id: int,
+    user_ids: list[int],
+    dedupe_prefix: str,
+    max_attempts: int = 5,
+) -> list[DeliveryOutbox]:
+    unique_user_ids = tuple(sorted({int(user_id) for user_id in user_ids if int(user_id) > 0}))
+    if not unique_user_ids:
+        return []
+
+    broadcasts_paused = await is_system_setting_enabled(db, "PAUSE_BROADCASTS")
+    status = STATUS_CANCELLED if broadcasts_paused else STATUS_PENDING
+    pause_error = "Broadcast delivery paused by admin setting" if broadcasts_paused else None
+    outbox_items = [
+        DeliveryOutbox(
+            channel=CHANNEL_TELEGRAM_MESSAGE,
+            status=status,
+            user_id=user_id,
+            payload={
+                "method": "copyMessage",
+                "payload": {
+                    "chat_id": user_id,
+                    "from_chat_id": source_chat_id,
+                    "message_id": source_message_id,
+                },
+            },
+            dedupe_key=f"{dedupe_prefix}:{user_id}",
+            max_attempts=max(1, int(max_attempts or 1)),
+            next_attempt_at=_now(),
+            last_error=pause_error,
+        )
+        for user_id in unique_user_ids
+    ]
+    db.add_all(outbox_items)
+    return outbox_items
+
+
+async def enqueue_telegram_message_batch(
+    db: AsyncSession,
+    *,
+    text: str,
+    entities: list[dict[str, Any]],
+    user_ids: list[int],
+    dedupe_prefix: str,
+    max_attempts: int = 5,
+) -> list[DeliveryOutbox]:
+    unique_user_ids = tuple(sorted({int(user_id) for user_id in user_ids if int(user_id) > 0}))
+    if not unique_user_ids:
+        return []
+
+    broadcasts_paused = await is_system_setting_enabled(db, "PAUSE_BROADCASTS")
+    status = STATUS_CANCELLED if broadcasts_paused else STATUS_PENDING
+    pause_error = "Broadcast delivery paused by admin setting" if broadcasts_paused else None
+    outbox_items = [
+        DeliveryOutbox(
+            channel=CHANNEL_TELEGRAM_MESSAGE,
+            status=status,
+            user_id=user_id,
+            payload={
+                "method": "sendMessage",
+                "payload": {
+                    "chat_id": user_id,
+                    "text": text,
+                    "entities": [dict(entity) for entity in entities],
+                    "disable_web_page_preview": True,
+                },
+            },
+            dedupe_key=f"{dedupe_prefix}:{user_id}",
+            max_attempts=max(1, int(max_attempts or 1)),
+            next_attempt_at=_now(),
+            last_error=pause_error,
+        )
+        for user_id in unique_user_ids
+    ]
+    db.add_all(outbox_items)
+    return outbox_items
+
+
+async def enqueue_feed_forecast_broadcast_batch(
+    db: AsyncSession,
+    *,
+    bet_id: UUID,
+    user_ids: list[int],
+    max_attempts: int = 5,
+) -> list[DeliveryOutbox]:
+    unique_user_ids = tuple(
+        sorted({
+            int(user_id)
+            for user_id in user_ids
+            if is_personal_telegram_user_id(user_id)
+        })
+    )
+    if not unique_user_ids:
+        return []
+
+    broadcasts_paused = await is_system_setting_enabled(db, "PAUSE_BROADCASTS")
+    status = STATUS_CANCELLED if broadcasts_paused else STATUS_PENDING
+    pause_error = "Broadcast delivery paused by admin setting" if broadcasts_paused else None
+    outbox_items = [
+        DeliveryOutbox(
+            channel=CHANNEL_FEED_FORECAST_BROADCAST,
+            status=status,
+            user_id=user_id,
+            payload={
+                "bet_id": str(bet_id),
+                "chat_id": user_id,
+            },
+            dedupe_key=f"feed_forecast:{bet_id}:{user_id}",
+            max_attempts=max(1, int(max_attempts or 1)),
+            next_attempt_at=_now(),
+            last_error=pause_error,
+        )
+        for user_id in unique_user_ids
+    ]
+    db.add_all(outbox_items)
+    return outbox_items
+
+
 async def enqueue_signal_external_delivery_batch(
     db: AsyncSession,
     deliveries: list[dict[str, Any]],
@@ -260,6 +384,18 @@ async def mark_delivery_failed(db: AsyncSession, delivery: DeliveryOutbox, error
     delivery.locked_at = None
     delivery.last_error = _error_text(error)
     delivery.updated_at = now
+    invalid_web_push_subscription = (
+        delivery.channel == CHANNEL_WEB_PUSH_SIGNAL
+        and isinstance(error, dict)
+        and bool(error.get("invalid_subscription"))
+    )
+    if invalid_web_push_subscription:
+        payload = dict(delivery.payload or {})
+        payload["terminal_category"] = TERMINAL_CATEGORY_INVALID_WEB_PUSH_SUBSCRIPTION
+        delivery.payload = payload
+        delivery.status = STATUS_FAILED
+        delivery.next_attempt_at = now
+        return
     if delivery.attempt_count >= int(delivery.max_attempts or 1):
         delivery.status = STATUS_FAILED
         delivery.next_attempt_at = now
@@ -275,7 +411,26 @@ async def dispatch_delivery(delivery: DeliveryOutbox, db: Optional[AsyncSession]
         method_payload = payload.get("payload")
         if not method or not isinstance(method_payload, dict):
             return {"ok": False, "description": "Invalid Telegram outbox payload"}
-        return await call_telegram_api_async(method, method_payload)
+        result = await call_telegram_api_async(method, method_payload)
+        description = str(result.get("description") or "").lower()
+        custom_emoji_denied = (
+            method == "sendMessage"
+            and isinstance(method_payload.get("entities"), list)
+            and any(entity.get("type") == "custom_emoji" for entity in method_payload["entities"])
+            and (
+                "custom emoji" in description
+                or "custom_emoji" in description
+                or "can't use" in description
+            )
+        )
+        if custom_emoji_denied:
+            fallback_payload = {
+                key: value
+                for key, value in method_payload.items()
+                if key != "entities"
+            }
+            return await call_telegram_api_async(method, fallback_payload)
+        return result
 
     if delivery.channel == CHANNEL_VK_MESSAGE:
         message = str(payload.get("message") or "").strip()
@@ -350,6 +505,26 @@ async def dispatch_delivery(delivery: DeliveryOutbox, db: Optional[AsyncSession]
         if not request_id:
             return {"ok": False, "description": "Invalid forecast admin full-copy payload"}
         return await dispatch_admin_group_full_forecast_copy_from_outbox(UUID(request_id))
+
+    if delivery.channel == CHANNEL_FEED_FORECAST_BROADCAST:
+        from src.services.feed_publication_broadcast import dispatch_feed_forecast_broadcast
+
+        bet_id = str(payload.get("bet_id") or "").strip()
+        chat_id = payload.get("chat_id") or delivery.user_id
+        try:
+            clean_bet_id = UUID(bet_id)
+            clean_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "description": "Invalid feed forecast broadcast payload"}
+        if not is_personal_telegram_user_id(clean_chat_id):
+            return {"ok": False, "description": "Invalid Telegram chat ID"}
+        if db is None:
+            return {"ok": False, "description": "Feed forecast broadcast database is unavailable"}
+        return await dispatch_feed_forecast_broadcast(
+            db,
+            bet_id=clean_bet_id,
+            chat_id=clean_chat_id,
+        )
 
     return {"ok": False, "description": f"Unsupported delivery channel: {delivery.channel}"}
 
@@ -437,13 +612,90 @@ async def get_delivery_outbox_metrics(db: AsyncSession) -> dict[str, Any]:
     queue_depth = int(by_status.get(STATUS_PENDING, 0) + by_status.get(STATUS_RETRY, 0))
     terminal_total = int(by_status.get(STATUS_SENT, 0) + by_status.get(STATUS_FAILED, 0))
     active_total = max(1, queue_depth + int(by_status.get(STATUS_PROCESSING, 0)))
+    windows = {
+        "1h": await _get_delivery_window_metrics(db, now=now, seconds=60 * 60),
+        "24h": await _get_delivery_window_metrics(db, now=now, seconds=24 * 60 * 60),
+    }
 
     return {
         "queue_depth": queue_depth,
         "oldest_pending_age_seconds": oldest_pending_age_seconds,
         "retry_rate": round(int(by_status.get(STATUS_RETRY, 0)) / active_total * 100, 2),
-        "fail_rate": round(int(by_status.get(STATUS_FAILED, 0)) / terminal_total * 100, 2) if terminal_total else 0.0,
+        "fail_rate": windows["1h"]["fail_rate"],
+        "lifetime_fail_rate": (
+            round(int(by_status.get(STATUS_FAILED, 0)) / terminal_total * 100, 2)
+            if terminal_total
+            else 0.0
+        ),
         "by_status": by_status,
+        "by_channel": by_channel,
+        "windows": windows,
+    }
+
+
+async def _get_delivery_window_metrics(
+    db: AsyncSession,
+    *,
+    now: datetime,
+    seconds: int,
+) -> dict[str, Any]:
+    cutoff = now - timedelta(seconds=max(1, int(seconds)))
+    result = await db.execute(
+        select(DeliveryOutbox.channel, DeliveryOutbox.status, DeliveryOutbox.payload).filter(
+            DeliveryOutbox.updated_at >= cutoff
+        )
+    )
+
+    by_channel: dict[str, dict[str, int | float]] = {
+        CHANNEL_TELEGRAM_MESSAGE: {},
+        CHANNEL_VK_MESSAGE: {},
+        CHANNEL_WEB_PUSH_SIGNAL: {},
+    }
+    for raw_channel, raw_status, raw_payload in result.all():
+        channel = str(raw_channel)
+        delivery_status = str(raw_status)
+        channel_metrics = by_channel.setdefault(channel, {})
+        channel_metrics[delivery_status] = int(channel_metrics.get(delivery_status, 0)) + 1
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        if (
+            channel == CHANNEL_WEB_PUSH_SIGNAL
+            and delivery_status == STATUS_FAILED
+            and payload.get("terminal_category") == TERMINAL_CATEGORY_INVALID_WEB_PUSH_SUBSCRIPTION
+        ):
+            channel_metrics["terminal_invalidations"] = int(
+                channel_metrics.get("terminal_invalidations", 0)
+            ) + 1
+
+    total_sent = 0
+    total_failed = 0
+    total_invalidations = 0
+    for channel in sorted(by_channel):
+        channel_metrics = by_channel[channel]
+        sent = int(channel_metrics.get(STATUS_SENT, 0))
+        failed = int(channel_metrics.get(STATUS_FAILED, 0))
+        invalidations = int(channel_metrics.get("terminal_invalidations", 0))
+        effective_failed = max(0, failed - invalidations)
+        effective_terminal_total = sent + effective_failed
+        channel_metrics["terminal_invalidations"] = invalidations
+        channel_metrics["effective_failed"] = effective_failed
+        channel_metrics["terminal_total"] = effective_terminal_total
+        channel_metrics["fail_rate"] = (
+            round(effective_failed / effective_terminal_total * 100, 2)
+            if effective_terminal_total
+            else 0.0
+        )
+        total_sent += sent
+        total_failed += effective_failed
+        total_invalidations += invalidations
+
+    total_terminal = total_sent + total_failed
+    return {
+        "seconds": max(1, int(seconds)),
+        "sent": total_sent,
+        "effective_failed": total_failed,
+        "terminal_invalidations": total_invalidations,
+        "terminal_total": total_terminal,
+        "fail_rate": round(total_failed / total_terminal * 100, 2) if total_terminal else 0.0,
         "by_channel": by_channel,
     }
 

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     TELEGRAM_WRITE_CUSTOM_EMOJI_ID: str = ""
     TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS: str = ""
     TELEGRAM_SPORT_CUSTOM_EMOJI_IDS: str = ""
+    TELEGRAM_DECOR_CUSTOM_EMOJI_IDS: str = ""
     TELEGRAM_API_TIMEOUT_SECONDS: float = 3.0
     TELEGRAM_API_RETRIES: int = 2
     TELEGRAM_PROXY_URLS_JSON: SecretStr = Field(default=SecretStr("[]"), repr=False)

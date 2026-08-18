@@ -1,4 +1,5 @@
--r requirements.txt
+-r requirements.lock
 -r requirements-audit.txt
 
-pytest>=8.4,<9
+pytest==9.0.3
+pytest-cov==7.0.0

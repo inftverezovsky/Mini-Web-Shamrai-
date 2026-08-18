@@ -225,7 +225,7 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
             patch.object(vk_callback.logger, "info") as log_info,
             patch.object(vk_callback, "_run_background") as run_background,
             patch.object(vk_callback, "_refresh_message_permission_from_message_new", new=Mock(return_value=object())) as refresh_permission,
-            patch.object(vk_callback, "_process_plain_text_status_message", new=Mock(return_value=object())) as process_status,
+            patch.object(vk_callback, "_process_vk_plain_text_message", new=Mock(return_value=object())) as process_status,
         ):
             response = await vk_callback.vk_callback(
                 FakeRequest(
@@ -304,7 +304,7 @@ class VkCallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(vk_callback, "_run_background", side_effect=fake_run_background) as run_background,
             patch.object(vk_callback, "_refresh_message_permission_from_message_new", new=Mock(return_value=object())) as refresh_permission,
-            patch.object(vk_callback, "_process_plain_text_forecast_message", new=Mock(return_value=object())) as process_text,
+            patch.object(vk_callback, "_process_vk_plain_text_message", new=Mock(return_value=object())) as process_text,
         ):
             response = await vk_callback.vk_callback(
                 FakeRequest(

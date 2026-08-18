@@ -1,0 +1,25 @@
+title = "Shamrai secret scanning rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "shamrai-runtime-secret-literal"
+description = "Shamrai runtime secret must be supplied through a credential store"
+regex = '''(?i)\b(?:SHAMRAI_SSH_PASSWORD|SHAMRAI_EXPECTED_[A-Z0-9_]*SECRET)\b\s*(?:=|:)\s*["']?([^"'$\s<{][^"'\r\n]{7,})'''
+secretGroup = 1
+keywords = ["SHAMRAI_"]
+
+[[rules]]
+id = "shamrai-ssh-scratch-password"
+description = "Plaintext password in an SSH or deployment scratch script"
+path = '''(?i)(?:^|[\\/])(?:check_ssh|test_(?:health|remote|ssh|deploy)[^\\/]*)\.(?:py|ps1|sh)$'''
+regex = '''(?i)(?:\bpassword\s*=\s*|convertto-securestring\s+)["']([^"'$\r\n<{][^"'\r\n]{5,})["']'''
+secretGroup = 1
+
+[[rules]]
+id = "shamrai-ssh-command-password"
+description = "Plaintext password passed to an SSH command"
+path = '''(?i)(?:^|[\\/])(?:check_ssh|test_(?:health|remote|ssh|deploy)[^\\/]*)\.(?:py|ps1|sh)$'''
+regex = '''(?i)(?:^|\s)-pw\s+["']?([^"'$\s<{][^"'\s\r\n]{5,})'''
+secretGroup = 1

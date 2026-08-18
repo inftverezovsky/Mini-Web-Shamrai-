@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from typing import Any, List, Optional
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from src.models.database import get_db, get_read_db
 from src.models.models import User, Bookmaker, Subscription, Bet, user_bets
@@ -880,7 +881,16 @@ async def get_my_taken_bets_timeline(
     """Resolved paid client bets grouped by settlement month/day with flat-stake ROI stats."""
     normalized_period = normalize_period(period)
     query = (
-        select(Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        select(
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.taken_at,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
@@ -897,12 +907,16 @@ async def get_my_taken_bets_timeline(
     rows = (await db.execute(query)).all()
     paid_items = []
     excluded_items = []
-    for bet, access_type, match_charged, taken_at in rows:
+    for bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in rows:
         item = stat_item_from_bet(
             bet,
             access_type=access_type,
             match_charged=match_charged,
             taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
         )
         if not item:
             continue
@@ -938,8 +952,8 @@ def _user_export_result_label(status_value: Any) -> str:
     return status_text
 
 
-def _user_export_flat_stake(status_value: Any) -> int:
-    return 1 if str(status_value or "") in {"win", "loss"} else 0
+def _user_export_flat_stake(item: dict[str, Any]) -> float:
+    return float(item.get("turnover_units") or (1 if str(item.get("status") or "") in {"win", "loss"} else 0))
 
 
 def _user_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -956,9 +970,11 @@ def _user_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "status": status_value,
             "result": _user_export_result_label(status_value),
             "coefficient": item.get("coefficient") or 0,
-            "flat_stake": _user_export_flat_stake(status_value),
+            "flat_stake": _user_export_flat_stake(item),
             "profit_units": item.get("profit_units") or 0,
-            "roi_percent": round(float(item.get("profit_units") or 0) * 100, 2),
+            "stake_rub": item.get("stake_rub") or 0,
+            "profit_rub": item.get("profit_rub") or 0,
+            "roi_percent": round(float(item.get("profit_units") or 0) / max(float(item.get("turnover_units") or 1), 0.000001) * 100, 2),
             "source": item.get("source_type") or "",
             "sport": item.get("sport_type") or "",
             "bookmakers": ", ".join(item.get("bookmaker_names") or []),
@@ -975,7 +991,9 @@ def _user_csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingRe
         "event_name",
         "bookmakers",
         "coefficient",
+        "stake_rub",
         "flat_stake",
+        "profit_rub",
         "profit_units",
         "result",
         "roi_percent",
@@ -1005,7 +1023,9 @@ def _user_xlsx_response(rows: list[dict[str, Any]], filename: str) -> StreamingR
         ("event_name", "Матч"),
         ("bookmakers", "БК"),
         ("coefficient", "КФ"),
+        ("stake_rub", "Ставка, ₽"),
         ("flat_stake", "Ставка, флет"),
+        ("profit_rub", "Прибыль, ₽"),
         ("profit_units", "Прибыль, флеты"),
         ("result", "Результат"),
         ("roi_percent", "ROI ставки, %"),
@@ -1042,7 +1062,16 @@ async def export_my_taken_bets_timeline(
 ):
     normalized_period = normalize_period(period)
     query = (
-        select(Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        select(
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.taken_at,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
@@ -1058,7 +1087,7 @@ async def export_my_taken_bets_timeline(
         query = query.filter(Bet.resolved_at >= start)
     rows = (await db.execute(query)).all()
     paid_items = []
-    for bet, access_type, match_charged, taken_at in rows:
+    for bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in rows:
         if not is_paid_client_access(access_type, match_charged):
             continue
         item = stat_item_from_bet(
@@ -1066,6 +1095,10 @@ async def export_my_taken_bets_timeline(
             access_type=access_type,
             match_charged=match_charged,
             taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
         )
         if item:
             paid_items.append(item)
@@ -1084,7 +1117,15 @@ async def generate_user_pdf_report(
     """
     # 1. Fetch user stats (similar to /api/bets/stats)
     query = (
-        select(Bet, user_bets.c.access_type, user_bets.c.match_charged)
+        select(
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.bet_id == Bet.id)
         .filter(
             user_bets.c.user_id == current_user.telegram_id,
@@ -1095,31 +1136,50 @@ async def generate_user_pdf_report(
         .order_by(Bet.created_at.desc())
     )
     result = await db.execute(query)
-    bets = [
-        bet
-        for bet, access_type, match_charged in result.all()
-        if is_paid_client_access(access_type, match_charged)
+    paid_rows = [
+        row
+        for row in result.all()
+        if is_paid_client_access(row.access_type, row.match_charged)
     ]
+    bets = [row.Bet for row in paid_rows]
     
     total = len(bets)
     won = 0
     lost = 0
     refunded = 0
-    profit = 0.0
+    profit_flats = Decimal("0")
+    profit_rub = Decimal("0")
+    turnover_flats = Decimal("0")
     
-    for bet in bets:
+    for row in paid_rows:
+        bet = row.Bet
+        row_profit_flats = (
+            Decimal(str(row.profit_flats))
+            if row.profit_flats is not None
+            else Decimal(str(bet.coefficient - 1)) if bet.status == "win"
+            else Decimal("-1") if bet.status == "loss"
+            else Decimal("0")
+        )
+        row_stake_flats = (
+            Decimal(str(row.stake_flats))
+            if row.stake_flats is not None and bet.status in {"win", "loss"}
+            else Decimal("1") if bet.status in {"win", "loss"}
+            else Decimal("0")
+        )
+        profit_flats += row_profit_flats
+        turnover_flats += row_stake_flats
+        if row.profit_rub is not None:
+            profit_rub += Decimal(str(row.profit_rub))
         if bet.status == "win":
             won += 1
-            profit += float(bet.coefficient - 1)
         elif bet.status == "loss":
             lost += 1
-            profit -= 1.0
         elif bet.status == "refund":
             refunded += 1
             
     resolved = won + lost
     winrate = (won / resolved * 100) if resolved > 0 else 0.0
-    roi = (profit / resolved * 100) if resolved > 0 else 0.0
+    roi = float(profit_flats / turnover_flats * Decimal("100")) if turnover_flats > 0 else 0.0
 
     # 2. Build PDF Document using reportlab
     from reportlab.lib.pagesizes import letter
@@ -1215,7 +1275,7 @@ async def generate_user_pdf_report(
             Paragraph(str(total), body_style),
             Paragraph(str(won), body_style),
             Paragraph(str(lost), body_style),
-            Paragraph(f"{profit:+.2f} Flat", body_style),
+            Paragraph(f"{profit_rub:+.2f} ₽ / {profit_flats:+.3f} фл.", body_style),
             Paragraph(f"{roi:+.2f}%", body_style)
         ]
     ]
@@ -1237,16 +1297,18 @@ async def generate_user_pdf_report(
     hist_headers = [
         Paragraph("<b>Date</b>", header_style),
         Paragraph("<b>Event Description</b>", header_style),
-        Paragraph("<b>Odds</b>", header_style),
+        Paragraph("<b>Stake</b>", header_style),
         Paragraph("<b>Result</b>", header_style)
     ]
     hist_rows = [hist_headers]
     
-    for bet in bets[:15]: # Show up to last 15 bets to fit nicely in pages
+    for row in paid_rows[:15]: # Show up to last 15 bets to fit nicely in pages
+        bet = row.Bet
+        stake_label = f"{Decimal(str(row.stake_rub)):,.2f} ₽" if row.stake_rub is not None else "1 flat"
         hist_rows.append([
             Paragraph(pdf_text(bet.created_at.strftime("%Y-%m-%d")), body_style),
             Paragraph(pdf_text(bet.event_name), body_style),
-            Paragraph(pdf_text(f"{float(bet.coefficient):.2f}"), body_style),
+            Paragraph(pdf_text(stake_label), body_style),
             Paragraph(pdf_text(bet.status.upper()), ParagraphStyle('ResultCol', parent=body_style, textColor=pink_color if bet.status == 'win' else colors.red if bet.status == 'loss' else colors.grey))
         ])
         

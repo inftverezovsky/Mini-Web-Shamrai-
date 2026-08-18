@@ -207,7 +207,8 @@ curl http://127.0.0.1:<frontend-port>/api/health
 ```powershell
 cd backend
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install pytest==8.4.2 pytest-cov==7.0.0 pip-audit==2.10.1
 Copy-Item .env.example .env
 .\.venv\Scripts\alembic.exe upgrade head
 .\.venv\Scripts\python.exe -m src.scripts.seed_defaults --demo
@@ -318,7 +319,7 @@ Docker and scripts:
 docker compose config --quiet
 ```
 
-CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile/Python dependency audit, frontend npm audit/lint/unit tests/build, Playwright prelaunch smoke, secret scanning, dependency review, Docker image builds, Alembic migration smoke on empty PostgreSQL, Compose config validation and PowerShell script parsing.
+CI mirrors the same core gates in `.github/workflows/ci.yml`: backend tests/compile/Python lockfile audit, independent `>=80%` coverage checks for the new flat financial services, frontend npm lockfile audit/lint/unit tests/build, Playwright prelaunch smoke, redacted full-history secret scanning, Docker image builds, Alembic migration smoke on empty PostgreSQL, Compose config validation and PowerShell ops tests.
 
 ## Deployment
 
@@ -341,13 +342,16 @@ Guarded public frontend deploy helper:
 
 ```powershell
 $env:SHAMRAI_SSH_PASSWORD = '<provide-at-runtime-do-not-store>'
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-public-shamrai-web.ps1 -DryRun
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy-public-shamrai-web.ps1 -RepairShamraiConflicts
 Remove-Item Env:\SHAMRAI_SSH_PASSWORD
 ```
 
-Public deploy is complete only after `frontend/dist` is published to the private public web root and `https://shamra1.pro/` references the newly built `assets/*.js` and `assets/*.css`.
+The helper refuses dirty worktrees and skipped local checks. It archives only tracked runtime files from the exact full commit SHA, publishes `frontend/dist/release-manifest.json`, injects the SHA/build timestamp into `/api/version`, and requires `/api/ready` before completion. Public deploy is complete only after `https://shamra1.pro/` references the newly built `assets/*.js`/`assets/*.css` and the public version/manifest match that commit.
 
 Encrypted database backups and restore drills are documented in [docs/backup-restore.md](docs/backup-restore.md).
+
+Exact-SHA CI and hidden flat purchase qualification are documented in [docs/flat-release-gates.md](docs/flat-release-gates.md). Flat sales must remain disabled until those gates and the backup/restore gates all pass for the release.
 
 Do not stop system nginx, unrelated containers, databases or ports `80/443` unless the task explicitly replaces the public production deployment and ownership is confirmed.
 
@@ -405,6 +409,7 @@ High-value follow-ups:
 - [docs/project-overview.md](docs/project-overview.md) - текстовое описание проекта, доменная карта, схемы и ключевые алгоритмы.
 - [docs/developer-guide.md](docs/developer-guide.md) - backend, frontend, database, payments, delivery and deployment map.
 - [docs/backup-restore.md](docs/backup-restore.md) - encrypted Postgres backups, retention, restore drill and production restore runbook.
+- [docs/flat-release-gates.md](docs/flat-release-gates.md) - exact-SHA CI evidence and hidden flat purchase E2E qualification.
 - [docs/process-flows.md](docs/process-flows.md) - Mermaid process diagrams for auth, payments, delivery, forecast, chat and deploy.
 - [docs/vk-delivery.md](docs/vk-delivery.md) - required VK ID, Callback API and delivery rules.
 - [docs/client-training/README.md](docs/client-training/README.md) - клиентское обучение по интерфейсу, VK, Web Push, статистике и уведомлениям со скриншотами.

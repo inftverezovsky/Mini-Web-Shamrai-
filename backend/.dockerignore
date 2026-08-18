@@ -6,9 +6,15 @@ venv
 .pytest_cache
 .mypy_cache
 .ruff_cache
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
 .env
 .env.*
 *.pem
 static/coupons/*
+check.py
+get_export.py
 .git
 .gitignore

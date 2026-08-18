@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, Users } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
@@ -12,6 +12,7 @@ interface CrowdBetWidgetProps {
 export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
   const [crowdBet, setCrowdBet] = useState<CrowdBetResponse | null>(null);
   const [funding, setFunding] = useState(false);
+  const checkoutIntents = useRef<Record<string, string>>({});
 
   useEffect(() => {
     async function loadCrowdBet() {
@@ -31,8 +32,15 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
 
     try {
       setFunding(true);
+      const checkoutScope = `${crowdBet.id}:${amountXtr}`;
+      const checkoutIntent = checkoutIntents.current[checkoutScope] || crypto.randomUUID();
+      checkoutIntents.current = {
+        ...checkoutIntents.current,
+        [checkoutScope]: checkoutIntent,
+      };
       const data = await apiFetch<CrowdBetFundResponse>(`/crowd-bets/${crowdBet.id}/fund`, {
         method: 'POST',
+        headers: { 'Idempotency-Key': checkoutIntent },
         body: JSON.stringify({ amount_xtr: amountXtr }),
       });
       setCrowdBet(data.crowd_bet);
@@ -41,6 +49,9 @@ export default function CrowdBetWidget({ onFunded }: CrowdBetWidgetProps) {
       if (tg && typeof tg.openInvoice === 'function') {
         tg.openInvoice(data.invoice_url, async (paymentStatus: string) => {
           if (paymentStatus === 'paid') {
+            checkoutIntents.current = Object.fromEntries(
+              Object.entries(checkoutIntents.current).filter(([scope]) => scope !== checkoutScope),
+            );
             notifyPending('Оплата прошла в Telegram. Обновляем складчину после webhook.');
             const refreshed = await apiFetch<CrowdBetResponse>('/crowd-bets/active');
             setCrowdBet(refreshed);

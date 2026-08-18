@@ -12,13 +12,16 @@ param(
   [string]$OffHostS3Bucket = $env:SHAMRAI_BACKUP_S3_BUCKET,
   [string]$OffHostS3Prefix = $env:SHAMRAI_BACKUP_S3_PREFIX,
   [string]$OffHostS3EndpointUrl = $env:SHAMRAI_BACKUP_S3_ENDPOINT_URL,
-  [string]$OffHostS3Region = $env:AWS_REGION,
+  [string]$OffHostS3Region = $env:SHAMRAI_BACKUP_S3_REGION,
+  [string]$ManifestSigningPublicKeyBase64 = $env:SHAMRAI_BACKUP_MANIFEST_SIGNING_PUBLIC_KEY_BASE64,
   [string]$AgeIdentityPath = $env:SHAMRAI_BACKUP_AGE_IDENTITY_PATH,
   [string]$SshKeyPath = $env:SHAMRAI_SSH_KEY_PATH,
   [string]$KnownHostsPath = "",
   [string]$DrillProjectPrefix = "shamrai-restore-drill",
   [int]$DrillBackendPort = 18000,
   [int]$DrillFrontendPort = 18082,
+  [int]$MaximumLatestAgeHours = 26,
+  [string]$AttestationPath = "",
   [switch]$NoHostKeyScan,
   [switch]$KeepDrillProject,
   [switch]$DryRun
@@ -27,11 +30,19 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$manifestSignatureModule = Join-Path $PSScriptRoot "lib/BackupManifestSignature.psm1"
+Import-Module -Name $manifestSignatureModule -Force -ErrorAction Stop
+
 $script:SensitiveLocalFiles = @()
+$script:SensitiveLocalDirectories = @()
 $script:RemoteStageToCleanup = ""
 $script:SshTool = ""
 $script:ScpTool = ""
 $script:AwsTool = ""
+$script:BackupCreatedAtUtc = $null
+$script:ManifestSha256 = ""
+$script:ManifestSignatureSha256 = ""
+$script:ManifestSigningPublicKeySha256 = ""
 
 trap {
   $originalError = $_
@@ -40,10 +51,16 @@ trap {
       Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
   }
+  foreach ($path in $script:SensitiveLocalDirectories) {
+    if (-not [string]::IsNullOrWhiteSpace($path)) {
+      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
 
   if (
     -not $KeepDrillProject -and
     -not [string]::IsNullOrWhiteSpace($script:RemoteStageToCleanup) -and
+    $script:RemoteStageToCleanup -match '^/tmp/shamrai-restore-drill\.[A-Za-z0-9]{6}$' -and
     -not [string]::IsNullOrWhiteSpace($script:SshTool) -and
     -not [string]::IsNullOrWhiteSpace($SshKeyPath) -and
     -not [string]::IsNullOrWhiteSpace($KnownHostsPath)
@@ -121,6 +138,44 @@ function Invoke-NativeOutputChecked {
   return ($output -join "`n")
 }
 
+function Get-StringSha256Hex {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    return ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+}
+
+function Set-OwnerOnlyLocalPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][bool]$Directory
+  )
+
+  $isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+  if ($isWindowsPlatform) {
+    $icacls = Find-Tool @("icacls.exe", "icacls")
+    if (-not $icacls) {
+      throw "icacls is required to protect decrypted restore material on Windows."
+    }
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $grant = if ($Directory) { "${identity}:(OI)(CI)F" } else { "${identity}:F" }
+    Invoke-NativeChecked -FilePath $icacls -Arguments @($Path, "/inheritance:r", "/grant:r", $grant)
+    return
+  }
+
+  $chmod = Find-Tool @("chmod")
+  if (-not $chmod) {
+    throw "chmod is required to protect decrypted restore material."
+  }
+  $mode = if ($Directory) { "0700" } else { "0600" }
+  Invoke-NativeChecked -FilePath $chmod -Arguments @($mode, "--", $Path)
+}
+
 function Get-AwsArguments {
   param([string[]]$Arguments = @())
 
@@ -163,18 +218,19 @@ function Get-LatestOffHostArtifactPair {
   if (-not [string]::IsNullOrWhiteSpace($rawKeys)) {
     $decodedKeys = $rawKeys | ConvertFrom-Json
   }
-  $manifestPattern = "^$([regex]::Escape($dailyPrefix))shamrai-db\.\d{8}T\d{6}Z\.manifest\.json$"
-  $manifestKey = @($decodedKeys) |
-    Where-Object { $_ -is [string] -and $_ -match $manifestPattern } |
+  $signaturePattern = "^$([regex]::Escape($dailyPrefix))shamrai-db\.\d{8}T\d{6}Z\.manifest\.sig$"
+  $signatureKey = @($decodedKeys) |
+    Where-Object { $_ -is [string] -and $_ -match $signaturePattern } |
     Sort-Object -Descending |
     Select-Object -First 1
-  if ([string]::IsNullOrWhiteSpace($manifestKey)) {
-    throw "No committed off-host backup manifest was found under the configured daily prefix."
+  if ([string]::IsNullOrWhiteSpace($signatureKey)) {
+    throw "No signed off-host backup commit marker was found under the configured daily prefix."
   }
 
   return [pscustomobject]@{
-    ArtifactKey = $manifestKey -replace '\.manifest\.json$', '.dump.age'
-    ManifestKey = $manifestKey
+    ArtifactKey = $signatureKey -replace '\.manifest\.sig$', '.dump.age'
+    ManifestKey = $signatureKey -replace '\.manifest\.sig$', '.manifest.json'
+    SignatureKey = $signatureKey
   }
 }
 
@@ -424,30 +480,48 @@ function Copy-FromRemoteChecked {
 function New-BackupSelectionCommand {
   param(
     [Parameter(Mandatory = $true)][string]$RemoteAppPath,
-    [Parameter(Mandatory = $true)][string]$RequestedBackup
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RequestedBackup
   )
 
   $remoteAppPathQuoted = ConvertTo-ShellSingleQuoted $RemoteAppPath
   $requestedBackupQuoted = ConvertTo-ShellSingleQuoted $RequestedBackup
   return @"
-set -e
+set -Eeuo pipefail
 REMOTE_PATH=$remoteAppPathQuoted
 REQUESTED_BACKUP=$requestedBackupQuoted
 if [ -n "`$REQUESTED_BACKUP" ]; then
   backup="`$REQUESTED_BACKUP"
+  signature="`${backup%.dump.age}.manifest.sig"
 else
-  backup="`$(find "`$REMOTE_PATH/db-backups/daily" "`$REMOTE_PATH/db-backups/weekly" -maxdepth 1 -type f -name 'shamrai-db.*.dump.age' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | sed 's/^[^ ]* //')"
+  signature="`$(find "`$REMOTE_PATH/db-backups/daily" "`$REMOTE_PATH/db-backups/weekly" -maxdepth 1 -type f -name 'shamrai-db.*.manifest.sig' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | sed 's/^[^ ]* //')"
+  backup="`${signature%.manifest.sig}.dump.age"
 fi
-if [ -z "`$backup" ] || [ ! -f "`$backup" ]; then
-  echo "No encrypted Shamrai backup was found." >&2
+if [ -z "`$signature" ] || [ -z "`$backup" ]; then
+  echo "No signed Shamrai backup commit marker was found." >&2
+  exit 30
+fi
+backup_name="`$(basename -- "`$backup")"
+backup_dir="`$(dirname -- "`$backup")"
+if [[ ! "`$backup_name" =~ ^shamrai-db\.[0-9]{8}T[0-9]{6}Z\.dump\.age$ ]] || {
+  [ "`$backup_dir" != "`$REMOTE_PATH/db-backups/daily" ] &&
+  [ "`$backup_dir" != "`$REMOTE_PATH/db-backups/weekly" ]
+}; then
+  echo "Requested backup path is outside the signed Shamrai backup directories or has an invalid name." >&2
   exit 30
 fi
 manifest="`${backup%.dump.age}.manifest.json"
-if [ ! -f "`$manifest" ]; then
-  echo "Backup manifest was not found for `$backup" >&2
+for candidate in "`$backup" "`$manifest" "`$signature"; do
+  if [ ! -s "`$candidate" ] || [ ! -f "`$candidate" ] || [ -L "`$candidate" ] || \
+     [ "`$(realpath -e -- "`$candidate")" != "`$candidate" ]; then
+    echo "Signed backup bundle member failed regular-file validation: `$candidate" >&2
+    exit 31
+  fi
+done
+if [ "`$(wc -c < "`$signature" | tr -d '[:space:]')" != "64" ]; then
+  echo "Backup manifest signature is not a 64-byte Ed25519 signature." >&2
   exit 31
 fi
-printf '%s\n%s\n' "`$backup" "`$manifest"
+printf '%s\n%s\n%s\n' "`$backup" "`$manifest" "`$signature"
 "@
 }
 
@@ -459,6 +533,8 @@ function New-RemoteRestoreDrillScript {
     [Parameter(Mandatory = $true)][int]$BackendPort,
     [Parameter(Mandatory = $true)][int]$FrontendPort,
     [Parameter(Mandatory = $true)][string]$CanonicalHealth,
+    [Parameter(Mandatory = $true)][string]$ReleaseSha,
+    [Parameter(Mandatory = $true)][string]$ReleaseBuildTime,
     [Parameter(Mandatory = $true)][bool]$Keep
   )
 
@@ -473,6 +549,8 @@ DRILL_PROJECT=__DRILL_PROJECT__
 DRILL_BACKEND_PORT=__DRILL_BACKEND_PORT__
 DRILL_FRONTEND_PORT=__DRILL_FRONTEND_PORT__
 CANON_HEALTH_URL=__CANON_HEALTH_URL__
+EXPECTED_RELEASE_SHA=__RELEASE_SHA__
+EXPECTED_RELEASE_BUILD_TIME=__RELEASE_BUILD_TIME__
 KEEP_DRILL_PROJECT=__KEEP_DRILL_PROJECT__
 
 STAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -485,6 +563,7 @@ cleanup() {
   status="$?"
   if [ "$KEEP_DRILL_PROJECT" != "1" ]; then
     docker compose -f "$COMPOSE_FILE" -p "$DRILL_PROJECT" down -v --remove-orphans >/dev/null 2>&1 || true
+    docker image rm "shamrai-restore-backend:$EXPECTED_RELEASE_SHA" >/dev/null 2>&1 || true
     rm -rf "$STAGE_DIR"
   else
     echo "Keeping restore drill project and stage for debugging: project=$DRILL_PROJECT stage=$STAGE_DIR" >&2
@@ -518,8 +597,15 @@ docker compose -p "$COMPOSE_PROJECT" config -q
 
 postgres_image="$(docker inspect -f '{{.Config.Image}}' shamrai-postgres)"
 redis_image="$(docker inspect -f '{{.Config.Image}}' shamrai-redis)"
-backend_image="$(docker inspect -f '{{.Config.Image}}' shamrai-backend)"
 frontend_image="$(docker inspect -f '{{.Config.Image}}' shamrai-frontend)"
+candidate_backend_image="shamrai-restore-backend:$EXPECTED_RELEASE_SHA"
+
+if [ ! -s "$STAGE_DIR/candidate-backend.tar.gz" ]; then
+  echo "Candidate backend archive is missing from restore stage." >&2
+  exit 43
+fi
+tar -xzf "$STAGE_DIR/candidate-backend.tar.gz" -C "$STAGE_DIR"
+docker build --label "shamrai.restore.release_sha=$EXPECTED_RELEASE_SHA" -t "$candidate_backend_image" "$STAGE_DIR/backend"
 
 cat > "$COMPOSE_FILE" <<EOF
 services:
@@ -553,7 +639,7 @@ services:
       - shamrai_restore
 
   backend:
-    image: ${backend_image}
+    image: ${candidate_backend_image}
     environment:
       APP_ENV: restore-drill
       DEBUG_MODE: "false"
@@ -576,6 +662,8 @@ services:
       TEGRO_API_KEY: ""
       TEGRO_SECRET_KEY: ""
       HTTPS_PROXY: ""
+      SHAMRAI_GIT_SHA: ${EXPECTED_RELEASE_SHA}
+      SHAMRAI_BUILD_TIME: ${EXPECTED_RELEASE_BUILD_TIME}
     read_only: true
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=1777
@@ -650,6 +738,11 @@ docker compose -f "$COMPOSE_FILE" -p "$DRILL_PROJECT" exec -T redis redis-cli pi
 
 docker compose -f "$COMPOSE_FILE" -p "$DRILL_PROJECT" exec -T postgres sh -c 'pg_restore --no-owner --role="$POSTGRES_USER" --exit-on-error -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$DUMP_FILE"
 
+# Prove that the restored database can be upgraded by the exact application
+# image used for the drill before any API process is considered healthy.
+docker compose -f "$COMPOSE_FILE" -p "$DRILL_PROJECT" run --rm backend alembic upgrade head
+docker compose -f "$COMPOSE_FILE" -p "$DRILL_PROJECT" run --rm backend alembic current --check-heads
+
 python3 - "$MANIFEST_FILE" "$EXPECTED_COUNTS" <<'PY'
 from __future__ import annotations
 
@@ -692,12 +785,15 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 curl -fsS "http://127.0.0.1:${DRILL_BACKEND_PORT}/api/health" >/dev/null
+curl -fsS "http://127.0.0.1:${DRILL_BACKEND_PORT}/api/ready" >/dev/null
+version_sha="$(curl -fsS "http://127.0.0.1:${DRILL_BACKEND_PORT}/api/version" | python3 -c 'import json, re, sys; payload = json.load(sys.stdin); value = str(payload.get("git_sha") or ""); assert re.fullmatch(r"[0-9a-f]{40}", value), value; assert value == sys.argv[1], payload; assert payload.get("build_time") == sys.argv[2], payload; print(value)' "$EXPECTED_RELEASE_SHA" "$EXPECTED_RELEASE_BUILD_TIME")"
 curl -fsS "http://127.0.0.1:${DRILL_FRONTEND_PORT}/" | grep -Eiq '<html|id="root"'
 
 cd "$REMOTE_PATH"
 docker compose -p "$COMPOSE_PROJECT" ps
 curl -fsS "$CANON_HEALTH_URL" >/dev/null
 
+echo "RESTORE_DRILL_VERSION_SHA=$version_sha"
 echo "RESTORE_DRILL_OK project=$DRILL_PROJECT"
 '@
 
@@ -707,6 +803,8 @@ echo "RESTORE_DRILL_OK project=$DRILL_PROJECT"
   $result = $result.Replace("__DRILL_BACKEND_PORT__", "$BackendPort")
   $result = $result.Replace("__DRILL_FRONTEND_PORT__", "$FrontendPort")
   $result = $result.Replace("__CANON_HEALTH_URL__", (ConvertTo-ShellSingleQuoted $CanonicalHealth))
+  $result = $result.Replace("__RELEASE_SHA__", (ConvertTo-ShellSingleQuoted $ReleaseSha))
+  $result = $result.Replace("__RELEASE_BUILD_TIME__", (ConvertTo-ShellSingleQuoted $ReleaseBuildTime))
   $result = $result.Replace("__KEEP_DRILL_PROJECT__", (ConvertTo-ShellSingleQuoted $keepValue))
   return $result
 }
@@ -718,8 +816,12 @@ if ([string]::IsNullOrWhiteSpace($Workspace)) {
 if ($DrillBackendPort -eq 8082 -or $DrillFrontendPort -eq 8082) {
   throw "Restore drill ports must not use canonical preview port 8082."
 }
+if ($MaximumLatestAgeHours -lt 1 -or $MaximumLatestAgeHours -gt 168) {
+  throw "MaximumLatestAgeHours must be between 1 and 168."
+}
 
 $artifactSourceNormalized = $ArtifactSource.ToLowerInvariant()
+$usingImplicitLatest = $artifactSourceNormalized -eq "s3" -and [string]::IsNullOrWhiteSpace($OffHostArtifactKey)
 if ($artifactSourceNormalized -eq "s3") {
   if (-not [string]::IsNullOrWhiteSpace($BackupFile)) {
     throw "BackupFile is only valid with ArtifactSource Vds; use OffHostArtifactKey for S3."
@@ -788,6 +890,16 @@ if ($artifactSourceNormalized -eq "s3") {
   throw "OffHostArtifactKey requires ArtifactSource S3."
 }
 
+if ([string]::IsNullOrWhiteSpace($ManifestSigningPublicKeyBase64)) {
+  if ($DryRun) {
+    # RFC 8032 test-vector public key; public and used only for command generation.
+    $ManifestSigningPublicKeyBase64 = "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+  } else {
+    throw "Set SHAMRAI_BACKUP_MANIFEST_SIGNING_PUBLIC_KEY_BASE64 or pass -ManifestSigningPublicKeyBase64. Unsigned restores are not allowed."
+  }
+}
+[byte[]]$manifestSigningPublicKeyDer = ConvertFrom-ShamraiEd25519PublicKeyBase64 -Value $ManifestSigningPublicKeyBase64
+
 $drillId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 $drillProject = "$DrillProjectPrefix-$drillId"
 
@@ -799,6 +911,8 @@ if ($DryRun) {
     -BackendPort $DrillBackendPort `
     -FrontendPort $DrillFrontendPort `
     -CanonicalHealth $HealthUrl `
+    -ReleaseSha ("0" * 40) `
+    -ReleaseBuildTime "1970-01-01T00:00:00Z" `
     -Keep ([bool]$KeepDrillProject)
   Assert-NoUnresolvedTemplatePlaceholders -Content $scriptPreview -Placeholders @(
     "__REMOTE_PATH__",
@@ -807,6 +921,8 @@ if ($DryRun) {
     "__DRILL_BACKEND_PORT__",
     "__DRILL_FRONTEND_PORT__",
     "__CANON_HEALTH_URL__",
+    "__RELEASE_SHA__",
+    "__RELEASE_BUILD_TIME__",
     "__KEEP_DRILL_PROJECT__"
   )
 
@@ -823,13 +939,17 @@ if ($DryRun) {
     if (-not [string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
       $offHostSelection = "explicit"
       $offHostManifestKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.json'
+      $offHostSignatureKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.sig'
       Write-Host "off_host_artifact=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $OffHostArtifactKey)"
       Write-Host "off_host_manifest=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $offHostManifestKey)"
+      Write-Host "off_host_signature=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $offHostSignatureKey)"
     } else {
       $artifactPreviewKey = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/<latest>.dump.age"
       $manifestPreviewKey = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/<latest>.manifest.json"
+      $signaturePreviewKey = Get-OffHostS3Key -Prefix $OffHostS3Prefix -RelativeKey "daily/<latest>.manifest.sig"
       Write-Host "off_host_artifact=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $artifactPreviewKey)"
       Write-Host "off_host_manifest=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $manifestPreviewKey)"
+      Write-Host "off_host_signature=$(Get-OffHostS3Uri -Bucket $OffHostS3Bucket -Key $signaturePreviewKey)"
     }
     Write-Host "off_host_selection=$offHostSelection"
     Write-Host "off_host_credentials=runtime_environment_only"
@@ -841,6 +961,8 @@ if ($DryRun) {
     Write-Host "backup_selection=$backupSelection"
   }
   Write-Host "age_identity_required=true"
+  Write-Host "manifest_signature_required=ed25519"
+  Write-Host "maximum_latest_age_hours=$MaximumLatestAgeHours"
   Write-Host "canonical_health=$HealthUrl"
   exit 0
 }
@@ -866,11 +988,20 @@ if ([string]::IsNullOrWhiteSpace($SshKeyPath) -or -not (Test-Path -LiteralPath $
 $script:SshTool = Find-Tool @("ssh.exe", "ssh")
 $script:ScpTool = Find-Tool @("scp.exe", "scp")
 $ageTool = Find-Tool @("age.exe", "age")
+$openSslTool = Find-Tool @(
+  "openssl.exe",
+  "openssl",
+  "C:\Program Files\Git\usr\bin\openssl.exe",
+  "C:\Program Files\Git\mingw64\bin\openssl.exe"
+)
 if (-not $script:SshTool -or -not $script:ScpTool) {
   throw "OpenSSH ssh/scp not found. Install OpenSSH Client."
 }
 if (-not $ageTool) {
   throw "age was not found. Install age before running restore drills."
+}
+if (-not $openSslTool) {
+  throw "OpenSSL with Ed25519 pkeyutl support is required before running restore drills."
 }
 if ($artifactSourceNormalized -eq "s3") {
   if ([string]::IsNullOrWhiteSpace($env:AWS_ACCESS_KEY_ID) -or [string]::IsNullOrWhiteSpace($env:AWS_SECRET_ACCESS_KEY)) {
@@ -893,59 +1024,154 @@ $KnownHostsPath = Initialize-KnownHosts `
   -SkipScan ([bool]$NoHostKeyScan)
 
 $deployDir = Join-Path $Workspace ".deploy"
-$localStage = Join-Path $deployDir "restore-drill-$drillId"
-New-Item -ItemType Directory -Force -Path $localStage | Out-Null
+$localStage = Join-Path ([IO.Path]::GetTempPath()) (
+  "shamrai-restore-drill-{0}-{1}" -f $drillId, [Guid]::NewGuid().ToString("N")
+)
+New-Item -ItemType Directory -Path $localStage | Out-Null
+Set-OwnerOnlyLocalPath -Path $localStage -Directory $true
+$script:SensitiveLocalDirectories += $localStage
+$publicKeyLocal = Join-Path $localStage "manifest-signing-public.der"
+[IO.File]::WriteAllBytes($publicKeyLocal, $manifestSigningPublicKeyDer)
+Set-OwnerOnlyLocalPath -Path $publicKeyLocal -Directory $false
+
+$gitTool = Find-Tool @("git.exe", "git")
+if (-not $gitTool) {
+  throw "Git is required to build the candidate restore image from an exact commit."
+}
+$gitStatus = @(& $gitTool -C $Workspace status --porcelain=v1 --untracked-files=normal)
+if ($LASTEXITCODE -ne 0 -or $gitStatus.Count -ne 0) {
+  throw "Restore drill requires a clean worktree so the candidate image matches an exact commit SHA."
+}
+$releaseSha = ((& $gitTool -C $Workspace rev-parse --verify HEAD) -join "").Trim().ToLowerInvariant()
+$releaseEpoch = ((& $gitTool -C $Workspace show -s --format=%ct $releaseSha) -join "").Trim()
+if ($releaseSha -notmatch '^[0-9a-f]{40}$' -or $releaseEpoch -notmatch '^\d+$') {
+  throw "Unable to resolve exact release identity for restore drill."
+}
+$releaseBuildTime = [DateTimeOffset]::FromUnixTimeSeconds([int64]$releaseEpoch).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$candidateBackendArchive = Join-Path $localStage "candidate-backend.tar.gz"
+Invoke-NativeChecked -FilePath $gitTool -Arguments @(
+  "-C", $Workspace,
+  "archive", "--format=tar.gz", "--output=$candidateBackendArchive", $releaseSha, "backend"
+)
 
 $script:remoteBackup = ""
 $script:remoteManifest = ""
+$script:remoteSignature = ""
 $script:offHostArtifactKey = ""
 $script:offHostManifestKey = ""
+$script:offHostSignatureKey = ""
 if ($artifactSourceNormalized -eq "s3") {
   Invoke-Step "Select committed off-host backup" {
     if ([string]::IsNullOrWhiteSpace($OffHostArtifactKey)) {
       $pair = Get-LatestOffHostArtifactPair
       $script:offHostArtifactKey = $pair.ArtifactKey
       $script:offHostManifestKey = $pair.ManifestKey
+      $script:offHostSignatureKey = $pair.SignatureKey
     } else {
       $script:offHostArtifactKey = $OffHostArtifactKey
       $script:offHostManifestKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.json'
+      $script:offHostSignatureKey = $OffHostArtifactKey -replace '\.dump\.age$', '.manifest.sig'
     }
-    Write-Host "artifact_key=$script:offHostArtifactKey"
-    Write-Host "manifest_key=$script:offHostManifestKey"
   }
 } else {
-  Invoke-Step "Select encrypted backup" {
+  Invoke-Step "Locate signed backup commit marker" {
     $selection = Invoke-RemoteOutputChecked -Command (New-BackupSelectionCommand -RemoteAppPath $RemotePath -RequestedBackup $BackupFile)
     $lines = @($selection -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($lines.Count -lt 2) {
-      throw "Backup selection did not return both backup and manifest paths."
+    if ($lines.Count -ne 3) {
+      throw "Backup selection did not return exactly one encrypted artifact, manifest, and signature."
     }
     $script:remoteBackup = $lines[0].Trim()
     $script:remoteManifest = $lines[1].Trim()
-    Write-Host "backup=$script:remoteBackup"
-    Write-Host "manifest=$script:remoteManifest"
+    $script:remoteSignature = $lines[2].Trim()
   }
 }
 
 $encryptedLocal = Join-Path $localStage "backup.dump.age"
 $manifestLocal = Join-Path $localStage "backup.manifest.json"
+$signatureLocal = Join-Path $localStage "backup.manifest.sig"
 $dumpLocal = Join-Path $localStage "restore.dump"
 $script:SensitiveLocalFiles += $dumpLocal
 
-Invoke-Step "Fetch encrypted backup metadata" {
+Invoke-Step "Fetch signed manifest commit marker" {
+  if ($artifactSourceNormalized -eq "s3") {
+    Copy-FromOffHostChecked -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
+    Copy-FromOffHostChecked -ObjectKey $script:offHostSignatureKey -LocalPath $signatureLocal
+    Assert-OffHostObjectMetadata -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
+    Assert-OffHostObjectMetadata -ObjectKey $script:offHostSignatureKey -LocalPath $signatureLocal
+  } else {
+    Copy-FromRemoteChecked -RemoteFilePath $script:remoteManifest -LocalPath $manifestLocal
+    Copy-FromRemoteChecked -RemoteFilePath $script:remoteSignature -LocalPath $signatureLocal
+  }
+}
+
+Invoke-Step "Authenticate signed backup candidate" {
+  $expectedEncryptedFile = if ($artifactSourceNormalized -eq "s3") {
+    ($script:offHostArtifactKey -split '/')[-1]
+  } else {
+    ($script:remoteBackup -split '/')[-1]
+  }
+  $expectedManifestFile = if ($artifactSourceNormalized -eq "s3") {
+    ($script:offHostManifestKey -split '/')[-1]
+  } else {
+    ($script:remoteManifest -split '/')[-1]
+  }
+  $expectedSignatureFile = if ($artifactSourceNormalized -eq "s3") {
+    ($script:offHostSignatureKey -split '/')[-1]
+  } else {
+    ($script:remoteSignature -split '/')[-1]
+  }
+  $signatureArguments = @{
+    ManifestPath = $manifestLocal
+    SignaturePath = $signatureLocal
+    PublicKeyDerPath = $publicKeyLocal
+    OpenSslPath = $openSslTool
+    ExpectedManifestFileName = $expectedManifestFile
+    ExpectedSignatureFileName = $expectedSignatureFile
+    ExpectedEncryptedFileName = $expectedEncryptedFile
+  }
+  if ($artifactSourceNormalized -eq "s3") {
+    $signatureArguments.ExpectedS3Bucket = $OffHostS3Bucket
+    $signatureArguments.ExpectedS3Prefix = $OffHostS3Prefix
+    $signatureArguments.ExpectedArtifactKey = $script:offHostArtifactKey
+    $signatureArguments.ExpectedManifestKey = $script:offHostManifestKey
+    $signatureArguments.ExpectedSignatureKey = $script:offHostSignatureKey
+  }
+  $script:VerifiedManifestBundle = Assert-ShamraiSignedBackupManifest @signatureArguments
+  $script:ManifestSha256 = $script:VerifiedManifestBundle.ManifestSha256
+  $script:ManifestSignatureSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $signatureLocal).Hash.ToLowerInvariant()
+  $script:ManifestSigningPublicKeySha256 = $script:VerifiedManifestBundle.PublicKeySha256
+  $createdAt = $script:VerifiedManifestBundle.CreatedAt
+  $nowUtc = [DateTimeOffset]::UtcNow
+  if ($createdAt -gt $nowUtc.AddMinutes(10)) {
+    throw "Backup manifest created_at is unreasonably far in the future."
+  }
+  if ($usingImplicitLatest -and $createdAt -lt $nowUtc.AddHours(-$MaximumLatestAgeHours)) {
+    throw "Newest committed S3 backup is older than $MaximumLatestAgeHours hours."
+  }
+  $script:BackupCreatedAtUtc = $createdAt
+  Write-Host "signature_verified=true"
+  if ($artifactSourceNormalized -eq "s3") {
+    Write-Host "artifact_key=$script:offHostArtifactKey"
+    Write-Host "manifest_key=$script:offHostManifestKey"
+    Write-Host "signature_key=$script:offHostSignatureKey"
+  } else {
+    Write-Host "backup=$script:remoteBackup"
+    Write-Host "manifest=$script:remoteManifest"
+    Write-Host "signature=$script:remoteSignature"
+  }
+}
+
+Invoke-Step "Fetch authenticated encrypted backup" {
   if ($artifactSourceNormalized -eq "s3") {
     Copy-FromOffHostChecked -ObjectKey $script:offHostArtifactKey -LocalPath $encryptedLocal
-    Copy-FromOffHostChecked -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
     Assert-OffHostObjectMetadata -ObjectKey $script:offHostArtifactKey -LocalPath $encryptedLocal
-    Assert-OffHostObjectMetadata -ObjectKey $script:offHostManifestKey -LocalPath $manifestLocal
   } else {
     Copy-FromRemoteChecked -RemoteFilePath $script:remoteBackup -LocalPath $encryptedLocal
-    Copy-FromRemoteChecked -RemoteFilePath $script:remoteManifest -LocalPath $manifestLocal
   }
 }
 
 Invoke-Step "Decrypt backup locally" {
-  $manifest = Get-Content -Raw -LiteralPath $manifestLocal | ConvertFrom-Json
+  $manifest = $script:VerifiedManifestBundle.Manifest
   $artifact = Get-JsonPropertyValue -Object $manifest -Name "artifact"
   if ($null -eq $artifact) {
     throw "Backup manifest is missing artifact metadata."
@@ -956,31 +1182,18 @@ Invoke-Step "Decrypt backup locally" {
     [string](Get-JsonPropertyValue -Object $artifact -Name "encrypted_size_bytes" -DefaultValue "0"),
     [ref]$expectedEncryptedSize
   ) | Out-Null
-  $schemaVersion = 0
-  [int]::TryParse(
-    [string](Get-JsonPropertyValue -Object $manifest -Name "schema_version" -DefaultValue "0"),
-    [ref]$schemaVersion
-  ) | Out-Null
-  if ($artifactSourceNormalized -eq "s3") {
-    if ($schemaVersion -lt 2 -or $expectedEncryptedHash -notmatch '^[0-9a-fA-F]{64}$' -or $expectedEncryptedSize -lt 1) {
-      throw "Off-host restore requires a schema v2 manifest with encrypted artifact integrity fields."
-    }
-    $expectedEncryptedFile = ($script:offHostArtifactKey -split '/')[-1]
-    $manifestEncryptedFile = [string](Get-JsonPropertyValue -Object $artifact -Name "encrypted_file" -DefaultValue "")
-    if ($manifestEncryptedFile -ne $expectedEncryptedFile) {
-      throw "Off-host manifest does not describe the selected encrypted artifact."
-    }
+  if ($expectedEncryptedHash -notmatch '^[0-9a-fA-F]{64}$' -or $expectedEncryptedSize -lt 1) {
+    throw "Signed restore requires encrypted artifact hash and size fields."
   }
 
-  if ($expectedEncryptedHash -match '^[0-9a-fA-F]{64}$' -and $expectedEncryptedSize -gt 0) {
-    $actualEncryptedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encryptedLocal).Hash.ToLowerInvariant()
-    $actualEncryptedSize = (Get-Item -LiteralPath $encryptedLocal).Length
-    if ($actualEncryptedHash -ne $expectedEncryptedHash.ToLowerInvariant() -or $actualEncryptedSize -ne $expectedEncryptedSize) {
-      throw "Encrypted backup hash/size does not match the manifest."
-    }
+  $actualEncryptedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $encryptedLocal).Hash.ToLowerInvariant()
+  $actualEncryptedSize = (Get-Item -LiteralPath $encryptedLocal).Length
+  if ($actualEncryptedHash -ne $expectedEncryptedHash.ToLowerInvariant() -or $actualEncryptedSize -ne $expectedEncryptedSize) {
+    throw "Encrypted backup hash/size does not match the signed manifest."
   }
 
   Invoke-NativeChecked -FilePath $ageTool -Arguments @("-d", "-i", $AgeIdentityPath, "-o", $dumpLocal, $encryptedLocal)
+  Set-OwnerOnlyLocalPath -Path $dumpLocal -Directory $false
   $expectedDumpHash = [string](Get-JsonPropertyValue -Object $artifact -Name "dump_sha256" -DefaultValue "")
   if ($expectedDumpHash -notmatch '^[0-9a-fA-F]{64}$') {
     throw "Backup manifest contains an invalid decrypted dump hash."
@@ -993,10 +1206,10 @@ Invoke-Step "Decrypt backup locally" {
 
 $remoteStage = ""
 Invoke-Step "Create isolated remote restore stage" {
-  $stageOutput = Invoke-RemoteOutputChecked -Command "stage=`$(mktemp -d /tmp/shamrai-restore-drill.XXXXXX); chmod 0700 `"`$stage`"; printf '%s\n' `"`$stage`""
-  $stageLines = @($stageOutput -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($stageLines.Count -lt 1) {
-    throw "Remote mktemp did not return a stage directory."
+  $stageOutput = Invoke-RemoteOutputChecked -Command "stage=`$(mktemp -d /tmp/shamrai-restore-drill.XXXXXX); chmod 0700 `"`$stage`"; realpath -e -- `"`$stage`""
+  $stageLines = @($stageOutput -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^/tmp/shamrai-restore-drill\.[A-Za-z0-9]{6}$' })
+  if ($stageLines.Count -ne 1) {
+    throw "Remote mktemp did not return one validated restore stage directory."
   }
   $script:remoteStage = $stageLines[0].Trim()
   $script:RemoteStageToCleanup = $script:remoteStage
@@ -1010,6 +1223,8 @@ $restoreScript = New-RemoteRestoreDrillScript `
   -BackendPort $DrillBackendPort `
   -FrontendPort $DrillFrontendPort `
   -CanonicalHealth $HealthUrl `
+  -ReleaseSha $releaseSha `
+  -ReleaseBuildTime $releaseBuildTime `
   -Keep ([bool]$KeepDrillProject)
 
 Assert-NoUnresolvedTemplatePlaceholders -Content $restoreScript -Placeholders @(
@@ -1019,6 +1234,8 @@ Assert-NoUnresolvedTemplatePlaceholders -Content $restoreScript -Placeholders @(
   "__DRILL_BACKEND_PORT__",
   "__DRILL_FRONTEND_PORT__",
   "__CANON_HEALTH_URL__",
+  "__RELEASE_SHA__",
+  "__RELEASE_BUILD_TIME__",
   "__KEEP_DRILL_PROJECT__"
 )
 
@@ -1028,15 +1245,56 @@ Set-Utf8NoBomLfContent -Path $localRestoreScript -Content $restoreScript
 Invoke-Step "Upload restore drill inputs" {
   Copy-ToRemoteChecked -LocalPath $dumpLocal -RemoteFilePath "$script:remoteStage/restore.dump"
   Copy-ToRemoteChecked -LocalPath $manifestLocal -RemoteFilePath "$script:remoteStage/restore.manifest.json"
+  Copy-ToRemoteChecked -LocalPath $candidateBackendArchive -RemoteFilePath "$script:remoteStage/candidate-backend.tar.gz"
   Copy-ToRemoteChecked -LocalPath $localRestoreScript -RemoteFilePath "$script:remoteStage/restore-drill.sh"
 }
 
 Invoke-Step "Run isolated restore drill" {
-  Invoke-RemoteChecked -Command "chmod 0700 $(ConvertTo-ShellSingleQuoted "$script:remoteStage/restore-drill.sh") && bash $(ConvertTo-ShellSingleQuoted "$script:remoteStage/restore-drill.sh")"
+  $script:drillOutput = Invoke-RemoteOutputChecked -Command "chmod 0700 $(ConvertTo-ShellSingleQuoted "$script:remoteStage/restore-drill.sh") && bash $(ConvertTo-ShellSingleQuoted "$script:remoteStage/restore-drill.sh")"
+  Write-Host $script:drillOutput
+  $shaMatch = [regex]::Match($script:drillOutput, '(?m)^RESTORE_DRILL_VERSION_SHA=([0-9a-f]{40})$')
+  if (-not $shaMatch.Success -or $script:drillOutput -notmatch '(?m)^RESTORE_DRILL_OK\s') {
+    throw "Restore drill did not return a valid version/result attestation."
+  }
+  $script:DrillVersionSha = $shaMatch.Groups[1].Value
 }
 
-Remove-Item -LiteralPath $dumpLocal -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $localStage -Recurse -Force
+$script:SensitiveLocalDirectories = @($script:SensitiveLocalDirectories | Where-Object { $_ -ne $localStage })
 $script:RemoteStageToCleanup = ""
+
+if ($artifactSourceNormalized -eq "s3") {
+  if ([string]::IsNullOrWhiteSpace($AttestationPath)) {
+    $AttestationPath = Join-Path $deployDir "shamrai-restore-attestation.json"
+  }
+  $attestation = [ordered]@{
+    schema_version = 1
+    status = "passed"
+    repository = [string]$env:GITHUB_REPOSITORY
+    workflow_run_id = if ([string]$env:GITHUB_RUN_ID -match '^\d+$') { [int64]$env:GITHUB_RUN_ID } else { 0 }
+    workflow_run_attempt = if ([string]$env:GITHUB_RUN_ATTEMPT -match '^\d+$') { [int]$env:GITHUB_RUN_ATTEMPT } else { 0 }
+    git_sha = ([string]$env:GITHUB_SHA).ToLowerInvariant()
+    artifact_source = "s3"
+    bucket = $OffHostS3Bucket
+    prefix = $OffHostS3Prefix
+    endpoint_url = $OffHostS3EndpointUrl
+    region = $OffHostS3Region
+    writer_access_key_id_sha256 = Get-StringSha256Hex -Value $env:AWS_ACCESS_KEY_ID
+    artifact_key = $script:offHostArtifactKey
+    manifest_key = $script:offHostManifestKey
+    signature_key = $script:offHostSignatureKey
+    manifest_sha256 = $script:ManifestSha256
+    signature_sha256 = $script:ManifestSignatureSha256
+    signing_public_key_sha256 = $script:ManifestSigningPublicKeySha256
+    signature_algorithm = "Ed25519"
+    signature_verified = $true
+    backup_created_at = $script:BackupCreatedAtUtc.ToUniversalTime().ToString("o")
+    verified_at = [DateTimeOffset]::UtcNow.ToString("o")
+    backend_git_sha = $script:DrillVersionSha
+  }
+  Set-Utf8NoBomLfContent -Path $AttestationPath -Content (($attestation | ConvertTo-Json -Depth 5) + "`n")
+  Write-Host "restore_attestation=$AttestationPath"
+}
 
 Write-Host ""
 Write-Host "shamrai_restore_drill_ok" -ForegroundColor Green

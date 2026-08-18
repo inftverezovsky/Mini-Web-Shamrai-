@@ -25,6 +25,7 @@ import {
   PerformanceSummary,
   PerformanceTimelineResponse,
   PeriodFilter,
+  StatsPeriodFilter,
   StatsDriveExportJob,
 } from '../../schemas/schemas';
 import SmoothCollapse from '../../components/SmoothCollapse';
@@ -197,7 +198,7 @@ export function PeriodSelector({
   onChange,
   activeTone = 'emerald',
 }: {
-  value: PeriodFilter;
+  value: StatsPeriodFilter;
   onChange: (value: PeriodFilter) => void;
   activeTone?: 'emerald' | 'cyan';
 }) {

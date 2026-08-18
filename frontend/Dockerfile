@@ -1,11 +1,11 @@
 # Build Stage
-FROM node:20-alpine AS build
+FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS build
 
 WORKDIR /app
 
 # Install dependencies
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 
 # Copy source and build
 COPY . .
@@ -34,13 +34,15 @@ ENV VITE_PLAUSIBLE_CAPTURE_LOCALHOST=${VITE_PLAUSIBLE_CAPTURE_LOCALHOST}
 RUN npm run build
 
 # Nginx Stage for production deployment
-FROM nginx:stable-alpine
+FROM nginx:stable-alpine@sha256:8a4f4b94275ff59d809477799cbbaf1a7ab65ed1871403d05e31fd66bdb8db82
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
 # Custom nginx config to handle React SPA router redirects
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-RUN chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /var/run /var/log/nginx /etc/nginx/conf.d
+RUN touch /run/nginx.pid \
+    && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \
+    && chown nginx:nginx /run/nginx.pid
 
 EXPOSE 8080
 

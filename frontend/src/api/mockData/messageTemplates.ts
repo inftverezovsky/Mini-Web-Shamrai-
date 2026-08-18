@@ -55,7 +55,7 @@ export const DEFAULT_MOCK_MESSAGE_TEMPLATES = [
     key: 'forecast_full',
     title: 'Полный прогноз',
     description: 'Сообщение с матчем, исходом, коэффициентом, описанием и купоном.',
-    body: 'Матч: <b>{{event_name}}</b>\n\nИсход: <b>{{outcome}}</b>\n\nКоэффициент: <b>{{coefficient}}</b>\n\n{{bookmaker_line}}\n\n{{description}}\n\n{{bookmaker_links_block}}\n\n{{contact_footer}}',
+    body: '<b>ПРОГНОЗ SHAMRAI</b>\n\nМатч: <b>{{event_name}}</b>\n\nИсход: <b>{{outcome}}</b>\n\nКоэффициент: <b>{{coefficient}}</b>\n\n{{bookmaker_line}}\n\n{{description}}\n\n{{bookmaker_links_block}}\n\n{{contact_footer}}',
     variables: [
       { key: 'event_name', label: 'Матч', example: 'Зенит - Спартак' },
       { key: 'outcome', label: 'Исход', example: 'П1' },

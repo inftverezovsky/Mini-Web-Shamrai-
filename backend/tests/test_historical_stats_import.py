@@ -161,6 +161,43 @@ class HistoricalStatsImportTests(unittest.IsolatedAsyncioTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.cutoff_at.isoformat(), DEFAULT_HISTORICAL_STATS_CUTOFF.isoformat())
 
+    async def test_exact_month_snapshot_and_timeline_use_only_that_archived_month(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "stats.xlsx"
+            _sample_workbook(source)
+            parsed = parse_historical_stats_workbook(source)
+
+            async with self.Session() as session:
+                await apply_historical_stats_import(session, parsed, apply=True)
+                session.add(Bet(
+                    id=uuid.uuid4(),
+                    event_name="Duplicate June live row",
+                    coefficient=Decimal("2.00"),
+                    status="win",
+                    publication_type="forecast",
+                    created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+                    resolved_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+                ))
+                await session.commit()
+
+                snapshot = await load_active_historical_stats_snapshot(session, "2026-06")
+                payload = await get_admin_shamrai_timeline_stats(
+                    period="2026-06",
+                    admin=object(),
+                    db=session,
+                )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.summary["bets"], 2)
+        self.assertEqual([row["period_key"] for row in snapshot.monthly], ["2026-06"])
+        self.assertEqual(len(snapshot.details), 2)
+        self.assertEqual({row["label"] for row in snapshot.sport_breakdowns}, {"Теннис", "Футбол"})
+        self.assertEqual(payload["period"], "2026-06")
+        self.assertEqual(payload["period_label"], "Июнь 2026")
+        self.assertEqual(payload["summary"]["bets"], 2)
+        self.assertEqual([month["key"] for month in payload["timeline"]], ["2026-06"])
+
     async def test_workbook_uses_historical_summary_without_fake_detail_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "stats.xlsx"

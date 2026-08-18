@@ -31,6 +31,7 @@ import { canEnterCabinet } from './utils/identityAccess';
 import { syncConnectionOnboarding } from './utils/connectionOnboarding';
 import { ADMIN_WEB_CHAT_OPEN_EVENT } from './utils/adminWebChatNavigation';
 import { canPrefetchAdminChunk } from './utils/performancePolicy';
+import { readStoredCheckout, resolveCheckoutAttemptId } from './utils/paymentCheckout';
 import {
   PROFILE_SETUP_NAVIGATION_EVENT,
   profileSetupIntentFromLocation,
@@ -317,7 +318,11 @@ export default function App() {
     const applyOpenTargetFromLocation = () => {
       const params = new URLSearchParams(window.location.search);
       const openTarget = params.get('open');
-      if (openTarget === 'web-bot-chat' || openTarget === 'web-chat') {
+      const paymentAttemptId = resolveCheckoutAttemptId(window.location.search, readStoredCheckout());
+      if (paymentAttemptId && subscriptionPurchasesEnabled) {
+        setMountedUserTabs((current) => addUniqueTab(current, 'billing'));
+        setActiveUserTab('billing');
+      } else if (openTarget === 'web-bot-chat' || openTarget === 'web-chat') {
         setMountedUserTabs((current) => addUniqueTab(current, 'chat'));
         setActiveUserTab('chat');
         scrollToTarget('web-bot-chat', 250);
@@ -344,7 +349,7 @@ export default function App() {
       window.removeEventListener(ADMIN_WEB_CHAT_OPEN_EVENT, openAdminWebChatTarget);
       window.removeEventListener('popstate', applyOpenTargetFromLocation);
     };
-  }, [isReady, isTelegram]);
+  }, [isReady, isTelegram, subscriptionPurchasesEnabled]);
 
   const appReady = isReady && !loading;
 

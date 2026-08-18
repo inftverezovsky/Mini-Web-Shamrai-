@@ -45,6 +45,7 @@ export interface UserResponse {
   guarantee_active: boolean;
   guarantee_opened_from_bet_id: string | null;
   guarantee_closed_at: string | null;
+  flat_subscription?: FlatSubscriptionSummaryResponse | null;
   onboarding_goal: string | null;
   ab_group: string | null;
   tg_chat_joined: boolean;
@@ -64,22 +65,104 @@ export interface UserResponse {
   badges: UserBadgeResponse[];
 }
 
+export type FlatSubscriptionStatus = 'pending_setup' | 'active' | 'closing' | 'completed' | 'cancelled';
+
+export interface FlatSubscriptionSummaryResponse {
+  id: string;
+  user_id: number;
+  revision: number;
+  status: FlatSubscriptionStatus;
+  flat_amount_rub: string | number | null;
+  target_flats: string | number;
+  profit_rub: string | number;
+  profit_flats: string | number;
+  remaining_flats: string | number;
+  pending_bets: number;
+  activated_at: string | null;
+  completed_at: string | null;
+}
+
+export interface FlatSubscriptionBetResponse {
+  bet_id: string;
+  event_name: string | null;
+  outcome: string | null;
+  taken_at: string | null;
+  stake_rub: string | number;
+  stake_flats: string | number;
+  coefficient: string | number;
+  status: 'pending' | 'win' | 'loss' | 'refund';
+  profit_rub: string | number | null;
+  profit_flats: string | number | null;
+}
+
+export interface FlatSubscriptionCreditResponse {
+  id: number;
+  event_type: string;
+  delta_target_flats: string | number;
+  actor_id: number | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface FlatSubscriptionResponse extends FlatSubscriptionSummaryResponse {
+  created_at: string;
+  updated_at: string;
+  bets: FlatSubscriptionBetResponse[];
+  credits: FlatSubscriptionCreditResponse[];
+}
+
+export interface FlatFinancialCorrectionPreviewValues {
+  flat_amount_rub?: string | number | null;
+  stake_rub?: string | number | null;
+  profit_rub: string | number;
+  profit_flats: string | number;
+  status: FlatSubscriptionStatus;
+}
+
+export interface FlatFinancialCorrectionPreviewResponse {
+  kind: 'flat_amount' | 'stake';
+  flat_subscription_id: string;
+  bet_id?: string | null;
+  current_revision: number;
+  affected_bets: number;
+  before: FlatFinancialCorrectionPreviewValues;
+  after: FlatFinancialCorrectionPreviewValues;
+}
+
+export interface PaymentAttemptStatusResponse {
+  attempt_id?: string;
+  id?: string;
+  checkout_state?: 'creating' | 'ready' | 'failed' | string | null;
+  creation_status?: 'creating' | 'ready' | 'failed' | string | null;
+  status?: string | null;
+  payment_status?: string | null;
+  requires_flat_setup?: boolean;
+  flat_setup_required?: boolean;
+  confirmation_url?: string | null;
+  checkout_url?: string | null;
+  flat_subscription?: FlatSubscriptionResponse | null;
+}
+
 export interface SubscriptionPlanResponse {
   id: number;
   name: string;
   duration_days: number;
   match_count: number;
+  entitlement_type: 'flat' | 'legacy_match';
+  target_flats: string | number | null;
   price: string | number;
   price_stars: number;
   currency: string;
   is_active: boolean;
+  is_hidden?: boolean;
+  allowed_user_ids?: number[];
 }
 
 export interface SubscriptionResponse {
   id: string;
   user_id: number;
   plan_id: number | null;
-  status: 'active' | 'expired' | 'pending';
+  status: 'active' | 'expired' | 'pending' | FlatSubscriptionStatus;
   payment_provider: string | null;
   payment_id: string | null;
   start_date: string | null;
@@ -93,13 +176,21 @@ export interface BookmakerLink {
   url: string;
 }
 
+export interface TelegramCustomEmojiEntity {
+  offset: number;
+  length: number;
+  custom_emoji_id: string;
+}
+
 export interface BetResponse {
   id: string;
   event_name: string;
+  event_name_entities: TelegramCustomEmojiEntity[];
   coefficient: string | number;
   fair_coefficient: string | number | null;
   bookmaker_id: number | null;
   description: string | null;
+  description_entities: TelegramCustomEmojiEntity[];
   teaser_text: string | null;
   status: 'pending' | 'win' | 'loss' | 'refund' | 'deleted';
   author_id: number | null;
@@ -139,6 +230,7 @@ export interface ForecastRequestUserResponse {
   is_web_only: boolean;
   matches_remaining: number;
   guarantee_active: boolean;
+  flat_subscription?: FlatSubscriptionSummaryResponse | null;
   bookmakers: BookmakerResponse[];
 }
 
@@ -154,6 +246,12 @@ export interface ForecastRequestResponse {
   balance_before: number | null;
   balance_after: number | null;
   no_balance_warning: boolean;
+  flat_subscription_id: string | null;
+  stake_rub: string | number | null;
+  stake_flats: string | number | null;
+  stake_input_channel: 'web' | 'telegram' | 'vk' | null;
+  stake_submitted_at: string | null;
+  flat_subscription?: FlatSubscriptionSummaryResponse | null;
   created_at: string;
   updated_at: string;
   bet: BetResponse;
@@ -434,13 +532,31 @@ export interface ChatReadUpdatedEvent {
   updated_at: string | null;
 }
 
+export interface WheelPrizeConfig {
+  id: string;
+  label: string;
+  sub: string;
+  probability: number;
+  reward_type: string;
+  reward_value: number;
+  color: string;
+  icon: string;
+}
+
+export interface WheelConfigPayload {
+  prizes: WheelPrizeConfig[];
+}
+
 export type PeriodFilter = 'week' | 'month' | 'quarter' | 'all';
+export type StatsMonthKey = `${number}-${number}`;
+export type StatsPeriodFilter = PeriodFilter | StatsMonthKey;
 
 export interface PerformanceSummary {
   bets: number;
   wins: number;
   losses: number;
   winrate: number;
+
   roi: number;
   profit_units: number;
   average_coefficient: number;
@@ -501,7 +617,7 @@ export interface SourceSplit {
 }
 
 export interface PerformanceTimelineResponse {
-  period: PeriodFilter;
+  period: StatsPeriodFilter;
   period_label: string;
   summary: PerformanceSummary;
   source_split: SourceSplit;
@@ -547,7 +663,7 @@ export interface AdminClientStatsItem {
 }
 
 export interface AdminClientsStatsResponse {
-  period: PeriodFilter;
+  period: StatsPeriodFilter;
   period_label: string;
   clients_count: number;
   active_clients_count: number;
@@ -576,7 +692,7 @@ export interface StatsDriveExportJob {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
   scope: StatsDriveExportScope;
-  period: PeriodFilter;
+  period: StatsPeriodFilter;
   formats: StatsDriveExportFormat[];
   filters?: Record<string, string>;
   links: StatsDriveExportLink[];
@@ -677,6 +793,7 @@ export interface PromoCodeResponse {
   reward_type: string;
   discount_percent: number;
   matches_count: number;
+  target_flats: string | number | null;
   valid_until: string;
   is_active: boolean;
 }
@@ -685,4 +802,36 @@ export interface WheelOfFortuneResponse {
   reward_type: string;
   promo_code: string | null;
   message: string;
+}
+// --- PROMO WIDGETS ADMIN SCHEMAS ---
+
+export interface QuizQuestionCreate {
+  question: string;
+  options: string[];
+  correct_answer_index: number;
+}
+
+export interface QuizCreate {
+  bet_id?: string;
+  discount_reward: number;
+  questions: QuizQuestionCreate[];
+}
+
+export interface QuizResponse {
+  id: number;
+  bet_id?: string;
+  discount_reward: number;
+  created_at: string;
+  is_active: boolean;
+}
+
+export interface PvPBattleCreate {
+  match_name: string;
+  option_a: string;
+  option_b: string;
+}
+
+export interface CrowdBetCreate {
+  bet_id: string;
+  target_amount: number;
 }

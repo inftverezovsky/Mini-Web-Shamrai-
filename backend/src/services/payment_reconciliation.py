@@ -1,7 +1,7 @@
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Optional
 
 from sqlalchemy import and_, or_
@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from src.models.models import (
     CrowdBetParticipant,
+    FlatSubscriptionCredit,
     MatchBalanceLog,
     PaymentAttempt,
     Subscription,
@@ -29,6 +30,7 @@ ISSUE_PENDING_STALE = "pending_stale"
 ISSUE_PROCESSING_STALE = "processing_stale"
 ISSUE_PROVIDER_SUCCEEDED_LOCAL_NOT_SUCCEEDED = "provider_succeeded_local_not_succeeded"
 ISSUE_PROVIDER_LOCAL_AMOUNT_MISMATCH = "provider_local_amount_mismatch"
+ISSUE_CHECKOUT_REQUIRES_RECONCILIATION = "checkout_requires_reconciliation"
 ISSUE_LOCAL_SUCCEEDED_MISSING_ENTITLEMENT = "local_succeeded_missing_entitlement"
 ISSUE_LOCAL_SUCCEEDED_ENTITLEMENT_MISMATCH = "local_succeeded_entitlement_mismatch"
 
@@ -63,7 +65,7 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
 
 def _decimal(value: Any) -> Optional[Decimal]:
     try:
-        return Decimal(str(value)).quantize(Decimal("0.01"))
+        return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, TypeError, ValueError):
         return None
 
@@ -84,7 +86,7 @@ def _safe_int(value: Any) -> int:
 def _purchase_type(attempt: PaymentAttempt) -> str:
     metadata = attempt.metadata_json or {}
     metadata_purchase_type = str(metadata.get("purchase_type") or "").strip()
-    if attempt.plan_id:
+    if attempt.plan_id or attempt.entitlement_type_snapshot:
         return PURCHASE_SUBSCRIPTION
     if metadata_purchase_type == PURCHASE_CROWD_BET:
         return PURCHASE_CROWD_BET
@@ -194,21 +196,55 @@ async def _subscription_issue(
         mismatch_details["subscription_user_id"] = subscription.user_id
     if subscription.plan_id != attempt.plan_id:
         mismatch_details["subscription_plan_id"] = subscription.plan_id
-    if subscription.status != "active":
+    entitlement_type = attempt.entitlement_type_snapshot or (
+        attempt.plan.entitlement_type if attempt.plan is not None else None
+    )
+    expected_target_flats = (
+        attempt.target_flats_snapshot
+        if attempt.target_flats_snapshot is not None
+        else (attempt.plan.target_flats if attempt.plan is not None else None)
+    )
+    expected_match_count = (
+        attempt.match_count_snapshot
+        if attempt.match_count_snapshot is not None
+        else (attempt.plan.match_count if attempt.plan is not None else 0)
+    )
+    is_flat_plan = entitlement_type == "flat"
+    allowed_statuses = {"pending_setup", "active", "closing", "completed"} if is_flat_plan else {"active"}
+    if subscription.status not in allowed_statuses:
         mismatch_details["subscription_status"] = subscription.status
 
-    ledger_result = await db.execute(
-        select(MatchBalanceLog).filter(
-            MatchBalanceLog.subscription_id == subscription.id,
-            MatchBalanceLog.event_type == "subscription_purchase",
+    if is_flat_plan:
+        if subscription.flat_subscription_id is None:
+            mismatch_details["missing_flat_subscription"] = True
+        if not _decimal_matches(subscription.target_flats_snapshot, expected_target_flats):
+            mismatch_details["target_flats_snapshot"] = str(subscription.target_flats_snapshot)
+            mismatch_details["expected_target_flats"] = str(expected_target_flats)
+        credit_result = await db.execute(
+            select(FlatSubscriptionCredit).filter(
+                FlatSubscriptionCredit.subscription_id == subscription.id,
+                FlatSubscriptionCredit.event_type == "subscription_purchase",
+            )
         )
-    )
-    ledger = ledger_result.scalars().first()
-    if not ledger:
-        mismatch_details["missing_ledger"] = True
-    elif attempt.plan and int(ledger.delta_matches or 0) != int(attempt.plan.match_count or 0):
-        mismatch_details["ledger_delta_matches"] = int(ledger.delta_matches or 0)
-        mismatch_details["expected_matches"] = int(attempt.plan.match_count or 0)
+        credit = credit_result.scalars().first()
+        if credit is None:
+            mismatch_details["missing_flat_credit"] = True
+        elif not _decimal_matches(credit.delta_target_flats, expected_target_flats):
+            mismatch_details["flat_credit_target"] = str(credit.delta_target_flats)
+
+    if not is_flat_plan:
+        ledger_result = await db.execute(
+            select(MatchBalanceLog).filter(
+                MatchBalanceLog.subscription_id == subscription.id,
+                MatchBalanceLog.event_type == "subscription_purchase",
+            )
+        )
+        ledger = ledger_result.scalars().first()
+        if not ledger:
+            mismatch_details["missing_ledger"] = True
+        elif int(ledger.delta_matches or 0) != int(expected_match_count or 0):
+            mismatch_details["ledger_delta_matches"] = int(ledger.delta_matches or 0)
+            mismatch_details["expected_matches"] = int(expected_match_count or 0)
 
     if mismatch_details:
         return _issue(
@@ -402,6 +438,17 @@ async def build_payment_reconciliation_report(
         purchase_type = _purchase_type(attempt)
         created_at = _as_utc(attempt.created_at) or now
         processing_started_at = _as_utc(attempt.processing_started_at) or _as_utc(attempt.updated_at) or created_at
+
+        if attempt.checkout_state == "requires_reconciliation":
+            if not await add_issue(_issue(
+                code=ISSUE_CHECKOUT_REQUIRES_RECONCILIATION,
+                severity="error",
+                message="Payment attempt lost its purchase reference and requires manual reconciliation.",
+                attempt=attempt,
+                purchase_type=purchase_type,
+                details={"checkout_state": "requires_reconciliation"},
+            )):
+                break
 
         if attempt.status == "pending" and created_at < pending_stale_before:
             if not await add_issue(_issue(

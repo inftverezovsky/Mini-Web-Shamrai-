@@ -1,12 +1,18 @@
 import asyncio
 import logging
 import mimetypes
+import os
+import re
 from typing import Optional
 import socket
 import time
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from contextlib import suppress
+from functools import lru_cache
+from pathlib import Path
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -18,16 +24,20 @@ from src.models.database import Base, engine, AsyncSessionLocal
 from src.models.models import Subscription, User
 from src.api.deps import get_optional_user_read
 from src.core.config import settings
+from src.core.redis_cache import get_redis_client
 from src.core.csrf import CsrfProtectionMiddleware
 from src.core.observability import RequestObservabilityMiddleware, configure_observability_logging
 from src.core.roles import is_staff_role
 from src.core.security_limits import SecurityRateLimitMiddleware, security_rate_limiter
 from src.core.telegram_delivery import is_personal_telegram_user_id, user_can_receive_personal_telegram
-from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, vk_callback, signals, chat, go, public_settings
+from src.api import auth, users, bets, subscriptions, payments, stats, marketing, admin, admin_web_chat, admin_broadcast, crowd_bets, telegram_webhook, telegram_custom_emojis, vk_callback, signals, chat, go, public_settings
 from src.services.delivery_outbox import delivery_outbox_daemon, get_delivery_outbox_metrics
 from src.services.observability_alerts import observability_alert_daemon
 from src.services.system_settings import is_system_setting_enabled
 from src.services.telegram_bot import call_telegram_api, call_telegram_api_async, run_telegram_api_background
+from src.services.telegram_emoji_catalog import load_telegram_emoji_catalog
+from src.services.telegram_custom_emoji_library import load_custom_emoji_library
+from src.services.telegram_custom_emoji_previews import warm_custom_emoji_previews
 from src.services.vk_delivery import (
     get_vk_unread_conversations,
     log_vk_runtime_config,
@@ -86,6 +96,8 @@ async def run_dev_schema_migrations(conn):
             "ALTER TABLE user_bets ADD COLUMN IF NOT EXISTS match_charged BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR NOT NULL DEFAULT 'feed'",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS publication_type VARCHAR NOT NULL DEFAULT 'forecast'",
+            "ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_name_entities JSON NOT NULL DEFAULT '[]'::json",
+            "ALTER TABLE bets ADD COLUMN IF NOT EXISTS description_entities JSON NOT NULL DEFAULT '[]'::json",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS fair_coefficient NUMERIC(5, 2)",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS teaser_text TEXT",
             "ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport_type VARCHAR",
@@ -400,6 +412,8 @@ async def run_dev_schema_migrations(conn):
             "bets": [
                 ("delivery_mode", "VARCHAR NOT NULL DEFAULT 'feed'"),
                 ("publication_type", "VARCHAR NOT NULL DEFAULT 'forecast'"),
+                ("event_name_entities", "JSON NOT NULL DEFAULT '[]'"),
+                ("description_entities", "JSON NOT NULL DEFAULT '[]'"),
                 ("fair_coefficient", "NUMERIC(5, 2)"),
                 ("teaser_text", "TEXT"),
                 ("sport_type", "VARCHAR"),
@@ -1587,6 +1601,26 @@ async def configure_telegram_delivery_on_startup():
         )
 
 
+async def warm_custom_emoji_previews_on_startup(custom_emoji_ids: tuple[str, ...]) -> None:
+    if not custom_emoji_ids:
+        return
+    await asyncio.sleep(2)
+    report = await asyncio.to_thread(
+        warm_custom_emoji_previews,
+        custom_emoji_ids,
+    )
+    logger.info(
+        "telegram_custom_emoji_previews_warmed",
+        extra={
+            "event": "telegram_custom_emoji_previews_warmed",
+            "total": report.total,
+            "ready": report.ready,
+            "cached": report.cached,
+            "failed": report.failed,
+        },
+    )
+
+
 async def _observability_delivery_metrics_probe() -> dict:
     async with AsyncSessionLocal() as db:
         return await get_delivery_outbox_metrics(db)
@@ -1610,6 +1644,33 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await run_dev_schema_migrations(conn)
+
+    custom_emoji_ids: tuple[str, ...] = ()
+    try:
+        async with AsyncSessionLocal() as db:
+            emoji_catalog = await load_telegram_emoji_catalog(db)
+            custom_emoji_library = await load_custom_emoji_library(db)
+            custom_emoji_ids = tuple(
+                item.custom_emoji_id
+                for item in custom_emoji_library
+            )
+        logger.info(
+            "telegram_emoji_catalog_loaded",
+            extra={
+                "event": "telegram_emoji_catalog_loaded",
+                "bookmaker_count": len(emoji_catalog.bookmaker_items),
+                "sport_count": len(emoji_catalog.sport_items),
+                "decor_count": len(emoji_catalog.decor_items),
+            },
+        )
+    except Exception as exc:
+        logger.exception(
+            "telegram_emoji_catalog_load_failed",
+            extra={
+                "event": "telegram_emoji_catalog_load_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
         
     telegram_proxy_count = len(settings.telegram_proxy_urls)
     if telegram_proxy_count:
@@ -1623,8 +1684,12 @@ async def lifespan(app: FastAPI):
  
     polling_task = None
     telegram_startup_task = None
+    custom_emoji_preview_task = None
     if settings.has_real_telegram_token:
         telegram_startup_task = asyncio.create_task(configure_telegram_delivery_on_startup())
+        custom_emoji_preview_task = asyncio.create_task(
+            warm_custom_emoji_previews_on_startup(custom_emoji_ids)
+        )
         if settings.TELEGRAM_USE_POLLING:
             polling_task = asyncio.create_task(telegram_polling_daemon())
 
@@ -1663,6 +1728,7 @@ async def lifespan(app: FastAPI):
         observability_alert_task,
         polling_task,
         telegram_startup_task,
+        custom_emoji_preview_task,
     ):
         if task:
             task.cancel()
@@ -1692,6 +1758,8 @@ MAINTENANCE_EXEMPT_PATH_PREFIXES = (
     "/api/admin",
     "/api/auth",
     "/api/health",
+    "/api/ready",
+    "/api/version",
     "/api/payments/telegram-webhook",
     "/api/payments/tegro/webhook",
     "/api/payments/yookassa/webhook",
@@ -1733,12 +1801,18 @@ async def maintenance_mode_middleware(request: Request, call_next):
     return await call_next(request)
 
 # Expose public coupon images without exposing private chat attachments.
-import os
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 static_coupons_dir = os.path.join(static_dir, "coupons")
+static_custom_emojis_dir = os.path.join(static_dir, "custom_emojis")
 os.makedirs(static_coupons_dir, exist_ok=True)
+os.makedirs(static_custom_emojis_dir, exist_ok=True)
 mimetypes.add_type("audio/webm", ".webm")
 app.mount("/static/coupons", StaticFiles(directory=static_coupons_dir), name="static-coupons")
+app.mount(
+    "/static/custom-emojis",
+    StaticFiles(directory=static_custom_emojis_dir),
+    name="static-custom-emojis",
+)
 
 # Include endpoint routers under /api prefix
 app.include_router(auth.router, prefix="/api")
@@ -1753,6 +1827,7 @@ app.include_router(admin_web_chat.router, prefix="/api")
 app.include_router(admin_broadcast.router, prefix="/api")
 app.include_router(crowd_bets.router, prefix="/api")
 app.include_router(telegram_webhook.router, prefix="/api")
+app.include_router(telegram_custom_emojis.router, prefix="/api")
 app.include_router(vk_callback.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
@@ -1775,8 +1850,114 @@ async def require_health_diagnostics_access(
 
 @app.get("/api/health")
 async def health_check():
-    """Simple container sanity health-check."""
-    return {"status": "ok", "message": "Betting TMA service active"}
+    """Process liveness only; dependency failures must not restart the process."""
+    return {"status": "ok"}
+
+
+@lru_cache(maxsize=1)
+def expected_alembic_revisions() -> tuple[str, ...]:
+    backend_root = Path(__file__).resolve().parents[1]
+    config = AlembicConfig(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    return tuple(sorted(ScriptDirectory.from_config(config).get_heads()))
+
+
+async def database_readiness_probe() -> dict[str, object]:
+    expected_revisions: tuple[str, ...] = ()
+    try:
+        expected_revisions = expected_alembic_revisions()
+    except Exception as exc:
+        logger.warning(
+            "readiness_expected_schema_unavailable",
+            extra={"event": "readiness_probe_failed", "probe": "alembic_head", "error_type": type(exc).__name__},
+        )
+
+    database_status = "error"
+    schema_status = "unknown"
+    current_revisions: tuple[str, ...] = ()
+    try:
+        async with AsyncSessionLocal() as db:
+            await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=2.0)
+            database_status = "ok"
+            version_rows = await asyncio.wait_for(
+                db.execute(text("SELECT version_num FROM alembic_version")),
+                timeout=2.0,
+            )
+            current_revisions = tuple(sorted(str(row[0]) for row in version_rows.all()))
+            schema_status = (
+                "ok"
+                if expected_revisions and set(current_revisions) == set(expected_revisions)
+                else "mismatch"
+            )
+    except Exception as exc:
+        logger.warning(
+            "readiness_database_probe_failed",
+            extra={"event": "readiness_probe_failed", "probe": "database", "error_type": type(exc).__name__},
+        )
+
+    return {
+        "database": database_status,
+        "schema": schema_status,
+        "expected_revisions": list(expected_revisions),
+        "current_revisions": list(current_revisions),
+    }
+
+
+async def redis_readiness_probe() -> dict[str, str]:
+    client = get_redis_client()
+    if client is None:
+        return {"redis": "error"}
+    try:
+        pong = await asyncio.wait_for(client.ping(), timeout=2.0)
+    except Exception as exc:
+        logger.warning(
+            "readiness_redis_probe_failed",
+            extra={"event": "readiness_probe_failed", "probe": "redis", "error_type": type(exc).__name__},
+        )
+        return {"redis": "error"}
+    return {"redis": "ok" if pong else "error"}
+
+
+@app.get("/api/ready")
+async def readiness_check():
+    database_result, redis_result = await asyncio.gather(
+        database_readiness_probe(),
+        redis_readiness_probe(),
+    )
+    checks = {
+        "database": str(database_result.get("database") or "error"),
+        "redis": str(redis_result.get("redis") or "error"),
+        "schema": str(database_result.get("schema") or "unknown"),
+    }
+    ready = all(value == "ok" for value in checks.values())
+    payload = {
+        "status": "ok" if ready else "not_ready",
+        "checks": checks,
+        "alembic": {
+            "expected_revisions": list(database_result.get("expected_revisions") or []),
+            "current_revisions": list(database_result.get("current_revisions") or []),
+        },
+    }
+    if not ready:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
+    return payload
+
+
+def _safe_release_value(name: str, pattern: str) -> str:
+    value = os.getenv(name, "").strip()
+    return value if re.fullmatch(pattern, value) else "unknown"
+
+
+@app.get("/api/version")
+def version_check() -> dict[str, str]:
+    return {
+        "app_version": app.version,
+        "git_sha": _safe_release_value("SHAMRAI_GIT_SHA", r"[0-9a-fA-F]{7,64}").lower(),
+        "build_time": _safe_release_value(
+            "SHAMRAI_BUILD_TIME",
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})",
+        ),
+    }
 
 
 @app.get("/api/health/payments", dependencies=[Depends(require_health_diagnostics_access)])

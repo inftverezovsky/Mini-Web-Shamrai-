@@ -8,13 +8,24 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
 
 from src.api.admin import admin_update_user, delete_bet_from_admin, get_pending_bets
-from src.api.admin_broadcast import mark_forecast_request_manual, stop_forecast_broadcast_from_admin
+from src.api.admin_broadcast import (
+    mark_forecast_request_manual,
+    remove_forecast_request_client_from_admin,
+    stop_forecast_broadcast_from_admin,
+)
 from src.api.deps import get_current_admin
 from src.models.database import Base
 from src.models.models import AdminAuditLog, Bet, DeliveryOutbox, ForecastRequest, MatchBalanceLog, User, user_bets
 from src.schemas.schemas import AdminUpdateUserPreferences
 from src.services import forecast_delivery
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
+from src.services.flat_subscriptions import (
+    FlatSubscriptionState,
+    credit_flat_subscription,
+    prepare_forecast_request_flat_stake,
+    record_user_flat_bet_access,
+    settle_flat_bet_takers,
+)
 from src.services.match_access import (
     REVOKE_USER_BET_ACCESS_EVENT,
     record_user_bet_access,
@@ -269,6 +280,52 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(audit)
             self.assertEqual(audit.action, "bet_deleted")
 
+    async def test_deleting_forecast_releases_closing_flat_subscription(self):
+        async with self.Session() as session:
+            admin = self._user(900, balance=0, role="moderator")
+            client = self._user(203, balance=0)
+            winning_bet = self._bet()
+            deleted_bet = self._bet()
+            deleted_bet.delivery_mode = "sales_private"
+            deleted_request = ForecastRequest(
+                bet=deleted_bet,
+                user=client,
+                status="announced",
+            )
+            session.add_all([admin, client, winning_bet, deleted_bet, deleted_request])
+            await session.flush()
+            subscription = await credit_flat_subscription(
+                session,
+                user=client,
+                target_flats=Decimal("0.45"),
+                flat_amount_rub=Decimal("10000"),
+                event_type="manual_credit",
+            )
+            await record_user_flat_bet_access(
+                session,
+                user=client,
+                bet=winning_bet,
+                stake_rub=Decimal("5000"),
+            )
+            await record_user_flat_bet_access(
+                session,
+                user=client,
+                bet=deleted_bet,
+                stake_rub=Decimal("5000"),
+                forecast_request=deleted_request,
+                input_channel="web",
+            )
+            deleted_request.status = "sent"
+            await settle_flat_bet_takers(session, bet=winning_bet, result_status="win")
+            await session.commit()
+            self.assertEqual(subscription.status, FlatSubscriptionState.CLOSING.value)
+
+            await delete_bet_from_admin(deleted_bet.id, admin=admin, db=session)
+
+            await session.refresh(subscription)
+            self.assertEqual(subscription.status, FlatSubscriptionState.COMPLETED.value)
+            self.assertEqual((await session.get(ForecastRequest, deleted_request.id)).status, FORECAST_STATUS_REMOVED)
+
     async def test_paid_set_can_be_stopped_from_broadcast_requests(self):
         async with self.Session() as session:
             admin = self._user(900, balance=0, role="admin")
@@ -293,6 +350,126 @@ class AdminDeleteAndRevokeAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(bet.auto_send_on_interest)
             refreshed = await session.get(ForecastRequest, forecast_request.id)
             self.assertEqual(refreshed.status, FORECAST_STATUS_REMOVED)
+
+    async def test_stopping_reserved_request_releases_closing_flat_subscription_idempotently(self):
+        async with self.Session() as session:
+            admin = self._user(900, balance=0, role="admin")
+            client = self._user(302, balance=0)
+            winning_bet = self._bet()
+            reserved_bet = self._bet()
+            reserved_bet.delivery_mode = "sales_private"
+            reserved_bet.auto_send_on_interest = True
+            reserved_request = ForecastRequest(
+                bet=reserved_bet,
+                user=client,
+                status="announced",
+            )
+            session.add_all([admin, client, winning_bet, reserved_bet, reserved_request])
+            await session.flush()
+            subscription = await credit_flat_subscription(
+                session,
+                user=client,
+                target_flats=Decimal("0.45"),
+                flat_amount_rub=Decimal("10000"),
+                event_type="manual_credit",
+            )
+            await record_user_flat_bet_access(
+                session,
+                user=client,
+                bet=winning_bet,
+                stake_rub=Decimal("5000"),
+            )
+            await prepare_forecast_request_flat_stake(
+                session,
+                forecast_request=reserved_request,
+                flat_subscription=subscription,
+                stake_rub=Decimal("5000"),
+                input_channel="web",
+            )
+            reserved_request.status = "interested"
+            await settle_flat_bet_takers(session, bet=winning_bet, result_status="win")
+            await session.commit()
+            self.assertEqual(subscription.status, FlatSubscriptionState.CLOSING.value)
+            revision_before_stop = subscription.revision
+
+            first = await stop_forecast_broadcast_from_admin(
+                reserved_bet.id,
+                current_admin=admin,
+                db=session,
+            )
+            second = await stop_forecast_broadcast_from_admin(
+                reserved_bet.id,
+                current_admin=admin,
+                db=session,
+            )
+
+            await session.refresh(subscription)
+            self.assertEqual(first["stopped_requests"], 1)
+            self.assertTrue(second["already_stopped"])
+            self.assertEqual(subscription.status, FlatSubscriptionState.COMPLETED.value)
+            self.assertEqual(subscription.revision, revision_before_stop + 1)
+
+    async def test_removing_delivered_client_releases_closing_flat_subscription_idempotently(self):
+        async with self.Session() as session:
+            admin = self._user(900, balance=0, role="admin")
+            client = self._user(303, balance=0)
+            winning_bet = self._bet()
+            delivered_bet = self._bet()
+            delivered_bet.delivery_mode = "sales_private"
+            delivered_request = ForecastRequest(
+                bet=delivered_bet,
+                user=client,
+                status="announced",
+            )
+            session.add_all([admin, client, winning_bet, delivered_bet, delivered_request])
+            await session.flush()
+            subscription = await credit_flat_subscription(
+                session,
+                user=client,
+                target_flats=Decimal("0.45"),
+                flat_amount_rub=Decimal("10000"),
+                event_type="manual_credit",
+            )
+            await record_user_flat_bet_access(
+                session,
+                user=client,
+                bet=winning_bet,
+                stake_rub=Decimal("5000"),
+            )
+            await record_user_flat_bet_access(
+                session,
+                user=client,
+                bet=delivered_bet,
+                stake_rub=Decimal("5000"),
+                forecast_request=delivered_request,
+                input_channel="web",
+            )
+            delivered_request.status = "sent"
+            await settle_flat_bet_takers(session, bet=winning_bet, result_status="win")
+            await session.commit()
+            self.assertEqual(subscription.status, FlatSubscriptionState.CLOSING.value)
+            revision_before_remove = subscription.revision
+
+            await remove_forecast_request_client_from_admin(
+                delivered_request.id,
+                current_admin=admin,
+                db=session,
+            )
+            await remove_forecast_request_client_from_admin(
+                delivered_request.id,
+                current_admin=admin,
+                db=session,
+            )
+
+            await session.refresh(subscription)
+            self.assertEqual(subscription.status, FlatSubscriptionState.COMPLETED.value)
+            self.assertEqual(subscription.revision, revision_before_remove + 1)
+            remaining_rows = (
+                await session.execute(
+                    select(user_bets.c.bet_id).filter(user_bets.c.user_id == client.telegram_id)
+                )
+            ).scalars().all()
+            self.assertEqual(remaining_rows, [winning_bet.id])
 
     async def test_stopping_forecast_broadcast_keeps_match_pending_for_results(self):
         async with self.Session() as session:

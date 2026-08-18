@@ -134,6 +134,7 @@ MESSAGE_TEMPLATE_DEFINITIONS: tuple[TemplateDefinition, ...] = (
         title="Полный прогноз",
         description="Сообщение с матчем, исходом, коэффициентом, описанием и купоном.",
         body=(
+            "<b>ПРОГНОЗ SHAMRAI</b>\n\n"
             "Матч: <b>{{event_name}}</b>\n\n"
             "Исход: <b>{{outcome}}</b>\n\n"
             "Коэффициент: <b>{{coefficient}}</b>\n\n"

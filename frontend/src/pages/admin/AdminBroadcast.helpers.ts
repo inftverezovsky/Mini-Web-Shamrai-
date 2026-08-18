@@ -132,7 +132,11 @@ export function forecastRequestVkDialogUrl(request: ForecastRequestResponse) {
 }
 
 export function requestHasFullForecastAccess(request: ForecastRequestResponse) {
-  return isPaidSetRequest(request) || request.user.matches_remaining > 0 || request.user.guarantee_active;
+  return isPaidSetRequest(request)
+    || request.user.matches_remaining > 0
+    || request.user.guarantee_active
+    || Boolean(request.flat_subscription_id)
+    || request.user.flat_subscription?.status === 'active';
 }
 
 export function requestDeliveryBlocked(request: ForecastRequestResponse) {

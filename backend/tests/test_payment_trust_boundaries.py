@@ -52,6 +52,7 @@ class PaymentTrustBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 response = await crowd_bets_api.fund_crowd_bet(
                     crowd_bet.id,
                     CrowdBetFundRequest(amount_xtr=50),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )
@@ -71,17 +72,31 @@ class PaymentTrustBoundaryTests(unittest.IsolatedAsyncioTestCase):
             user = self._user()
             bet = self._bet()
             crowd_bet = CrowdBet(bet=bet, target_amount=50, current_amount=0, status="funding")
-            session.add_all([user, bet, crowd_bet])
+            decoy_bet = self._bet()
+            decoy_crowd_bet = CrowdBet(
+                bet=decoy_bet,
+                target_amount=50,
+                current_amount=0,
+                status="funding",
+            )
+            session.add_all([user, bet, crowd_bet, decoy_bet, decoy_crowd_bet])
             await session.commit()
 
             with patch.object(crowd_bets_api, "create_telegram_stars_invoice_link", return_value="mock-invoice"):
                 response = await crowd_bets_api.fund_crowd_bet(
                     crowd_bet.id,
                     CrowdBetFundRequest(amount_xtr=50),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )
 
+            attempt = await session.get(PaymentAttempt, response.attempt_id)
+            attempt.metadata_json = {
+                **(attempt.metadata_json or {}),
+                "crowd_bet_id": decoy_crowd_bet.id,
+            }
+            await session.commit()
             result = await _process_payment_attempt(
                 session,
                 attempt_id=response.attempt_id,
@@ -90,13 +105,16 @@ class PaymentTrustBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 amount=Decimal("50"),
                 currency="XTR",
                 raw_payload={"ok": True},
+                payer_user_id=user.telegram_id,
             )
             await session.commit()
             await session.refresh(crowd_bet)
+            await session.refresh(decoy_crowd_bet)
             access_count = int((await session.execute(select(func.count()).select_from(user_bets))).scalar() or 0)
 
             self.assertEqual(result["status"], "success")
             self.assertEqual(crowd_bet.current_amount, 50)
+            self.assertEqual(decoy_crowd_bet.current_amount, 0)
             self.assertEqual(crowd_bet.status, "opened")
             self.assertEqual(access_count, 1)
 
@@ -111,6 +129,7 @@ class PaymentTrustBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 response = await bets_api.buy_bet_hint(
                     bet.id,
                     BetHintRequest(amount_xtr=1),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )

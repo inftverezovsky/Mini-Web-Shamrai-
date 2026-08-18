@@ -15,6 +15,8 @@ const MOCK_MESSAGE_TEMPLATES_STORAGE_KEY = 'bet_tma_mock_message_templates';
 const MOCK_SYSTEM_SETTINGS_STORAGE_KEY = 'bet_tma_mock_system_settings';
 const MOCK_MARKETING_WIDGETS_STORAGE_KEY = 'bet_tma_mock_marketing_widgets';
 const MOCK_SUPPORT_MESSAGES_STORAGE_KEY = 'bet_tma_mock_support_messages';
+const MOCK_FLAT_SUBSCRIPTION_STORAGE_KEY = 'bet_tma_mock_flat_subscription';
+const MOCK_PAYMENT_ATTEMPTS_STORAGE_KEY = 'bet_tma_mock_payment_attempts';
 const MOCK_AVATAR_CYAN = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23051b2b%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%2380e0f7%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%2320c997%22/%3E%3C/svg%3E';
 const MOCK_AVATAR_GOLD = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23221805%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%23f59e0b%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%23facc15%22/%3E%3C/svg%3E';
 const MOCK_AVATAR_GREEN = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 rx=%2224%22 fill=%22%23071917%22/%3E%3Ccircle cx=%2240%22 cy=%2232%22 r=%2214%22 fill=%22%2334d399%22/%3E%3Cpath d=%22M18 72c4-17 15-25 22-25s18 8 22 25%22 fill=%22%2380e0f7%22/%3E%3C/svg%3E';
@@ -862,6 +864,7 @@ const MONTH_LABELS = [
 ];
 
 type PeriodFilter = 'week' | 'month' | 'quarter' | 'all';
+type StatsPeriodFilter = PeriodFilter | `${number}-${number}`;
 
 const PERIOD_LABELS: Record<PeriodFilter, string> = {
   week: 'Текущая неделя',
@@ -870,14 +873,20 @@ const PERIOD_LABELS: Record<PeriodFilter, string> = {
   all: 'Весь период',
 };
 
-function normalizeMockPeriod(period: string | null | undefined): PeriodFilter {
-  return ['week', 'month', 'quarter', 'all'].includes(String(period))
-    ? (period as PeriodFilter)
+function normalizeMockPeriod(period: string | null | undefined): StatsPeriodFilter {
+  const cleanPeriod = String(period || 'all');
+  if (/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(cleanPeriod)) return cleanPeriod as `${number}-${number}`;
+  return ['week', 'month', 'quarter', 'all'].includes(cleanPeriod)
+    ? (cleanPeriod as PeriodFilter)
     : 'all';
 }
 
-function mockPeriodStart(period: PeriodFilter) {
+function mockPeriodStart(period: StatsPeriodFilter) {
   if (period === 'all') return null;
+  if (/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(period)) {
+    const [year, month] = period.split('-').map(Number);
+    return new Date(year, month - 1, 1);
+  }
   const now = new Date();
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
@@ -896,10 +905,26 @@ function mockPeriodStart(period: PeriodFilter) {
   return start;
 }
 
-function filterMockItemsByPeriod(items: any[], period: PeriodFilter) {
+function mockPeriodEnd(period: StatsPeriodFilter) {
+  if (!/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(period)) return null;
+  const [year, month] = period.split('-').map(Number);
+  return new Date(year, month, 1);
+}
+
+function mockPeriodLabel(period: StatsPeriodFilter) {
+  if (period in PERIOD_LABELS) return PERIOD_LABELS[period as PeriodFilter];
+  const [year, month] = period.split('-').map(Number);
+  return `${MONTH_LABELS[month - 1]} ${year}`;
+}
+
+function filterMockItemsByPeriod(items: any[], period: StatsPeriodFilter) {
   const start = mockPeriodStart(period);
+  const end = mockPeriodEnd(period);
   if (!start) return items;
-  return items.filter((item) => new Date(item.resolved_at).getTime() >= start.getTime());
+  return items.filter((item) => {
+    const resolvedAt = new Date(item.resolved_at).getTime();
+    return resolvedAt >= start.getTime() && (!end || resolvedAt < end.getTime());
+  });
 }
 
 function mockProfitUnits(bet: any) {
@@ -986,7 +1011,7 @@ function mockBreakdown(items: any[], key: 'sport_type' | 'bookmaker_names', empt
     .sort((a, b) => b.summary.bets - a.summary.bets || a.label.localeCompare(b.label));
 }
 
-function buildMockPerformancePayload(rawItems: any[], period: PeriodFilter = 'all') {
+function buildMockPerformancePayload(rawItems: any[], period: StatsPeriodFilter = 'all') {
   const items = rawItems
     .map(mockStatItemFromBet)
     .filter(Boolean)
@@ -1029,7 +1054,7 @@ function buildMockPerformancePayload(rawItems: any[], period: PeriodFilter = 'al
   const paidSetItems = items.filter((item: any) => item.source_type === 'paid_set');
   return {
     period,
-    period_label: PERIOD_LABELS[period],
+    period_label: mockPeriodLabel(period),
     summary: mockSummary(items),
     source_split: {
       all: mockSummary(items),
@@ -1072,6 +1097,25 @@ function buildMockUsers() {
       matches_remaining: 12,
       guarantee_active: false,
       has_active_subscription: true,
+      flat_subscription: buildMockFlatSubscription({
+        user_id: 123456789,
+        status: 'active',
+        flat_amount_rub: '10000.00',
+        activated_at: nowIso(),
+        pending_bets: 1,
+        bets: [{
+          bet_id: 'mock-bet-1',
+          event_name: 'Зенит — Спартак',
+          outcome: 'П1',
+          taken_at: nowIso(),
+          stake_rub: '5000.00',
+          stake_flats: '0.500000',
+          coefficient: '1.90',
+          status: 'pending',
+          profit_rub: null,
+          profit_flats: null,
+        }],
+      }),
       subscription_end_date: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
       bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [1, 2, 4, 7].includes(bookmaker.id)),
       other_bookmaker_name: null,
@@ -1095,6 +1139,7 @@ function buildMockUsers() {
       matches_remaining: -3,
       guarantee_active: false,
       has_active_subscription: false,
+      flat_subscription: buildMockFlatSubscription({ user_id: 223344556, status: 'pending_setup', flat_amount_rub: null }),
       subscription_end_date: null,
       bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [1].includes(bookmaker.id)),
       other_bookmaker_name: null,
@@ -1117,6 +1162,7 @@ function buildMockUsers() {
       matches_remaining: 0,
       guarantee_active: false,
       has_active_subscription: false,
+      flat_subscription: buildMockFlatSubscription({ user_id: 223344557, status: 'closing', flat_amount_rub: '5000.00', pending_bets: 1, profit_rub: '15000.00', profit_flats: '3.000000', remaining_flats: '0.000000' }),
       subscription_end_date: null,
       bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [3, 12].includes(bookmaker.id)),
       other_bookmaker_name: 'Локальная БК',
@@ -1139,6 +1185,7 @@ function buildMockUsers() {
       matches_remaining: 0,
       guarantee_active: true,
       has_active_subscription: true,
+      flat_subscription: buildMockFlatSubscription({ user_id: 334455667, status: 'completed', flat_amount_rub: '15000.00', profit_rub: '45000.00', profit_flats: '3.000000', remaining_flats: '0.000000', completed_at: nowIso() }),
       subscription_end_date: null,
       bookmakers: MOCK_BOOKMAKERS.filter((bookmaker) => [1, 6].includes(bookmaker.id)),
       other_bookmaker_name: null,
@@ -1170,7 +1217,7 @@ function getMockUsers() {
       if (
         Array.isArray(users) &&
         users.some((user: any) => user.role === 'user') &&
-        users.every((user: any) => (
+        users.every((user: any) => user.role !== 'user' || (
           'client_group' in user
           && 'client_tag' in user
           && 'recent_match_results' in user
@@ -1179,6 +1226,7 @@ function getMockUsers() {
           && 'telegram_connected' in user
           && 'vk_connected' in user
           && 'web_push_enabled' in user
+          && 'flat_subscription' in user
         ))
       ) {
         return users;
@@ -1360,10 +1408,86 @@ function mockThreadFromUser(user: any, latestMessage: any | null) {
 }
 
 let MOCK_PLANS = [
-  { id: 1, name: 'Старт', duration_days: 7, match_count: 5, price: 990, price_stars: 0, currency: 'RUB', is_active: true },
-  { id: 2, name: 'Профи', duration_days: 30, match_count: 25, price: 3990, price_stars: 0, currency: 'RUB', is_active: true },
-  { id: 3, name: 'VIP', duration_days: 30, match_count: 60, price: 7990, price_stars: 0, currency: 'RUB', is_active: true },
+  { id: 1, name: 'Старт +3', duration_days: 0, match_count: 0, entitlement_type: 'flat', target_flats: 3, price: 990, price_stars: 0, currency: 'RUB', is_active: true },
+  { id: 2, name: 'Профи +5', duration_days: 0, match_count: 0, entitlement_type: 'flat', target_flats: 5, price: 3990, price_stars: 0, currency: 'RUB', is_active: true },
+  { id: 3, name: 'VIP +10', duration_days: 0, match_count: 0, entitlement_type: 'flat', target_flats: 10, price: 7990, price_stars: 0, currency: 'RUB', is_active: true },
 ];
+
+function readMockPaymentAttempts() {
+  try {
+    const stored = localStorage.getItem(MOCK_PAYMENT_ATTEMPTS_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveMockPaymentAttempts(attempts: Record<string, any>) {
+  localStorage.setItem(MOCK_PAYMENT_ATTEMPTS_STORAGE_KEY, JSON.stringify(attempts));
+}
+
+function buildMockFlatSubscription(overrides: Record<string, any> = {}) {
+  const now = nowIso();
+  return {
+    id: '11111111-2222-4333-8444-555555555555',
+    user_id: 123456789,
+    revision: 1,
+    status: 'pending_setup',
+    flat_amount_rub: null,
+    target_flats: '3.00',
+    profit_rub: '0.00',
+    profit_flats: '0.000000',
+    remaining_flats: '3.000000',
+    pending_bets: 0,
+    activated_at: null,
+    completed_at: null,
+    created_at: now,
+    updated_at: now,
+    bets: [],
+    credits: [{
+      id: 1,
+      event_type: 'purchase',
+      delta_target_flats: '3.00',
+      actor_id: null,
+      note: 'Тестовая покупка',
+      created_at: now,
+    }],
+    ...overrides,
+  };
+}
+
+function getMockFlatSubscription() {
+  try {
+    const stored = localStorage.getItem(MOCK_FLAT_SUBSCRIPTION_STORAGE_KEY);
+    if (stored) return JSON.parse(stored);
+  } catch {
+    // Rebuild synthetic state below.
+  }
+
+  const hasSuccessfulPayment = Object.values(readMockPaymentAttempts()).some((attempt: any) => (
+    ['paid', 'success', 'succeeded', 'completed'].includes(String(attempt?.status || '').toLowerCase())
+  ));
+  return hasSuccessfulPayment ? buildMockFlatSubscription() : null;
+}
+
+function saveMockFlatSubscription(subscription: any) {
+  localStorage.setItem(MOCK_FLAT_SUBSCRIPTION_STORAGE_KEY, JSON.stringify(subscription));
+  return subscription;
+}
+
+function createMockPaymentAttempt(provider: 'tegro' | 'yookassa') {
+  const attemptId = crypto.randomUUID();
+  const attempts = readMockPaymentAttempts();
+  attempts[attemptId] = {
+    attempt_id: attemptId,
+    checkout_state: 'ready',
+    status: 'pending',
+    requires_flat_setup: false,
+    provider,
+  };
+  saveMockPaymentAttempts(attempts);
+  return attemptId;
+}
 
 function getMockBookmakerIds() {
   const stored = localStorage.getItem('bet_tma_mock_bookmaker_ids');
@@ -1438,6 +1562,7 @@ function getMockUser() {
     guarantee_active: false,
     guarantee_opened_from_bet_id: null,
     guarantee_closed_at: null,
+    flat_subscription: getMockFlatSubscription(),
     onboarding_goal: 'profit',
     ab_group: null,
     tg_chat_joined: true,
@@ -2562,7 +2687,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     ));
     return {
       period,
-      period_label: PERIOD_LABELS[period],
+      period_label: mockPeriodLabel(period),
       clients_count: users.length,
       active_clients_count: users.filter((user: any) => (user.matches_remaining || user.purchased_bets_balance || 0) > 0 || user.guarantee_active).length,
       active_clients_with_stats_count: clients.filter((client: any) => client.summary.bets > 0).length,
@@ -2746,20 +2871,63 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/users/me/payments') return [];
   if (endpoint === '/subscriptions/my-status') return { status: 'inactive' };
+  if (endpoint === '/subscriptions/flats/current/configure' && options.method === 'POST') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const current = getMockFlatSubscription() || buildMockFlatSubscription();
+    const configured = saveMockFlatSubscription({
+      ...current,
+      revision: Number(current.revision || 0) + 1,
+      status: 'active',
+      flat_amount_rub: body.flat_amount_rub,
+      activated_at: current.activated_at || nowIso(),
+      updated_at: nowIso(),
+    });
+    const attempts = readMockPaymentAttempts();
+    Object.keys(attempts).forEach((attemptId) => {
+      attempts[attemptId] = {
+        ...attempts[attemptId],
+        requires_flat_setup: false,
+        flat_subscription: configured,
+      };
+    });
+    saveMockPaymentAttempts(attempts);
+    return configured;
+  }
+  if (endpoint === '/subscriptions/flats/current') {
+    const subscription = getMockFlatSubscription();
+    // `null` is the mock-router fallthrough sentinel, so wrap the valid nullable API response.
+    return subscription === null ? Promise.resolve(null) : subscription;
+  }
   if (endpoint === '/subscriptions/plans' && options.method === 'POST') {
     const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
     const createdPlan = {
       id: Math.max(0, ...MOCK_PLANS.map((plan) => plan.id)) + 1,
       name: body.name || 'Новый абонемент',
       duration_days: Number(body.duration_days || 0),
-      match_count: Number(body.match_count || 1),
+      match_count: Number(body.match_count || 0),
+      entitlement_type: body.entitlement_type || 'flat',
+      target_flats: body.target_flats ?? 3,
       price: Number(body.price || 0),
       price_stars: Number(body.price_stars || 0),
       currency: body.currency || 'RUB',
       is_active: body.is_active !== false,
+      is_hidden: body.is_hidden === true,
+      allowed_user_ids: Array.isArray(body.allowed_user_ids) ? body.allowed_user_ids : [],
     };
     MOCK_PLANS = [...MOCK_PLANS, createdPlan];
     return createdPlan;
+  }
+  if (/^\/subscriptions\/plans\/\d+\/allowlist$/.test(endpoint)) {
+    const planId = Number(endpoint.split('/')[3]);
+    const plan = MOCK_PLANS.find((candidate) => candidate.id === planId) as any;
+    if (options.method === 'PUT') {
+      const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+      MOCK_PLANS = MOCK_PLANS.map((candidate) => (
+        candidate.id === planId ? { ...candidate, allowed_user_ids: body.allowed_user_ids || [] } : candidate
+      ));
+      return { plan_id: planId, is_hidden: Boolean(plan?.is_hidden), allowed_user_ids: body.allowed_user_ids || [] };
+    }
+    return { plan_id: planId, is_hidden: Boolean(plan?.is_hidden), allowed_user_ids: plan?.allowed_user_ids || [] };
   }
   if (endpoint.startsWith('/subscriptions/plans/') && options.method === 'PUT') {
     const planId = Number(endpoint.split('/').pop());
@@ -2769,7 +2937,7 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint.startsWith('/subscriptions/plans/') && options.method === 'DELETE') {
     const planId = Number(endpoint.split('/').pop());
-    MOCK_PLANS = MOCK_PLANS.filter((plan) => plan.id !== planId);
+    MOCK_PLANS = MOCK_PLANS.map((plan) => (plan.id === planId ? { ...plan, is_active: false } : plan));
     return { status: 'success' };
   }
   if (endpoint.startsWith('/subscriptions/plans')) return MOCK_PLANS;
@@ -2777,6 +2945,15 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
     return { status: 'success', user: getMockUser() };
   }
   if (endpoint === '/payments/invoice') return { invoice_url: 'https://example.com/mock-invoice' };
+  if (endpoint.startsWith('/payments/attempts/')) {
+    const attemptId = endpoint.split('/').pop() || '';
+    const attempt = readMockPaymentAttempts()[attemptId];
+    if (!attempt) throw new Error('Платёжная попытка не найдена');
+    return {
+      ...attempt,
+      flat_subscription: getMockFlatSubscription(),
+    };
+  }
   if (endpoint.startsWith('/payments/debug/complete-bet/')) return { status: 'success' };
   if (endpoint.startsWith('/payments/promo/validate')) {
     const code = new URLSearchParams(endpoint.split('?')[1] || '').get('code') || 'DEBUG10';
@@ -2794,8 +2971,27 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
       balance_after: 15,
     };
   }
-  if (endpoint === '/payments/yookassa/create') return { confirmation_url: 'https://example.com/mock-payment' };
-  if (endpoint === '/payments/yookassa/debug-complete') return { status: 'success' };
+  if (endpoint === '/payments/tegro/create') {
+    return { mock: true, attempt_id: createMockPaymentAttempt('tegro') };
+  }
+  if (endpoint === '/payments/yookassa/create') {
+    return { mock: true, attempt_id: createMockPaymentAttempt('yookassa') };
+  }
+  if (endpoint === '/payments/tegro/debug-complete' || endpoint === '/payments/yookassa/debug-complete') {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const attempts = readMockPaymentAttempts();
+    if (body.attempt_id && attempts[body.attempt_id]) {
+      attempts[body.attempt_id] = {
+        ...attempts[body.attempt_id],
+        checkout_state: 'ready',
+        status: 'succeeded',
+        requires_flat_setup: true,
+      };
+      saveMockPaymentAttempts(attempts);
+    }
+    saveMockFlatSubscription(buildMockFlatSubscription());
+    return { status: 'success' };
+  }
   if (endpoint === '/marketing/marathon') return { current_day: 3, streak: 3, reward_available: true };
   if (endpoint === '/marketing/widgets') {
     const payload = getMockMarketingWidgets();
@@ -3147,6 +3343,120 @@ export function mockApiFetch(endpoint: string, options: RequestInit) {
   }
   if (endpoint === '/admin/users') return getMockUsers().filter((user: any) => user.role === 'user');
   if (endpoint === '/admin/admins') return getMockUsers().filter((user: any) => user.role !== 'user');
+  if (endpoint === '/admin/custom-emojis') return [];
+  if (endpoint === '/admin/custom-emojis/refresh' && options.method === 'POST') return [];
+  const adminFlatDetailsMatch = endpoint.match(/^\/admin\/users\/(-?\d+)\/flat-subscription$/);
+  if (adminFlatDetailsMatch && (!options.method || options.method === 'GET')) {
+    const userId = Number(adminFlatDetailsMatch[1]);
+    return getMockUsers().find((user: any) => user.telegram_id === userId)?.flat_subscription ?? null;
+  }
+  const adminFlatPreviewMatch = endpoint.match(/^\/admin\/users\/(-?\d+)\/flat-subscriptions\/([^/]+)\/flat-amount\/preview$/);
+  if (adminFlatPreviewMatch && options.method === 'POST') {
+    const userId = Number(adminFlatPreviewMatch[1]);
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const subscription = getMockUsers().find((user: any) => user.telegram_id === userId)?.flat_subscription || buildMockFlatSubscription({ user_id: userId, status: 'active', flat_amount_rub: '10000.00' });
+    const nextFlatAmount = Number(body.flat_amount_rub);
+    const profitRub = Number(subscription.profit_rub || 0);
+    return {
+      kind: 'flat_amount',
+      flat_subscription_id: subscription.id,
+      current_revision: Number(subscription.revision || 1),
+      affected_bets: subscription.bets?.length || 0,
+      before: {
+        flat_amount_rub: subscription.flat_amount_rub,
+        profit_rub: subscription.profit_rub,
+        profit_flats: subscription.profit_flats,
+        status: subscription.status,
+      },
+      after: {
+        flat_amount_rub: body.flat_amount_rub,
+        profit_rub: subscription.profit_rub,
+        profit_flats: nextFlatAmount > 0 ? (profitRub / nextFlatAmount).toFixed(6) : subscription.profit_flats,
+        status: subscription.status,
+      },
+    };
+  }
+  const adminFlatApplyMatch = endpoint.match(/^\/admin\/users\/(-?\d+)\/flat-subscriptions\/([^/]+)\/flat-amount$/);
+  if (adminFlatApplyMatch && options.method === 'PATCH') {
+    const userId = Number(adminFlatApplyMatch[1]);
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const currentSubscription = getMockUsers().find((user: any) => user.telegram_id === userId)?.flat_subscription;
+    if (!String(body.note || '').trim()) throw new Error('Укажите причину финансовой корректировки');
+    if (Number(body.expected_revision) !== Number(currentSubscription?.revision)) {
+      throw new Error('Данные абонемента изменились. Обновите карточку и повторите проверку');
+    }
+    let updatedSubscription: any = null;
+    const users = getMockUsers().map((user: any) => {
+      if (user.telegram_id !== userId || !user.flat_subscription) return user;
+      const profitRub = Number(user.flat_subscription.profit_rub || 0);
+      const flatAmountRub = Number(body.flat_amount_rub);
+      updatedSubscription = {
+        ...user.flat_subscription,
+        revision: Number(user.flat_subscription.revision || 0) + 1,
+        flat_amount_rub: body.flat_amount_rub,
+        profit_flats: flatAmountRub > 0 ? (profitRub / flatAmountRub).toFixed(6) : user.flat_subscription.profit_flats,
+        updated_at: nowIso(),
+      };
+      return { ...user, flat_subscription: updatedSubscription };
+    });
+    saveMockUsers(users);
+    return updatedSubscription;
+  }
+  const adminStakePreviewMatch = endpoint.match(/^\/admin\/users\/(-?\d+)\/bets\/([^/]+)\/stake\/preview$/);
+  if (adminStakePreviewMatch && options.method === 'POST') {
+    const userId = Number(adminStakePreviewMatch[1]);
+    const betId = adminStakePreviewMatch[2];
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const subscription = getMockUsers().find((user: any) => user.telegram_id === userId)?.flat_subscription;
+    const bet = subscription?.bets?.find((item: any) => item.bet_id === betId);
+    const nextStake = Number(body.stake_rub);
+    const coefficient = Number(bet?.coefficient || 1);
+    const nextProfitRub = bet?.status === 'win' ? nextStake * (coefficient - 1) : bet?.status === 'loss' ? -nextStake : 0;
+    const flatAmount = Number(subscription?.flat_amount_rub || 1);
+    return {
+      kind: 'stake',
+      flat_subscription_id: subscription?.id,
+      bet_id: betId,
+      current_revision: Number(subscription?.revision || 1),
+      affected_bets: 1,
+      before: {
+        stake_rub: bet?.stake_rub || 0,
+        profit_rub: subscription?.profit_rub || 0,
+        profit_flats: subscription?.profit_flats || 0,
+        status: subscription?.status || 'active',
+      },
+      after: {
+        stake_rub: body.stake_rub,
+        profit_rub: nextProfitRub.toFixed(2),
+        profit_flats: (nextProfitRub / flatAmount).toFixed(6),
+        status: subscription?.status || 'active',
+      },
+    };
+  }
+  const adminStakeApplyMatch = endpoint.match(/^\/admin\/users\/(-?\d+)\/bets\/([^/]+)\/stake$/);
+  if (adminStakeApplyMatch && options.method === 'PATCH') {
+    const userId = Number(adminStakeApplyMatch[1]);
+    const betId = adminStakeApplyMatch[2];
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const currentSubscription = getMockUsers().find((user: any) => user.telegram_id === userId)?.flat_subscription;
+    if (!String(body.note || '').trim()) throw new Error('Укажите причину финансовой корректировки');
+    if (Number(body.expected_revision) !== Number(currentSubscription?.revision)) {
+      throw new Error('Данные абонемента изменились. Обновите карточку и повторите проверку');
+    }
+    let updatedSubscription: any = null;
+    const users = getMockUsers().map((user: any) => {
+      if (user.telegram_id !== userId || !user.flat_subscription) return user;
+      updatedSubscription = {
+        ...user.flat_subscription,
+        revision: Number(user.flat_subscription.revision || 0) + 1,
+        bets: (user.flat_subscription.bets || []).map((bet: any) => bet.bet_id === betId ? { ...bet, stake_rub: body.stake_rub } : bet),
+        updated_at: nowIso(),
+      };
+      return { ...user, flat_subscription: updatedSubscription };
+    });
+    saveMockUsers(users);
+    return updatedSubscription;
+  }
   if (endpoint.startsWith('/admin/users/') && options.method === 'DELETE') {
     const userId = Number(endpoint.split('/')[3]);
     const users = getMockUsers().filter((user: any) => user.telegram_id !== userId);

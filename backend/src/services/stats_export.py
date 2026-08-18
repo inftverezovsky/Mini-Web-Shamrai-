@@ -20,7 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
 from src.core.roles import STAFF_ROLES
-from src.models.models import Bet, User, user_bets
+from src.models.models import Bet, FlatSubscription, User, user_bets, PromoCode
 from src.services.historical_stats import HistoricalStatsSnapshot, load_active_historical_stats_snapshot
 from src.services.statistics import (
     MONTH_LABELS,
@@ -28,6 +28,8 @@ from src.services.statistics import (
     client_situation,
     is_paid_client_access,
     last_result_codes,
+    period_end,
+    period_label,
     period_start,
     _prefer_fonbet_bookmakers,
     stat_item_from_bet,
@@ -238,8 +240,14 @@ class ClientInfoExportRow:
     ab_group: str = ""
     bookmaker_logo_codes: list[str] = field(default_factory=list)
     bookmaker_ids: list[int] = field(default_factory=list)
-
-
+    active_bonuses: str = ""
+    flat_subscription_status: str = ""
+    flat_amount_rub: Optional[Decimal] = None
+    target_flats: Decimal = Decimal("0.00")
+    profit_rub: Decimal = Decimal("0.00")
+    profit_flats: Decimal = Decimal("0.000000")
+    remaining_flats: Decimal = Decimal("0.00")
+    actual_turnover_rub: Decimal = Decimal("0.00")
 @dataclass
 class ClientRecentBetExportRow:
     user_id: int
@@ -267,6 +275,13 @@ class ClientRecentBetExportRow:
     bet_id: str
     ab_group: str = ""
     bookmaker_logo_codes: list[str] = field(default_factory=list)
+    flat_subscription_status: str = ""
+    flat_amount_rub: Optional[Decimal] = None
+    stake_rub: Optional[Decimal] = None
+    stake_flats: Optional[Decimal] = None
+    coefficient_snapshot: Optional[Decimal] = None
+    profit_rub: Optional[Decimal] = None
+    profit_flats: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -1632,16 +1647,33 @@ def _client_recent_period_values(row: ClientRecentBetExportRow) -> tuple[str, st
     return _month_label(value), value.strftime("%d.%m.%Y")
 
 
-def _client_recent_flat_stake(row: ClientRecentBetExportRow) -> int:
-    return 1 if row.status in {"win", "loss"} else 0
+def _client_recent_flat_stake(row: ClientRecentBetExportRow) -> Decimal:
+    if row.stake_flats is not None:
+        return Decimal(str(row.stake_flats))
+    return Decimal("1") if row.status in {"win", "loss"} else Decimal("0")
 
 
-def _client_recent_flat_profit(row: ClientRecentBetExportRow) -> float:
+def _client_recent_flat_profit(row: ClientRecentBetExportRow) -> Decimal:
+    if row.profit_flats is not None:
+        return Decimal(str(row.profit_flats))
     if row.status == "win":
-        return float((Decimal(str(row.coefficient or "0")) - Decimal("1")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return (Decimal(str(row.coefficient or "0")) - Decimal("1")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if row.status == "loss":
-        return -1.0
-    return 0.0
+        return Decimal("-1")
+    return Decimal("0")
+
+
+def _current_flat_subscription(user: User) -> Optional[FlatSubscription]:
+    subscriptions = list(getattr(user, "flat_subscriptions", None) or [])
+    open_statuses = {"pending_setup", "active", "closing"}
+    open_items = [item for item in subscriptions if item.status in open_statuses]
+    candidates = open_items or subscriptions
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (item.created_at or datetime.min.replace(tzinfo=timezone.utc), str(item.id)),
+    )
 
 
 def _split_bookmaker_names(value: str) -> list[str]:
@@ -1670,7 +1702,7 @@ def _client_period_summary(rows: list[ClientRecentBetExportRow]) -> dict[str, An
     refunds = sum(1 for row in rows if row.status == "refund")
     pending = sum(1 for row in rows if row.status == "pending")
     settled = wins + losses
-    profit = sum((_client_recent_flat_profit(row) for row in rows), 0.0)
+    profit = sum((_client_recent_flat_profit(row) for row in rows), Decimal("0"))
     coefficient_rows = [row for row in rows if row.status in {"win", "loss"} and Decimal(str(row.coefficient or "0")) > 0]
     coefficient_sum = sum((Decimal(str(row.coefficient or "0")) for row in coefficient_rows), Decimal("0"))
     top_sport = _top_label((row.sport_type for row in rows), "Без спорта")
@@ -1739,6 +1771,15 @@ def _client_balance_bucket_value(matches_remaining: int, guarantee_active: bool)
 
 
 def _client_balance_bucket(row: ClientInfoExportRow | ClientRecentBetExportRow) -> str:
+    flat_status = getattr(row, "flat_subscription_status", "")
+    if flat_status == "pending_setup":
+        return "Флет: настройка"
+    if flat_status == "active":
+        return "Флет: активен"
+    if flat_status == "closing":
+        return "Флет: закрывается"
+    if flat_status == "completed":
+        return "Флет: завершён"
     return _client_balance_bucket_value(row.matches_remaining, row.guarantee_active)
 
 
@@ -1759,6 +1800,13 @@ def _client_recommended_action_value(matches_remaining: int, guarantee_active: b
 
 
 def _client_recommended_action(row: ClientInfoExportRow | ClientRecentBetExportRow) -> str:
+    flat_status = getattr(row, "flat_subscription_status", "")
+    if flat_status == "pending_setup":
+        return "Настроить размер флета"
+    if flat_status == "closing":
+        return "Дождаться расчёта"
+    if flat_status == "active":
+        return "Сопровождать дистанцию"
     return _client_recommended_action_value(
         row.matches_remaining,
         row.guarantee_active,
@@ -1833,9 +1881,10 @@ def filter_client_info_export_rows(
             ]).lower()
             if clean_q not in searchable:
                 return False
-        if activity == "active" and not (row.matches_remaining > 0 or row.guarantee_active):
+        flat_is_open = row.flat_subscription_status in {"pending_setup", "active", "closing"}
+        if activity == "active" and not (row.matches_remaining > 0 or row.guarantee_active or flat_is_open):
             return False
-        if activity == "empty" and (row.guarantee_active or row.matches_remaining > 0):
+        if activity == "empty" and (row.guarantee_active or row.matches_remaining > 0 or flat_is_open):
             return False
         if activity == "guarantee" and not row.guarantee_active:
             return False
@@ -2245,9 +2294,17 @@ def build_client_info_export_workbook_artifact(
         "Группа",
         "Тег",
         "A/B",
+        "Активные бонусы",
         "БК клиента",
         "Дата регистрации",
         "Матчей осталось",
+        "Флетовый статус",
+        "Размер флета, ₽",
+        "Цель, фл.",
+        "Профит, ₽",
+        "Профит, фл.",
+        "Остаток, фл.",
+        "Оборот, ₽",
         "Сегмент абона",
         "Гарантия",
         "Рекомендованное действие",
@@ -2287,9 +2344,17 @@ def build_client_info_export_workbook_artifact(
             row_data.client_group,
             row_data.client_tag,
             row_data.ab_group or "A",
+            row_data.active_bonuses,
             row_data.bookmaker_names,
             _excel_datetime(row_data.created_at),
             row_data.matches_remaining,
+            row_data.flat_subscription_status,
+            row_data.flat_amount_rub,
+            row_data.target_flats,
+            row_data.profit_rub,
+            row_data.profit_flats,
+            row_data.remaining_flats,
+            row_data.actual_turnover_rub,
             _client_balance_bucket(row_data),
             _yes_no(row_data.guarantee_active),
             _client_recommended_action(row_data),
@@ -2315,6 +2380,10 @@ def build_client_info_export_workbook_artifact(
         for col, value in enumerate(values, 1):
             ws.cell(row=row_idx, column=col, value=value)
         ws.cell(row=row_idx, column=header_cols["Дата регистрации"]).number_format = DATE_FORMAT
+        for money_header in ("Размер флета, ₽", "Профит, ₽", "Оборот, ₽"):
+            ws.cell(row=row_idx, column=header_cols[money_header]).number_format = MONEY_FORMAT
+        for flat_header in ("Цель, фл.", "Профит, фл.", "Остаток, фл."):
+            ws.cell(row=row_idx, column=header_cols[flat_header]).number_format = FLAT_FORMAT
         ws.cell(row=row_idx, column=header_cols["Проход"]).number_format = PERCENT_FORMAT
         ws.cell(row=row_idx, column=header_cols["ROI"]).number_format = PERCENT_FORMAT
         ws.cell(row=row_idx, column=header_cols["Профит, флеты"]).number_format = FLAT_FORMAT
@@ -2389,7 +2458,7 @@ def build_client_info_export_workbook_artifact(
         "I": 14,
         "J": 8,
         "K": 52,
-        "L": 18,
+        "L": 52,
         "M": 14,
         "N": 16,
         "O": 12,
@@ -2473,6 +2542,7 @@ def _write_client_recent_bets_sheet(
         "Группа",
         "Тег",
         "Матчей осталось",
+        "Флетовый статус",
         "Сегмент абона",
         "Рекомендованное действие",
         "Канал связи",
@@ -2485,8 +2555,11 @@ def _write_client_recent_bets_sheet(
         "Иконка БК",
         "БК",
         "Коэфф.",
+        "Размер флета, ₽",
+        "Ставка, ₽",
         "Ставка, флет",
-        "Ставка",
+        "Исход",
+        "Прибыль, ₽",
         "Прибыль, флеты",
         "Результат",
         "Источник",
@@ -2513,6 +2586,7 @@ def _write_client_recent_bets_sheet(
             row_data.client_group,
             row_data.client_tag,
             row_data.matches_remaining,
+            row_data.flat_subscription_status,
             _client_balance_bucket(row_data),
             _client_recommended_action(row_data),
             _client_contact_channel(row_data),
@@ -2525,8 +2599,11 @@ def _write_client_recent_bets_sheet(
             _logo_cell_text(row_data.bookmaker_logo_codes),
             _compact_list_label(row_data.bookmaker_names),
             row_data.coefficient,
+            row_data.flat_amount_rub,
+            row_data.stake_rub,
             _client_recent_flat_stake(row_data),
             row_data.outcome,
+            row_data.profit_rub,
             _client_recent_flat_profit(row_data),
             row_data.result_label,
             row_data.source_type,
@@ -2547,6 +2624,8 @@ def _write_client_recent_bets_sheet(
         ws.cell(row=row_idx, column=header_cols["Коэфф."]).number_format = COEF_FORMAT
         ws.cell(row=row_idx, column=header_cols["Ставка, флет"]).number_format = FLAT_FORMAT
         ws.cell(row=row_idx, column=header_cols["Прибыль, флеты"]).number_format = FLAT_FORMAT
+        for money_header in ("Размер флета, ₽", "Ставка, ₽", "Прибыль, ₽"):
+            ws.cell(row=row_idx, column=header_cols[money_header]).number_format = MONEY_FORMAT
         fill = _status_fill(row_data.status)
         for col in range(1, len(headers) + 1):
             ws.cell(row=row_idx, column=col).fill = fill
@@ -2595,7 +2674,7 @@ def _write_client_recent_bets_sheet(
                 header_cols["Вид спорта"],
                 header_cols["Матч"],
                 header_cols["БК"],
-                header_cols["Ставка"],
+                header_cols["Исход"],
                 header_cols["ID ставки"],
             },
             row_height=36,
@@ -2634,6 +2713,14 @@ def _write_client_recent_bets_sheet(
         "AD": 14,
         "AE": 36,
     })
+    for header, width in {
+        "Матч": 44,
+        "БК": 24,
+        "Исход": 36,
+        "ID ставки": 36,
+        "Флетовый статус": 18,
+    }.items():
+        ws.column_dimensions[get_column_letter(header_cols[header])].width = width
     ws.freeze_panes = "A2"
 
 
@@ -2712,13 +2799,7 @@ def build_stats_export_workbook(
 
 
 def stats_export_period_label(period: str) -> str:
-    labels = {
-        "week": "Текущая неделя",
-        "month": "Текущий месяц",
-        "quarter": "Текущий квартал",
-        "all": "Весь период",
-    }
-    return labels.get(period, labels["all"])
+    return period_label(period)
 
 
 async def load_shamrai_export_items(db: AsyncSession, period: str) -> list[StatsExportItem]:
@@ -2730,10 +2811,14 @@ async def load_shamrai_export_items(db: AsyncSession, period: str) -> list[Stats
         .order_by(Bet.resolved_at.asc())
     )
     start = period_start(period)
-    if start:
-        query = query.filter(Bet.resolved_at >= start)
-    elif historical:
-        query = query.filter(Bet.resolved_at >= historical.cutoff_at)
+    end = period_end(period)
+    lower_bound = start
+    if historical and (lower_bound is None or historical.cutoff_at > lower_bound):
+        lower_bound = historical.cutoff_at
+    if lower_bound:
+        query = query.filter(Bet.resolved_at >= lower_bound)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     result = await db.execute(query)
     return [
         item
@@ -2761,8 +2846,11 @@ async def load_author_export_items(
         .order_by(Bet.resolved_at.asc())
     )
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     result = await db.execute(query)
     items = [
         item
@@ -2789,8 +2877,11 @@ async def load_client_export_groups(db: AsyncSession, period: str) -> list[Clien
         .order_by(User.telegram_id.asc(), Bet.resolved_at.asc())
     )
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
 
     grouped: dict[int, ClientStatsExportGroup] = {}
     for user, bet, access_type, match_charged, _taken_at in (await db.execute(query)).all():
@@ -2825,7 +2916,7 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
     users_result = await db.execute(
         select(User)
         .filter(User.role.notin_(list(STAFF_ROLES)))
-        .options(selectinload(User.bookmakers))
+        .options(selectinload(User.bookmakers), selectinload(User.flat_subscriptions))
         .order_by(User.created_at.desc(), User.telegram_id.desc())
     )
     users = users_result.scalars().all()
@@ -2857,7 +2948,17 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             counts["refund"] += 1
 
     query = (
-        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        select(
+            User,
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.taken_at,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.user_id == User.telegram_id)
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
@@ -2869,11 +2970,28 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         .options(selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
         .order_by(User.telegram_id.asc(), Bet.resolved_at.desc())
     )
+
+    # Preload active promo codes
+    promos_query = select(PromoCode).filter(PromoCode.is_active == True)
+    active_promos = (await db.execute(promos_query)).scalars().all()
+    user_promos: dict[int, list[str]] = {}
+    for promo in active_promos:
+        if promo.user_id:
+            if promo.reward_type == "discount":
+                reward_desc = f"Скидка {promo.discount_percent}%"
+            elif promo.reward_type in ("free_match", "matches", "free_matches"):
+                reward_desc = f"{promo.matches_count} матчей бесплатно"
+            else:
+                reward_desc = promo.reward_type
+            user_promos.setdefault(promo.user_id, []).append(f"{promo.code} ({reward_desc})")
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
 
-    for user, bet, access_type, match_charged, taken_at in (await db.execute(query)).all():
+    for user, bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in (await db.execute(query)).all():
         if not is_paid_client_access(access_type, match_charged):
             continue
         item = stat_item_from_bet(
@@ -2881,6 +2999,10 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             access_type=access_type,
             match_charged=match_charged,
             taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
         )
         if item:
             grouped_items.setdefault(user.telegram_id, []).append(item)
@@ -2891,6 +3013,13 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
         summary = summarize_items(items)
         situation = client_situation(summary)
         bookmaker_refs = _bookmaker_refs_for_user(user)
+        flat_subscription = _current_flat_subscription(user)
+        flat_target = Decimal(str(flat_subscription.target_flats or 0)) if flat_subscription else Decimal("0")
+        flat_profit = Decimal(str(flat_subscription.profit_flats or 0)) if flat_subscription else Decimal("0")
+        actual_turnover_rub = sum(
+            (Decimal(str(item["stake_rub"])) for item in items if item.get("stake_rub") is not None),
+            Decimal("0"),
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         rows.append(ClientInfoExportRow(
             user_id=user.telegram_id,
             client_name=_display_user(user),
@@ -2927,6 +3056,24 @@ async def load_client_info_export_rows(db: AsyncSession, period: str) -> list[Cl
             ab_group=str(getattr(user, "ab_group", "") or ""),
             bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmaker_refs),
             bookmaker_ids=[int(bookmaker["id"]) for bookmaker in bookmaker_refs if bookmaker.get("id") is not None],
+            active_bonuses=", ".join(user_promos.get(user.telegram_id, [])),
+            flat_subscription_status=str(flat_subscription.status or "") if flat_subscription else "",
+            flat_amount_rub=(Decimal(str(flat_subscription.flat_amount_rub)) if flat_subscription and flat_subscription.flat_amount_rub is not None else None),
+            target_flats=flat_target.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            profit_rub=(
+                Decimal(str(flat_subscription.profit_rub or 0)).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+                if flat_subscription
+                else Decimal("0.00")
+            ),
+            profit_flats=flat_profit.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP),
+            remaining_flats=max(Decimal("0"), flat_target - flat_profit).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            ),
+            actual_turnover_rub=actual_turnover_rub,
         ))
 
     return sorted(rows, key=lambda row: (
@@ -2944,7 +3091,19 @@ async def load_client_recent_bet_export_rows(
     limit_per_client: Optional[int] = 50,
 ) -> list[ClientRecentBetExportRow]:
     query = (
-        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        select(
+            User,
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.taken_at,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.flat_amount_rub_snapshot,
+            user_bets.c.coefficient_snapshot,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.user_id == User.telegram_id)
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
@@ -2952,16 +3111,36 @@ async def load_client_recent_bet_export_rows(
             Bet.publication_type == "forecast",
             Bet.status.in_(["pending", "win", "loss", "refund"]),
         )
-        .options(selectinload(User.bookmakers), selectinload(Bet.bookmaker), selectinload(Bet.bookmakers))
+        .options(
+            selectinload(User.bookmakers),
+            selectinload(User.flat_subscriptions),
+            selectinload(Bet.bookmaker),
+            selectinload(Bet.bookmakers),
+        )
         .order_by(User.telegram_id.asc(), user_bets.c.taken_at.desc(), Bet.created_at.desc())
     )
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(user_bets.c.taken_at >= start)
+    if end:
+        query = query.filter(user_bets.c.taken_at < end)
 
     rows: list[ClientRecentBetExportRow] = []
     per_user_counts: dict[int, int] = defaultdict(int)
-    for user, bet, access_type, match_charged, taken_at in (await db.execute(query)).all():
+    for (
+        user,
+        bet,
+        access_type,
+        match_charged,
+        taken_at,
+        stake_rub,
+        stake_flats,
+        flat_amount_rub,
+        coefficient_snapshot,
+        profit_rub,
+        profit_flats,
+    ) in (await db.execute(query)).all():
         if limit_per_client is not None and per_user_counts[user.telegram_id] >= limit_per_client:
             continue
         per_user_counts[user.telegram_id] += 1
@@ -2969,6 +3148,7 @@ async def load_client_recent_bet_export_rows(
         bookmakers = _bookmakers_for_bet(bet)
         bookmaker_names = ", ".join(bookmaker["name"] for bookmaker in bookmakers) or "Без БК"
         delivery_mode = str(getattr(bet, "delivery_mode", None) or "feed")
+        flat_subscription = _current_flat_subscription(user)
         rows.append(ClientRecentBetExportRow(
             user_id=user.telegram_id,
             client_name=_display_user(user),
@@ -2984,7 +3164,7 @@ async def load_client_recent_bet_export_rows(
             event_name=str(getattr(bet, "event_name", "") or ""),
             sport_type=str(getattr(bet, "sport_type", None) or "Без спорта"),
             bookmaker_names=bookmaker_names,
-            coefficient=Decimal(str(getattr(bet, "coefficient", None) or "0")),
+            coefficient=Decimal(str(coefficient_snapshot or getattr(bet, "coefficient", None) or "0")),
             outcome=str(getattr(bet, "outcome", None) or ""),
             status=str(getattr(bet, "status", "") or ""),
             result_label=_status_label(str(getattr(bet, "status", "") or "")),
@@ -2995,5 +3175,12 @@ async def load_client_recent_bet_export_rows(
             bet_id=str(bet.id),
             ab_group=str(getattr(user, "ab_group", "") or ""),
             bookmaker_logo_codes=_bookmaker_logo_codes_for_refs(bookmakers),
+            flat_subscription_status=str(flat_subscription.status or "") if flat_subscription else "",
+            flat_amount_rub=Decimal(str(flat_amount_rub)) if flat_amount_rub is not None else None,
+            stake_rub=Decimal(str(stake_rub)) if stake_rub is not None else None,
+            stake_flats=Decimal(str(stake_flats)) if stake_flats is not None else None,
+            coefficient_snapshot=Decimal(str(coefficient_snapshot)) if coefficient_snapshot is not None else None,
+            profit_rub=Decimal(str(profit_rub)) if profit_rub is not None else None,
+            profit_flats=Decimal(str(profit_flats)) if profit_flats is not None else None,
         ))
     return rows

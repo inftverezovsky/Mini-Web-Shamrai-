@@ -15,7 +15,13 @@ from src.core.background_tasks import create_logged_task
 from src.core.config import settings
 from src.core.message_templates import TEMPLATE_TELEGRAM_WELCOME, render_message_template
 from src.core.security import verify_telegram_webhook_secret
-from src.core.telegram_text import SHAMRAI_CONTACT_USERNAME, contact_footer, write_emoji
+from src.core.telegram_emoji_catalog import EmojiCatalogSnapshot, replace_emoji_catalog
+from src.core.telegram_text import (
+    SHAMRAI_CONTACT_USERNAME,
+    contact_footer,
+    custom_emoji,
+    write_emoji,
+)
 from src.api.payments import process_telegram_payment_update
 from src.services.forecast_delivery import (
     FORECAST_CONTACT_DRAFT_TEXT,
@@ -27,6 +33,26 @@ from src.services.forecast_delivery import (
 )
 from src.services.telegram_auth import confirm_telegram_bot_auth_session, parse_telegram_auth_start_param
 from src.services.telegram_bot import call_telegram_api
+from src.services.telegram_emoji_catalog import (
+    EmojiAssignment,
+    extract_emoji_assignments,
+    load_telegram_emoji_catalog,
+    save_emoji_assignments,
+)
+from src.services.telegram_custom_emoji_library import (
+    extract_custom_emoji_library_items,
+    save_custom_emoji_library_items,
+)
+from src.services.telegram_custom_emoji_previews import warm_custom_emoji_previews
+from src.services.telegram_manual_post import extract_replied_post, publish_telegram_post
+from src.services.flat_subscriptions import (
+    FlatSubscriptionState,
+    clear_forecast_stake_input,
+    lookup_forecast_stake_input,
+    get_open_flat_subscription,
+    parse_stake_amount,
+    start_forecast_stake_input,
+)
 import logging
 
 router = APIRouter(prefix="/telegram", tags=["Telegram Webhook"])
@@ -38,6 +64,8 @@ EMOJI_ID_COMMANDS = {
     "/emoji_ids_bk": "TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS",
     "/emoji_ids_sport": "TELEGRAM_SPORT_CUSTOM_EMOJI_IDS",
 }
+EMOJI_CATALOG_COMMANDS = {"/emoji_add", "/emoji_list", "/emoji_help"}
+MANUAL_POST_COMMAND = "/publish"
 
 
 def _telegram_update_type(update: dict) -> str:
@@ -221,6 +249,67 @@ def _can_use_emoji_id_command(user_id: Optional[int]) -> bool:
     return bool(allowed_ids) and int(user_id) in allowed_ids
 
 
+def _is_manual_post_command(text: str) -> bool:
+    first_token = (text.strip().split(None, 1)[0] if text.strip() else "").lower()
+    return first_token.split("@", 1)[0] == MANUAL_POST_COMMAND
+
+
+async def _build_manual_post_response(
+    message: dict,
+    user_id: Optional[int],
+    db: AsyncSession,
+) -> dict:
+    if not _can_use_emoji_id_command(user_id):
+        return {
+            "method": "sendMessage",
+            "text": "Эта команда доступна только владельцу или менеджеру Shamrai.",
+        }
+
+    try:
+        actor_user_id = int(user_id)
+        draft = extract_replied_post(message, actor_user_id=actor_user_id)
+        report = await publish_telegram_post(
+            db,
+            draft,
+            actor_user_id=actor_user_id,
+        )
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        return {
+            "method": "sendMessage",
+            "text": html.escape(str(exc)),
+            "parse_mode": "HTML",
+        }
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "telegram_manual_post_publish_failed",
+            extra={
+                "event": "telegram_manual_post_publish_failed",
+                "actor_user_id": user_id,
+            },
+        )
+        return {
+            "method": "sendMessage",
+            "text": "Не удалось опубликовать пост. Попробуйте еще раз.",
+        }
+
+    status_line = (
+        "Этот пост уже был опубликован."
+        if report.already_published
+        else "Пост добавлен в Ленту и поставлен в очередь Telegram."
+    )
+    return {
+        "method": "sendMessage",
+        "text": (
+            f"✅ {status_line}\n"
+            f"Получателей в личных сообщениях: {report.telegram_recipients}\n"
+            f"Custom emoji в исходном посте: {report.custom_emoji_count}"
+        ),
+    }
+
+
 def _label_for_custom_emoji(text: str, entity: dict, index: int) -> str:
     start_index = _utf16_offset_to_index(text, int(entity.get("offset") or 0))
     line_start = text.rfind("\n", 0, start_index) + 1
@@ -278,6 +367,216 @@ def _build_emoji_ids_response(message: dict, user_id: Optional[int]) -> Optional
             f"<code>{html.escape(env_value)}</code>"
         ),
         "parse_mode": "HTML",
+    }
+
+
+def _emoji_catalog_command(text: str) -> Optional[str]:
+    first_token = (str(text or "").strip().split(None, 1)[0] if str(text or "").strip() else "").lower()
+    command = first_token.split("@", 1)[0]
+    return command if command in EMOJI_CATALOG_COMMANDS else None
+
+
+def _emoji_slot_label(assignment: EmojiAssignment) -> str:
+    return assignment.scope if assignment.key is None else f"{assignment.scope}:{assignment.key}"
+
+
+def _emoji_preview_fallback(scope: str, key: Optional[str]) -> str:
+    if scope == "write":
+        return "✍️"
+    if scope == "shamrai":
+        return "⚔️"
+    if scope == "bookmaker":
+        return "🏦"
+    if scope == "sport":
+        return "🏟️"
+    fallbacks = {
+        "forecast": "🔒",
+        "match": "🏟️",
+        "outcome": "🎯",
+        "coefficient": "📊",
+        "bookmaker": "🏦",
+        "sport": "🏟️",
+        "price": "💰",
+        "link": "🔗",
+        "general": "📢",
+        "bet_promo": "🎯",
+        "flash_sale": "⚡",
+        "urgent": "🚨",
+    }
+    return fallbacks.get(str(key or "").strip().lower(), "✨")
+
+
+def _emoji_catalog_help_text() -> str:
+    return (
+        "<b>Добавление custom emoji</b>\n\n"
+        "Отправьте одним сообщением:\n"
+        "<code>/emoji_add\n"
+        "shamrai &lt;эмодзи&gt;\n"
+        "write &lt;эмодзи&gt;\n"
+        "bk:winline &lt;эмодзи&gt;\n"
+        "sport:football &lt;эмодзи&gt;\n"
+        "decor:forecast &lt;эмодзи&gt;</code>\n\n"
+        "Или ответьте командой <code>/emoji_add decor:forecast</code> "
+        "на одно custom emoji / custom-emoji sticker.\n\n"
+        "Декор прогнозов: <code>forecast, match, outcome, coefficient, "
+        "bookmaker, sport, price, link</code>.\n"
+        "Декор постов: <code>general, bet_promo, flash_sale, urgent</code>.\n\n"
+        "Посмотреть набор: /emoji_list"
+    )
+
+
+def _catalog_preview_lines(snapshot: EmojiCatalogSnapshot) -> list[str]:
+    lines: list[str] = []
+    scalar_values = (
+        ("shamrai", None, snapshot.shamrai_id),
+        ("write", None, snapshot.write_id),
+    )
+    for scope, key, custom_id in scalar_values:
+        if custom_id:
+            fallback = _emoji_preview_fallback(scope, key)
+            lines.append(f"{custom_emoji(custom_id, fallback)} <code>{scope}</code>")
+    for scope in ("bookmaker", "sport", "decor"):
+        for key, custom_id in sorted(snapshot.mapping(scope).items()):
+            fallback = _emoji_preview_fallback(scope, key)
+            lines.append(f"{custom_emoji(custom_id, fallback)} <code>{scope}:{html.escape(key)}</code>")
+    return lines[:80]
+
+
+async def _build_emoji_catalog_response(
+    message: dict,
+    user_id: Optional[int],
+    db: AsyncSession,
+) -> Optional[dict]:
+    text = str(message.get("text") or message.get("caption") or "")
+    command = _emoji_catalog_command(text)
+    if not command:
+        return None
+    if not _can_use_emoji_id_command(user_id):
+        return {
+            "method": "sendMessage",
+            "text": "Команда доступна только владельцу или менеджеру бота.",
+        }
+    if command == "/emoji_help":
+        return {
+            "method": "sendMessage",
+            "text": _emoji_catalog_help_text(),
+            "parse_mode": "HTML",
+        }
+    if command == "/emoji_list":
+        snapshot = await load_telegram_emoji_catalog(db)
+        lines = _catalog_preview_lines(snapshot)
+        body = "\n".join(lines) if lines else "Пока не добавлено ни одного custom emoji."
+        return {
+            "method": "sendMessage",
+            "text": f"<b>Набор Shamrai</b>\n\n{body}\n\nДобавить: /emoji_help",
+            "parse_mode": "HTML",
+        }
+
+    try:
+        assignments = extract_emoji_assignments(message)
+        snapshot = await save_emoji_assignments(db, assignments)
+        await db.commit()
+        replace_emoji_catalog(snapshot)
+    except ValueError as exc:
+        await db.rollback()
+        return {
+            "method": "sendMessage",
+            "text": f"Не удалось добавить эмодзи: {html.escape(str(exc))}\n\n/emoji_help",
+            "parse_mode": "HTML",
+        }
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(
+            "telegram_emoji_catalog_save_failed",
+            extra={
+                "event": "telegram_emoji_catalog_save_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return {
+            "method": "sendMessage",
+            "text": "Не удалось сохранить набор. Попробуйте ещё раз.",
+        }
+
+    saved_lines = [
+        (
+            f"{custom_emoji(item.custom_emoji_id, _emoji_preview_fallback(item.scope, item.key))} "
+            f"<code>{html.escape(_emoji_slot_label(item))}</code>"
+        )
+        for item in assignments
+    ]
+    return {
+        "method": "sendMessage",
+        "text": (
+            f"<b>Сохранено: {len(assignments)}</b>\n\n"
+            f"{chr(10).join(saved_lines)}\n\n"
+            f"Всего слотов: "
+            f"{int(bool(snapshot.shamrai_id)) + int(bool(snapshot.write_id)) + len(snapshot.bookmaker_items) + len(snapshot.sport_items) + len(snapshot.decor_items)}"
+        ),
+        "parse_mode": "HTML",
+    }
+
+
+def _message_has_custom_emoji(message: dict) -> bool:
+    entities = message.get("entities") or message.get("caption_entities") or []
+    if any(
+        isinstance(entity, dict)
+        and entity.get("type") == "custom_emoji"
+        and entity.get("custom_emoji_id")
+        for entity in entities
+    ):
+        return True
+    return bool((message.get("sticker") or {}).get("custom_emoji_id"))
+
+
+async def _build_custom_emoji_library_upload_response(
+    message: dict,
+    user_id: Optional[int],
+    db: AsyncSession,
+) -> Optional[dict]:
+    if not _message_has_custom_emoji(message):
+        return None
+    if not _can_use_emoji_id_command(user_id):
+        return {
+            "method": "sendMessage",
+            "text": "Добавлять custom emoji в библиотеку может только владелец или менеджер бота.",
+        }
+    try:
+        incoming = extract_custom_emoji_library_items(message)
+        library = await save_custom_emoji_library_items(db, incoming)
+        await db.commit()
+        _run_background(
+            asyncio.to_thread(
+                warm_custom_emoji_previews,
+                [item.custom_emoji_id for item in incoming],
+            )
+        )
+    except ValueError as exc:
+        await db.rollback()
+        return {
+            "method": "sendMessage",
+            "text": f"Не удалось добавить эмодзи: {html.escape(str(exc))}",
+            "parse_mode": "HTML",
+        }
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(
+            "telegram_custom_emoji_library_save_failed",
+            extra={
+                "event": "telegram_custom_emoji_library_save_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return {
+            "method": "sendMessage",
+            "text": "Не удалось сохранить эмодзи. Попробуйте ещё раз.",
+        }
+    return {
+        "method": "sendMessage",
+        "text": (
+            f"Добавлено: {len(incoming)}. Всего в библиотеке: {len(library)}.\n\n"
+            "Теперь эмодзи доступны в приложении: Панель → Лента → Текст."
+        ),
     }
 
 
@@ -432,6 +731,62 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
         )
         return _answer_callback_query(callback_id, "Принято, отправляем прогноз.")
 
+    if action == "take":
+        actor_user = (
+            await db.get(User, int(actor_user_id))
+            if callable(getattr(db, "get", None))
+            else None
+        )
+        legacy_access_active = bool(
+            actor_user
+            and (
+                max(
+                    int(getattr(actor_user, "purchased_bets_balance", 0) or 0),
+                    int(getattr(actor_user, "matches_remaining", 0) or 0),
+                ) > 0
+                or bool(getattr(actor_user, "guarantee_active", False))
+            )
+        )
+        supports_flat_lookup = callable(getattr(db, "execute", None))
+        if actor_user is None and not supports_flat_lookup:
+            legacy_access_active = True
+        flat_subscription = (
+            await get_open_flat_subscription(db, int(actor_user_id))
+            if not legacy_access_active and supports_flat_lookup
+            else None
+        )
+        if flat_subscription is not None and not legacy_access_active:
+            if flat_subscription.status != FlatSubscriptionState.ACTIVE.value:
+                return _answer_callback_query(
+                    callback_id,
+                    "Флетовый абонемент пока не принимает новые ставки",
+                    True,
+                )
+            await start_forecast_stake_input(
+                db,
+                channel="telegram",
+                user_id=int(actor_user_id),
+                forecast_request_id=request_id,
+            )
+            await db.commit()
+            chat_id = (
+                ((callback_query.get("message") or {}).get("chat") or {}).get("id")
+                or actor_user_id
+            )
+            await asyncio.to_thread(
+                call_telegram_api,
+                "sendMessage",
+                {
+                    "chat_id": int(chat_id),
+                    "text": (
+                        f"Размер вашего флета: {flat_subscription.flat_amount_rub} ₽.\n"
+                        "Напишите сумму фактической ставки, например 5000 или 5 тыс.\n"
+                        "Для отмены отправьте /cancel."
+                    ),
+                },
+            )
+            return _answer_callback_query(callback_id, "Жду сумму ставки")
+
     try:
         if action == "take":
             forecast_request, message, should_notify_sales = await set_forecast_request_interested(
@@ -493,6 +848,69 @@ async def _handle_forecast_callback(callback_query: dict, db: AsyncSession) -> d
         await db.rollback()
         logger.exception("[Webhook] Forecast callback failed: %s", exc)
         return _answer_callback_query(callback_id, "Не удалось обработать заявку", True)
+
+
+async def _handle_pending_telegram_stake(message: dict, user_id: int) -> Optional[dict]:
+    text = str(message.get("text") or "").strip()
+    if not text:
+        return None
+    async with AsyncSessionLocal() as db:
+        input_lookup = await lookup_forecast_stake_input(
+            db,
+            channel="telegram",
+            user_id=user_id,
+            for_update=True,
+        )
+        input_session = input_lookup.session
+        if input_session is None:
+            await db.commit()
+            if input_lookup.expired:
+                return {
+                    "method": "sendMessage",
+                    "chat_id": message["chat"]["id"],
+                    "text": "Время ввода суммы истекло. Нажмите «Взять» у нужного прогноза ещё раз.",
+                }
+            return None
+        if text.casefold() in {"/cancel", "отмена", "отменить"}:
+            await clear_forecast_stake_input(db, channel="telegram", user_id=user_id)
+            await db.commit()
+            return {"method": "sendMessage", "chat_id": message["chat"]["id"], "text": "Ввод суммы отменён."}
+        try:
+            stake_rub = parse_stake_amount(text)
+            forecast_request, response_message, should_notify_sales = await set_forecast_request_interested(
+                db,
+                request_id=input_session.forecast_request_id,
+                actor_user_id=user_id,
+                notify_sales_manager_now=False,
+                auto_delivery_now=False,
+                stake_rub=stake_rub,
+                input_channel="telegram",
+            )
+            await clear_forecast_stake_input(db, channel="telegram", user_id=user_id)
+            await db.commit()
+            if should_notify_sales:
+                _run_background(notify_sales_manager_for_request(forecast_request.id))
+            return {
+                "method": "sendMessage",
+                "chat_id": message["chat"]["id"],
+                "text": f"Сумма {stake_rub:,.2f} ₽ принята. {response_message}".replace(",", " "),
+            }
+        except ValueError as exc:
+            await db.rollback()
+            return {
+                "method": "sendMessage",
+                "chat_id": message["chat"]["id"],
+                "text": f"{exc}. Попробуйте ещё раз или отправьте /cancel.",
+            }
+        except HTTPException as exc:
+            await db.rollback()
+            await clear_forecast_stake_input(db, channel="telegram", user_id=user_id)
+            await db.commit()
+            return {
+                "method": "sendMessage",
+                "chat_id": message["chat"]["id"],
+                "text": f"{exc.detail}. Нажмите «Взять» у прогноза повторно.",
+            }
 
 
 @router.post("/webhook")
@@ -592,11 +1010,61 @@ async def _handle_telegram_update_inner(update: dict, request_base_url: Optional
             await _mark_private_telegram_chat_joined(db, message)
             return await _build_start_response_from_template(db, message, request_base_url=request_base_url)
 
+    pending_stake_response = await _handle_pending_telegram_stake(message, int(user.get("id") or chat_id))
+    if pending_stake_response is not None:
+        return pending_stake_response
+
+    if _is_manual_post_command(text):
+        async with AsyncSessionLocal() as db:
+            manual_post_response = await _build_manual_post_response(
+                message,
+                user.get("id"),
+                db,
+            )
+        return {
+            "chat_id": chat_id,
+            **manual_post_response,
+        }
+
+    if _emoji_catalog_command(text):
+        async with AsyncSessionLocal() as db:
+            emoji_catalog_response = await _build_emoji_catalog_response(message, user.get("id"), db)
+        if emoji_catalog_response:
+            return {
+                "chat_id": chat_id,
+                **emoji_catalog_response,
+            }
+
+    if _message_has_custom_emoji(message):
+        async with AsyncSessionLocal() as db:
+            library_response = await _build_custom_emoji_library_upload_response(
+                message,
+                user.get("id"),
+                db,
+            )
+        if library_response:
+            return {
+                "chat_id": chat_id,
+                **library_response,
+            }
+
     emoji_ids_response = _build_emoji_ids_response(message, user.get("id"))
     if emoji_ids_response:
         return {
             "chat_id": chat_id,
             **emoji_ids_response,
+        }
+
+    if _can_use_emoji_id_command(user.get("id")) and (
+        str(message.get("text") or message.get("caption") or "").strip()
+    ):
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": (
+                "Чтобы добавить custom emoji в библиотеку приложения, просто отправьте "
+                "их отдельным сообщением без подписи."
+            ),
         }
 
     async with AsyncSessionLocal() as db:

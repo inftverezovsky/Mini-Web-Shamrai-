@@ -17,6 +17,7 @@ from src.core.roles import is_staff_role
 from src.core.web_push_security import validate_public_web_push_endpoint
 from src.models.database import AsyncSessionLocal, get_db
 from src.models.models import Bet, ForecastRequest, PersonalSignal, User
+from src.schemas.schemas import FlatStakeRequest
 from src.services.forecast_delivery import (
     FORECAST_CONTACT_DRAFT_TEXT,
     build_web_forecast_signal_data,
@@ -365,41 +366,77 @@ async def send_support_message_from_web_chat(
     return _serialize_signal(signal)
 
 
+async def _take_forecast_request_from_web_chat(
+    request_id: UUID,
+    background_tasks: BackgroundTasks,
+    payload: Optional[FlatStakeRequest],
+    current_user: User,
+    db: AsyncSession,
+) -> ForecastSignalActionResponse:
+    forecast_request, message, should_notify_sales = await set_forecast_request_interested(
+        db,
+        request_id=request_id,
+        actor_user_id=current_user.telegram_id,
+        notify_sales_manager_now=False,
+        auto_delivery_method="auto",
+        auto_delivery_now=False,
+        stake_rub=payload.stake_rub if payload is not None else None,
+        input_channel="web",
+    )
+    await db.commit()
+    inactive = forecast_request_is_inactive_for_client(forecast_request)
+    if should_notify_sales:
+        background_tasks.add_task(notify_sales_manager_for_request, forecast_request.id)
+    contact_required = (
+        not inactive
+        and forecast_request.status == "announced"
+        and FORECAST_CONTACT_DRAFT_TEXT in message
+    )
+    return ForecastSignalActionResponse(
+        status="removed" if inactive else forecast_request.status,
+        message=message,
+        forecast_request_id=str(forecast_request.id),
+        action="inactive" if inactive else "contact_required" if contact_required else "accepted",
+        contact={
+            "channel": "web",
+            "draft_text": FORECAST_CONTACT_DRAFT_TEXT,
+        } if contact_required else None,
+    )
+
+
+@router.post("/forecast-requests/{request_id}/take", response_model=ForecastSignalActionResponse)
+async def take_forecast_request_from_web_chat(
+    request_id: UUID,
+    payload: FlatStakeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _take_forecast_request_from_web_chat(
+        request_id,
+        background_tasks,
+        payload,
+        current_user,
+        db,
+    )
+
+
 @router.post("/forecast-requests/{request_id}/{action}", response_model=ForecastSignalActionResponse)
 async def answer_forecast_request_from_web_chat(
     request_id: UUID,
     action: str,
     background_tasks: BackgroundTasks,
+    payload: Optional[FlatStakeRequest] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if action == "take":
-        forecast_request, message, should_notify_sales = await set_forecast_request_interested(
+        return await _take_forecast_request_from_web_chat(
+            request_id,
+            background_tasks,
+            payload,
+            current_user,
             db,
-            request_id=request_id,
-            actor_user_id=current_user.telegram_id,
-            notify_sales_manager_now=False,
-            auto_delivery_method="auto",
-            auto_delivery_now=False,
-        )
-        await db.commit()
-        inactive = forecast_request_is_inactive_for_client(forecast_request)
-        if should_notify_sales:
-            background_tasks.add_task(notify_sales_manager_for_request, forecast_request.id)
-        contact_required = (
-            not inactive
-            and forecast_request.status == "announced"
-            and FORECAST_CONTACT_DRAFT_TEXT in message
-        )
-        return ForecastSignalActionResponse(
-            status="removed" if inactive else forecast_request.status,
-            message=message,
-            forecast_request_id=str(forecast_request.id),
-            action="inactive" if inactive else "contact_required" if contact_required else "accepted",
-            contact={
-                "channel": "web",
-                "draft_text": FORECAST_CONTACT_DRAFT_TEXT,
-            } if contact_required else None,
         )
 
     if action == "decline":

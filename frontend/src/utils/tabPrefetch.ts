@@ -9,6 +9,7 @@ import {
   PaginatedResponse,
   PerformanceTimelineResponse,
   PeriodFilter,
+  StatsPeriodFilter,
   ProfileDashboardResponse,
   SubscriptionPlanResponse,
 } from '../schemas/schemas';
@@ -34,7 +35,7 @@ export const adminUsersPageQueryKey = (
   tagFilter = 'all',
   bookmakerFilter = 'all',
 ) => ['admin-users-page', searchTerm, activityFilter, groupFilter, tagFilter, bookmakerFilter] as const;
-export const adminStatsDashboardQueryKey = (period: PeriodFilter = 'all') => ['admin-stats-dashboard', period] as const;
+export const adminStatsDashboardQueryKey = (period: StatsPeriodFilter = 'all') => ['admin-stats-dashboard', period] as const;
 
 export interface GlobalStatsData {
   period: GlobalStatsPeriod;
@@ -68,7 +69,7 @@ export interface AdminStatsDashboardData {
   bookmakers: BookmakerResponse[];
 }
 
-export type AdminDashboardTabId = 'bets' | 'broadcast' | 'requests' | 'results';
+export type AdminDashboardTabId = 'bets' | 'promo-content' | 'broadcast' | 'requests' | 'results';
 
 interface PrefetchTabContext {
   loadChunk?: () => Promise<unknown>;
@@ -154,17 +155,17 @@ export function fetchBookmakers(signal?: AbortSignal) {
   return apiFetch<BookmakerResponse[]>('/bookmakers', { signal });
 }
 
-export function fetchAdminAuthorTimeline(period: PeriodFilter = 'all', signal?: AbortSignal) {
+export function fetchAdminAuthorTimeline(period: StatsPeriodFilter = 'all', signal?: AbortSignal) {
   const endpoint = `/admin/stats/author-timeline?period=${encodeURIComponent(period)}`;
   return signal ? apiFetch<AdminAuthorTimelineResponse>(endpoint, { signal }) : apiFetch<AdminAuthorTimelineResponse>(endpoint);
 }
 
-export function fetchAdminShamraiTimeline(period: PeriodFilter = 'all', signal?: AbortSignal) {
+export function fetchAdminShamraiTimeline(period: StatsPeriodFilter = 'all', signal?: AbortSignal) {
   const endpoint = `/admin/stats/shamrai-timeline?period=${encodeURIComponent(period)}`;
   return signal ? apiFetch<PerformanceTimelineResponse>(endpoint, { signal }) : apiFetch<PerformanceTimelineResponse>(endpoint);
 }
 
-export async function fetchAdminStatsDashboard(period: PeriodFilter = 'all', signal?: AbortSignal): Promise<AdminStatsDashboardData> {
+export async function fetchAdminStatsDashboard(period: StatsPeriodFilter = 'all', signal?: AbortSignal): Promise<AdminStatsDashboardData> {
   const periodQuery = `period=${encodeURIComponent(period)}`;
   const [authorTimeline, shamraiTimeline, clients, bookmakers] = await Promise.all([
     fetchAdminAuthorTimeline(period, signal),
@@ -265,6 +266,7 @@ export function prefetchAdminTab(queryClient: QueryClient, tab: AdminShellTabId,
 
 const adminDashboardChunkLoaders: Record<AdminDashboardTabId, () => Promise<unknown>> = {
   bets: () => import('../pages/admin/AdminBets'),
+  'promo-content': () => import('../pages/admin/AdminPromoContent'),
   broadcast: () => import('../pages/admin/AdminBroadcast'),
   requests: () => import('../pages/admin/AdminBroadcast'),
   results: () => import('../pages/admin/AdminResults'),

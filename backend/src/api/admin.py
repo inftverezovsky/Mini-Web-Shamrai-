@@ -6,6 +6,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -13,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import String, case, cast, delete, func, or_, update
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,7 @@ from src.models.models import (
     CrowdBetParticipant,
     DailyRewardClaim,
     ForecastRequest,
+    FlatSubscription,
     Marathon,
     MarketingRewardEvent,
     MatchBalanceLog,
@@ -41,6 +43,9 @@ from src.models.models import (
     UserNote,
     user_bets,
     user_bookmakers,
+    Quiz,
+    PvPBattle,
+    CrowdBet,
 )
 from src.schemas.schemas import (
     AdminAuditLogResponse,
@@ -62,6 +67,17 @@ from src.schemas.schemas import (
     SystemSettingsResponse,
     UserResponse,
     PromoCodeResponse,
+    WheelConfigPayload,
+    QuizCreate,
+    QuizResponse,
+    PvPBattleCreate,
+    PvPBattleResponse,
+    CrowdBetCreate,
+    CrowdBetResponse,
+    FlatStakeCorrectionRequest,
+    FlatSubscriptionConfigureRequest,
+    FlatSubscriptionCreditRequest,
+    FlatSubscriptionResponse,
 )
 from src.api.deps import get_current_admin, get_current_admin_read, get_current_owner, get_current_privileged_admin
 from src.core.config import settings
@@ -75,11 +91,27 @@ from src.core.security_limits import get_security_rate_limit_metrics
 from src.services.forecast_delivery import FORECAST_STATUS_REMOVED
 from src.services.delivery_outbox import get_delivery_outbox_metrics
 from src.services.observability_alerts import build_observability_alert_payload
+from src.services import subscription_notifications
 from src.services.match_access import (
     current_match_balance,
     lock_user_balance,
+    lock_user_balances,
     log_match_balance_event,
     revoke_user_bet_access,
+)
+from src.services.flat_subscriptions import (
+    activate_pending_flat_subscription_if_eligible,
+    configure_flat_subscription,
+    correct_flat_bet_stake,
+    credit_flat_subscription,
+    flat_subscription_payload,
+    get_latest_flat_subscription,
+    get_open_flat_subscription,
+    lock_flat_subscription_financial_rows,
+    preview_flat_amount_change,
+    preview_flat_bet_stake,
+    refresh_flat_subscriptions_after_terminal_requests,
+    reopen_flat_subscription,
 )
 from src.services.payment_reconciliation import build_payment_reconciliation_report, build_payment_reconciliation_summary
 from src.services.statistics import (
@@ -89,6 +121,7 @@ from src.services.statistics import (
     is_paid_client_access,
     last_result_codes,
     normalize_period,
+    period_end,
     period_start,
     stat_item_from_bet,
     summarize_items,
@@ -126,6 +159,7 @@ from src.services.stats_export import (
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 PUBLICATION_TYPE_FORECAST = "forecast"
+STATS_PERIOD_QUERY_PATTERN = r"^(week|month|quarter|all|[1-9]\d{3}-(0[1-9]|1[0-2]))$"
 
 
 def _encode_admin_user_cursor(user: User) -> str:
@@ -152,9 +186,10 @@ def _decode_admin_user_cursor(cursor: Optional[str]) -> tuple[datetime, int] | N
 
 class PromoCreate(BaseModel):
     code: str = Field(min_length=1, max_length=80)
-    reward_type: str = Field(default="discount", pattern="^(discount|matches)$")
+    reward_type: str = Field(default="discount", pattern="^(discount|flats)$")
     discount_percent: Optional[int] = Field(default=None, ge=0, le=100)
     matches_count: Optional[int] = Field(default=None, ge=0, le=1000)
+    target_flats: Optional[Decimal] = Field(default=None, ge=Decimal("0.01"), le=Decimal("10000.00"), decimal_places=2)
     valid_until: datetime
 
 
@@ -228,6 +263,32 @@ def build_admin_user_response(
     web_push_enabled = isinstance(web_push_subscription, dict) and bool(web_push_subscription.get("endpoint"))
     telegram_connected = user.telegram_id > 0
     vk_connected = bool(user.vk_user_id)
+    loaded_flat_subscriptions = user.__dict__.get("flat_subscriptions", ())
+    flat_subscription = max(
+        loaded_flat_subscriptions,
+        key=lambda item: (item.created_at or datetime.min.replace(tzinfo=timezone.utc), str(item.id)),
+        default=None,
+    )
+    flat_summary = None
+    if flat_subscription is not None:
+        profit_flats = Decimal(str(flat_subscription.profit_flats or 0))
+        target_flats = Decimal(str(flat_subscription.target_flats or 0))
+        flat_summary = {
+            "id": flat_subscription.id,
+            "user_id": flat_subscription.user_id,
+            "status": flat_subscription.status,
+            "flat_amount_rub": flat_subscription.flat_amount_rub,
+            "target_flats": target_flats,
+            "profit_rub": flat_subscription.profit_rub,
+            "profit_flats": profit_flats,
+            "remaining_flats": max(Decimal("0"), target_flats - profit_flats),
+            "pending_bets": 0,
+            "activated_at": flat_subscription.activated_at,
+            "completed_at": flat_subscription.completed_at,
+        }
+    has_open_flat_subscription = bool(
+        flat_subscription and flat_subscription.status in {"pending_setup", "active", "closing"}
+    )
     return {
         "telegram_id": user.telegram_id,
         "username": user.username,
@@ -249,13 +310,14 @@ def build_admin_user_response(
         "web_push_enabled": web_push_enabled,
         "role": user.role,
         "stats_display_mode": user.stats_display_mode,
-        "has_active_subscription": match_balance > 0 or user.guarantee_active,
+        "has_active_subscription": match_balance > 0 or user.guarantee_active or has_open_flat_subscription,
         "subscription_end_date": None,
         "purchased_bets_balance": match_balance,
         "matches_remaining": match_balance,
         "guarantee_active": user.guarantee_active,
         "guarantee_opened_from_bet_id": user.guarantee_opened_from_bet_id,
         "guarantee_closed_at": user.guarantee_closed_at,
+        "flat_subscription": flat_summary,
         "bookmakers": user.bookmakers,
         "other_bookmaker_name": user.other_bookmaker_name,
         "client_group": user.client_group,
@@ -369,11 +431,18 @@ async def get_admin_dashboard_stats(
     res_users = await db.execute(select(func.count(User.telegram_id)))
     total_users = res_users.scalar() or 0
 
-    # 2. Active subscribers (users with remaining matches or active guarantee)
+    # 2. Active subscribers (legacy access or an open flat programme)
     now = datetime.now(timezone.utc)
+    open_flat_exists = select(FlatSubscription.id).where(
+        FlatSubscription.user_id == User.telegram_id,
+        FlatSubscription.status.in_(["pending_setup", "active", "closing"]),
+    ).exists()
     res_active = await db.execute(
         select(func.count(User.telegram_id)).filter(
-            (User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True)
+            (User.purchased_bets_balance > 0)
+            | (User.matches_remaining > 0)
+            | (User.guarantee_active == True)
+            | open_flat_exists
         )
     )
     active_subscribers = res_active.scalar() or 0
@@ -425,31 +494,37 @@ async def get_admin_dashboard_stats(
     # 4. A/B testing split conversion metrics
     res_a_total = await db.execute(select(func.count(User.telegram_id)).filter(User.ab_group == 'A'))
     total_a = res_a_total.scalar() or 0
-    
+
     res_b_total = await db.execute(select(func.count(User.telegram_id)).filter(User.ab_group == 'B'))
     total_b = res_b_total.scalar() or 0
-    
+
     res_a_active = await db.execute(
         select(func.count(User.telegram_id))
         .filter(
             User.ab_group == 'A',
-            (User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True)
+            (User.purchased_bets_balance > 0)
+            | (User.matches_remaining > 0)
+            | (User.guarantee_active == True)
+            | open_flat_exists
         )
     )
     active_a = res_a_active.scalar() or 0
-    
+
     res_b_active = await db.execute(
         select(func.count(User.telegram_id))
         .filter(
             User.ab_group == 'B',
-            (User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True)
+            (User.purchased_bets_balance > 0)
+            | (User.matches_remaining > 0)
+            | (User.guarantee_active == True)
+            | open_flat_exists
         )
     )
     active_b = res_b_active.scalar() or 0
-    
+
     conv_a = (active_a / total_a * 100) if total_a > 0 else 0.0
     conv_b = (active_b / total_b * 100) if total_b > 0 else 0.0
-    
+
     return {
         "active_subscribers": active_subscribers,
         "channel_roi": channel_performance["roi"],
@@ -753,6 +828,11 @@ async def admin_referrals_summary(
             ReferralRewardEvent.status == RISK_STATUS_APPROVED
         )
     )).scalar() or 0)
+    target_flats_awarded_total = Decimal(str((await db.execute(
+        select(func.coalesce(func.sum(ReferralRewardEvent.target_flats_awarded), 0)).filter(
+            ReferralRewardEvent.status == RISK_STATUS_APPROVED
+        )
+    )).scalar() or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     held_events = int((await db.execute(
         select(func.count(ReferralRewardEvent.id)).filter(ReferralRewardEvent.status == RISK_STATUS_HELD)
     )).scalar() or 0)
@@ -779,6 +859,10 @@ async def admin_referrals_summary(
             "source_type": event.source_type,
             "discount_percent_snapshot": event.discount_percent_snapshot,
             "matches_awarded": event.matches_awarded,
+            "target_flats_awarded": Decimal(str(event.target_flats_awarded or 0)).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            ),
             "status": event.status,
             "risk_score": event.risk_score,
             "risk_reasons": event.risk_reasons or [],
@@ -791,6 +875,7 @@ async def admin_referrals_summary(
         "qualified_purchase_events": qualified_purchase_events,
         "active_referrers": active_referrers,
         "matches_awarded_total": matches_awarded_total,
+        "target_flats_awarded_total": target_flats_awarded_total,
         "held_events": held_events,
         "rejected_events": rejected_events,
         "recent_events": recent_events,
@@ -830,6 +915,56 @@ async def admin_update_marketing_widgets(
         "configured": True,
         "widgets": widgets,
     }
+@router.get("/marketing/wheel-config", response_model=WheelConfigPayload)
+async def admin_get_wheel_config(
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    from src.api.marketing import get_wheel_prizes_from_db
+    prizes = await get_wheel_prizes_from_db(db)
+    return WheelConfigPayload(prizes=prizes)
+
+
+@router.post("/marketing/wheel-config", response_model=WheelConfigPayload)
+async def admin_update_wheel_config(
+    payload: WheelConfigPayload,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from src.models.models import MarketingWidgetConfig
+    import json
+
+    # Check probabilities sum to 100
+    total_prob = sum(p.probability for p in payload.prizes)
+    if total_prob != 100:
+        raise HTTPException(status_code=400, detail=f"Сумма вероятностей должна быть 100% (сейчас {total_prob}%)")
+
+    config = await db.execute(select(MarketingWidgetConfig).filter_by(key="wheel_of_fortune"))
+    config = config.scalars().first()
+
+    if not config:
+        config = MarketingWidgetConfig(
+            key="wheel_of_fortune",
+            is_enabled=True,
+            settings_json={},
+            updated_by=admin.telegram_id
+        )
+        db.add(config)
+
+    settings = dict(config.settings_json) if config.settings_json else {}
+    settings["prizes"] = [p.dict() for p in payload.prizes]
+    config.settings_json = settings
+    config.updated_by = admin.telegram_id
+
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="marketing_wheel_config_updated",
+        details={"prizes_count": len(payload.prizes)}
+    )
+
+    await db.commit()
+    return payload
 
 
 @router.get("/marketing/reward-events")
@@ -1107,7 +1242,7 @@ def _admin_user_display(user: User) -> str:
 
 @router.get("/stats/author-timeline")
 async def get_admin_author_timeline_stats(
-    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    period: str = Query("all", pattern=STATS_PERIOD_QUERY_PATTERN),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> dict[str, Any]:
@@ -1124,8 +1259,11 @@ async def get_admin_author_timeline_stats(
         .order_by(Bet.resolved_at.desc())
     )
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     result = await db.execute(query)
     items = [
         item
@@ -1143,7 +1281,7 @@ async def get_admin_author_timeline_stats(
 
 @router.get("/stats/shamrai-timeline")
 async def get_admin_shamrai_timeline_stats(
-    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    period: str = Query("all", pattern=STATS_PERIOD_QUERY_PATTERN),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> dict[str, Any]:
@@ -1160,9 +1298,19 @@ async def _load_client_stat_rows(
     *,
     user_id: Optional[int] = None,
     period: str = "all",
-) -> list[tuple[User, Bet, str, bool, datetime]]:
+) -> list[tuple[User, Bet, str, bool, datetime, Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[Decimal]]]:
     query = (
-        select(User, Bet, user_bets.c.access_type, user_bets.c.match_charged, user_bets.c.taken_at)
+        select(
+            User,
+            Bet,
+            user_bets.c.access_type,
+            user_bets.c.match_charged,
+            user_bets.c.taken_at,
+            user_bets.c.stake_rub,
+            user_bets.c.stake_flats,
+            user_bets.c.profit_rub,
+            user_bets.c.profit_flats,
+        )
         .join(user_bets, user_bets.c.user_id == User.telegram_id)
         .join(Bet, Bet.id == user_bets.c.bet_id)
         .filter(
@@ -1177,19 +1325,29 @@ async def _load_client_stat_rows(
     if user_id is not None:
         query = query.filter(User.telegram_id == user_id)
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     return (await db.execute(query)).all()
 
 
 async def _client_counts(db: AsyncSession) -> dict[str, int]:
+    open_flat_exists = select(FlatSubscription.id).where(
+        FlatSubscription.user_id == User.telegram_id,
+        FlatSubscription.status.in_(["pending_setup", "active", "closing"]),
+    ).exists()
     total_res = await db.execute(
         select(func.count(User.telegram_id)).filter(User.role.notin_(list(STAFF_ROLES)))
     )
     active_res = await db.execute(
         select(func.count(User.telegram_id)).filter(
             User.role.notin_(list(STAFF_ROLES)),
-            (User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True),
+            (User.purchased_bets_balance > 0)
+            | (User.matches_remaining > 0)
+            | (User.guarantee_active == True)
+            | open_flat_exists,
         )
     )
     return {
@@ -1200,7 +1358,7 @@ async def _client_counts(db: AsyncSession) -> dict[str, int]:
 
 @router.get("/stats/clients")
 async def get_admin_client_stats(
-    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    period: str = Query("all", pattern=STATS_PERIOD_QUERY_PATTERN),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> dict[str, Any]:
@@ -1208,7 +1366,7 @@ async def get_admin_client_stats(
     normalized_period = normalize_period(period)
     rows = await _load_client_stat_rows(db, period=normalized_period)
     grouped: dict[int, dict[str, Any]] = {}
-    for user, bet, access_type, match_charged, taken_at in rows:
+    for user, bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in rows:
         if not is_paid_client_access(access_type, match_charged):
             continue
         item = stat_item_from_bet(
@@ -1216,6 +1374,10 @@ async def get_admin_client_stats(
             access_type=access_type,
             match_charged=match_charged,
             taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
         )
         if not item:
             continue
@@ -1272,7 +1434,7 @@ async def get_admin_client_stats(
 @router.get("/stats/clients/{user_id}")
 async def get_admin_client_timeline_stats(
     user_id: int,
-    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    period: str = Query("all", pattern=STATS_PERIOD_QUERY_PATTERN),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
 ) -> dict[str, Any]:
@@ -1289,12 +1451,16 @@ async def get_admin_client_timeline_stats(
 
     paid_items = []
     excluded_items = []
-    for _user, bet, access_type, match_charged, taken_at in rows:
+    for _user, bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in rows:
         item = stat_item_from_bet(
             bet,
             access_type=access_type,
             match_charged=match_charged,
             taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
         )
         if not item:
             continue
@@ -1399,6 +1565,7 @@ def _client_info_csv_response(rows: list[ClientInfoExportRow], filename: str) ->
         "Web/VK клиент",
         "Группа",
         "Тег",
+        "Активные бонусы",
         "БК клиента",
         "Дата регистрации",
         "Матчей осталось",
@@ -1435,6 +1602,7 @@ def _client_info_csv_response(rows: list[ClientInfoExportRow], filename: str) ->
             "Web/VK клиент": _yes_no_csv(row.is_web_only),
             "Группа": row.client_group,
             "Тег": row.client_tag,
+            "Активные бонусы": row.active_bonuses,
             "БК клиента": row.bookmaker_names,
             "Дата регистрации": _client_export_datetime(row.created_at),
             "Матчей осталось": row.matches_remaining,
@@ -1486,8 +1654,11 @@ async def _author_export_items(db: AsyncSession, admin: User, period: str, sourc
         .order_by(Bet.resolved_at.desc())
     )
     start = period_start(period)
+    end = period_end(period)
     if start:
         query = query.filter(Bet.resolved_at >= start)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     result = await db.execute(query)
     items = [
         item
@@ -1503,10 +1674,19 @@ async def _author_export_items(db: AsyncSession, admin: User, period: str, sourc
 async def _clients_export_items(db: AsyncSession, period: str) -> list[dict[str, Any]]:
     rows = await _load_client_stat_rows(db, period=period)
     items = []
-    for user, bet, access_type, match_charged, taken_at in rows:
+    for user, bet, access_type, match_charged, taken_at, stake_rub, stake_flats, profit_rub, profit_flats in rows:
         if not is_paid_client_access(access_type, match_charged):
             continue
-        item = stat_item_from_bet(bet, access_type=access_type, match_charged=match_charged, taken_at=taken_at)
+        item = stat_item_from_bet(
+            bet,
+            access_type=access_type,
+            match_charged=match_charged,
+            taken_at=taken_at,
+            stake_rub=stake_rub,
+            stake_flats=stake_flats,
+            profit_rub=profit_rub,
+            profit_flats=profit_flats,
+        )
         if item:
             item["client_name"] = _admin_user_display(user)
             items.append(item)
@@ -1526,10 +1706,14 @@ async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str,
         .order_by(Bet.resolved_at.desc())
     )
     start = period_start(period)
-    if start:
-        query = query.filter(Bet.resolved_at >= start)
-    elif historical:
-        query = query.filter(Bet.resolved_at >= historical.cutoff_at)
+    end = period_end(period)
+    lower_bound = start
+    if historical and (lower_bound is None or historical.cutoff_at > lower_bound):
+        lower_bound = historical.cutoff_at
+    if lower_bound:
+        query = query.filter(Bet.resolved_at >= lower_bound)
+    if end:
+        query = query.filter(Bet.resolved_at < end)
     result = await db.execute(query)
     return [
         item
@@ -1542,7 +1726,7 @@ async def _shamrai_export_items(db: AsyncSession, period: str) -> list[dict[str,
 async def export_admin_stats(
     scope: str = Query("author", pattern="^(author|clients|shamrai)$"),
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
-    period: str = Query("all", pattern="^(week|month|quarter|all)$"),
+    period: str = Query("all", pattern=STATS_PERIOD_QUERY_PATTERN),
     source: str = Query("all", pattern="^(all|feed|private|paid_set)$"),
     admin: User = Depends(get_current_admin_read),
     db: AsyncSession = Depends(get_read_db),
@@ -1703,6 +1887,19 @@ async def delete_bet_from_admin(
         .order_by(User.telegram_id)
     )
     takers = users_result.scalars().all()
+    await lock_user_balances(db, [user.telegram_id for user in takers])
+    linked_flat_subscription_ids = {
+        row.flat_subscription_id
+        for row in (
+            await db.execute(
+                select(user_bets.c.flat_subscription_id).filter(
+                    user_bets.c.bet_id == bet.id,
+                    user_bets.c.flat_subscription_id.is_not(None),
+                )
+            )
+        ).all()
+    }
+    await lock_flat_subscription_financial_rows(db, linked_flat_subscription_ids)
     revoke_results = []
     revoke_results_by_user_id = {}
     for user in takers:
@@ -1721,6 +1918,8 @@ async def delete_bet_from_admin(
     )
     marked_requests = 0
     for forecast_request in requests_result.scalars().all():
+        if forecast_request.flat_subscription_id is not None:
+            linked_flat_subscription_ids.add(forecast_request.flat_subscription_id)
         if forecast_request.status != FORECAST_STATUS_REMOVED:
             marked_requests += 1
         forecast_request.status = FORECAST_STATUS_REMOVED
@@ -1731,6 +1930,11 @@ async def delete_bet_from_admin(
                 forecast_request.balance_before = revoke_result.balance_before
             forecast_request.balance_after = revoke_result.balance_after
             forecast_request.no_balance_warning = False
+
+    await refresh_flat_subscriptions_after_terminal_requests(
+        db,
+        linked_flat_subscription_ids,
+    )
 
     already_deleted = bet.status == "deleted"
     bet.status = "deleted"
@@ -1776,6 +1980,7 @@ async def create_promo(
     reward_type = data.reward_type or "discount"
     discount_percent = int(data.discount_percent or 0)
     matches_count = int(data.matches_count or 0)
+    target_flats = data.target_flats
 
     if reward_type == "discount":
         if discount_percent <= 0:
@@ -1784,13 +1989,15 @@ async def create_promo(
                 detail="Укажите скидку от 1 до 100%",
             )
         matches_count = 0
-    elif reward_type == "matches":
-        if matches_count <= 0:
+        target_flats = None
+    elif reward_type == "flats":
+        if target_flats is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Укажите количество матчей для промокода",
+                detail="Укажите цель во флетах для промокода",
             )
         discount_percent = 0
+        matches_count = 0
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1809,6 +2016,7 @@ async def create_promo(
         reward_type=reward_type,
         discount_percent=discount_percent,
         matches_count=matches_count,
+        target_flats=target_flats,
         valid_until=data.valid_until,
         is_active=True
     )
@@ -1822,6 +2030,7 @@ async def create_promo(
             "reward_type": promo.reward_type,
             "discount_percent": promo.discount_percent,
             "matches_count": promo.matches_count,
+            "target_flats": str(promo.target_flats) if promo.target_flats is not None else None,
             "valid_until": promo.valid_until.isoformat(),
         },
     )
@@ -1944,7 +2153,7 @@ async def admin_list_users(
     result = await db.execute(
         select(User)
         .filter(User.role == "user")
-        .options(selectinload(User.bookmakers), selectinload(User.badges))
+        .options(selectinload(User.bookmakers), selectinload(User.badges), selectinload(User.flat_subscriptions))
         .order_by(User.created_at.desc())
     )
     users = result.scalars().all()
@@ -2010,12 +2219,22 @@ async def admin_list_users_page(
             func.lower(func.coalesce(User.other_bookmaker_name, "")).like(like_q),
             cast(User.telegram_id, String).like(f"%{clean_q}%"),
         ))
+    open_flat_exists = select(FlatSubscription.id).where(
+        FlatSubscription.user_id == User.telegram_id,
+        FlatSubscription.status.in_(["pending_setup", "active", "closing"]),
+    ).exists()
     if activity == "active":
-        filters.append((User.purchased_bets_balance > 0) | (User.matches_remaining > 0) | (User.guarantee_active == True))
+        filters.append(
+            (User.purchased_bets_balance > 0)
+            | (User.matches_remaining > 0)
+            | (User.guarantee_active == True)
+            | open_flat_exists
+        )
     elif activity == "empty":
         filters.append(User.guarantee_active == False)
         filters.append(User.purchased_bets_balance <= 0)
         filters.append(User.matches_remaining <= 0)
+        filters.append(~open_flat_exists)
     elif activity == "guarantee":
         filters.append(User.guarantee_active == True)
     if group and group != "all":
@@ -2041,7 +2260,7 @@ async def admin_list_users_page(
     result = await db.execute(
         select(User)
         .filter(*filters)
-        .options(selectinload(User.bookmakers), selectinload(User.badges))
+        .options(selectinload(User.bookmakers), selectinload(User.badges), selectinload(User.flat_subscriptions))
         .order_by(User.created_at.desc(), User.telegram_id.desc())
         .limit(limit + 1)
     )
@@ -2404,10 +2623,273 @@ async def admin_update_user(
             target_user_id=user.telegram_id,
             details=audit_changes,
         )
+
+    if data.close_guarantee or (data.matches_delta is not None and data.matches_delta < 0):
+        await activate_pending_flat_subscription_if_eligible(db, user=user)
                 
     telegram_id = user.telegram_id
     await db.commit()
     return await load_user_response(db, telegram_id)
+
+
+class FlatSubscriptionReopenRequest(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.get("/users/{user_id}/flat-subscription", response_model=Optional[FlatSubscriptionResponse])
+async def admin_get_user_flat_subscription(
+    user_id: int,
+    admin: User = Depends(get_current_admin_read),
+    db: AsyncSession = Depends(get_read_db),
+):
+    flat_subscription = await get_latest_flat_subscription(db, user_id)
+    if flat_subscription is None:
+        return None
+    return await flat_subscription_payload(db, flat_subscription)
+
+
+@router.post("/users/{user_id}/flat-subscription/credit", response_model=FlatSubscriptionResponse)
+async def admin_credit_user_flat_subscription(
+    user_id: int,
+    payload: FlatSubscriptionCreditRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+    current = await get_open_flat_subscription(db, user_id)
+    if current is None and payload.flat_amount_rub is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Для первого начисления укажите размер одного флета клиента",
+        )
+    flat_subscription = await credit_flat_subscription(
+        db,
+        user=user,
+        target_flats=payload.target_flats,
+        flat_amount_rub=payload.flat_amount_rub,
+        event_type="admin_target_credit",
+        actor_id=admin.telegram_id,
+        note=payload.note,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="flat_subscription_credited",
+        target_user_id=user_id,
+        details={
+            "flat_subscription_id": str(flat_subscription.id),
+            "target_flats_added": str(payload.target_flats),
+            "flat_amount_rub": str(payload.flat_amount_rub) if payload.flat_amount_rub is not None else None,
+        },
+    )
+    await subscription_notifications.enqueue_flat_target_credit_notifications(
+        db,
+        user=user,
+        flat_subscription=flat_subscription,
+        target_flats_added=payload.target_flats,
+        actor=admin,
+        source="admin_manual",
+    )
+    await db.commit()
+    await db.refresh(flat_subscription)
+    return await flat_subscription_payload(db, flat_subscription)
+
+
+@router.patch(
+    "/users/{user_id}/flat-subscriptions/{flat_subscription_id}/flat-amount",
+    response_model=FlatSubscriptionResponse,
+)
+async def admin_change_flat_amount(
+    user_id: int,
+    flat_subscription_id: UUID,
+    payload: FlatSubscriptionConfigureRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    note = str(getattr(payload, "note", None) or "").strip()
+    expected_revision = getattr(payload, "expected_revision", None)
+    if not note:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Укажите причину изменения")
+    if expected_revision is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Обновите карточку клиента перед изменением")
+    preview = await preview_flat_amount_change(
+        db,
+        user_id=user_id,
+        flat_subscription_id=flat_subscription_id,
+        flat_amount_rub=payload.flat_amount_rub,
+        expected_revision=expected_revision,
+    )
+    if preview["before"]["flat_amount_rub"] == preview["after"]["flat_amount_rub"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Размер флета уже имеет это значение")
+    flat_subscription = await configure_flat_subscription(
+        db,
+        user_id=user_id,
+        flat_subscription_id=flat_subscription_id,
+        flat_amount_rub=payload.flat_amount_rub,
+        actor_id=admin.telegram_id,
+        expected_revision=expected_revision,
+        note=note,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="flat_amount_changed",
+        target_user_id=user_id,
+        details=jsonable_encoder(
+            {
+                "flat_subscription_id": str(flat_subscription.id),
+                "reason": note,
+                "preview": preview,
+                "applied_revision": flat_subscription.revision,
+            },
+            custom_encoder={Decimal: lambda value: format(value, "f")},
+        ),
+    )
+    client = await db.get(User, user_id)
+    if client is not None:
+        await subscription_notifications.enqueue_flat_adjustment_notification(
+            db,
+            user=client,
+            flat_subscription=flat_subscription,
+            adjustment_kind="flat_amount",
+            reason=note,
+        )
+    await db.commit()
+    await db.refresh(flat_subscription)
+    return await flat_subscription_payload(db, flat_subscription)
+
+
+@router.post(
+    "/users/{user_id}/flat-subscriptions/{flat_subscription_id}/flat-amount/preview",
+)
+async def admin_preview_flat_amount_change(
+    user_id: int,
+    flat_subscription_id: UUID,
+    payload: FlatSubscriptionConfigureRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    del admin
+    expected_revision = getattr(payload, "expected_revision", None)
+    if expected_revision is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Обновите карточку клиента перед изменением")
+    return await preview_flat_amount_change(
+        db,
+        user_id=user_id,
+        flat_subscription_id=flat_subscription_id,
+        flat_amount_rub=payload.flat_amount_rub,
+        expected_revision=expected_revision,
+    )
+
+
+@router.patch("/users/{user_id}/bets/{bet_id}/stake", response_model=FlatSubscriptionResponse)
+async def admin_correct_user_flat_stake(
+    user_id: int,
+    bet_id: UUID,
+    payload: FlatStakeCorrectionRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    note = str(payload.note or "").strip()
+    expected_revision = getattr(payload, "expected_revision", None)
+    if not note:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Укажите причину изменения")
+    if expected_revision is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Обновите карточку клиента перед изменением")
+    preview = await preview_flat_bet_stake(
+        db,
+        user_id=user_id,
+        bet_id=bet_id,
+        stake_rub=payload.stake_rub,
+        expected_revision=expected_revision,
+    )
+    if preview["before"]["stake_rub"] == preview["after"]["stake_rub"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Сумма ставки уже имеет это значение")
+    flat_subscription = await correct_flat_bet_stake(
+        db,
+        user_id=user_id,
+        bet_id=bet_id,
+        stake_rub=payload.stake_rub,
+        actor_id=admin.telegram_id,
+        note=note,
+        expected_revision=expected_revision,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="flat_stake_corrected",
+        target_user_id=user_id,
+        details=jsonable_encoder(
+            {
+                "bet_id": str(bet_id),
+                "reason": note,
+                "preview": preview,
+                "applied_revision": flat_subscription.revision,
+            },
+            custom_encoder={Decimal: lambda value: format(value, "f")},
+        ),
+    )
+    client = await db.get(User, user_id)
+    if client is not None:
+        await subscription_notifications.enqueue_flat_adjustment_notification(
+            db,
+            user=client,
+            flat_subscription=flat_subscription,
+            adjustment_kind="stake",
+            reason=note,
+            bet_id=str(bet_id),
+        )
+    await db.commit()
+    await db.refresh(flat_subscription)
+    return await flat_subscription_payload(db, flat_subscription)
+
+
+@router.post("/users/{user_id}/bets/{bet_id}/stake/preview")
+async def admin_preview_user_flat_stake(
+    user_id: int,
+    bet_id: UUID,
+    payload: FlatStakeCorrectionRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    del admin
+    expected_revision = getattr(payload, "expected_revision", None)
+    if expected_revision is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Обновите карточку клиента перед изменением")
+    return await preview_flat_bet_stake(
+        db,
+        user_id=user_id,
+        bet_id=bet_id,
+        stake_rub=payload.stake_rub,
+        expected_revision=expected_revision,
+    )
+
+
+@router.post("/flat-subscriptions/{flat_subscription_id}/reopen", response_model=FlatSubscriptionResponse)
+async def admin_reopen_user_flat_subscription(
+    flat_subscription_id: UUID,
+    payload: FlatSubscriptionReopenRequest,
+    admin: User = Depends(get_current_privileged_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    flat_subscription = await reopen_flat_subscription(
+        db,
+        flat_subscription_id=flat_subscription_id,
+        actor_id=admin.telegram_id,
+        note=payload.note,
+    )
+    add_admin_audit_log(
+        db,
+        actor=admin,
+        action="flat_subscription_reopened",
+        target_user_id=flat_subscription.user_id,
+        details={"flat_subscription_id": str(flat_subscription.id)},
+    )
+    await db.commit()
+    await db.refresh(flat_subscription)
+    return await flat_subscription_payload(db, flat_subscription)
 
 
 @router.post("/users/{source_user_id}/merge", response_model=UserResponse)
@@ -2744,4 +3226,111 @@ async def mark_bonus_used(
     
     bonus.is_active = False
     await db.commit()
+
+    # Send telegram notification to user
+    from src.services.signals import send_telegram_signal_to_user
+    user = await db.get(User, bonus.user_id)
+    if user and user.telegram_id and user.telegram_id > 0:
+        prize_name = bonus.description or bonus.code
+        text = f"🎁 Ваш бонус «{prize_name}» был успешно использован администратором!"
+        await send_telegram_signal_to_user(user.telegram_id, text)
+
     return {"status": "success", "message": "Бонус отмечен как использованный"}
+
+# ==========================================
+# PROMO CONTENT MANAGEMENT (CMS)
+# ==========================================
+
+@router.post("/quizzes", response_model=QuizResponse)
+async def create_quiz(
+    payload: QuizCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_privileged_admin)
+):
+    quiz = Quiz(
+        bet_id=payload.bet_id,
+        discount_reward=payload.discount_reward,
+        questions=[q.model_dump() for q in payload.questions]
+    )
+    db.add(quiz)
+    await db.commit()
+    await db.refresh(quiz)
+    return quiz
+
+@router.get("/quizzes", response_model=list[QuizResponse])
+async def get_quizzes(
+    db: AsyncSession = Depends(get_read_db),
+    admin: User = Depends(get_current_admin_read)
+):
+    result = await db.execute(select(Quiz).order_by(Quiz.created_at.desc()))
+    return result.scalars().all()
+
+@router.delete("/quizzes/{quiz_id}")
+async def delete_quiz(
+    quiz_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_privileged_admin)
+):
+    quiz = await db.get(Quiz, quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    quiz.is_active = False
+    await db.commit()
+    return {"status": "success"}
+
+@router.post("/pvp", response_model=PvPBattleResponse)
+async def create_pvp_battle(
+    payload: PvPBattleCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_privileged_admin)
+):
+    battle = PvPBattle(
+        match_name=payload.match_name,
+        option_a=payload.option_a,
+        option_b=payload.option_b,
+        votes_a=0,
+        votes_b=0,
+        is_active=True
+    )
+    db.add(battle)
+    await db.commit()
+    await db.refresh(battle)
+    return battle
+
+@router.get("/pvp", response_model=list[PvPBattleResponse])
+async def get_pvp_battles(
+    db: AsyncSession = Depends(get_read_db),
+    admin: User = Depends(get_current_admin_read)
+):
+    result = await db.execute(select(PvPBattle).order_by(PvPBattle.created_at.desc()))
+    return result.scalars().all()
+
+@router.post("/crowd-bets", response_model=CrowdBetResponse)
+async def create_crowd_bet(
+    payload: CrowdBetCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_privileged_admin)
+):
+    bet = await db.get(Bet, payload.bet_id)
+    if not bet:
+        raise HTTPException(status_code=404, detail="Bet not found")
+
+    cb = CrowdBet(
+        bet_id=payload.bet_id,
+        target_amount=payload.target_amount,
+        current_amount=0,
+        is_active=True,
+        is_completed=False
+    )
+    db.add(cb)
+    await db.commit()
+    await db.refresh(cb)
+    return cb
+
+@router.get("/crowd-bets", response_model=list[CrowdBetResponse])
+async def get_crowd_bets(
+    db: AsyncSession = Depends(get_read_db),
+    admin: User = Depends(get_current_admin_read)
+):
+    result = await db.execute(select(CrowdBet).order_by(CrowdBet.created_at.desc()))
+    return result.scalars().all()

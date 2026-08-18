@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.models import MatchBalanceLog, PaymentAttempt, ReferralRewardEvent, User
+from src.models.models import MatchBalanceLog, PaymentAttempt, ReferralRewardEvent, SubscriptionPlan, User
+from src.services.flat_subscriptions import credit_flat_subscription
 from src.services.marketing_risk import (
     RISK_STATUS_APPROVED,
     RISK_STATUS_REJECTED,
@@ -29,7 +31,7 @@ async def get_referral_stats(db: AsyncSession, user_id: int) -> dict:
             "discount_max_percent": int(referral_settings["discount_max_percent"]),
             "referral_discount_percent": 0,
             "match_reward_enabled": bool(referral_settings["match_reward_enabled"]),
-            "match_reward_count": int(referral_settings["match_reward_count"]),
+            "match_reward_count": Decimal(str(referral_settings["match_reward_count"])),
         }
 
     approved_events_res = await db.execute(
@@ -61,7 +63,7 @@ async def get_referral_stats(db: AsyncSession, user_id: int) -> dict:
         "discount_max_percent": discount_max_percent,
         "referral_discount_percent": referral_discount_percent,
         "match_reward_enabled": bool(referral_settings["match_reward_enabled"]),
-        "match_reward_count": int(referral_settings["match_reward_count"]),
+        "match_reward_count": Decimal(str(referral_settings["match_reward_count"])),
     }
 
 
@@ -85,6 +87,25 @@ async def _lock_referral_reward_event(
     if locked_event is None:
         raise ValueError("Событие реферальной награды не найдено")
     return locked_event
+
+
+async def _purchase_entitlement_type(
+    db: AsyncSession,
+    payment_attempt: PaymentAttempt | None,
+) -> str | None:
+    """Resolve reward semantics from the immutable checkout snapshot.
+
+    Attempts created before checkout snapshots existed may still fall back to
+    their linked plan. New attempts must never let a later plan edit change a
+    referral reward from flats to matches (or vice versa).
+    """
+    if payment_attempt is None or payment_attempt.plan_id is None:
+        return None
+    snapshot = getattr(payment_attempt, "entitlement_type_snapshot", None)
+    if snapshot:
+        return str(snapshot)
+    purchased_plan = await db.get(SubscriptionPlan, payment_attempt.plan_id)
+    return str(purchased_plan.entitlement_type or "legacy_match") if purchased_plan else None
 
 
 async def apply_referral_reward_for_purchase(
@@ -123,15 +144,28 @@ async def apply_referral_reward_for_purchase(
         referrer=referrer,
         referred_user=referred_user,
     )
+    # Only a delayed callback for an already sold legacy plan keeps the old
+    # match reward. Every new reward path (flat plan or standalone purchase)
+    # grants target flats.
+    entitlement_type = await _purchase_entitlement_type(db, payment_attempt)
+    use_flat_reward = entitlement_type != "legacy_match"
     discount_snapshot = 0
     matches_awarded = 0
+    target_flats_awarded = Decimal("0.00")
     if risk_decision.status == RISK_STATUS_APPROVED:
         discount_snapshot = await get_referral_discount_percent(db, referrer.telegram_id)
-        matches_awarded = (
-            int(referral_settings["match_reward_count"])
+        configured_reward = (
+            Decimal(str(referral_settings["match_reward_count"])).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
             if bool(referral_settings["match_reward_enabled"])
-            else 0
+            else Decimal("0.00")
         )
+        if use_flat_reward:
+            target_flats_awarded = configured_reward
+        else:
+            matches_awarded = int(configured_reward)
 
     if matches_awarded > 0:
         balance_before = current_match_balance(locked_balance)
@@ -144,6 +178,14 @@ async def apply_referral_reward_for_purchase(
             event_type="referral_match_reward",
             note=f"Referral reward for user {referred_user.telegram_id} via {source_type}",
         ))
+    elif target_flats_awarded > 0:
+        await credit_flat_subscription(
+            db,
+            user=referrer,
+            target_flats=target_flats_awarded,
+            event_type="referral_target_credit",
+            note=f"Referral reward for user {referred_user.telegram_id} via {source_type}",
+        )
 
     event = ReferralRewardEvent(
         referrer_user_id=referrer.telegram_id,
@@ -152,6 +194,7 @@ async def apply_referral_reward_for_purchase(
         source_type=source_type,
         discount_percent_snapshot=discount_snapshot,
         matches_awarded=matches_awarded,
+        target_flats_awarded=target_flats_awarded,
         status=risk_decision.status,
         risk_score=risk_decision.score,
         risk_reasons=risk_decision.reasons,
@@ -179,28 +222,46 @@ async def approve_referral_reward_event(
     await db.flush()
 
     referral_settings = await get_referral_program_settings(db)
-    match_count = int(referral_settings["match_reward_count"])
+    target_flats = Decimal(str(referral_settings["match_reward_count"])).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    payment_attempt = await db.get(PaymentAttempt, event.source_payment_attempt_id) if event.source_payment_attempt_id else None
+    entitlement_type = await _purchase_entitlement_type(db, payment_attempt)
+    use_flat_reward = entitlement_type != "legacy_match"
     should_award_matches = (
         bool(referral_settings["program_enabled"])
         and bool(referral_settings["match_reward_enabled"])
-        and match_count > 0
+        and target_flats > 0
         and int(event.matches_awarded or 0) <= 0
+        and Decimal(str(event.target_flats_awarded or 0)) <= 0
     )
     if should_award_matches:
-        locked_balance = await lock_user_balance(db, event.referrer_user_id)
         referrer = await db.get(User, event.referrer_user_id)
         if referrer:
-            balance_before = current_match_balance(locked_balance)
-            balance_after = max(0, balance_before) + match_count
-            referrer.purchased_bets_balance = balance_after
-            referrer.matches_remaining = balance_after
-            event.matches_awarded = match_count
-            db.add(MatchBalanceLog(
-                user_id=referrer.telegram_id,
-                delta_matches=match_count,
-                event_type="referral_match_reward",
-                note=f"Approved held referral reward for user {event.referred_user_id}",
-            ))
+            if use_flat_reward:
+                await credit_flat_subscription(
+                    db,
+                    user=referrer,
+                    target_flats=target_flats,
+                    event_type="referral_target_credit",
+                    note=f"Approved held referral reward for user {event.referred_user_id}",
+                )
+                event.target_flats_awarded = target_flats
+            else:
+                match_count = int(target_flats)
+                locked_balance = await lock_user_balance(db, event.referrer_user_id)
+                balance_before = current_match_balance(locked_balance)
+                balance_after = max(0, balance_before) + match_count
+                referrer.purchased_bets_balance = balance_after
+                referrer.matches_remaining = balance_after
+                event.matches_awarded = match_count
+                db.add(MatchBalanceLog(
+                    user_id=referrer.telegram_id,
+                    delta_matches=match_count,
+                    event_type="referral_match_reward",
+                    note=f"Approved held referral reward for user {event.referred_user_id}",
+                ))
 
     if bool(referral_settings["program_enabled"]):
         event.discount_percent_snapshot = await get_referral_discount_percent(db, event.referrer_user_id)

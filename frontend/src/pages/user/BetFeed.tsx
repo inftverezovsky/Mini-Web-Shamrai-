@@ -3,7 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteD
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { apiFetch } from '../../utils/api';
 import { API_BASE_URL, DEBUG_AUTH_ENABLED } from '../../config/api';
-import { BetResponse, MarketingWidgetsResponse, PaginatedResponse } from '../../schemas/schemas';
+import { BetResponse, FlatSubscriptionResponse, MarketingWidgetsResponse, PaginatedResponse, PaymentAttemptStatusResponse } from '../../schemas/schemas';
 import { useAuthSelector } from '../../context/AuthContext';
 import { useLayoutMode } from '../../context/LayoutModeContext';
 import { Trophy, Calendar, Check, Plus, AlertCircle, Loader2, Sparkles, Flame, ExternalLink, Star, Image as ImageIcon } from 'lucide-react';
@@ -14,6 +14,17 @@ import { notifyError, notifyInfo, notifyPending, notifySuccess } from '../../uti
 import { trackEvent } from '../../utils/analytics';
 import { BETS_FEED_QUERY_KEY, TAB_QUERY_STALE_TIME, fetchBetsFeedPage } from '../../utils/tabPrefetch';
 import { betTakeFailureNotice } from './betFeedActions';
+import TelegramCustomEmojiText from '../../components/TelegramCustomEmojiText';
+import FlatStakeModal from '../../components/FlatStakeModal';
+import { flatSubscriptionUiState } from '../../utils/flatSubscriptionUi';
+import {
+  clearStoredStarsCheckout,
+  createStarsCheckoutIntent,
+  isValidCheckoutUuid,
+  readStoredStarsCheckout,
+  writeStoredStarsCheckout,
+  type StoredStarsCheckout,
+} from '../../utils/paymentCheckout';
 
 const MarathonWidget = lazy(() => import('./MarathonWidget'));
 const LiveTracker = lazy(() => import('./LiveTracker'));
@@ -22,6 +33,30 @@ const QuizWidget = lazy(() => import('./QuizWidget'));
 const PvPWidget = lazy(() => import('./PvPWidget'));
 const CrowdBetWidget = lazy(() => import('./CrowdBetWidget'));
 const TAKEN_BETS_STORAGE_KEY = 'bet_tma_taken_ids';
+const STARS_TERMINAL_SUCCESS = new Set(['completed', 'fulfilled', 'paid', 'success', 'succeeded']);
+const STARS_TERMINAL_FAILURE = new Set(['cancelled', 'canceled', 'expired', 'failed', 'refunded']);
+
+interface StarsInvoiceResponse {
+  invoice_url?: string | null;
+  attempt_id?: string;
+  status?: string | null;
+  checkout_state?: string | null;
+}
+
+function starsPaymentStatus(attempt: PaymentAttemptStatusResponse | StarsInvoiceResponse) {
+  return String(
+    'payment_status' in attempt ? attempt.payment_status : attempt.status,
+  ).toLowerCase();
+}
+
+function isStarsPaymentSuccessful(attempt: PaymentAttemptStatusResponse | StarsInvoiceResponse) {
+  return STARS_TERMINAL_SUCCESS.has(starsPaymentStatus(attempt));
+}
+
+function isStarsPaymentFailed(attempt: PaymentAttemptStatusResponse | StarsInvoiceResponse) {
+  return STARS_TERMINAL_FAILURE.has(starsPaymentStatus(attempt))
+    || String(attempt.checkout_state || '').toLowerCase() === 'failed';
+}
 
 type BetFeedInfiniteData = InfiniteData<PaginatedResponse<BetResponse>, string | null>;
 
@@ -196,7 +231,12 @@ const BetFeedCard = memo(function BetFeedCard({
 
       <div className={!unlocked ? 'select-none opacity-45 pointer-events-none' : ''}>
         <div>
-          <h4 className="text-xs font-extrabold text-white leading-snug">{bet.event_name}</h4>
+          <h4 className="text-xs font-extrabold text-white leading-snug">
+            <TelegramCustomEmojiText
+              text={bet.event_name}
+              entities={bet.event_name_entities}
+            />
+          </h4>
         </div>
 
         {unlocked && bet.coupon_image_url && (
@@ -265,7 +305,10 @@ const BetFeedCard = memo(function BetFeedCard({
 
         {bet.description && (
           <p className="text-slate-300 text-[11px] leading-normal bg-black/20 p-2.5 rounded-xl border border-white/5 mt-2">
-            {bet.description}
+            <TelegramCustomEmojiText
+              text={bet.description}
+              entities={bet.description_entities}
+            />
           </p>
         )}
 
@@ -474,6 +517,15 @@ export default function BetFeed({
   
   const [takenBetIds, setTakenBetIds] = useState<string[]>([]);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [stakeBet, setStakeBet] = useState<BetResponse | null>(null);
+
+  const flatSubscriptionQuery = useQuery<FlatSubscriptionResponse | null, Error>({
+    queryKey: ['flat-subscription-current'],
+    queryFn: ({ signal }) => apiFetch<FlatSubscriptionResponse | null>('/subscriptions/flats/current', { signal }),
+    enabled: feedActive && !isStaffRole(userProfile?.role),
+    staleTime: 30_000,
+    retry: false,
+  });
 
   const feedQuery = useInfiniteQuery<PaginatedResponse<BetResponse>, Error>({
     queryKey: BETS_FEED_QUERY_KEY,
@@ -527,6 +579,16 @@ export default function BetFeed({
     await refetchFeed();
   }, [refetchFeed]);
 
+  const pollStarsAttempt = useCallback(async (attemptId: string) => {
+    let latest: PaymentAttemptStatusResponse | null = null;
+    for (let index = 0; index < 10; index += 1) {
+      latest = await apiFetch<PaymentAttemptStatusResponse>(`/payments/attempts/${attemptId}`);
+      if (isStarsPaymentSuccessful(latest) || isStarsPaymentFailed(latest)) return latest;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1_500));
+    }
+    return latest;
+  }, []);
+
   useEffect(() => {
     if (feedActive) return;
     void queryClient.cancelQueries({ queryKey: BETS_FEED_QUERY_KEY, exact: true });
@@ -543,8 +605,11 @@ export default function BetFeed({
   const error = feedError?.message || null;
 
   const takeBetMutation = useMutation({
-    mutationFn: async ({ betId }: { betId: string; bet?: BetResponse }) => {
-      return apiFetch(`/bets/${betId}/take`, { method: 'POST' });
+    mutationFn: async ({ betId, stakeRub }: { betId: string; bet?: BetResponse; stakeRub?: string }) => {
+      return apiFetch(`/bets/${betId}/take`, {
+        method: 'POST',
+        body: stakeRub ? JSON.stringify({ stake_rub: stakeRub }) : undefined,
+      });
     },
     onMutate: async ({ betId }) => {
       setActionLoadingId(betId);
@@ -566,6 +631,7 @@ export default function BetFeed({
       return { previousFeed, previousTakenIds };
     },
     onSuccess: (_data, { bet }) => {
+      setStakeBet(null);
       notifySuccess('Прогноз добавлен в “Мои ставки”.');
       trackEvent('Bet Take Success', {
         category: bet?.category,
@@ -594,21 +660,39 @@ export default function BetFeed({
     onSettled: () => {
       setActionLoadingId(null);
       queryClient.invalidateQueries({ queryKey: BETS_FEED_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ['flat-subscription-current'] });
     },
   });
 
-  const handleTakeBet = useCallback((betId: string) => {
+  const handleTakeBet = useCallback(async (betId: string) => {
     const bet = bets.find((item) => item.id === betId);
     trackEvent('Bet Take Started', {
       category: bet?.category,
       sport: bet?.sport_type,
       unlocked: bet?.is_unlocked,
     });
+    let flatSubscription = flatSubscriptionQuery.data;
+    if (flatSubscription === undefined && !isStaffRole(userProfile?.role)) {
+      flatSubscription = (await flatSubscriptionQuery.refetch()).data ?? null;
+    }
+    const hasLegacyAccess = (userProfile?.matches_remaining || 0) > 0 || Boolean(userProfile?.guarantee_active);
+    if (bet && flatSubscription?.status === 'active' && !hasLegacyAccess) {
+      setStakeBet(bet);
+      return;
+    }
     takeBetMutation.mutate({ betId, bet });
-  }, [bets, takeBetMutation]);
+  }, [
+    bets,
+    flatSubscriptionQuery,
+    takeBetMutation,
+    userProfile?.guarantee_active,
+    userProfile?.matches_remaining,
+    userProfile?.role,
+  ]);
 
   const handleBuyBet = useCallback(async (betId: string) => {
     const bet = bets.find((item) => item.id === betId);
+    let checkout: StoredStarsCheckout | null = null;
 
     try {
       setActionLoadingId(betId);
@@ -617,16 +701,61 @@ export default function BetFeed({
         sport: bet?.sport_type,
         price_stars: bet?.price_stars ?? 50,
       });
-      
-      // POST /api/payments/invoice
-      const invoiceData = await apiFetch('/payments/invoice', {
-        method: 'POST',
-        body: JSON.stringify({ 
-          bet_id: betId
-        })
-      });
+      checkout = createStarsCheckoutIntent(readStoredStarsCheckout(betId), { betId });
+      writeStoredStarsCheckout(checkout);
+
+      let invoiceData: StarsInvoiceResponse | null = null;
+      if (isValidCheckoutUuid(checkout.attempt_id)) {
+        try {
+          const attempt = await apiFetch<PaymentAttemptStatusResponse>(
+            `/payments/attempts/${checkout.attempt_id}`,
+          );
+          if (isStarsPaymentSuccessful(attempt)) {
+            clearStoredStarsCheckout(checkout.bet_id, checkout.intent_id);
+            notifySuccess('Оплата подтверждена, прогноз открыт.');
+            await loadFeed();
+            return;
+          }
+          if (isStarsPaymentFailed(attempt)) {
+            clearStoredStarsCheckout(checkout.bet_id, checkout.intent_id);
+            checkout = createStarsCheckoutIntent(null, { betId });
+            writeStoredStarsCheckout(checkout);
+          } else if (attempt.checkout_url) {
+            invoiceData = {
+              invoice_url: attempt.checkout_url,
+              attempt_id: attempt.attempt_id || attempt.id,
+              status: attempt.payment_status || attempt.status,
+              checkout_state: attempt.checkout_state,
+            };
+          }
+        } catch {
+          // Repeating POST with the same persisted intent is the recovery path
+          // when the status request or the original response was lost.
+        }
+      }
+
+      if (!invoiceData) {
+        invoiceData = await apiFetch<StarsInvoiceResponse>('/payments/invoice', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': checkout.intent_id },
+          body: JSON.stringify({ bet_id: betId }),
+        });
+      }
+      if (!isValidCheckoutUuid(invoiceData.attempt_id)) {
+        throw new Error('Счёт создан без безопасного идентификатора. Повторите проверку.');
+      }
+      checkout = { ...checkout, attempt_id: invoiceData.attempt_id };
+      writeStoredStarsCheckout(checkout);
 
       const invoiceUrl = invoiceData.invoice_url;
+      if (!invoiceUrl) {
+        if (String(invoiceData.checkout_state || '').toLowerCase() === 'requires_reconciliation') {
+          notifyError('Счёт отправлен на безопасную проверку. Повторите проверку позже или напишите в поддержку.');
+          return;
+        }
+        notifyPending('Проверяем ранее созданный счёт. Нажмите «Купить» ещё раз через минуту.');
+        return;
+      }
       const tg = window.Telegram?.WebApp;
 
       if (tg && typeof tg.openInvoice === 'function') {
@@ -635,6 +764,7 @@ export default function BetFeed({
           sport: bet?.sport_type,
           price_stars: bet?.price_stars ?? 50,
         });
+        const activeCheckout = checkout;
         tg.openInvoice(invoiceUrl, async (status: string) => {
           if (status === 'paid') {
             notifyPending('Оплата прошла в Telegram. Ждем webhook и обновляем ленту.');
@@ -643,6 +773,20 @@ export default function BetFeed({
               sport: bet?.sport_type,
               price_stars: bet?.price_stars ?? 50,
             });
+            try {
+              const attempt = await pollStarsAttempt(activeCheckout.attempt_id!);
+              if (attempt && isStarsPaymentSuccessful(attempt)) {
+                clearStoredStarsCheckout(activeCheckout.bet_id, activeCheckout.intent_id);
+                notifySuccess('Оплата подтверждена, прогноз открыт.');
+              } else if (attempt && isStarsPaymentFailed(attempt)) {
+                clearStoredStarsCheckout(activeCheckout.bet_id, activeCheckout.intent_id);
+                notifyError('Telegram не подтвердил оплату. Создайте новый счёт.');
+              } else {
+                notifyInfo('Подтверждение ещё обрабатывается. Статус можно проверить повторно.');
+              }
+            } catch {
+              notifyInfo('Не удалось проверить webhook. Повторное нажатие восстановит этот же платёж.');
+            }
             await loadFeed();
           } else {
             trackEvent('Stars Checkout Closed', {
@@ -662,6 +806,7 @@ export default function BetFeed({
         }
 
         await apiFetch(`/payments/debug/complete-bet/${betId}`, { method: 'POST' });
+        clearStoredStarsCheckout(checkout.bet_id, checkout.intent_id);
         notifySuccess('Debug-покупка проведена, прогноз открыт.');
         trackEvent('Stars Checkout Paid', {
           provider: 'debug',
@@ -681,7 +826,7 @@ export default function BetFeed({
     } finally {
       setActionLoadingId(null);
     }
-  }, [bets, debugCheckoutEnabled, loadFeed]);
+  }, [bets, debugCheckoutEnabled, loadFeed, pollStarsAttempt]);
 
   const handleNavigateToBilling = () => {
     trackEvent('Billing CTA Clicked', {
@@ -693,10 +838,14 @@ export default function BetFeed({
 
   const hasMatchAccess = () => {
     if (isStaffRole(userProfile?.role)) return true;
-    return (userProfile?.matches_remaining || 0) > 0 || Boolean(userProfile?.guarantee_active);
+    return (userProfile?.matches_remaining || 0) > 0
+      || Boolean(userProfile?.guarantee_active)
+      || flatSubscriptionQuery.data?.status === 'active';
   };
 
   const active = hasMatchAccess();
+  const hasLegacyAccess = (userProfile?.matches_remaining || 0) > 0 || Boolean(userProfile?.guarantee_active);
+  const subscriptionUi = flatSubscriptionUiState(flatSubscriptionQuery.data, hasLegacyAccess);
 
   if (loading) {
     return (
@@ -752,26 +901,37 @@ export default function BetFeed({
       )}
 
       {/* 2. Account Access Banner */}
+      {flatSubscriptionQuery.isError && !isStaffRole(userProfile?.role) && (
+        <div className="flex flex-col gap-2 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-[11px] text-amber-50 sm:flex-row sm:items-center sm:justify-between">
+          <span>Не удалось обновить статус абонемента. Взятие прогноза временно заблокировано для безопасности.</span>
+          <button
+            type="button"
+            onClick={() => void flatSubscriptionQuery.refetch()}
+            className="min-h-[34px] shrink-0 rounded-lg border border-white/10 bg-white/[0.07] px-3 text-[10px] font-black uppercase text-white"
+          >
+            Повторить
+          </button>
+        </div>
+      )}
+
       {!active && subscriptionPurchasesEnabled && (
-        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
+        <div className="promo-status-panel motion-card shimmer-border spark-field relative flex flex-col gap-3 overflow-hidden rounded-xl border border-indigo-500/20 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10 p-3 text-[11px] text-slate-200 shadow-glass backdrop-blur-md sm:flex-row sm:items-center sm:justify-between" data-testid={`flat-access-${subscriptionUi.key}`}>
           <div className="min-w-0 space-y-0.5">
             <p className="font-extrabold text-white flex items-center flex-wrap gap-1.5">
               <Sparkles className="iridescent-icon w-3.5 h-3.5 mr-1.5 shrink-0" />
-              Нужен абонемент
+              {subscriptionUi.title}
               <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[8px] font-black uppercase tracking-wider text-cyan-300">
-                В разработке
+                {subscriptionUi.key === 'closing' ? 'Новые ставки закрыты' : subscriptionUi.key === 'waiting_legacy' ? 'Ожидание' : 'Доступ закрыт'}
               </span>
             </p>
-          <p className="text-[9px] text-slate-400">
-              Купите абонемент на матчи, чтобы открыть премиум-ленту прогнозов.
-            </p>
+            <p className="text-[9px] text-slate-400">{subscriptionUi.description}</p>
           </div>
-          {onNavigateToBilling && (
+          {onNavigateToBilling && ['buy', 'configure', 'renew'].includes(subscriptionUi.action) && (
             <button 
               onClick={handleNavigateToBilling}
               className="inline-flex min-h-[36px] w-full items-center justify-center rounded-lg bg-indigo-500 px-3 py-1.5 text-[10px] font-extrabold text-white shadow-glass transition-all active:scale-95 sm:w-auto"
             >
-              Купить матчи
+              {subscriptionUi.action === 'configure' ? 'Настроить флет' : subscriptionUi.action === 'renew' ? 'Выбрать новую цель' : 'Выбрать цель'}
             </button>
           )}
         </div>
@@ -828,6 +988,16 @@ export default function BetFeed({
           <span>{isFetchingNextPage ? 'Загружаем...' : 'Показать еще'}</span>
         </button>
       )}
+
+      <FlatStakeModal
+        open={Boolean(stakeBet)}
+        flatAmountRub={flatSubscriptionQuery.data?.flat_amount_rub}
+        submitting={takeBetMutation.isPending}
+        onClose={() => setStakeBet(null)}
+        onSubmit={(stakeRub) => {
+          if (stakeBet) takeBetMutation.mutate({ betId: stakeBet.id, bet: stakeBet, stakeRub });
+        }}
+      />
     </div>
   );
 }

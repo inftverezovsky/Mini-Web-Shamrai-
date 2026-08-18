@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import and_
 from typing import List, Dict, Any
 
-from src.models.database import get_db
+from src.models.database import get_db, get_read_db
 from src.models.models import User, Marathon, LivePulseLog, DailyRewardClaim, PromoCode, Bet, Quiz, PvPBattle, PvPBattleVote
 from src.api.deps import get_current_user
 from src.core.config import settings
@@ -34,6 +34,7 @@ from src.schemas.schemas import (
     PvPVoteRequest,
     PvPVoteResponse,
     WheelOfFortuneResponse,
+    WheelConfigPayload,
 )
 
 router = APIRouter(prefix="/marketing", tags=["Marketing"])
@@ -226,7 +227,7 @@ async def get_pulse_logs(db: AsyncSession = Depends(get_db)):
     query = select(LivePulseLog).order_by(LivePulseLog.created_at.desc()).limit(5)
     result = await db.execute(query)
     logs = result.scalars().all()
-    
+
     if not logs and settings.DEBUG_MODE:
         mock_messages = [
             "@alex*** разблокировал VIP прогноз за 50 ⭐️",
@@ -302,7 +303,7 @@ async def claim_daily_bonus(
     promo = None
     db.add(DailyRewardClaim(user_id=current_user.telegram_id, claimed_date=claim_date, claimed_at=now))
     await db.flush()
-    
+
     if reward_type == "free_bet":
         free_bets_added = max(1, reward_value or 1)
         current_user.free_bets_available = (
@@ -342,7 +343,7 @@ async def claim_daily_bonus(
         promo_code_id=promo.id if promo else None,
     )
     await db.commit()
-    
+
     return reward_detail
 
 
@@ -665,6 +666,16 @@ async def get_wheel_status(
 ):
     """Check if the user can spin the wheel of fortune right now."""
     from src.models.models import MarketingRewardEvent
+    from src.services.marketing_widgets import is_widget_available_for_user
+
+    is_available = await is_widget_available_for_user(db, "wheel_of_fortune", current_user)
+    if not is_available:
+        return {
+            "can_spin": False,
+            "is_enabled": False,
+            "next_spin_at": None,
+            "disabled_reason": "Колесо Фортуны временно выключено администратором."
+        }
     
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
     last_spin = await db.execute(
@@ -679,8 +690,36 @@ async def get_wheel_status(
     
     if last_event and last_event.created_at >= seven_days_ago:
         next_spin = last_event.created_at + timedelta(days=7)
-        return {"can_spin": False, "next_spin_at": next_spin.isoformat()}
-    return {"can_spin": True, "next_spin_at": None}
+        return {"can_spin": False, "is_enabled": True, "next_spin_at": next_spin.isoformat()}
+    return {"can_spin": True, "is_enabled": True, "next_spin_at": None}
+
+DEFAULT_WHEEL_PRIZES = [
+    {"id": "post_payment_top_error", "label": "Топ Ошибка", "sub": "на послеоплату", "probability": 50, "reward_type": "post_payment_match", "reward_value": 0, "color": "from-amber-300 to-yellow-600", "icon": "Star"},
+    {"id": "discount_50", "label": "Скидка 50%", "sub": "на абонемент", "probability": 15, "reward_type": "discount", "reward_value": 50, "color": "from-cyan-400 to-blue-600", "icon": "Percent"},
+    {"id": "discount_70", "label": "Скидка 70%", "sub": "на абонемент", "probability": 20, "reward_type": "discount", "reward_value": 70, "color": "from-purple-400 to-indigo-600", "icon": "Percent"},
+    {"id": "bonus_1000", "label": "1000 бонусов", "sub": "на счет", "probability": 15, "reward_type": "bonus_1000", "reward_value": 1000, "color": "from-slate-400 to-slate-600", "icon": "Coins"}
+]
+
+async def get_wheel_prizes_from_db(db: AsyncSession) -> list[dict]:
+    from src.models.models import MarketingWidgetConfig
+    config = await db.execute(select(MarketingWidgetConfig).filter_by(key="wheel_of_fortune"))
+    config = config.scalars().first()
+    if config and config.settings_json and "prizes" in config.settings_json:
+        return config.settings_json["prizes"]
+    return DEFAULT_WHEEL_PRIZES
+
+@router.get("/wheel-config", response_model=WheelConfigPayload)
+async def get_wheel_config(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_read_db)
+):
+    """
+    GET /api/marketing/wheel-config
+    Returns the current wheel prizes config.
+    """
+    prizes = await get_wheel_prizes_from_db(db)
+    return WheelConfigPayload(prizes=prizes)
+
 
 @router.post("/wheel-of-fortune", response_model=WheelOfFortuneResponse)
 async def spin_wheel_of_fortune(
@@ -693,7 +732,16 @@ async def spin_wheel_of_fortune(
     Allowed once per week per user.
     """
     from src.models.models import MarketingRewardEvent
+    from src.services.marketing_widgets import ensure_widget_available, MarketingWidgetDisabledError
     
+    try:
+        await ensure_widget_available(db, "wheel_of_fortune", current_user)
+    except MarketingWidgetDisabledError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Колесо Фортуны сейчас выключено администратором."
+        )
+
     # Блокируем баланс пользователя, чтобы предотвратить параллельные запросы (рейс-кондишены)
     await lock_user_balance(db, current_user.telegram_id)
     
@@ -712,35 +760,45 @@ async def spin_wheel_of_fortune(
             detail="Вы уже получали бонус на этой неделе."
         )
 
-    # Распределение: Топ Ошибка 50%, Скидка 50% 15%, Скидка 70% 20%, 1000 бонусов 15%
-    r = random.random()
-    if r < 0.50:
-        prize_type = "post_payment_top_error"
-    elif r < 0.65:
-        prize_type = "discount_50"
-    elif r < 0.85:
-        prize_type = "discount_70"
-    else:
-        prize_type = "bonus_1000"
+    prizes = await get_wheel_prizes_from_db(db)
+
+    # Calculate total probability
+    total_prob = sum(p.get("probability", 0) for p in prizes)
+    if total_prob == 0:
+        total_prob = 100 # Fallback
+
+    r = random.uniform(0, total_prob)
+    current_sum = 0
+    selected_prize = prizes[-1] if prizes else None
+
+    for prize in prizes:
+        current_sum += prize.get("probability", 0)
+        if r <= current_sum:
+            selected_prize = prize
+            break
+
+    if not selected_prize:
+        raise HTTPException(status_code=500, detail="Ошибка генерации приза")
+
+    prize_type = selected_prize["id"]
+    reward_type = selected_prize.get("reward_type", "none")
+    reward_value = selected_prize.get("reward_value", 0)
 
     promo = None
     message = ""
-    reward_type = prize_type
 
-    if prize_type == "post_payment_top_error":
+    if reward_type == "post_payment_match":
         promo = await create_bound_promo(db, current_user, "WHEEL", 0, hours_valid=168)
         promo.reward_type = "post_payment_match"
-        message = "🎉 Поздравляем! Вы выиграли Топ Ошибку на послеоплату."
-    elif prize_type == "discount_50":
-        promo = await create_bound_promo(db, current_user, "WHEEL", 50, hours_valid=168)
-        message = "🎉 Поздравляем! Вы выиграли скидку 50% на абонемент."
-    elif prize_type == "discount_70":
-        promo = await create_bound_promo(db, current_user, "WHEEL", 70, hours_valid=168)
-        message = "🎉 Поздравляем! Вы выиграли скидку 70% на абонемент."
-    elif prize_type == "bonus_1000":
+        message = f"🎉 Поздравляем! Вы выиграли {selected_prize.get('label', 'Топ Ошибку')} {selected_prize.get('sub', '')}."
+    elif reward_type == "discount":
+        promo = await create_bound_promo(db, current_user, "WHEEL", reward_value, hours_valid=168)
+        message = f"🎉 Поздравляем! Вы выиграли {selected_prize.get('label', 'Скидку')} {selected_prize.get('sub', '')}."
+    elif reward_type == "bonus_1000":
         promo = await create_bound_promo(db, current_user, "WHEEL", 0, hours_valid=168)
         promo.reward_type = "bonus_1000"
-        message = "🎉 Поздравляем! Вы выиграли 1000 бонусов на Топ Ошибку."
+        promo.reward_value = reward_value
+        message = f"🎉 Поздравляем! Вы выиграли {selected_prize.get('label', 'Бонусы')} {selected_prize.get('sub', '')}."
 
     db.add(LivePulseLog(
         text_message=f"🎡 @{current_user.username[:4] if current_user.username else 'user'}*** крутит Колесо Фортуны и забирает приз!",
@@ -759,7 +817,7 @@ async def spin_wheel_of_fortune(
     await db.commit()
 
     return WheelOfFortuneResponse(
-        reward_type=reward_type,
+        reward_type=prize_type,
         promo_code=promo.code if promo else None,
         message=message
     )

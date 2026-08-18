@@ -19,6 +19,7 @@ import {
   ChatReadUpdatedEvent,
   ChatSignalMessagePageResponse,
   ChatSignalMessageResponse,
+  FlatSubscriptionResponse,
 } from '../../schemas/schemas';
 import { WEB_SIGNAL_EVENT, WEB_SIGNAL_STATUS_EVENT } from '../../components/WebSignalListener';
 import { apiFetch, buildApiWebSocketUrl, downloadApiFile } from '../../utils/api';
@@ -40,6 +41,7 @@ import MessageList from './MessageList';
 import { applyReadReceiptToMessages } from './readReceipts';
 import SignalMessageCard, { signalActionNotice } from './SignalMessageCard';
 import SupportMessageBubble, { SupportMessageView } from './SupportMessageBubble';
+import FlatStakeModal from '../../components/FlatStakeModal';
 
 type ActiveConversationKey = 'signals' | 'support';
 type ForecastSignalAction = 'take' | 'decline';
@@ -253,6 +255,8 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   const [streamState, setStreamState] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [supportStreamState, setSupportStreamState] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [stakeSignal, setStakeSignal] = useState<ChatSignalMessageResponse | null>(null);
+  const [stakeFlatAmount, setStakeFlatAmount] = useState<string | number | null>(null);
   const [draft, setDraft] = useState('');
   const [replyTarget, setReplyTarget] = useState<ChatReplyTarget | null>(null);
   const [supportSearch, setSupportSearch] = useState('');
@@ -655,7 +659,11 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     }, 80);
   }, []);
 
-  const answerForecastRequest = useCallback(async (signal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
+  const answerForecastRequest = useCallback(async (
+    signal: ChatSignalMessageResponse,
+    action: ForecastSignalAction,
+    stakeRub?: string,
+  ) => {
     const requestId = signal.data?.forecast_request_id;
     if (!requestId) return;
 
@@ -665,8 +673,12 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
     try {
       const response = await apiFetch<ForecastSignalActionResponse>(
         `/signals/forecast-requests/${requestId}/${action}`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          body: action === 'take' && stakeRub ? JSON.stringify({ stake_rub: stakeRub }) : undefined,
+        },
       );
+      setStakeSignal(null);
       updateSignalForecastStatus(requestId, response.status);
       if (response.action === 'inactive') {
         const notice = signalActionNotice(signal, action, response.message);
@@ -876,7 +888,29 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
   }, [active, markActiveRead]);
 
   const handleForecastAction = useCallback((nextSignal: ChatSignalMessageResponse, action: ForecastSignalAction) => {
-    void answerForecastRequest(nextSignal, action);
+    if (action !== 'take') {
+      void answerForecastRequest(nextSignal, action);
+      return;
+    }
+    const requestId = nextSignal.data?.forecast_request_id;
+    if (!requestId) return;
+    const inspectFlatSubscription = async () => {
+      setActionBusy(`${requestId}:take`);
+      try {
+        const flatSubscription = await apiFetch<FlatSubscriptionResponse | null>('/subscriptions/flats/current');
+        if (flatSubscription?.status === 'active') {
+          setStakeFlatAmount(flatSubscription.flat_amount_rub);
+          setStakeSignal(nextSignal);
+          return;
+        }
+        await answerForecastRequest(nextSignal, action);
+      } catch (error: any) {
+        notifyError(error?.message || 'Не удалось проверить абонемент');
+      } finally {
+        setActionBusy((current) => (current === `${requestId}:take` ? null : current));
+      }
+    };
+    void inspectFlatSubscription();
   }, [answerForecastRequest]);
 
   const signalUnreadStartIndex = signalsConversation?.unread_count
@@ -1123,6 +1157,16 @@ export default function WebMessenger({ active = true }: WebMessengerProps) {
           <span className="min-w-0">Переподключение...</span>
         </div>
       )}
+
+      <FlatStakeModal
+        open={Boolean(stakeSignal)}
+        flatAmountRub={stakeFlatAmount}
+        submitting={Boolean(stakeSignal?.data?.forecast_request_id && actionBusy === `${stakeSignal.data.forecast_request_id}:take`)}
+        onClose={() => setStakeSignal(null)}
+        onSubmit={(stakeRub) => {
+          if (stakeSignal) void answerForecastRequest(stakeSignal, 'take', stakeRub);
+        }}
+      />
     </section>
   );
 }

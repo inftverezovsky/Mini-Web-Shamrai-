@@ -1756,7 +1756,30 @@ export default function AdminBroadcast({ initialMode = 'forecast', showModeTabs 
                                   {deliveryBlocked && request.status === 'interested' && (
                                     <div className="mt-2 bg-slate-500/10 border border-slate-500/25 text-slate-200 rounded-lg p-2 text-[10px] font-bold flex items-center space-x-1.5">
                                       <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                      <span>У клиента 0 матчей. Отправка прогноза недоступна до оплаты.</span>
+                                      <span>У клиента нет активного доступа. Отправка прогноза недоступна до оплаты.</span>
+                                    </div>
+                                  )}
+
+                                  {request.stake_rub != null && (
+                                    <div className="mt-2 grid grid-cols-2 gap-2 rounded-xl border border-emerald-300/20 bg-emerald-400/[0.07] p-2 text-[10px] sm:grid-cols-4">
+                                      <div>
+                                        <p className="font-black uppercase text-slate-500">Сумма</p>
+                                        <p className="mt-0.5 font-black text-white">{Number(request.stake_rub).toLocaleString('ru-RU')} ₽</p>
+                                      </div>
+                                      <div>
+                                        <p className="font-black uppercase text-slate-500">Доля</p>
+                                        <p className="mt-0.5 font-black text-emerald-200">{Number(request.stake_flats || 0).toFixed(3)} флета</p>
+                                      </div>
+                                      <div>
+                                        <p className="font-black uppercase text-slate-500">Один флет</p>
+                                        <p className="mt-0.5 font-black text-white">{request.flat_subscription?.flat_amount_rub == null ? '—' : `${Number(request.flat_subscription.flat_amount_rub).toLocaleString('ru-RU')} ₽`}</p>
+                                      </div>
+                                      <div>
+                                        <p className="font-black uppercase text-slate-500">Прогресс</p>
+                                        <p className="mt-0.5 font-black text-cyan-100">
+                                          {Number(request.flat_subscription?.profit_flats || 0).toFixed(2)} / +{Number(request.flat_subscription?.target_flats || 0).toFixed(2)}
+                                        </p>
+                                      </div>
                                     </div>
                                   )}
 

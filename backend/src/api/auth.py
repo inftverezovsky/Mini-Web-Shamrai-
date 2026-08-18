@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from typing import Any, Optional
 
@@ -42,7 +43,10 @@ from src.models.models import (
     CrowdBetParticipant,
     DailyRewardClaim,
     DeliveryOutbox,
+    FlatSubscription,
+    FlatSubscriptionCredit,
     ForecastRequest,
+    ForecastStakeInputSession,
     IdentityDeviceLink,
     MarketingRewardEvent,
     MatchBalanceLog,
@@ -60,6 +64,7 @@ from src.models.models import (
     UserNote,
     user_bets,
     user_bookmakers,
+    subscription_plan_checkout_allowlist,
 )
 from src.schemas.schemas import UserResponse
 from src.services.telegram_auth import (
@@ -71,6 +76,7 @@ from src.services.telegram_auth import (
 from src.services.vk_auth_flow import consume_vk_auth_flow, store_vk_auth_flow
 from src.services.delivery_outbox import CHANNEL_TELEGRAM_MESSAGE, enqueue_delivery
 from src.services.match_access import current_match_balance, lock_user_balance, lock_user_balances
+from src.services.flat_subscriptions import refresh_flat_subscription_totals
 from src.services.system_settings import REFERRAL_PROGRAM_ENABLED_KEY, is_system_setting_enabled
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -1232,7 +1238,13 @@ async def _merge_personal_signal_read_cursor(db: AsyncSession, source_id: int, t
 async def _move_user_references(db: AsyncSession, source_id: int, target_id: int) -> None:
     await _merge_referral_reward_events(db, source_id, target_id)
     await _merge_user_bookmakers(db, source_id, target_id)
+    await _merge_subscription_plan_checkout_allowlist(db, source_id, target_id)
+    await _merge_flat_subscriptions(db, source_id, target_id)
     await _merge_user_bets(db, source_id, target_id)
+    # A pending amount prompt is short-lived and tied to a channel identity.
+    # Preserve the target profile's prompt and let the merged user request a
+    # fresh one instead of risking a duplicate (channel, user) session.
+    await db.execute(delete(ForecastStakeInputSession).where(ForecastStakeInputSession.user_id == source_id))
     await _merge_forecast_requests(db, source_id, target_id)
     await _merge_daily_rewards(db, source_id, target_id)
     await _merge_promo_redemptions(db, source_id, target_id)
@@ -1262,6 +1274,7 @@ async def _move_user_references(db: AsyncSession, source_id: int, target_id: int
     await db.execute(update(ForecastRequest).where(ForecastRequest.handled_by == source_id).values(handled_by=target_id))
     await db.execute(update(AdminAuditLog).where(AdminAuditLog.actor_id == source_id).values(actor_id=target_id))
     await db.execute(update(AdminAuditLog).where(AdminAuditLog.target_user_id == source_id).values(target_user_id=target_id))
+    await db.execute(update(FlatSubscriptionCredit).where(FlatSubscriptionCredit.actor_id == source_id).values(actor_id=target_id))
     await db.execute(update(MessageTemplate).where(MessageTemplate.updated_by == source_id).values(updated_by=target_id))
     await db.execute(update(IdentityDeviceLink).where(IdentityDeviceLink.source_user_id == source_id).values(source_user_id=target_id))
 
@@ -1274,6 +1287,10 @@ def _merge_referral_reward_event_state(
     source: ReferralRewardEvent,
 ) -> None:
     target.matches_awarded = int(target.matches_awarded or 0) + int(source.matches_awarded or 0)
+    target.target_flats_awarded = (
+        Decimal(str(target.target_flats_awarded or 0))
+        + Decimal(str(source.target_flats_awarded or 0))
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     target.discount_percent_snapshot = max(
         int(target.discount_percent_snapshot or 0),
         int(source.discount_percent_snapshot or 0),
@@ -1372,6 +1389,121 @@ async def _merge_user_bookmakers(db: AsyncSession, source_id: int, target_id: in
     await db.execute(delete(user_bookmakers).where(user_bookmakers.c.user_id == source_id))
 
 
+async def _merge_subscription_plan_checkout_allowlist(
+    db: AsyncSession,
+    source_id: int,
+    target_id: int,
+) -> None:
+    source_result = await db.execute(
+        select(subscription_plan_checkout_allowlist.c.plan_id).where(
+            subscription_plan_checkout_allowlist.c.user_id == source_id
+        )
+    )
+    target_result = await db.execute(
+        select(subscription_plan_checkout_allowlist.c.plan_id).where(
+            subscription_plan_checkout_allowlist.c.user_id == target_id
+        )
+    )
+    source_plan_ids = set(source_result.scalars().all())
+    target_plan_ids = set(target_result.scalars().all())
+    for plan_id in sorted(source_plan_ids - target_plan_ids):
+        await db.execute(
+            insert(subscription_plan_checkout_allowlist).values(
+                plan_id=plan_id,
+                user_id=target_id,
+            )
+        )
+    await db.execute(
+        delete(subscription_plan_checkout_allowlist).where(
+            subscription_plan_checkout_allowlist.c.user_id == source_id
+        )
+    )
+
+
+async def _merge_flat_subscriptions(db: AsyncSession, source_id: int, target_id: int) -> None:
+    open_statuses = {"pending_setup", "active", "closing"}
+    source_subscriptions = list(
+        (
+            await db.execute(
+                select(FlatSubscription)
+                .where(FlatSubscription.user_id == source_id)
+                .order_by(FlatSubscription.created_at, FlatSubscription.id)
+                .with_for_update()
+            )
+        ).scalars().all()
+    )
+    target_open = (
+        await db.execute(
+            select(FlatSubscription)
+            .where(
+                FlatSubscription.user_id == target_id,
+                FlatSubscription.status.in_(open_statuses),
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    target_user = await db.get(User, target_id)
+
+    for source_subscription in source_subscriptions:
+        if source_subscription.status not in open_statuses or target_open is None:
+            source_subscription.user_id = target_id
+            if source_subscription.status in open_statuses:
+                target_open = source_subscription
+            continue
+
+        merged_from_id = source_subscription.id
+        target_open.target_flats = (
+            Decimal(str(target_open.target_flats or 0))
+            + Decimal(str(source_subscription.target_flats or 0))
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if target_open.flat_amount_rub is None and source_subscription.flat_amount_rub is not None:
+            target_open.flat_amount_rub = source_subscription.flat_amount_rub
+        if target_open.activated_at is None:
+            target_open.activated_at = source_subscription.activated_at
+
+        for table, column in (
+            (user_bets, user_bets.c.flat_subscription_id),
+            (ForecastRequest, ForecastRequest.flat_subscription_id),
+            (Subscription, Subscription.flat_subscription_id),
+            (FlatSubscriptionCredit, FlatSubscriptionCredit.flat_subscription_id),
+        ):
+            await db.execute(
+                update(table)
+                .where(column == merged_from_id)
+                .values({column.key: target_open.id})
+            )
+        db.add(
+            FlatSubscriptionCredit(
+                flat_subscription_id=target_open.id,
+                delta_target_flats=Decimal("0.00"),
+                event_type="identity_merge",
+                note=f"Flat subscription {merged_from_id} merged into this profile",
+            )
+        )
+        await db.delete(source_subscription)
+
+    await db.flush()
+    if target_open is not None:
+        has_legacy_access = bool(
+            target_user
+            and (
+                max(
+                    int(target_user.purchased_bets_balance or 0),
+                    int(target_user.matches_remaining or 0),
+                ) > 0
+                or target_user.guarantee_active
+            )
+        )
+        if target_open.flat_amount_rub is None or has_legacy_access:
+            target_open.status = "pending_setup"
+            target_open.completed_at = None
+        else:
+            target_open.status = "active"
+            target_open.completed_at = None
+            target_open.activated_at = target_open.activated_at or datetime.now(timezone.utc)
+        await refresh_flat_subscription_totals(db, target_open)
+
+
 async def _merge_user_bets(db: AsyncSession, source_id: int, target_id: int) -> None:
     source_result = await db.execute(select(user_bets).where(user_bets.c.user_id == source_id))
     source_rows = source_result.mappings().all()
@@ -1388,6 +1520,15 @@ async def _merge_user_bets(db: AsyncSession, source_id: int, target_id: int) -> 
                 taken_at=row.get("taken_at"),
                 access_type=row.get("access_type") or "paid_match",
                 match_charged=row.get("match_charged") if row.get("match_charged") is not None else True,
+                flat_subscription_id=row.get("flat_subscription_id"),
+                stake_rub=row.get("stake_rub"),
+                flat_amount_rub_snapshot=row.get("flat_amount_rub_snapshot"),
+                stake_flats=row.get("stake_flats"),
+                coefficient_snapshot=row.get("coefficient_snapshot"),
+                settled_status=row.get("settled_status"),
+                profit_rub=row.get("profit_rub"),
+                profit_flats=row.get("profit_flats"),
+                settled_at=row.get("settled_at"),
             )
         )
 

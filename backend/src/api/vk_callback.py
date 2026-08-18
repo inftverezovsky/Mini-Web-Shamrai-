@@ -28,6 +28,14 @@ from src.services.vk_delivery import (
     send_vk_message,
     vk_group_id,
 )
+from src.services.flat_subscriptions import (
+    FlatSubscriptionState,
+    clear_forecast_stake_input,
+    lookup_forecast_stake_input,
+    get_open_flat_subscription,
+    parse_stake_amount,
+    start_forecast_stake_input,
+)
 
 logger = logging.getLogger("uvicorn")
 router = APIRouter(prefix="/vk", tags=["VK Callback"])
@@ -286,6 +294,39 @@ async def _handle_forecast_button(event_object: dict, db: AsyncSession) -> dict:
     should_notify_sales = False
     try:
         if action == "take":
+            has_legacy_fields = all(
+                hasattr(user, field)
+                for field in ("purchased_bets_balance", "matches_remaining", "guarantee_active")
+            )
+            legacy_access_active = not has_legacy_fields or (
+                max(
+                    int(getattr(user, "purchased_bets_balance", 0) or 0),
+                    int(getattr(user, "matches_remaining", 0) or 0),
+                ) > 0
+                or bool(getattr(user, "guarantee_active", False))
+            )
+            flat_subscription = (
+                await get_open_flat_subscription(db, user.telegram_id)
+                if not legacy_access_active and callable(getattr(db, "execute", None))
+                else None
+            )
+            if flat_subscription is not None and not legacy_access_active:
+                if flat_subscription.status != FlatSubscriptionState.ACTIVE.value:
+                    return {"status": "failed", "message": "Флетовый абонемент пока не принимает новые ставки"}
+                await start_forecast_stake_input(
+                    db,
+                    channel="vk",
+                    user_id=user.telegram_id,
+                    forecast_request_id=request_id,
+                )
+                await db.commit()
+                return {
+                    "status": "awaiting_stake",
+                    "message": (
+                        f"Размер вашего флета: {flat_subscription.flat_amount_rub} ₽. "
+                        "Напишите сумму фактической ставки, например 5000 или 5 тыс. Для отмены напишите «отмена»."
+                    ),
+                }
             forecast_request, message, should_notify_sales = await set_forecast_request_interested(
                 db,
                 request_id=request_id,
@@ -407,6 +448,86 @@ async def _process_plain_text_forecast_message(event_object: dict) -> None:
     _send_forecast_button_message(event_object, result.get("message") or "Принято")
 
 
+async def _process_pending_vk_stake_message(event_object: dict) -> bool:
+    vk_user_id = _vk_event_user_id(event_object)
+    text = str((event_object.get("message") or {}).get("text") or "").strip()
+    if not vk_user_id or not text:
+        return False
+    async with AsyncSessionLocal() as db:
+        user = await _load_user_by_vk_id(db, vk_user_id)
+        if user is None:
+            return False
+        input_lookup = await lookup_forecast_stake_input(
+            db,
+            channel="vk",
+            user_id=user.telegram_id,
+            for_update=True,
+        )
+        input_session = input_lookup.session
+        if input_session is None:
+            await db.commit()
+            if input_lookup.expired:
+                _send_forecast_button_message(
+                    event_object,
+                    "Время ввода суммы истекло. Нажмите «Взять» у нужного прогноза ещё раз.",
+                )
+                return True
+            return False
+        if text.casefold() in {"/cancel", "отмена", "отменить"}:
+            await clear_forecast_stake_input(db, channel="vk", user_id=user.telegram_id)
+            await db.commit()
+            _send_forecast_button_message(event_object, "Ввод суммы отменён.")
+            return True
+        try:
+            stake_rub = parse_stake_amount(text)
+            forecast_request, response_message, should_notify_sales = await set_forecast_request_interested(
+                db,
+                request_id=input_session.forecast_request_id,
+                actor_user_id=user.telegram_id,
+                notify_sales_manager_now=False,
+                auto_delivery_method="auto",
+                auto_delivery_now=False,
+                stake_rub=stake_rub,
+                input_channel="vk",
+            )
+            await clear_forecast_stake_input(db, channel="vk", user_id=user.telegram_id)
+            await db.commit()
+            if should_notify_sales:
+                _run_background(notify_sales_manager_for_request(forecast_request.id))
+            _send_forecast_button_message(
+                event_object,
+                f"Сумма {stake_rub:,.2f} ₽ принята. {response_message}".replace(",", " "),
+            )
+            return True
+        except ValueError as exc:
+            await db.rollback()
+            _send_forecast_button_message(event_object, f"{exc}. Попробуйте ещё раз или напишите «отмена».")
+            return True
+        except HTTPException as exc:
+            await db.rollback()
+            await clear_forecast_stake_input(db, channel="vk", user_id=user.telegram_id)
+            await db.commit()
+            _send_forecast_button_message(
+                event_object,
+                f"{exc.detail}. Нажмите «Взять» у прогноза повторно.",
+            )
+            return True
+
+
+async def _process_vk_plain_text_message(event_object: dict) -> None:
+    try:
+        if await _process_pending_vk_stake_message(event_object):
+            return
+    except Exception as exc:
+        logger.exception("[VKCallback] pending stake input failed: %s", exc)
+        _send_forecast_button_message(event_object, "Не удалось обработать сумму ставки")
+        return
+    if _forecast_action_from_message_text(event_object):
+        await _process_plain_text_forecast_message(event_object)
+    elif _should_reply_to_plain_text_message(event_object):
+        await _process_plain_text_status_message(event_object)
+
+
 async def _process_plain_text_status_message(event_object: dict) -> None:
     if not _should_reply_to_plain_text_message(event_object):
         return
@@ -442,18 +563,17 @@ async def handle_vk_message_new_event(event_object: dict, *, source: str = "call
     _run_background(_refresh_message_permission_from_message_new(event_object))
     if button_payload.get("type") == "forecast_request":
         _run_background(_process_forecast_button_event(event_object))
-    elif _forecast_action_from_message_text(event_object):
-        _run_background(_process_plain_text_forecast_message(event_object))
-    elif _should_reply_to_plain_text_message(event_object):
-        _run_background(_process_plain_text_status_message(event_object))
+    elif str(message.get("text") or "").strip():
+        _run_background(_process_vk_plain_text_message(event_object))
 
 
 @router.post("/callback")
 async def vk_callback(request: Request):
     try:
         payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON update")
+    except Exception as e:
+        body = await request.body()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON update: {e} Body: {body!r}")
 
     event_type = str(payload.get("type") or "")
 

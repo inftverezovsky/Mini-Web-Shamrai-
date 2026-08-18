@@ -3,11 +3,12 @@ import { createPortal } from 'react-dom';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, downloadApiFile } from '../../utils/api';
 import { ADMIN_TAB_QUERY_STALE_TIME, BOOKMAKERS_QUERY_KEY, TAB_QUERY_STALE_TIME, adminUsersPageQueryKey, fetchAdminUsersPage, fetchBookmakers } from '../../utils/tabPrefetch';
-import { BookmakerResponse, ChatConversationResponse, PaginatedResponse, StatsDriveExportJob, PromoCodeResponse } from '../../schemas/schemas';
+import { BookmakerResponse, ChatConversationResponse, FlatFinancialCorrectionPreviewResponse, FlatSubscriptionResponse, FlatSubscriptionSummaryResponse, PaginatedResponse, StatsDriveExportJob, PromoCodeResponse } from '../../schemas/schemas';
 import { isOtherBookmaker } from '../../constants/bookmakers';
 import EmojiTextField from '../../components/EmojiTextField';
 import { BookmakerLogoFrame } from '../../components/LogoFrame';
 import SmoothCollapse from '../../components/SmoothCollapse';
+import { parseStakeInput } from '../../components/FlatStakeModal';
 import { useAuthSelector } from '../../context/AuthContext';
 import { isPrivilegedRole } from '../../utils/roles';
 import {
@@ -59,8 +60,9 @@ import {
   StatTile,
 } from '../../features/performance/performanceStatsUi';
 import { useGlassOverlayGuard } from '../../hooks/useGlassOverlayGuard';
+import { matchesFlatSubscriptionQueue, type FlatSubscriptionQueue } from '../../utils/flatSubscriptionUi';
 
-type ActivityFilter = 'all' | 'active' | 'empty' | 'guarantee';
+type ActivityFilter = 'all' | 'active' | 'empty' | 'guarantee' | FlatSubscriptionQueue;
 
 interface CRMUser {
   telegram_id: number;
@@ -78,6 +80,7 @@ interface CRMUser {
   guarantee_active: boolean;
   guarantee_opened_from_bet_id: string | null;
   guarantee_closed_at: string | null;
+  flat_subscription?: FlatSubscriptionSummaryResponse | null;
   bookmakers: BookmakerResponse[];
   other_bookmaker_name: string | null;
   client_group: string | null;
@@ -110,6 +113,11 @@ const filterLabels: Record<ActivityFilter, string> = {
   active: 'Активные',
   empty: 'Без матчей',
   guarantee: 'Гарантия',
+  flat_pending_setup: 'Флет: настройка',
+  flat_active: 'Флет: активные',
+  flat_closing: 'Флет: закрываются',
+  flat_completed: 'Флет: завершены',
+  flat_cancelled: 'Флет: отменены',
 };
 
 function getDisplayName(user: CRMUser) {
@@ -347,9 +355,18 @@ function ClientTelegramContactLine({ user }: { user: CRMUser }) {
         <span className="min-w-0 truncate text-slate-500">{usernameLabel}</span>
       )}
       <span className="shrink-0 text-slate-600">/</span>
-      <AdminWebChatDialogLink user={user} title="Открыть диалог с клиентом в веб-чате" className="shrink-0">
-        {telegramIdLabel}
-      </AdminWebChatDialogLink>
+      {user.is_web_only ? (
+        <span className="shrink-0">{telegramIdLabel}</span>
+      ) : (
+        <a
+          href={`tg://user?id=${user.telegram_id}`}
+          onClick={(e) => e.stopPropagation()}
+          title="Открыть диалог с клиентом в Telegram"
+          className="shrink-0 text-cyan-100 transition hover:text-cyan-50 hover:underline focus:outline-none focus:ring-1 focus:ring-cyan-300/45"
+        >
+          {telegramIdLabel}
+        </a>
+      )}
     </span>
   );
 }
@@ -573,6 +590,12 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
   const [editClientGroup, setEditClientGroup] = useState('');
   const [editClientTag, setEditClientTag] = useState('');
   const [matchDelta, setMatchDelta] = useState('');
+  const [flatTarget, setFlatTarget] = useState('');
+  const [flatAmount, setFlatAmount] = useState('');
+  const [stakeEdits, setStakeEdits] = useState<Record<string, string>>({});
+  const [correctionPreview, setCorrectionPreview] = useState<FlatFinancialCorrectionPreviewResponse | null>(null);
+  const [correctionNote, setCorrectionNote] = useState('');
+  const [previewingCorrection, setPreviewingCorrection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | null>(null);
   const [driveJob, setDriveJob] = useState<StatsDriveExportJob | null>(null);
@@ -606,7 +629,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     enabled: Boolean(currentAdmin) && active,
     queryFn: ({ pageParam, signal }) => fetchAdminUsersPage<CRMUser>((pageParam as string | null) ?? null, {
       searchTerm: debouncedSearchTerm,
-      activityFilter,
+      activityFilter: activityFilter.startsWith('flat_') ? 'all' : activityFilter,
       groupFilter,
       tagFilter,
       bookmakerFilter,
@@ -614,6 +637,15 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_cursor : undefined),
     staleTime: ADMIN_TAB_QUERY_STALE_TIME,
   });
+  const flatDetailsQuery = useQuery<FlatSubscriptionResponse | null>({
+    queryKey: ['admin-flat-subscription', selectedUser?.telegram_id],
+    queryFn: () => apiFetch<FlatSubscriptionResponse | null>(`/admin/users/${selectedUser!.telegram_id}/flat-subscription`),
+    enabled: Boolean(selectedUser),
+    staleTime: 10_000,
+    retry: false,
+  });
+  const selectedFlatSubscription = flatDetailsQuery.data ?? selectedUser?.flat_subscription ?? null;
+  const selectedFlatBets = flatDetailsQuery.data?.bets ?? [];
 
   const users = useMemo(() => {
     const byId = new Map<number, CRMUser>();
@@ -682,7 +714,8 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
         activityFilter === 'all' ||
         (activityFilter === 'active' && user.has_active_subscription) ||
         (activityFilter === 'empty' && !user.guarantee_active && getMatchBalance(user) <= 0) ||
-        (activityFilter === 'guarantee' && user.guarantee_active);
+        (activityFilter === 'guarantee' && user.guarantee_active) ||
+        (activityFilter.startsWith('flat_') && matchesFlatSubscriptionQueue(user, activityFilter as FlatSubscriptionQueue));
       const matchesGroup = groupFilter === 'all' || user.client_group === groupFilter;
       const matchesTag = tagFilter === 'all' || user.client_tag === tagFilter;
       const matchesBookmaker = clientMatchesBookmakerFilter(user, bookmakerFilter);
@@ -697,7 +730,10 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     const guarantee = users.filter(user => user.guarantee_active).length;
     const debt = users.filter(user => getMatchBalance(user) < 0).length;
     const attention = users.filter(user => user.guarantee_active || getMatchBalance(user) < 0).length;
-    return { active, empty, guarantee, debt, attention };
+    const flatPendingSetup = users.filter(user => user.flat_subscription?.status === 'pending_setup').length;
+    const flatClosing = users.filter(user => user.flat_subscription?.status === 'closing').length;
+    const flatCompleted = users.filter(user => user.flat_subscription?.status === 'completed').length;
+    return { active, empty, guarantee, debt, attention, flatPendingSetup, flatClosing, flatCompleted };
   }, [users]);
 
   const otherBookmakerSelected = useMemo(() => (
@@ -721,11 +757,18 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     setEditClientGroup(user.client_group || '');
     setEditClientTag(getCrmClientTagLabel(user.client_tag) || '');
     setMatchDelta('');
+    setFlatTarget('');
+    setFlatAmount(user.flat_subscription?.flat_amount_rub == null ? '' : String(user.flat_subscription.flat_amount_rub));
+    setStakeEdits({});
+    setCorrectionPreview(null);
+    setCorrectionNote('');
   };
 
   const closeEditModal = () => {
     if (saving) return;
     setSelectedUser(null);
+    setCorrectionPreview(null);
+    setCorrectionNote('');
   };
 
   const handleToggleBk = (bkId: number) => {
@@ -811,6 +854,148 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     setMatchDelta(String(-currentBalance));
   };
 
+  const refreshSelectedFlat = async () => {
+    await Promise.all([flatDetailsQuery.refetch(), loadCRM()]);
+  };
+
+  const handleCreditFlatTarget = async () => {
+    if (!selectedUser) return;
+    const target = Number(flatTarget.replace(',', '.'));
+    const amount = parseStakeInput(flatAmount);
+    const needsAmount = !selectedFlatSubscription || ['completed', 'cancelled'].includes(selectedFlatSubscription.status);
+    if (!Number.isFinite(target) || target < 0.01 || target > 10_000) {
+      notifyError('Укажите цель от 0,01 до 10 000 флетов');
+      return;
+    }
+    if (needsAmount && !amount) {
+      notifyError('Для нового абонемента укажите размер одного флета');
+      return;
+    }
+    try {
+      setSaving(true);
+      await apiFetch(`/admin/users/${selectedUser.telegram_id}/flat-subscription/credit`, {
+        method: 'POST',
+        body: JSON.stringify({
+          target_flats: target.toFixed(2),
+          flat_amount_rub: needsAmount ? amount : undefined,
+        }),
+      });
+      setFlatTarget('');
+      notifySuccess(`Начислено +${target.toFixed(2)} флета к цели`);
+      await refreshSelectedFlat();
+    } catch (error: any) {
+      notifyError(error?.message || 'Не удалось начислить флеты');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleChangeFlatAmount = async () => {
+    if (!selectedUser || !selectedFlatSubscription) return;
+    const amount = parseStakeInput(flatAmount);
+    if (!amount) {
+      notifyError('Укажите размер флета от 1 ₽ до 100 000 000 ₽');
+      return;
+    }
+    try {
+      setPreviewingCorrection(true);
+      const preview = await apiFetch<FlatFinancialCorrectionPreviewResponse>(`/admin/users/${selectedUser.telegram_id}/flat-subscriptions/${selectedFlatSubscription.id}/flat-amount/preview`, {
+        method: 'POST',
+        body: JSON.stringify({
+          flat_amount_rub: amount,
+          expected_revision: selectedFlatSubscription.revision,
+        }),
+      });
+      setCorrectionPreview(preview);
+      setCorrectionNote('');
+    } catch (error: any) {
+      notifyError(error?.message || 'Не удалось рассчитать изменение размера флета');
+    } finally {
+      setPreviewingCorrection(false);
+    }
+  };
+
+  const handleCorrectFlatStake = async (betId: string) => {
+    if (!selectedUser || !selectedFlatSubscription) return;
+    const amount = parseStakeInput(stakeEdits[betId] || '');
+    if (!amount) {
+      notifyError('Укажите корректную сумму ставки');
+      return;
+    }
+    try {
+      setPreviewingCorrection(true);
+      const preview = await apiFetch<FlatFinancialCorrectionPreviewResponse>(`/admin/users/${selectedUser.telegram_id}/bets/${betId}/stake/preview`, {
+        method: 'POST',
+        body: JSON.stringify({
+          stake_rub: amount,
+          expected_revision: selectedFlatSubscription.revision,
+        }),
+      });
+      setCorrectionPreview(preview);
+      setCorrectionNote('');
+    } catch (error: any) {
+      notifyError(error?.message || 'Не удалось рассчитать исправление ставки');
+    } finally {
+      setPreviewingCorrection(false);
+    }
+  };
+
+  const handleApplyFlatCorrection = async () => {
+    if (!selectedUser || !selectedFlatSubscription || !correctionPreview) return;
+    const note = correctionNote.trim();
+    if (!note) {
+      notifyError('Укажите причину финансовой корректировки');
+      return;
+    }
+
+    const isFlatAmountCorrection = correctionPreview.kind === 'flat_amount';
+    const target = isFlatAmountCorrection
+      ? `/admin/users/${selectedUser.telegram_id}/flat-subscriptions/${selectedFlatSubscription.id}/flat-amount`
+      : `/admin/users/${selectedUser.telegram_id}/bets/${correctionPreview.bet_id}/stake`;
+    const correctedValue = isFlatAmountCorrection
+      ? { flat_amount_rub: correctionPreview.after.flat_amount_rub }
+      : { stake_rub: correctionPreview.after.stake_rub };
+
+    try {
+      setSaving(true);
+      await apiFetch<FlatSubscriptionResponse>(target, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...correctedValue,
+          expected_revision: correctionPreview.current_revision,
+          note,
+        }),
+      });
+      notifySuccess(isFlatAmountCorrection
+        ? 'Размер флета изменён, связанные ставки пересчитаны'
+        : 'Сумма ставки исправлена, прогресс пересчитан');
+      setCorrectionPreview(null);
+      setCorrectionNote('');
+      await refreshSelectedFlat();
+    } catch (error: any) {
+      notifyError(error?.message || 'Не удалось применить финансовую корректировку');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReopenFlatSubscription = async () => {
+    if (!selectedFlatSubscription) return;
+    try {
+      setSaving(true);
+      await apiFetch(`/admin/flat-subscriptions/${selectedFlatSubscription.id}/reopen`, {
+        method: 'POST',
+        body: JSON.stringify({ note: 'Повторно открыт из CRM' }),
+      });
+      notifySuccess('Флетовый абонемент повторно открыт');
+      await refreshSelectedFlat();
+    } catch (error: any) {
+      notifyError(error?.message || 'Не удалось повторно открыть абонемент');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleCloseGuarantee = async () => {
     if (!selectedUser) return;
     const confirmed = await confirmDestructive({
@@ -875,7 +1060,8 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
     const params = new URLSearchParams({ format });
     const cleanSearch = searchTerm.trim();
     if (cleanSearch) params.set('q', cleanSearch);
-    if (activityFilter !== 'all') params.set('activity', activityFilter);
+    if (activityFilter.startsWith('flat_')) params.set('flat_status', activityFilter.replace('flat_', ''));
+    else if (activityFilter !== 'all') params.set('activity', activityFilter);
     if (groupFilter !== 'all') params.set('group', groupFilter);
     if (tagFilter !== 'all') params.set('tag', tagFilter);
     if (bookmakerFilter !== 'all') params.set('bookmaker_id', bookmakerFilter);
@@ -900,7 +1086,8 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
         method: 'POST',
         body: JSON.stringify({
           q: cleanSearch || null,
-          activity: activityFilter,
+          activity: activityFilter.startsWith('flat_') ? 'all' : activityFilter,
+          flat_status: activityFilter.startsWith('flat_') ? activityFilter.replace('flat_', '') : null,
           group: groupFilter !== 'all' ? groupFilter : null,
           tag: tagFilter !== 'all' ? tagFilter : null,
           bookmaker_id: bookmakerFilter !== 'all' ? Number.parseInt(bookmakerFilter, 10) : null,
@@ -1008,6 +1195,29 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
         <StatTile label="Гарантия" value={summary.guarantee} hint="открыта" tone="text-amber-200" />
         <StatTile label="Долг" value={summary.debt} hint="минусовой баланс" tone={summary.debt ? 'text-slate-200' : 'text-slate-300'} />
       </div>
+
+      <section className="grid gap-2 sm:grid-cols-3" aria-label="Очереди флетовых абонементов">
+        {([
+          ['flat_pending_setup', 'Нужна настройка', summary.flatPendingSetup, 'text-amber-100'],
+          ['flat_closing', 'Закрываются', summary.flatClosing, 'text-cyan-100'],
+          ['flat_completed', 'Завершены', summary.flatCompleted, 'text-emerald-100'],
+        ] as const).map(([filter, label, count, tone]) => (
+          <button
+            key={filter}
+            type="button"
+            onClick={() => setActivityFilter(filter)}
+            className={`rounded-2xl border px-3 py-3 text-left transition-all ${
+              activityFilter === filter
+                ? 'border-cyan-200/45 bg-cyan-200/15'
+                : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.07]'
+            }`}
+          >
+            <span className="block text-[9px] font-black uppercase tracking-wider text-slate-500">Флетовая очередь</span>
+            <span className={`mt-1 block text-lg font-black ${tone}`}>{count}</span>
+            <span className="block text-[10px] font-bold text-slate-300">{label}</span>
+          </button>
+        ))}
+      </section>
 
       <section className="rounded-[24px] border border-white/10 bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045)]">
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
@@ -1215,6 +1425,183 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
 
               <ClientBonusesSection userId={selectedUser.telegram_id} />
 
+              <section className="space-y-3 rounded-[22px] border border-emerald-300/20 bg-emerald-400/[0.055] p-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="flex items-center text-[9px] font-extrabold uppercase tracking-wider text-emerald-200">
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                    Флетовый абонемент
+                  </h4>
+                  {selectedFlatSubscription && (
+                    <span data-testid="flat-subscription-status" className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-black uppercase text-slate-300">
+                      {selectedFlatSubscription.status} · rev. {selectedFlatSubscription.revision}
+                    </span>
+                  )}
+                </div>
+
+                {flatDetailsQuery.isError && (
+                  <div className="rounded-xl border border-amber-300/25 bg-amber-300/10 p-3 text-amber-50">
+                    <p className="text-[10px] font-bold">Не удалось загрузить детали флетового абонемента. Ставки не скрыты намеренно — данные нужно запросить повторно.</p>
+                    <button
+                      type="button"
+                      onClick={() => void flatDetailsQuery.refetch()}
+                      className="mt-2 rounded-lg border border-white/10 bg-white/[0.07] px-3 py-1.5 text-[9px] font-black uppercase text-white"
+                    >
+                      Повторить загрузку
+                    </button>
+                  </div>
+                )}
+
+                {selectedFlatSubscription && (
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <StatTile label="Прибыль" value={Number(selectedFlatSubscription.profit_flats).toFixed(3)} hint="флета" tone="text-emerald-200" minHeightClass="min-h-[58px]" />
+                    <StatTile label="Цель" value={`+${Number(selectedFlatSubscription.target_flats).toFixed(2)}`} hint="флета" tone="text-white" minHeightClass="min-h-[58px]" />
+                    <StatTile label="Один флет" value={selectedFlatSubscription.flat_amount_rub == null ? '—' : Number(selectedFlatSubscription.flat_amount_rub).toLocaleString('ru-RU')} hint="₽" tone="text-cyan-100" minHeightClass="min-h-[58px]" />
+                    <StatTile label="Открытые" value={selectedFlatSubscription.pending_bets} hint="ставок" tone="text-amber-100" minHeightClass="min-h-[58px]" />
+                  </div>
+                )}
+
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    aria-label="Цель флетового абонемента"
+                    inputMode="decimal"
+                    value={flatTarget}
+                    onChange={(event) => setFlatTarget(event.target.value)}
+                    placeholder="Начислить к цели, например 3"
+                    className="min-w-0 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-bold text-white outline-none focus:border-emerald-400/50"
+                  />
+                  <input
+                    aria-label="Размер флета клиента"
+                    inputMode="decimal"
+                    value={flatAmount}
+                    onChange={(event) => setFlatAmount(event.target.value)}
+                    placeholder="Размер флета клиента, ₽"
+                    className="min-w-0 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-bold text-white outline-none focus:border-cyan-400/50"
+                  />
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <button type="button" onClick={() => void handleCreditFlatTarget()} disabled={saving} className="rounded-xl bg-emerald-400 px-3 py-2 text-[10px] font-black uppercase text-slate-950 disabled:opacity-50">
+                    Начислить цель
+                  </button>
+                  <button type="button" onClick={() => void handleChangeFlatAmount()} disabled={saving || previewingCorrection || !selectedFlatSubscription} className="rounded-xl border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-[10px] font-black uppercase text-cyan-100 disabled:opacity-40">
+                    {previewingCorrection ? 'Считаем изменения…' : 'Проверить изменение флета'}
+                  </button>
+                </div>
+
+                {correctionPreview && (
+                  <div className="space-y-3 rounded-2xl border border-amber-300/25 bg-slate-950/55 p-3" role="region" aria-label="Предпросмотр финансовой корректировки">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-[9px] font-black uppercase tracking-wider text-amber-200">Проверьте перед применением</p>
+                        <p className="mt-1 text-[10px] text-slate-400">
+                          {correctionPreview.kind === 'flat_amount' ? 'Изменение размера флета' : 'Исправление суммы ставки'} • затронуто ставок: {correctionPreview.affected_bets}
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-black text-slate-300">rev. {correctionPreview.current_revision}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-xl border border-white/5 bg-black/20 p-2">
+                        <p className="text-[8px] font-black uppercase text-slate-500">До</p>
+                        <p className="mt-1 text-[10px] font-black text-white">Прибыль: {Number(correctionPreview.before.profit_rub).toLocaleString('ru-RU')} ₽</p>
+                        <p className="text-[9px] text-slate-400">{Number(correctionPreview.before.profit_flats).toFixed(6)} флета • {correctionPreview.before.status}</p>
+                        {correctionPreview.before.flat_amount_rub != null && <p className="mt-1 text-[9px] text-cyan-100">Флет: {Number(correctionPreview.before.flat_amount_rub).toLocaleString('ru-RU')} ₽</p>}
+                        {correctionPreview.before.stake_rub != null && <p className="mt-1 text-[9px] text-cyan-100">Ставка: {Number(correctionPreview.before.stake_rub).toLocaleString('ru-RU')} ₽</p>}
+                      </div>
+                      <div className="rounded-xl border border-emerald-300/15 bg-emerald-300/[0.06] p-2">
+                        <p className="text-[8px] font-black uppercase text-emerald-200">После</p>
+                        <p className="mt-1 text-[10px] font-black text-white">Прибыль: {Number(correctionPreview.after.profit_rub).toLocaleString('ru-RU')} ₽</p>
+                        <p className="text-[9px] text-slate-300">{Number(correctionPreview.after.profit_flats).toFixed(6)} флета • {correctionPreview.after.status}</p>
+                        {correctionPreview.after.flat_amount_rub != null && <p className="mt-1 text-[9px] text-cyan-100">Флет: {Number(correctionPreview.after.flat_amount_rub).toLocaleString('ru-RU')} ₽</p>}
+                        {correctionPreview.after.stake_rub != null && <p className="mt-1 text-[9px] text-cyan-100">Ставка: {Number(correctionPreview.after.stake_rub).toLocaleString('ru-RU')} ₽</p>}
+                      </div>
+                    </div>
+                    <label className="block space-y-1.5">
+                      <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">Причина изменения — обязательно</span>
+                      <textarea
+                        aria-label="Причина финансовой корректировки"
+                        value={correctionNote}
+                        onChange={(event) => setCorrectionNote(event.target.value)}
+                        rows={2}
+                        maxLength={500}
+                        placeholder="Например: клиент уточнил фактическую сумму ставки"
+                        className="w-full resize-none rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-white outline-none focus:border-amber-300/45"
+                      />
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setCorrectionPreview(null); setCorrectionNote(''); }}
+                        disabled={saving}
+                        className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[9px] font-black uppercase text-slate-200 disabled:opacity-50"
+                      >
+                        Отмена
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleApplyFlatCorrection()}
+                        disabled={saving || !correctionNote.trim()}
+                        className="rounded-xl bg-amber-300 px-3 py-2 text-[9px] font-black uppercase text-slate-950 disabled:opacity-40"
+                      >
+                        {saving ? 'Применяем…' : 'Подтвердить корректировку'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {selectedFlatSubscription?.status === 'completed'
+                  && Number(selectedFlatSubscription.profit_flats) < Number(selectedFlatSubscription.target_flats) && (
+                    <button type="button" onClick={() => void handleReopenFlatSubscription()} disabled={saving} className="w-full rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-[10px] font-black uppercase text-amber-100 disabled:opacity-50">
+                      Повторно открыть завершённый абонемент
+                    </button>
+                )}
+
+                {selectedFlatBets.length > 0 && (
+                  <div className="space-y-2 border-t border-white/5 pt-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">Ставки и фактические суммы</p>
+                    {selectedFlatBets.map((bet) => (
+                      <div key={bet.bet_id} className="rounded-xl border border-white/5 bg-black/15 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate font-bold text-white">{bet.event_name || 'Прогноз'}</p>
+                            <p className="mt-0.5 text-[9px] text-slate-500">{Number(bet.stake_flats).toFixed(3)} флета • КФ {Number(bet.coefficient).toFixed(2)} • {bet.status}</p>
+                          </div>
+                          <span className="shrink-0 font-black text-emerald-200">{Number(bet.stake_rub).toLocaleString('ru-RU')} ₽</span>
+                        </div>
+                        <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+                          <input
+                            aria-label={`Фактическая сумма ставки: ${bet.event_name || 'Прогноз'}`}
+                            inputMode="decimal"
+                            value={stakeEdits[bet.bet_id] ?? String(bet.stake_rub)}
+                            onChange={(event) => setStakeEdits((current) => ({ ...current, [bet.bet_id]: event.target.value }))}
+                            className="min-w-0 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-emerald-400/50"
+                          />
+                          <button type="button" onClick={() => void handleCorrectFlatStake(bet.bet_id)} disabled={saving || previewingCorrection} className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-[9px] font-black uppercase text-white disabled:opacity-50">
+                            Проверить
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(flatDetailsQuery.data?.credits?.length ?? 0) > 0 && (
+                  <div className="space-y-2 border-t border-white/5 pt-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">История начислений и корректировок</p>
+                    {flatDetailsQuery.data!.credits.map((credit) => (
+                      <div key={credit.id} className="rounded-xl border border-white/5 bg-black/15 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-black text-slate-200">{credit.event_type}</span>
+                          <span className={Number(credit.delta_target_flats) > 0 ? 'font-black text-emerald-200' : 'text-slate-500'}>
+                            {Number(credit.delta_target_flats) > 0 ? `+${Number(credit.delta_target_flats).toFixed(2)} флета` : 'корректировка'}
+                          </span>
+                        </div>
+                        {credit.note && <p className="mt-1 text-[9px] leading-relaxed text-slate-500">{credit.note}</p>}
+                        <p className="mt-1 text-[8px] text-slate-600">{new Date(credit.created_at).toLocaleString('ru-RU')}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
               <section className="space-y-2 rounded-[22px] border border-white/10 bg-white/[0.045] p-3 text-xs">
                 <h4 className="font-extrabold flex items-center uppercase tracking-wider text-[9px] text-slate-400">
                   <Calendar className="w-3.5 h-3.5 text-indigo-400 mr-1.5 shrink-0" />
@@ -1353,7 +1740,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                 )}
               </section>
 
-              <section className="sticky bottom-0 z-10 space-y-2 rounded-[22px] border border-white/10 bg-[#0C1226]/95 p-3 shadow-[0_-16px_34px_rgba(12,18,38,0.92)] backdrop-blur">
+              {!correctionPreview && <section className="sticky bottom-0 z-10 space-y-2 rounded-[22px] border border-white/10 bg-[#0C1226]/95 p-3 shadow-[0_-16px_34px_rgba(12,18,38,0.92)] backdrop-blur">
                 <div className="mb-2 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">
                   <Activity className="h-3.5 w-3.5 text-emerald-200" />
                   Действия
@@ -1391,7 +1778,7 @@ export default function AdminCRM({ active = true }: AdminCRMProps = {}) {
                     )}
                   </button>
                 )}
-              </section>
+              </section>}
             </div>
           </div>
         </div>

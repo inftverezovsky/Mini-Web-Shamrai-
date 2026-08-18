@@ -48,7 +48,8 @@ $BackendPython
 Create it before running backend checks:
   cd backend
   py -3.11 -m venv .venv
-  .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+  .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements.lock
+  .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.lock
 "@
   }
 

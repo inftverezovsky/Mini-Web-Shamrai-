@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.database import Base
-from src.models.models import Bet, Bookmaker, User, user_bets
+from src.models.models import Bet, Bookmaker, FlatSubscription, User, user_bets
 from src.services.stats_export import (
     CLIENT_EXPORT_STAKE,
     FLAT_FORMAT,
@@ -631,6 +631,55 @@ class StatsExportClientAccessTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(bool(history.cell(row=2, column=col).alignment.wrap_text))
         self.assertGreaterEqual(float(history.row_dimensions[2].height), 34)
         self.assertGreaterEqual(float(history.column_dimensions[get_column_letter(match_col)].width), 42)
+
+    async def test_flat_client_export_uses_actual_money_fraction_and_odds_snapshot(self):
+        async with self.Session() as session:
+            user = self._user(777)
+            bet = self._bet(777, status="win")
+            bet.coefficient = Decimal("5.00")
+            bet.resolved_at = datetime(2026, 7, 10, 12, tzinfo=timezone.utc)
+            subscription = FlatSubscription(
+                user=user,
+                status="active",
+                flat_amount_rub=Decimal("10000.00"),
+                target_flats=Decimal("3.00"),
+                profit_rub=Decimal("3500.00"),
+                profit_flats=Decimal("0.350000"),
+            )
+            session.add_all([user, bet, subscription])
+            await session.flush()
+            await session.execute(
+                user_bets.insert().values(
+                    user_id=user.telegram_id,
+                    bet_id=bet.id,
+                    access_type="flat_subscription",
+                    match_charged=False,
+                    flat_subscription_id=subscription.id,
+                    stake_rub=Decimal("5000.00"),
+                    flat_amount_rub_snapshot=Decimal("10000.00"),
+                    stake_flats=Decimal("0.500000"),
+                    coefficient_snapshot=Decimal("1.700"),
+                    settled_status="win",
+                    profit_rub=Decimal("3500.00"),
+                    profit_flats=Decimal("0.350000"),
+                    settled_at=bet.resolved_at,
+                )
+            )
+            await session.commit()
+
+            info = (await load_client_info_export_rows(session, "all"))[0]
+            recent = (await load_client_recent_bet_export_rows(session, "all"))[0]
+
+        self.assertEqual(info.flat_subscription_status, "active")
+        self.assertEqual(info.flat_amount_rub, Decimal("10000.00"))
+        self.assertEqual(info.profit_rub, Decimal("3500.00"))
+        self.assertEqual(info.actual_turnover_rub, Decimal("5000.00"))
+        self.assertEqual(info.profit_units, 0.35)
+        self.assertEqual(recent.coefficient, Decimal("1.700"))
+        self.assertEqual(recent.stake_rub, Decimal("5000.00"))
+        self.assertEqual(recent.stake_flats, Decimal("0.500000"))
+        self.assertEqual(recent.profit_rub, Decimal("3500.00"))
+        self.assertEqual(recent.profit_flats, Decimal("0.350000"))
 
 
 if __name__ == "__main__":

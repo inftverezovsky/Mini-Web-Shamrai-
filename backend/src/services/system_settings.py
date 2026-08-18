@@ -6,6 +6,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -60,7 +61,6 @@ _THEME_NUMBER_RANGES: dict[str, tuple[float, float]] = {
 _INTEGER_RANGES: dict[str, tuple[int, int]] = {
     REFERRAL_DISCOUNT_STEP_PERCENT_KEY: (0, 100),
     REFERRAL_DISCOUNT_MAX_PERCENT_KEY: (0, 100),
-    REFERRAL_MATCH_REWARD_COUNT_KEY: (0, 1000),
 }
 
 
@@ -92,6 +92,12 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
         key="PAUSE_BROADCASTS",
         default_value="false",
         description="Экстренная пауза исходящих рассылок.",
+        value_kind="boolean",
+    ),
+    SystemSettingDefinition(
+        key="BROADCAST_ONLY_ACTIVE_SUBSCRIBERS",
+        default_value="false",
+        description="Отправлять анонсы на матчи только клиентам с действующими абонементами (>0 матчей).",
         value_kind="boolean",
     ),
     SystemSettingDefinition(
@@ -133,14 +139,14 @@ SYSTEM_SETTING_DEFINITIONS: tuple[SystemSettingDefinition, ...] = (
     SystemSettingDefinition(
         key=REFERRAL_MATCH_REWARD_ENABLED_KEY,
         default_value="false",
-        description="Начисляет пригласившему матчи после первой квалифицированной покупки реферала.",
+        description="Начисляет пригласившему целевые флеты после первой квалифицированной покупки реферала.",
         value_kind="boolean",
     ),
     SystemSettingDefinition(
         key=REFERRAL_MATCH_REWARD_COUNT_KEY,
         default_value="0",
-        description="Количество матчей, начисляемых пригласившему за первую покупку реферала.",
-        value_kind="integer",
+        description="Количество целевых флетов, начисляемых пригласившему за первую покупку реферала.",
+        value_kind="flat_target",
     ),
     SystemSettingDefinition(
         key="VK_ACCESS_TOKEN",
@@ -610,6 +616,17 @@ def _normalize_setting_value(definition: SystemSettingDefinition, value: Any) ->
         if numeric_value < min_value or numeric_value > max_value:
             raise ValueError(f"Значение {definition.key} должно быть в диапазоне {min_value}-{max_value}")
         return str(numeric_value)
+    if definition.value_kind == "flat_target":
+        try:
+            numeric_value = Decimal(clean_value.replace(",", ".")).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"Значение {definition.key} должно быть числом") from exc
+        if numeric_value < Decimal("0") or numeric_value > Decimal("10000"):
+            raise ValueError(f"Значение {definition.key} должно быть в диапазоне 0-10000")
+        return format(numeric_value, "f")
     if definition.value_kind == "enum:theme_density":
         normalized = clean_value.lower() or definition.default_value
         if normalized not in _THEME_DENSITY_VALUES:
@@ -935,7 +952,7 @@ def _integer_value(stored_settings: dict[str, SystemSetting], key: str) -> int:
         return int(definition.default_value)
 
 
-async def get_referral_program_settings(db: AsyncSession) -> dict[str, bool | int]:
+async def get_referral_program_settings(db: AsyncSession) -> dict[str, bool | int | Decimal]:
     stored_settings = await _load_settings_by_key(db, _REFERRAL_SETTING_KEYS)
 
     def bool_value(key: str) -> bool:
@@ -950,7 +967,18 @@ async def get_referral_program_settings(db: AsyncSession) -> dict[str, bool | in
         "discount_step_percent": _integer_value(stored_settings, REFERRAL_DISCOUNT_STEP_PERCENT_KEY),
         "discount_max_percent": _integer_value(stored_settings, REFERRAL_DISCOUNT_MAX_PERCENT_KEY),
         "match_reward_enabled": bool_value(REFERRAL_MATCH_REWARD_ENABLED_KEY),
-        "match_reward_count": _integer_value(stored_settings, REFERRAL_MATCH_REWARD_COUNT_KEY),
+        # The legacy key name is retained so existing installations keep their
+        # configured value; all new rewards interpret it as target flats.
+        "match_reward_count": Decimal(
+            _normalize_setting_value(
+                _DEFINITIONS_BY_KEY[REFERRAL_MATCH_REWARD_COUNT_KEY],
+                (
+                    stored_settings[REFERRAL_MATCH_REWARD_COUNT_KEY].value
+                    if REFERRAL_MATCH_REWARD_COUNT_KEY in stored_settings
+                    else _DEFINITIONS_BY_KEY[REFERRAL_MATCH_REWARD_COUNT_KEY].default_value
+                ),
+            )
+        ),
     }
 
 

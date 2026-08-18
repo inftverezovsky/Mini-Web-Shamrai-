@@ -133,6 +133,7 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(HTTPException) as raised:
                     await payments_api.create_stars_invoice(
                         payments_api.InvoiceRequest(bet_id=bet.id),
+                        idempotency_key=uuid.uuid4(),
                         current_user=user,
                         db=session,
                     )
@@ -162,6 +163,7 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
                     await bets_api.buy_bet_hint(
                         bet.id,
                         bets_api.BetHintRequest(amount_xtr=20),
+                        idempotency_key=uuid.uuid4(),
                         current_user=user,
                         db=session,
                     )
@@ -192,6 +194,7 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as raised:
                 await payments_api.create_stars_invoice(
                     payments_api.InvoiceRequest(bet_id=bet.id),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )
@@ -203,7 +206,7 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.status_code, 409)
             self.assertEqual(attempt_count, 0)
 
-    async def test_single_bet_invoice_deduplicates_active_payment_attempts(self):
+    async def test_single_bet_invoice_recovers_active_attempt_for_new_client_key(self):
         async with self.Session() as session:
             user = User(telegram_id=4004)
             bet = self._bet()
@@ -217,43 +220,46 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
             ):
                 first = await payments_api.create_stars_invoice(
                     payments_api.InvoiceRequest(bet_id=bet.id),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )
-                with self.assertRaises(HTTPException) as raised:
-                    await payments_api.create_stars_invoice(
-                        payments_api.InvoiceRequest(bet_id=bet.id),
-                        current_user=user,
-                        db=session,
-                    )
+                recovered = await payments_api.create_stars_invoice(
+                    payments_api.InvoiceRequest(bet_id=bet.id),
+                    idempotency_key=uuid.uuid4(),
+                    current_user=user,
+                    db=session,
+                )
             await session.rollback()
 
             attempt_count = int(
                 (await session.execute(select(func.count(PaymentAttempt.id)))).scalar() or 0
             )
             self.assertTrue(first["attempt_id"])
-            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(recovered["attempt_id"], first["attempt_id"])
+            self.assertEqual(recovered["invoice_url"], first["invoice_url"])
+            self.assertTrue(recovered["idempotent_replay"])
             self.assertEqual(attempt_count, 1)
 
-    async def test_single_bet_invoice_provider_failure_marks_attempt_failed_and_allows_retry(self):
+    async def test_single_bet_invoice_ambiguous_failure_is_quarantined_and_safely_replayed(self):
         async with self.Session() as session:
             user = User(telegram_id=4005)
             bet = self._bet()
             session.add_all([user, bet])
             await session.commit()
 
-            invoice_mock = AsyncMock(
-                side_effect=[RuntimeError("provider unavailable"), "https://invoice.invalid/retry"]
-            )
+            invoice_mock = AsyncMock(side_effect=RuntimeError("provider unavailable"))
             with patch.object(payments_api, "create_telegram_stars_invoice_link", new=invoice_mock):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(HTTPException) as first_error:
                     await payments_api.create_stars_invoice(
                         payments_api.InvoiceRequest(bet_id=bet.id),
+                        idempotency_key=uuid.uuid4(),
                         current_user=user,
                         db=session,
                     )
                 retry = await payments_api.create_stars_invoice(
                     payments_api.InvoiceRequest(bet_id=bet.id),
+                    idempotency_key=uuid.uuid4(),
                     current_user=user,
                     db=session,
                 )
@@ -264,38 +270,40 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
                 )
             ).scalars().all()
 
-            self.assertEqual(invoice_mock.await_count, 2)
-            self.assertCountEqual([attempt.status for attempt in attempts], ["failed", "pending"])
-            retry_attempt = next(
-                attempt for attempt in attempts if str(attempt.id) == retry["attempt_id"]
-            )
-            self.assertEqual(retry_attempt.status, "pending")
-            self.assertEqual(retry["invoice_url"], "https://invoice.invalid/retry")
+            self.assertEqual(first_error.exception.status_code, 502)
+            self.assertEqual(retry["attempt_id"], str(attempts[0].id))
+            self.assertEqual(retry["checkout_state"], "requires_reconciliation")
+            self.assertIsNone(retry["invoice_url"])
+            self.assertEqual(invoice_mock.await_count, 1)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0].status, "pending")
+            self.assertEqual(attempts[0].checkout_state, "requires_reconciliation")
 
-    async def test_paid_hint_invoice_provider_failure_marks_attempt_failed_and_allows_retry(self):
+    async def test_paid_hint_ambiguous_provider_failure_is_quarantined_without_retry(self):
         async with self.Session() as session:
             user = User(telegram_id=4006)
             bet = self._bet()
             session.add_all([user, bet])
             await session.commit()
 
-            invoice_mock = AsyncMock(
-                side_effect=[RuntimeError("provider unavailable"), "https://invoice.invalid/hint-retry"]
-            )
+            invoice_mock = AsyncMock(side_effect=RuntimeError("provider unavailable"))
             with patch.object(bets_api, "create_telegram_stars_invoice_link", new=invoice_mock):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(HTTPException) as first_error:
                     await bets_api.buy_bet_hint(
                         bet.id,
                         bets_api.BetHintRequest(amount_xtr=20),
+                        idempotency_key=uuid.uuid4(),
                         current_user=user,
                         db=session,
                     )
-                retry = await bets_api.buy_bet_hint(
-                    bet.id,
-                    bets_api.BetHintRequest(amount_xtr=20),
-                    current_user=user,
-                    db=session,
-                )
+                with self.assertRaises(HTTPException) as retry_error:
+                    await bets_api.buy_bet_hint(
+                        bet.id,
+                        bets_api.BetHintRequest(amount_xtr=20),
+                        idempotency_key=uuid.uuid4(),
+                        current_user=user,
+                        db=session,
+                    )
 
             attempts = (
                 await session.execute(
@@ -303,11 +311,12 @@ class BetEligibilityTests(unittest.IsolatedAsyncioTestCase):
                 )
             ).scalars().all()
 
-            self.assertEqual(invoice_mock.await_count, 2)
-            self.assertCountEqual([attempt.status for attempt in attempts], ["failed", "pending"])
-            retry_attempt = next(attempt for attempt in attempts if attempt.id == retry.attempt_id)
-            self.assertEqual(retry_attempt.status, "pending")
-            self.assertEqual(retry.invoice_url, "https://invoice.invalid/hint-retry")
+            self.assertEqual(first_error.exception.status_code, 502)
+            self.assertEqual(retry_error.exception.status_code, 409)
+            self.assertEqual(invoice_mock.await_count, 1)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0].status, "pending")
+            self.assertEqual(attempts[0].checkout_state, "requires_reconciliation")
 
     async def test_paid_hint_entitlement_survives_resolution_after_payment(self):
         async with self.Session() as session:

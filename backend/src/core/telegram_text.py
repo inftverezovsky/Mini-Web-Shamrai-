@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Optional
 
 from src.core.config import settings
+from src.core.telegram_emoji_catalog import current_emoji_catalog, emoji_catalog_is_loaded
 
 SHAMRAI_CONTACT_USERNAME = "@Shamrai_Osnova"
 SHAMRAI_CONTACT_URL = "https://t.me/+OUTzNRDdl9gzNTQy"
@@ -39,6 +40,38 @@ BOOKMAKER_EMOJI_KEY_ALIASES = {
     "zenit": ("zenit", "зенит", "зенит (zenit)"),
     "other": ("other", "другие"),
 }
+SPORT_EMOJI_GROUPS = (
+    (("автогонки", "auto racing", "motorsport"), "🏎️"),
+    (("ам. футбол", "американский футбол", "american football"), "🏈"),
+    (("бадминтон", "badminton"), "🏸"),
+    (("баскетбол", "basketball"), "🏀"),
+    (("бейсбол", "baseball"), "⚾"),
+    (("бильярд", "billiards", "pool"), "🎱"),
+    (("бокс", "boxing"), "🥊"),
+    (("велоспорт", "cycling"), "🚴"),
+    (("вод. поло", "водное поло", "water polo"), "🤽"),
+    (("водные виды", "water sports", "swimming"), "🏊"),
+    (("волейбол", "volleyball"), "🏐"),
+    (("гандбол", "handball"), "🤾"),
+    (("гимнастика", "gymnastics"), "🤸"),
+    (("гольф", "golf"), "⛳"),
+    (("дартс", "darts"), "🎯"),
+    (("единоборства", "martial arts", "mma"), "🥋"),
+    (("киберспорт", "esports", "e-sports"), "🎮"),
+    (("коньки", "skating", "figure skating"), "⛸️"),
+    (("крикет", "cricket"), "🏏"),
+    (("л/атл", "легкая атлетика", "athletics"), "🏃"),
+    (("лыжи/биатлон", "лыжи", "биатлон", "skiing", "biathlon"), "🎿"),
+    (("н/т", "настольный теннис", "table tennis"), "🏓"),
+    (("пляж. футб", "пляжный футбол", "beach football"), "⚽"),
+    (("регби", "rugby"), "🏉"),
+    (("сани/бобслей", "сани", "бобслей", "luge", "bobsleigh"), "🛷"),
+    (("теннис", "tennis"), "🎾"),
+    (("футбол", "football", "soccer"), "⚽"),
+    (("футзал", "futsal"), "⚽"),
+    (("хоккей", "hockey", "ice hockey"), "🏒"),
+)
+SPORT_FALLBACK_EMOJI = "🏅"
 
 
 def custom_emoji(custom_emoji_id: Optional[str], fallback: str) -> str:
@@ -110,7 +143,11 @@ def _bookmaker_emoji_keys(code: Optional[str], name: Optional[str] = None) -> li
 
 
 def bookmaker_custom_emoji(code: Optional[str], name: Optional[str] = None) -> str:
-    emoji_map = _parse_custom_emoji_map(settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS)
+    emoji_map = (
+        current_emoji_catalog().mapping("bookmaker")
+        if emoji_catalog_is_loaded()
+        else _parse_custom_emoji_map(settings.TELEGRAM_BOOKMAKER_CUSTOM_EMOJI_IDS)
+    )
     fallback = bookmaker_fallback_emoji(code, name)
     for key in _bookmaker_emoji_keys(code, name):
         emoji = custom_emoji(emoji_map.get(key), fallback)
@@ -127,13 +164,89 @@ def bookmaker_fallback_emoji(code: Optional[str], name: Optional[str] = None) ->
     return BOOKMAKER_FALLBACK_EMOJI
 
 
+def _sport_emoji_keys(label: Optional[str]) -> tuple[str, ...]:
+    key = _emoji_key(label)
+    if not key:
+        return ()
+    for aliases, _fallback in SPORT_EMOJI_GROUPS:
+        if key in aliases:
+            return (key, *(alias for alias in aliases if alias != key))
+    return (key,)
+
+
+def sport_fallback_emoji(label: Optional[str]) -> str:
+    keys = _sport_emoji_keys(label)
+    for aliases, fallback in SPORT_EMOJI_GROUPS:
+        if any(key in aliases for key in keys):
+            return fallback
+    return SPORT_FALLBACK_EMOJI
+
+
 def sport_custom_emoji(label: Optional[str]) -> str:
-    emoji_map = _parse_custom_emoji_map(settings.TELEGRAM_SPORT_CUSTOM_EMOJI_IDS)
-    return custom_emoji(emoji_map.get(str(label or "").strip().lower()), "🏟")
+    emoji_map = (
+        current_emoji_catalog().mapping("sport")
+        if emoji_catalog_is_loaded()
+        else _parse_custom_emoji_map(settings.TELEGRAM_SPORT_CUSTOM_EMOJI_IDS)
+    )
+    fallback = sport_fallback_emoji(label)
+    for key in _sport_emoji_keys(label):
+        emoji = custom_emoji(emoji_map.get(key), fallback)
+        if emoji:
+            return emoji
+    return fallback
 
 
 def write_emoji() -> str:
-    return custom_emoji(settings.TELEGRAM_WRITE_CUSTOM_EMOJI_ID, "✍️") or "✍️"
+    custom_id = (
+        current_emoji_catalog().write_id
+        if emoji_catalog_is_loaded()
+        else settings.TELEGRAM_WRITE_CUSTOM_EMOJI_ID
+    )
+    return custom_emoji(custom_id, "✍️") or "✍️"
+
+
+def shamrai_custom_emoji(fallback: str = "⚔️") -> str:
+    custom_id = (
+        current_emoji_catalog().shamrai_id
+        if emoji_catalog_is_loaded()
+        else settings.TELEGRAM_SHAMRAI_CUSTOM_EMOJI_ID
+    )
+    return custom_emoji(custom_id, fallback) or fallback
+
+
+def decor_custom_emoji(key: str, fallback: str) -> str:
+    emoji_map = (
+        current_emoji_catalog().mapping("decor")
+        if emoji_catalog_is_loaded()
+        else _parse_custom_emoji_map(settings.TELEGRAM_DECOR_CUSTOM_EMOJI_IDS)
+    )
+    return custom_emoji(emoji_map.get(str(key or "").strip().lower()), fallback) or fallback
+
+
+_FORECAST_LINE_DECOR = (
+    ("<b>Закрытый анонс прогноза</b>", "forecast", "🔒"),
+    ("<b>ПРОГНОЗ SHAMRAI</b>", "forecast", "⚔️"),
+    ("Матч:", "match", "🏆"),
+    ("Исход:", "outcome", "🎯"),
+    ("Коэффициент:", "coefficient", "📈"),
+    ("КФ:", "coefficient", "📈"),
+    ("Спорт:", "sport", SPORT_FALLBACK_EMOJI),
+    ("Стоимость:", "price", "💰"),
+)
+
+
+def decorate_forecast_html(message: str) -> str:
+    decorated_lines: list[str] = []
+    for line in str(message or "").split("\n"):
+        decorated_line = line
+        for marker, slot, fallback in _FORECAST_LINE_DECOR:
+            if line.startswith(marker):
+                icon = decor_custom_emoji(slot, fallback)
+                if not line.startswith(icon):
+                    decorated_line = f"{icon} {line}"
+                break
+        decorated_lines.append(decorated_line)
+    return "\n".join(decorated_lines)
 
 
 def contact_footer() -> str:
