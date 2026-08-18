@@ -1002,6 +1002,8 @@ try {
   Assert-Contains -Actual $runbookSource -Expected "SHAMRAI_BACKUP_S3_STS_ENDPOINT_URL"
   Assert-NotContains -Actual $runbookSource -Unexpected "writer_admin_residual_gaps"
 
+  # Expected-failure subprocesses are asserted above; do not leak their status to the CI shell.
+  $global:LASTEXITCODE = 0
   Write-Host "s3_retention_audit_tests_ok"
 } finally {
   foreach ($name in $secretEnvironmentNames) {
