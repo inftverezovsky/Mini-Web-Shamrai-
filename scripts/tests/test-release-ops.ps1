@@ -115,10 +115,11 @@ if ($null -eq $remoteBashFunctionAst) {
   throw 'Release backup remote command normalizer was not found.'
 }
 Invoke-Expression $remoteBashFunctionAst.Extent.Text
-$remoteBashFixture = ConvertTo-RemoteBashCommand "set -Eeuo pipefail`r`nprintf 'ok'`r`n"
+$remoteBashSource = "set -Eeuo pipefail`r`nhead -c 4096 >/dev/null`r`nprintf 'after-stdin-consumer\n'`r`n"
+$remoteBashFixture = ConvertTo-RemoteBashCommand $remoteBashSource
 $remoteBashMatch = [regex]::Match(
   $remoteBashFixture,
-  "^printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| bash$"
+  '^bash -c "\$\(printf ''%s'' ''([A-Za-z0-9+/=]+)'' \| base64 -d\)"$'
 )
 if ($remoteBashFixture.Contains("`r") -or -not $remoteBashMatch.Success) {
   throw 'Release backup remote command wrapper is invalid.'
@@ -126,8 +127,13 @@ if ($remoteBashFixture.Contains("`r") -or -not $remoteBashMatch.Success) {
 $decodedRemoteBashFixture = [Text.Encoding]::UTF8.GetString(
   [Convert]::FromBase64String($remoteBashMatch.Groups[1].Value)
 )
-if ($decodedRemoteBashFixture -cne "set -Eeuo pipefail`nprintf 'ok'`n") {
+if ($decodedRemoteBashFixture -cne "set -Eeuo pipefail`nhead -c 4096 >/dev/null`nprintf 'after-stdin-consumer\n'`n") {
   throw 'Release backup remote command wrapper did not normalize LF safely.'
+}
+$bashCommand = Get-Command bash -ErrorAction Stop
+$remoteBashOutput = & $bashCommand.Source -c $remoteBashFixture
+if ($LASTEXITCODE -ne 0 -or ($remoteBashOutput -join "`n").Trim() -cne 'after-stdin-consumer') {
+  throw 'Release backup remote command wrapper allowed a child process to consume the remaining script.'
 }
 
 $jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | ConvertFrom-Json
@@ -315,6 +321,8 @@ Assert-NotContains $deploySource '--ignore-scripts=false'
 Assert-Contains $deploySource 'move_state_directories "`$backup_path" "$RemotePath"'
 Assert-Contains $deploySource 'flock -w 300 8'
 Assert-Contains $deploySource 'New-FencedRemoteCommand'
+Assert-Contains $deploySource '$remoteCommand = "bash -c `"`$(printf ''%s'' ''$encodedRemote'' | base64 -d)`""'
+Assert-NotContains $deploySource '$remoteCommand = "printf ''%s'' ''$encodedRemote'' | base64 -d | bash"'
 Assert-Contains $deploySource 'shamrai-public-deploy.owner'
 Assert-Contains $deploySource 'refusing stale lifecycle action'
 Assert-Contains $deploySource 'Prune exact snapshots after committed release'
@@ -423,6 +431,7 @@ Assert-Contains $releaseBackupSource 'ConnectTimeout=15'
 Assert-Contains $releaseBackupSource 'ServerAliveInterval=15'
 Assert-Contains $releaseBackupSource 'ServerAliveCountMax=4'
 Assert-Contains $releaseBackupSource 'throw "Backend restart after release backup verification failed:'
+Assert-NotContains $releaseBackupSource "base64 -d | bash"
 foreach ($protectedTable in @('subscription_plans', 'flat_subscription_credits', 'quizzes')) {
   $expectedProtectedTableLine = '  "' + $protectedTable + '",'
   Assert-Contains $releaseBackupSource $expectedProtectedTableLine

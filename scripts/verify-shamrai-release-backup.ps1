@@ -215,7 +215,7 @@ function ConvertTo-RemoteBashCommand {
 
   $normalized = ((($Command -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
   $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
-  return "printf '%s' '$encoded' | base64 -d | bash"
+  return "bash -c `"`$(printf '%s' '$encoded' | base64 -d)`""
 }
 function Invoke-RemoteChecked {
   param([string]$Command)

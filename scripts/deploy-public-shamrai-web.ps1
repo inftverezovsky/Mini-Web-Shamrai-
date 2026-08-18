@@ -2301,7 +2301,7 @@ $publicFrontendVerificationBlock
 "@
     $normalizedRemote = ((($remote -replace "`r`n", "`n") -replace "`r", "").TrimEnd("`n")) + "`n"
     $encodedRemote = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedRemote))
-    $remoteCommand = "printf '%s' '$encodedRemote' | base64 -d | bash"
+    $remoteCommand = "bash -c `"`$(printf '%s' '$encodedRemote' | base64 -d)`""
     $verifiedLifecycleCommand = New-FencedRemoteCommand `
       -Command $remoteCommand `
       -OwnerToken $remoteStageToken `
