@@ -11,16 +11,23 @@ $runbookPath = Join-Path $repoRoot "docs/backup-restore.md"
 $fakeAwsScript = Join-Path $repoRoot "scripts/tests/fixtures/fake-s3-audit-aws.ps1"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 
+function ConvertTo-ComparableOutputText {
+  param([Parameter(Mandatory = $true)][string]$Value)
+  $ansiPattern = [regex]::Escape([string][char]27) + '\[[0-?]*[ -/]*[@-~]'
+  $withoutAnsi = [regex]::Replace($Value, $ansiPattern, '')
+  return (($withoutAnsi -replace '\s+', ' ').Trim())
+}
+
 function Assert-Contains {
   param([Parameter(Mandatory = $true)][string]$Actual, [Parameter(Mandatory = $true)][string]$Expected)
-  if (-not $Actual.Contains($Expected)) {
+  if (-not (ConvertTo-ComparableOutputText $Actual).Contains((ConvertTo-ComparableOutputText $Expected))) {
     throw "Expected output to contain '$Expected'. Actual output:`n$Actual"
   }
 }
 
 function Assert-NotContains {
   param([Parameter(Mandatory = $true)][string]$Actual, [Parameter(Mandatory = $true)][string]$Unexpected)
-  if ($Actual.Contains($Unexpected)) {
+  if ((ConvertTo-ComparableOutputText $Actual).Contains((ConvertTo-ComparableOutputText $Unexpected))) {
     throw "Expected output not to contain '$Unexpected'. Actual output:`n$Actual"
   }
 }

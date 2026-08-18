@@ -92,31 +92,9 @@ test.describe('@compat browser matrix smoke', () => {
     await expect.poll(() => page.evaluate(() => document.documentElement.dataset.performanceProfile)).toBe('lowPower');
     await expect.poll(() => page.evaluate(() => Boolean((window as any).Telegram))).toBe(false);
 
-    const viewport = page.viewportSize();
-    const navLayout = await nav.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return {
-        nav: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-        buttons: Array.from(element.querySelectorAll('button')).map((button) => {
-          const buttonRect = button.getBoundingClientRect();
-          return { x: buttonRect.x, y: buttonRect.y, width: buttonRect.width, height: buttonRect.height };
-        }),
-      };
-    });
-    expect(viewport).not.toBeNull();
-
-    if (viewport) {
-      const navBox = navLayout.nav;
-      expect(navBox.x).toBeGreaterThanOrEqual(-1);
-      expect(navBox.x + navBox.width).toBeLessThanOrEqual(viewport.width + 1);
-      expect(navBox.y).toBeGreaterThanOrEqual(-1);
-      expect(navBox.y + navBox.height).toBeLessThanOrEqual(viewport.height + 1);
-
-      for (const buttonBox of navLayout.buttons) {
-        expect(buttonBox.x).toBeGreaterThanOrEqual(navBox.x - 1);
-        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(navBox.x + navBox.width + 1);
-        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(viewport.width + 1);
-      }
+    const navButtons = nav.getByRole('button');
+    for (let index = 0; index < await navButtons.count(); index += 1) {
+      await expect(navButtons.nth(index)).toBeInViewport({ ratio: 1 });
     }
 
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
