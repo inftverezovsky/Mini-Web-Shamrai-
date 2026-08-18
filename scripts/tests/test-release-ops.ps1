@@ -74,6 +74,28 @@ if ([string]$stepReturnFixture -cne '/tmp/shamrai-public-release.A1b2C3') {
   throw 'Release step runner did not preserve its scriptblock return value.'
 }
 
+foreach ($functionName in @('ConvertTo-ShellSingleQuoted', 'New-FencedRemoteCommand')) {
+  $functionAst = $deployAst.Find(
+    {
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $functionName
+    },
+    $true
+  )
+  if ($null -eq $functionAst) {
+    throw "Release function '$functionName' was not found."
+  }
+  Invoke-Expression $functionAst.Extent.Text
+}
+$fencedCommandFixture = New-FencedRemoteCommand `
+  -Command "printf 'ok'`r`n" `
+  -OwnerToken 'shamrai-public-release.A1b2C3' `
+  -InitializeOwner
+if ($fencedCommandFixture.Contains("`r")) {
+  throw 'Fenced remote command contains Windows carriage returns.'
+}
+
 $jsonPropertyCountFixture = '{"backend":"success","frontend":"success"}' | ConvertFrom-Json
 if (@($jsonPropertyCountFixture.PSObject.Properties).Count -ne 2) {
   throw 'JSON property enumeration is not stable in this PowerShell runtime.'

@@ -100,8 +100,9 @@ fi
 rm -f -- "$owner_file"
 '@
   }
+  $normalizedBody = (($body -replace "`r`n", "`n") -replace "`r", "")
   return "flock -n /run/lock/shamrai-public-deploy.lock bash -c " +
-    (ConvertTo-ShellSingleQuoted $body)
+    (ConvertTo-ShellSingleQuoted $normalizedBody)
 }
 
 function Find-Tool {
