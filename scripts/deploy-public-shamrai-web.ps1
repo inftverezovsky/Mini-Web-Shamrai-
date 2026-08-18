@@ -14,6 +14,7 @@ param(
   [string]$RestoreAttestationPath = "",
   [string]$CiAttestationPath = "",
   [string]$HiddenFlatAttestationPath = "",
+  [switch]$LocalEncryptedBackupGate,
   [switch]$PreviewOnly,
   [switch]$PromptPassword,
   [switch]$DryRun
@@ -21,6 +22,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($LocalEncryptedBackupGate -and $PSVersionTable.PSVersion.Major -lt 7) {
+  throw "LocalEncryptedBackupGate requires PowerShell 7 or newer for binary-safe backup streaming."
+}
 
 function Invoke-Step {
   param([string]$Title, [scriptblock]$Script)
@@ -564,6 +569,75 @@ function Get-AuthenticatedGitHubArtifactJson {
   }
 }
 
+function Assert-CiReleaseGateAttestation {
+  param(
+    [string]$CiPath,
+    [string]$ExpectedReleaseSha,
+    [string]$ExpectedRepository
+  )
+
+  if (-not (Test-Path -LiteralPath $CiPath -PathType Leaf)) {
+    throw "Required CI release gate attestation was not found: $CiPath"
+  }
+  $bootstrap = Read-ReleaseGateBootstrap $CiPath
+  $runId = [int64](Get-RequiredJsonProperty $bootstrap "workflow_run_id")
+  $runAttempt = [int](Get-RequiredJsonProperty $bootstrap "workflow_run_attempt")
+  $ci = Get-AuthenticatedGitHubArtifactJson `
+    -Bootstrap $bootstrap `
+    -ExpectedRepository $ExpectedRepository `
+    -ExpectedReleaseSha $ExpectedReleaseSha `
+    -ExpectedWorkflowName "CI" `
+    -ExpectedWorkflowPath ".github/workflows/ci.yml" `
+    -AllowedEvents @("push") `
+    -ArtifactName "ci-release-attestation-$ExpectedReleaseSha" `
+    -ExpectedFileName "ci-release-attestation.json"
+  Assert-AttestationSchemaVersion $ci "ci-release"
+  if ([string](Get-RequiredJsonProperty $ci "repository") -cne $ExpectedRepository -or
+      [string](Get-RequiredJsonProperty $ci "git_sha") -cne $ExpectedReleaseSha -or
+      [int64](Get-RequiredJsonProperty $ci "workflow_run_id") -ne $runId -or
+      [int](Get-RequiredJsonProperty $ci "workflow_run_attempt") -ne $runAttempt) {
+    throw "Authenticated CI release evidence has inconsistent workflow provenance."
+  }
+  if ([string](Get-RequiredJsonProperty $ci "status") -cne "passed") {
+    throw "CI release attestation did not pass."
+  }
+  $ciVerifiedAt = Assert-FreshUtcTimestamp ([string](Get-RequiredJsonProperty $ci "verified_at")) "ci.verified_at" 168
+  if ((Get-RequiredJsonProperty $ci "ref_protected") -isnot [bool] -or
+      -not [bool](Get-RequiredJsonProperty $ci "ref_protected")) {
+    throw "CI release attestation must come from a protected branch."
+  }
+  if ([string](Get-RequiredJsonProperty $ci "workflow") -cne "CI" -or
+      [string](Get-RequiredJsonProperty $ci "event_name") -cne "push" -or
+      [string](Get-RequiredJsonProperty $ci "ref") -cne "refs/heads/main" -or
+      [int64](Get-RequiredJsonProperty $ci "run_id") -ne $runId -or
+      [int](Get-RequiredJsonProperty $ci "run_attempt") -ne $runAttempt) {
+    throw "CI release attestation must come from the exact protected main-branch push run."
+  }
+  $requiredCiJobs = @(
+    "backend", "flat-coverage", "frontend", "secret-scan", "docker-build",
+    "alembic-smoke", "postgres-concurrency", "compose", "powershell"
+  )
+  $jobResults = Get-RequiredJsonProperty $ci "job_results"
+  if ($jobResults.PSObject.Properties.Count -ne $requiredCiJobs.Count) {
+    throw "CI release attestation has an unexpected mandatory job set."
+  }
+  foreach ($jobName in $requiredCiJobs) {
+    if ([string](Get-RequiredJsonProperty $jobResults $jobName) -cne "success") {
+      throw "CI release attestation job '$jobName' did not succeed."
+    }
+  }
+
+  return [pscustomobject]@{
+    Bucket = ""
+    Prefix = ""
+    EndpointUrl = ""
+    Region = ""
+    WriterAccessKeySha256 = ""
+    ManifestSigningPublicKeySha256 = ""
+    CiVerifiedAt = $ciVerifiedAt
+  }
+}
+
 function Assert-ReleaseGateAttestations {
   param(
     [string]$S3Path,
@@ -868,12 +942,19 @@ if ([string]::IsNullOrWhiteSpace($CiAttestationPath)) {
 if ([string]::IsNullOrWhiteSpace($HiddenFlatAttestationPath)) {
   $HiddenFlatAttestationPath = Join-Path $Workspace ".deploy\hidden-flat-e2e-attestation.json"
 }
-$releaseGateContext = Assert-ReleaseGateAttestations `
-  -S3Path $S3RetentionAttestationPath `
-  -RestorePath $RestoreAttestationPath `
-  -CiPath $CiAttestationPath `
-  -ExpectedReleaseSha $releaseSha `
-  -ExpectedRepository "inftverezovsky/Mini-Web-Shamrai-"
+if ($LocalEncryptedBackupGate) {
+  $releaseGateContext = Assert-CiReleaseGateAttestation `
+    -CiPath $CiAttestationPath `
+    -ExpectedReleaseSha $releaseSha `
+    -ExpectedRepository "inftverezovsky/Mini-Web-Shamrai-"
+} else {
+  $releaseGateContext = Assert-ReleaseGateAttestations `
+    -S3Path $S3RetentionAttestationPath `
+    -RestorePath $RestoreAttestationPath `
+    -CiPath $CiAttestationPath `
+    -ExpectedReleaseSha $releaseSha `
+    -ExpectedRepository "inftverezovsky/Mini-Web-Shamrai-"
+}
 
 if (-not $PreviewOnly) {
   $hiddenBootstrap = Read-ReleaseGateBootstrap $HiddenFlatAttestationPath
@@ -907,7 +988,7 @@ if ([string]::IsNullOrWhiteSpace($SshKeyPath) -and (Test-Path -LiteralPath $defa
 
 $ssh = Find-Tool @("ssh.exe", "ssh")
 $scp = Find-Tool @("scp.exe", "scp")
-$sshKeyscan = Find-Tool @("ssh-keyscan.exe", "ssh-keyscan")
+$sshKeyscan = Find-Tool @("C:\Program Files\Git\usr\bin\ssh-keyscan.exe", "ssh-keyscan.exe", "ssh-keyscan")
 $sshKeygen = Find-Tool @("ssh-keygen.exe", "ssh-keygen")
 $knownHostsPath = Join-Path $Workspace ".deploy\shamrai-known-hosts"
 
@@ -1156,6 +1237,36 @@ Invoke-Step "Create root-private remote release stage" {
 Invoke-Step "Create remote scripts" {
   $remoteGuardContent = New-ServerGuardScript -Repair:$RepairShamraiConflicts
   Set-Utf8NoBomLfContent -Path $remoteGuardScript -Content $remoteGuardContent
+
+  if ($LocalEncryptedBackupGate) {
+    $candidateImagePreparationBlock = @"
+prebuilt_backend_image="`$(cat '$remoteStage/prebuilt-backend-image-id')"
+prebuilt_frontend_image="`$(cat '$remoteStage/prebuilt-frontend-image-id')"
+case "`$prebuilt_backend_image:`$prebuilt_frontend_image" in sha256:*:sha256:*) ;; *) echo 'Prebuilt candidate image IDs are invalid.' >&2; exit 32 ;; esac
+docker image inspect "`$prebuilt_backend_image" >/dev/null
+docker image inspect "`$prebuilt_frontend_image" >/dev/null
+docker image tag "`$prebuilt_backend_image" shamrai-backend
+docker image tag "`$prebuilt_frontend_image" shamrai-frontend
+[ "`$(docker image inspect -f '{{.Id}}' shamrai-backend)" = "`$prebuilt_backend_image" ]
+[ "`$(docker image inspect -f '{{.Id}}' shamrai-frontend)" = "`$prebuilt_frontend_image" ]
+backend_image_id="`$prebuilt_backend_image"
+"@
+    $migrationImageVerificationBlock = @"
+[ "`$(docker image inspect -f '{{.Id}}' shamrai-backend)" = "`$prebuilt_backend_image" ] || { echo 'Migration backend image differs from the qualified candidate.' >&2; exit 34; }
+"@
+    $startApplicationBlock = "docker compose -p '$ComposeProject' up -d --no-deps --force-recreate --no-build backend frontend"
+  } else {
+    $candidateImagePreparationBlock = @"
+docker compose -p '$ComposeProject' build backend frontend
+backend_image_id="`$(docker compose -p '$ComposeProject' images -q backend | head -n 1)"
+if [ -z "`$backend_image_id" ]; then
+  echo 'Unable to resolve the exact freshly built backend image.' >&2
+  exit 32
+fi
+"@
+    $migrationImageVerificationBlock = "docker image inspect `"`$backend_image_id`" >/dev/null"
+    $startApplicationBlock = "docker compose -p '$ComposeProject' up -d"
+  }
 
   $remoteDeployContent = @"
 set -Eeuo pipefail
@@ -1422,23 +1533,88 @@ find "$RemotePath" \( -path "$RemotePath/ops" -o -path "$RemotePath/db-backups" 
 harden_state_modes
 cd "$RemotePath"
 docker compose -p "$ComposeProject" up -d postgres
-docker compose -p "$ComposeProject" build backend frontend
+$candidateImagePreparationBlock
 backend_static_volume="${ComposeProject}_backend_static"
 docker volume inspect "`$backend_static_volume" >/dev/null 2>&1 || docker volume create "`$backend_static_volume" >/dev/null
-backend_image_id="`$(docker compose -p "$ComposeProject" images -q backend | head -n 1)"
-if [ -z "`$backend_image_id" ]; then
-  echo 'Unable to resolve the exact freshly built backend image.' >&2
-  exit 32
-fi
 docker run --rm --user 0:0 --entrypoint sh -v "`$backend_static_volume:/target" "`$backend_image_id" -c 'mkdir -p /target/coupons && chown -R 10001:10001 /target'
+protected_data_fingerprints() {
+  docker compose -p "$ComposeProject" exec -T postgres psql -U shamrai -d shamrai -At -v ON_ERROR_STOP=1 <<'SQL'
+WITH fingerprints(key, value) AS (
+  SELECT 'bets', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM bets AS t) AS rows
+  UNION ALL
+  SELECT 'flat_subscription_credits', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM flat_subscription_credits AS t) AS rows
+  UNION ALL
+  SELECT 'flat_subscriptions_legacy', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5((to_jsonb(t) - 'revision')::text) AS row_hash FROM flat_subscriptions AS t) AS rows
+  UNION ALL
+  SELECT 'historical_stats_breakdowns', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM historical_stats_breakdowns AS t) AS rows
+  UNION ALL
+  SELECT 'historical_stats_details', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM historical_stats_details AS t) AS rows
+  UNION ALL
+  SELECT 'historical_stats_import_batches', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM historical_stats_import_batches AS t) AS rows
+  UNION ALL
+  SELECT 'historical_stats_monthly', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM historical_stats_monthly AS t) AS rows
+  UNION ALL
+  SELECT 'payment_attempts_legacy', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (
+    SELECT md5((to_jsonb(t) - ARRAY[
+      'checkout_intent_id', 'checkout_payload_hash', 'checkout_state', 'checkout_url',
+      'checkout_creation_started_at', 'telegram_pre_checkout_query_id',
+      'telegram_pre_checkout_user_id', 'telegram_pre_checkout_reserved_at',
+      'purchase_type_snapshot', 'crowd_bet_id_snapshot', 'plan_name_snapshot',
+      'entitlement_type_snapshot', 'target_flats_snapshot', 'match_count_snapshot',
+      'discount_percent_snapshot'
+    ]::text[])::text) AS row_hash
+    FROM payment_attempts AS t
+  ) AS rows
+  UNION ALL
+  SELECT 'quizzes_legacy', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5((to_jsonb(t) - ARRAY['created_at', 'is_active']::text[])::text) AS row_hash FROM quizzes AS t) AS rows
+  UNION ALL
+  SELECT 'subscription_plans_legacy', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5((to_jsonb(t) - 'is_hidden')::text) AS row_hash FROM subscription_plans AS t) AS rows
+  UNION ALL
+  SELECT 'subscriptions', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM subscriptions AS t) AS rows
+  UNION ALL
+  SELECT 'user_bets', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM user_bets AS t) AS rows
+  UNION ALL
+  SELECT 'users', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))
+  FROM (SELECT md5(to_jsonb(t)::text) AS row_hash FROM users AS t) AS rows
+)
+SELECT key || '=' || value FROM fingerprints ORDER BY key;
+SQL
+}
 # Drain every old payment writer before the one-time checkout snapshot
 # backfill.  Once Alembic commits, the old writer must never be restarted:
 # attempts created by it would not contain immutable checkout snapshots.
 docker compose -p "$ComposeProject" stop backend
-docker compose -p "$ComposeProject" run --rm backend alembic upgrade head
+pre_migration_protected_fingerprints="`$(protected_data_fingerprints)"
+test -n "`$pre_migration_protected_fingerprints"
+$migrationImageVerificationBlock
+docker compose -p "$ComposeProject" run --rm --no-deps backend alembic upgrade head
 schema_upgrade_committed=1
 install -m 0600 /dev/null "`$schema_upgrade_marker"
-docker compose -p "$ComposeProject" up -d
+post_migration_protected_fingerprints="`$(protected_data_fingerprints)"
+if [ "`$post_migration_protected_fingerprints" != "`$pre_migration_protected_fingerprints" ]; then
+  echo 'Protected production data changed during migrations.' >&2
+  diff -u <(printf '%s\n' "`$pre_migration_protected_fingerprints") <(printf '%s\n' "`$post_migration_protected_fingerprints") >&2 || true
+  exit 35
+fi
+migration_revision="`$(docker compose -p "$ComposeProject" exec -T postgres psql -U shamrai -d shamrai -At -v ON_ERROR_STOP=1 -c 'SELECT version_num FROM alembic_version')"
+[ "`$migration_revision" = '20260802_0043' ] || { echo 'Unexpected Alembic revision after migration.' >&2; exit 36; }
+migration_invariants="`$(docker compose -p "$ComposeProject" exec -T postgres psql -U shamrai -d shamrai -At -v ON_ERROR_STOP=1 -c "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM subscription_plans WHERE is_hidden IS DISTINCT FROM FALSE) AND NOT EXISTS (SELECT 1 FROM subscription_plan_checkout_allowlist) AND NOT EXISTS (SELECT 1 FROM flat_subscriptions WHERE revision IS DISTINCT FROM 1) AND NOT EXISTS (SELECT 1 FROM payment_attempts WHERE checkout_state IS NULL) AND NOT EXISTS (SELECT 1 FROM quizzes WHERE is_active IS DISTINCT FROM TRUE) THEN 'ok' ELSE 'failed' END")"
+[ "`$migration_invariants" = 'ok' ] || { echo 'Post-migration data invariants failed.' >&2; exit 37; }
+echo 'protected_production_data_unchanged'
+echo 'migration_data_invariants_ok'
+$startApplicationBlock
 health_ok=0
 for attempt in {1..30}; do
   if curl -fsS http://127.0.0.1:8082/api/ready; then
@@ -1737,8 +1913,69 @@ Invoke-Step "Upload archives and nginx config" {
 
 try {
   $finalBackupArtifactKey = ""
-  Invoke-Step "Quiesce backend and create the final encrypted database backup" {
-    $finalBackupCommand = @"
+  if ($LocalEncryptedBackupGate) {
+    Invoke-Step "Prebuild exact candidate images before backend downtime" {
+      $prebuildCommand = @"
+set -Eeuo pipefail
+prebuild='$remoteStage/prebuild'
+prebuild_project='shamrai-prebuild-$($remoteStageToken.Split('.')[-1])'
+cleanup_prebuild() {
+  rm -rf -- "`$prebuild"
+}
+trap cleanup_prebuild EXIT
+rm -rf -- "`$prebuild"
+mkdir -p "`$prebuild"
+chmod 0700 "`$prebuild"
+tar -xzf '$remoteStage/repo.tar.gz' -C "`$prebuild"
+for runtime_env in '$RemotePath/.env' '$RemotePath/backend/.env'; do
+  test -f "`$runtime_env"
+  test ! -L "`$runtime_env"
+done
+cp -- '$RemotePath/.env' "`$prebuild/.env"
+cp -- '$RemotePath/backend/.env' "`$prebuild/backend/.env"
+chmod 0600 "`$prebuild/.env" "`$prebuild/backend/.env"
+cd "`$prebuild"
+docker compose -p "`$prebuild_project" build backend frontend
+backend_image="`$(docker image inspect -f '{{.Id}}' "`$prebuild_project-backend")"
+frontend_image="`$(docker image inspect -f '{{.Id}}' "`$prebuild_project-frontend")"
+case "`$backend_image:`$frontend_image" in sha256:*:sha256:*) ;; *) echo 'Unable to resolve prebuilt candidate images.' >&2; exit 83 ;; esac
+printf '%s\n' "`$backend_image" > '$remoteStage/prebuilt-backend-image-id'
+printf '%s\n' "`$frontend_image" > '$remoteStage/prebuilt-frontend-image-id'
+chmod 0600 '$remoteStage/prebuilt-backend-image-id' '$remoteStage/prebuilt-frontend-image-id'
+"@
+      $prebuildFencedCommand = New-FencedRemoteCommand `
+        -Command $prebuildCommand `
+        -OwnerToken $remoteStageToken `
+        -InitializeOwner
+      Invoke-RemoteChecked $prebuildFencedCommand
+    }
+
+    Invoke-Step "Create and restore-drill the final local encrypted production backup" {
+      $releaseBackupAttestationPath = Join-Path $Workspace ".deploy\shamrai-release-backup-attestation.json"
+      $releaseBackupVerifier = Join-Path $Workspace "scripts\verify-shamrai-release-backup.ps1"
+      & $releaseBackupVerifier `
+        -Workspace $Workspace `
+        -Server $Server `
+        -HostKeyFingerprint $expectedFingerprintMatch.Value `
+        -RemotePath $RemotePath `
+        -ComposeProject $ComposeProject `
+        -SshKeyPath $SshKeyPath `
+        -KnownHostsPath $knownHostsPath `
+        -AttestationPath $releaseBackupAttestationPath `
+        -NoHostKeyScan `
+        -LeaveBackendStopped
+      $localBackupEvidence = Read-ReleaseGateBootstrap $releaseBackupAttestationPath
+      if ([string](Get-RequiredJsonProperty $localBackupEvidence "status") -cne "passed" -or
+          [bool](Get-RequiredJsonProperty $localBackupEvidence "plaintext_dump_persisted") -or
+          -not [bool](Get-RequiredJsonProperty $localBackupEvidence "isolated_restore") -or
+          [string](Get-RequiredJsonProperty $localBackupEvidence "alembic_revision") -cne "20260802_0041" -or
+          [string](Get-RequiredJsonProperty $localBackupEvidence "normalized_schema_hash") -notmatch '^[0-9a-f]{64}$') {
+        throw "Local encrypted release backup attestation is invalid."
+      }
+    }
+  } else {
+    Invoke-Step "Quiesce backend and create the final encrypted database backup" {
+      $finalBackupCommand = @"
 set -Eeuo pipefail
 cd '$RemotePath'
 systemctl is-enabled --quiet shamrai-db-backup.timer
@@ -1781,55 +2018,56 @@ systemctl is-active --quiet shamrai-db-backup.timer
 trap - ERR
 printf 'FINAL_BACKUP_BASENAME=%s\n' "`${latest_target##*/}"
 "@
-    $fencedBackupCommand = New-FencedRemoteCommand `
-      -Command $finalBackupCommand `
-      -OwnerToken $remoteStageToken `
-      -InitializeOwner
-    $backupOutput = Invoke-RemoteOutputChecked $fencedBackupCommand
-    $backupMatches = @(
-      $backupOutput -split "`n" |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -match '^FINAL_BACKUP_BASENAME=shamrai-db\.\d{8}T\d{6}Z\.dump\.age$' }
-    )
-    if ($backupMatches.Count -ne 1) {
-      throw "Final backup did not return one validated encrypted artifact name."
+      $fencedBackupCommand = New-FencedRemoteCommand `
+        -Command $finalBackupCommand `
+        -OwnerToken $remoteStageToken `
+        -InitializeOwner
+      $backupOutput = Invoke-RemoteOutputChecked $fencedBackupCommand
+      $backupMatches = @(
+        $backupOutput -split "`n" |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { $_ -match '^FINAL_BACKUP_BASENAME=shamrai-db\.\d{8}T\d{6}Z\.dump\.age$' }
+      )
+      if ($backupMatches.Count -ne 1) {
+        throw "Final backup did not return one validated encrypted artifact name."
+      }
+      $backupBasename = $backupMatches[0].Substring("FINAL_BACKUP_BASENAME=".Length)
+      $finalBackupArtifactKey = ($releaseGateContext.Prefix.Trim("/") + "/daily/" + $backupBasename).TrimStart("/")
+      Write-Host "final_backup_artifact=$finalBackupArtifactKey"
     }
-    $backupBasename = $backupMatches[0].Substring("FINAL_BACKUP_BASENAME=".Length)
-    $finalBackupArtifactKey = ($releaseGateContext.Prefix.Trim("/") + "/daily/" + $backupBasename).TrimStart("/")
-    Write-Host "final_backup_artifact=$finalBackupArtifactKey"
-  }
 
-  Invoke-Step "Restore-drill the quiesced final backup before migration" {
-    $restoreDrill = Join-Path $Workspace "scripts\run-shamrai-restore-drill.ps1"
-    $restoreDrillArguments = @{
-      Workspace = $Workspace
-      Server = $Server
-      HostKeyFingerprint = $expectedFingerprintMatch.Value
-      RemotePath = $RemotePath
-      ComposeProject = $ComposeProject
-      ArtifactSource = "S3"
-      OffHostArtifactKey = $finalBackupArtifactKey
-      OffHostS3Bucket = $releaseGateContext.Bucket
-      OffHostS3Prefix = $releaseGateContext.Prefix
-      OffHostS3EndpointUrl = $releaseGateContext.EndpointUrl
-      OffHostS3Region = $releaseGateContext.Region
-      SshKeyPath = $SshKeyPath
-      KnownHostsPath = $knownHostsPath
-      MaximumLatestAgeHours = 1
-      AttestationPath = $RestoreAttestationPath
-      NoHostKeyScan = $true
+    Invoke-Step "Restore-drill the quiesced final backup before migration" {
+      $restoreDrill = Join-Path $Workspace "scripts\run-shamrai-restore-drill.ps1"
+      $restoreDrillArguments = @{
+        Workspace = $Workspace
+        Server = $Server
+        HostKeyFingerprint = $expectedFingerprintMatch.Value
+        RemotePath = $RemotePath
+        ComposeProject = $ComposeProject
+        ArtifactSource = "S3"
+        OffHostArtifactKey = $finalBackupArtifactKey
+        OffHostS3Bucket = $releaseGateContext.Bucket
+        OffHostS3Prefix = $releaseGateContext.Prefix
+        OffHostS3EndpointUrl = $releaseGateContext.EndpointUrl
+        OffHostS3Region = $releaseGateContext.Region
+        SshKeyPath = $SshKeyPath
+        KnownHostsPath = $knownHostsPath
+        MaximumLatestAgeHours = 1
+        AttestationPath = $RestoreAttestationPath
+        NoHostKeyScan = $true
+      }
+      & $restoreDrill @restoreDrillArguments
+      $finalRestoreEvidence = Read-ReleaseGateBootstrap $RestoreAttestationPath
+      if ([string](Get-RequiredJsonProperty $finalRestoreEvidence "artifact_key") -cne $finalBackupArtifactKey) {
+        throw "Final restore attestation is not bound to the quiesced backup artifact."
+      }
+      $releaseGateContext = Assert-ReleaseGateAttestations `
+        -S3Path $S3RetentionAttestationPath `
+        -RestorePath $RestoreAttestationPath `
+        -CiPath $CiAttestationPath `
+        -ExpectedReleaseSha $releaseSha `
+        -ExpectedRepository "inftverezovsky/Mini-Web-Shamrai-"
     }
-    & $restoreDrill @restoreDrillArguments
-    $finalRestoreEvidence = Read-ReleaseGateBootstrap $RestoreAttestationPath
-    if ([string](Get-RequiredJsonProperty $finalRestoreEvidence "artifact_key") -cne $finalBackupArtifactKey) {
-      throw "Final restore attestation is not bound to the quiesced backup artifact."
-    }
-    $releaseGateContext = Assert-ReleaseGateAttestations `
-      -S3Path $S3RetentionAttestationPath `
-      -RestorePath $RestoreAttestationPath `
-      -CiPath $CiAttestationPath `
-      -ExpectedReleaseSha $releaseSha `
-      -ExpectedRepository "inftverezovsky/Mini-Web-Shamrai-"
   }
 
   Invoke-Step "Deploy exact code to the canonical preview under the release fence" {
@@ -1840,10 +2078,24 @@ printf 'FINAL_BACKUP_BASENAME=%s\n' "`${latest_target##*/}"
   }
 
   Invoke-Step "Verify preview APIs before any public frontend publish" {
+    if ($LocalEncryptedBackupGate) {
+      $candidateImageVerificationBlock = @"
+expected_backend_image="`$(cat '$remoteStage/prebuilt-backend-image-id')"
+expected_frontend_image="`$(cat '$remoteStage/prebuilt-frontend-image-id')"
+running_backend="`$(docker inspect -f '{{.Image}}' "`$(docker compose -p '$ComposeProject' ps -q backend)")"
+running_frontend="`$(docker inspect -f '{{.Image}}' "`$(docker compose -p '$ComposeProject' ps -q frontend)")"
+[ "`$running_backend" = "`$expected_backend_image" ] || { echo 'Running backend differs from the prebuilt candidate.' >&2; exit 84; }
+[ "`$running_frontend" = "`$expected_frontend_image" ] || { echo 'Running frontend differs from the prebuilt candidate.' >&2; exit 84; }
+echo 'prebuilt_candidate_images_match_running_containers'
+"@
+    } else {
+      $candidateImageVerificationBlock = "echo 's3_release_candidate_prebuild_not_requested'"
+    }
     $previewVerification = @"
 set -Eeuo pipefail
 cd '$RemotePath'
 docker compose -p '$ComposeProject' ps
+$candidateImageVerificationBlock
 curl -fsS http://127.0.0.1:8082/api/health >/dev/null
 curl -fsS http://127.0.0.1:8082/api/ready >/dev/null
 curl -fsS http://127.0.0.1:8082/api/version | python3 -c 'import json, sys; payload = json.load(sys.stdin); assert payload.get("git_sha") == sys.argv[1], payload; assert payload.get("build_time") == sys.argv[2], payload' '$releaseSha' '$releaseBuildTime'
@@ -1927,7 +2179,10 @@ cd '$RemotePath'
     docker compose -p '$ComposeProject' ps
     curl -fsS http://127.0.0.1:8082/api/health
     curl -fsS http://127.0.0.1:8082/api/ready
-    curl -fsS http://127.0.0.1:8082/api/version | python3 -c 'import json, sys; payload = json.load(sys.stdin); assert payload.get("git_sha") == sys.argv[1], payload; assert payload.get("build_time") == sys.argv[2], payload' '$releaseSha' '$releaseBuildTime'
+curl -fsS http://127.0.0.1:8082/api/version | python3 -c 'import json, sys; payload = json.load(sys.stdin); assert payload.get("git_sha") == sys.argv[1], payload; assert payload.get("build_time") == sys.argv[2], payload' '$releaseSha' '$releaseBuildTime'
+if [ '$([int][bool]$LocalEncryptedBackupGate)' = '1' ]; then
+  echo 'local_encrypted_backup_restore_gate_ok'
+else
 systemctl is-enabled --quiet shamrai-db-backup.timer
 systemctl is-active --quiet shamrai-db-backup.timer
 test -x '$RemotePath/ops/backup-db.sh'
@@ -1963,6 +2218,7 @@ derived_manifest_signing_public_key_sha256="`$(systemd-creds decrypt --name=mani
 test "`$configured_manifest_signing_public_key_sha256" = $attestedManifestSigningPublicKeySha256
 test "`$derived_manifest_signing_public_key_sha256" = $attestedManifestSigningPublicKeySha256
 echo 'backup_schedule_state_ok'
+fi
 docker compose -p '$ComposeProject' exec -T backend python - <<'PY'
 from src.core.config import settings
 from src.services.telegram_bot import call_telegram_api

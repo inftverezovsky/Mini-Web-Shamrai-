@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $deployPath = Join-Path $repoRoot "scripts\deploy-public-shamrai-web.ps1"
+$releaseBackupPath = Join-Path $repoRoot "scripts\verify-shamrai-release-backup.ps1"
 $hiddenGatePath = Join-Path $repoRoot "scripts\verify-shamrai-hidden-flat-e2e.ps1"
 $hiddenGateModulePath = Join-Path $repoRoot "scripts\lib\HiddenFlatE2EGate.psm1"
 $ciPath = Join-Path $repoRoot ".github\workflows\ci.yml"
@@ -24,7 +25,7 @@ function Assert-NotContains {
 
 $tokens = $null
 $parseErrors = $null
-foreach ($sourcePath in @($deployPath, $hiddenGatePath, $hiddenGateModulePath)) {
+foreach ($sourcePath in @($deployPath, $releaseBackupPath, $hiddenGatePath, $hiddenGateModulePath)) {
   $tokens = $null
   $parseErrors = $null
   [System.Management.Automation.Language.Parser]::ParseFile(
@@ -93,6 +94,11 @@ try {
 }
 Assert-Contains $deploySource 'status --porcelain=v1 --untracked-files=normal'
 Assert-Contains $deploySource 'Deployment requires a clean worktree.'
+Assert-Contains $deploySource '[switch]$LocalEncryptedBackupGate'
+Assert-Contains $deploySource 'LocalEncryptedBackupGate requires PowerShell 7 or newer'
+Assert-Contains $deploySource 'C:\Program Files\Git\usr\bin\ssh-keyscan.exe'
+Assert-Contains $deploySource 'Assert-CiReleaseGateAttestation'
+Assert-Contains $deploySource 'refs/heads/main'
 Assert-Contains $deploySource '$canonicalRemotePath = "/opt/shamrai-mini-app"'
 Assert-Contains $deploySource '$canonicalComposeProject = "shamrai"'
 Assert-Contains $deploySource '$canonicalPublicWebRoot = "/var/www/shamrai_web/dist"'
@@ -134,9 +140,24 @@ Assert-Contains $deploySource 'Invoke-NativeChecked "npm" "ci"'
 Assert-Contains $deploySource 'Invoke-WithSanitizedReleaseEnvironment'
 Assert-Contains $deploySource '$sensitivePrefixPattern'
 $paymentDrain = $deploySource.IndexOf('docker compose -p "$ComposeProject" stop backend', [StringComparison]::Ordinal)
-$migrationUpgrade = $deploySource.IndexOf('docker compose -p "$ComposeProject" run --rm backend alembic upgrade head', [StringComparison]::Ordinal)
+$migrationUpgrade = $deploySource.IndexOf('docker compose -p "$ComposeProject" run --rm --no-deps backend alembic upgrade head', [StringComparison]::Ordinal)
 if ($paymentDrain -lt 0 -or $migrationUpgrade -lt 0 -or $paymentDrain -gt $migrationUpgrade) {
   throw 'The old backend must be stopped before checkout snapshot migrations run.'
+}
+$protectedFingerprintBefore = $deploySource.IndexOf('pre_migration_protected_fingerprints="`$(protected_data_fingerprints)"', [StringComparison]::Ordinal)
+$protectedFingerprintAfter = $deploySource.IndexOf('post_migration_protected_fingerprints="`$(protected_data_fingerprints)"', [StringComparison]::Ordinal)
+$protectedFingerprintComparison = $deploySource.IndexOf('Protected production data changed during migrations.', [StringComparison]::Ordinal)
+$postMigrationInvariants = $deploySource.IndexOf('Post-migration data invariants failed.', [StringComparison]::Ordinal)
+$startApplication = $deploySource.IndexOf('$startApplicationBlock', $postMigrationInvariants, [StringComparison]::Ordinal)
+if (
+  $protectedFingerprintBefore -lt $paymentDrain -or
+  $protectedFingerprintBefore -gt $migrationUpgrade -or
+  $protectedFingerprintAfter -lt $migrationUpgrade -or
+  $protectedFingerprintComparison -lt $protectedFingerprintAfter -or
+  $postMigrationInvariants -lt $protectedFingerprintComparison -or
+  $startApplication -lt $postMigrationInvariants
+) {
+  throw 'Protected data fingerprints and migration invariants must pass while the backend is stopped.'
 }
 $schemaUpgradeMarker = $deploySource.IndexOf('install -m 0600 /dev/null "`$schema_upgrade_marker"', [StringComparison]::Ordinal)
 $schemaUpgradeCommitted = $deploySource.IndexOf('schema_upgrade_committed=1', [StringComparison]::Ordinal)
@@ -149,6 +170,15 @@ if (
 }
 Assert-Contains $deploySource 'schema_upgrade_marker="$remoteStage/schema-upgrade.completed"'
 Assert-Contains $deploySource 'if [ "`$schema_upgrade_committed" = "1" ] || [ -f "`$schema_upgrade_marker" ]; then'
+Assert-Contains $deploySource 'protected_data_fingerprints()'
+Assert-Contains $deploySource 'to_jsonb(t) - ARRAY['
+Assert-Contains $deploySource "'checkout_intent_id', 'checkout_payload_hash', 'checkout_state', 'checkout_url'"
+Assert-Contains $deploySource "SELECT 'users', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))"
+Assert-Contains $deploySource "SELECT 'bets', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))"
+Assert-Contains $deploySource "SELECT 'user_bets', md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), ''))"
+Assert-Contains $deploySource 'NOT EXISTS (SELECT 1 FROM subscription_plan_checkout_allowlist)'
+Assert-Contains $deploySource 'NOT EXISTS (SELECT 1 FROM flat_subscriptions WHERE revision IS DISTINCT FROM 1)'
+Assert-Contains $deploySource '[ "`$migration_revision" = ''20260802_0043'' ]'
 Assert-Contains $deploySource 'rm -f "`$backup_marker"'
 Assert-Contains $deploySource 'Schema upgrade already committed; refusing pre-migration code rollback.'
 Assert-Contains $deploySource 'Post-migration rollback retained the new code and database; forward repair is required.'
@@ -218,6 +248,25 @@ Assert-Contains $deploySource 'Restore-drill the quiesced final backup before mi
 Assert-Contains $deploySource 'scripts\run-shamrai-restore-drill.ps1'
 Assert-Contains $deploySource 'OffHostArtifactKey = $finalBackupArtifactKey'
 Assert-Contains $deploySource 'Final restore attestation is not bound to the quiesced backup artifact.'
+Assert-Contains $deploySource 'Prebuild exact candidate images before backend downtime'
+Assert-Contains $deploySource 'Create and restore-drill the final local encrypted production backup'
+Assert-Contains $deploySource 'scripts\verify-shamrai-release-backup.ps1'
+Assert-Contains $deploySource '-LeaveBackendStopped'
+Assert-Contains $deploySource 'prebuilt_candidate_images_match_running_containers'
+Assert-Contains $deploySource 'docker image tag "`$prebuilt_backend_image" shamrai-backend'
+Assert-Contains $deploySource 'Migration backend image differs from the qualified candidate.'
+Assert-Contains $deploySource 'up -d --no-deps --force-recreate --no-build backend frontend'
+Assert-Contains $deploySource 'local_encrypted_backup_restore_gate_ok'
+$localCandidatePreparationMatch = [regex]::Match(
+  $deploySource,
+  '(?s)if \(\$LocalEncryptedBackupGate\) \{\s+\$candidateImagePreparationBlock = @"(?<body>.*?)"@'
+)
+if (-not $localCandidatePreparationMatch.Success) {
+  throw 'Local exact-candidate preparation block was not found.'
+}
+$localCandidatePreparationBody = $localCandidatePreparationMatch.Groups['body'].Value
+Assert-Contains $localCandidatePreparationBody 'docker image tag "`$prebuilt_backend_image" shamrai-backend'
+Assert-NotContains $localCandidatePreparationBody 'docker compose -p "$ComposeProject" build'
 Assert-Contains $deploySource 'Verify preview APIs before any public frontend publish'
 Assert-Contains $deploySource 'Publish public frontend after successful preview verification'
 Assert-NotContains $deploySource '$deployLifecycle += " && bash $(ConvertTo-ShellSingleQuoted "$remoteStage/publish.sh")"'
@@ -240,6 +289,13 @@ if (
 ) {
   throw 'Stage 2 ordering must be quiesce -> final backup -> restore drill -> migration -> preview verification -> public publish.'
 }
+$localPrebuild = $deploySource.IndexOf('Prebuild exact candidate images before backend downtime', [StringComparison]::Ordinal)
+$localBackup = $deploySource.IndexOf('Create and restore-drill the final local encrypted production backup', $localPrebuild, [StringComparison]::Ordinal)
+$localDeploy = $deploySource.IndexOf('Deploy exact code to the canonical preview under the release fence', $localBackup, [StringComparison]::Ordinal)
+$localPreview = $deploySource.IndexOf('Verify preview APIs before any public frontend publish', $localDeploy, [StringComparison]::Ordinal)
+if ($localPrebuild -lt 0 -or $localBackup -lt $localPrebuild -or $localDeploy -lt $localBackup -or $localPreview -lt $localDeploy) {
+  throw 'Local Stage 2 ordering must be prebuild -> encrypted backup/restore -> migration -> preview verification.'
+}
 Assert-Contains $deploySource 'find "$RemotePath" \( -path "$RemotePath/ops" -o -path "$RemotePath/db-backups" \) -prune'
 Assert-NotContains $deploySource ' -pw $password '
 Assert-NotContains $deploySource 'StrictHostKeyChecking=accept-new'
@@ -248,6 +304,34 @@ Assert-NotContains $deploySource '"-czf" $repoArchive "."'
 Assert-NotContains $deploySource 'mv "$RemotePath" "`$failed_path" || true'
 Assert-NotContains $deploySource 'mv "$PublicWebRoot" "`$web_failed" || true'
 Assert-NotContains $deploySource 'move_state_directories "`$failed_path" "$RemotePath" || true'
+
+$releaseBackupSource = Get-Content -Raw -LiteralPath $releaseBackupPath
+Assert-Contains $releaseBackupSource 'PowerShell 7 or newer is required for binary-safe encrypted backup streaming.'
+Assert-Contains $releaseBackupSource 'docker compose -p $projectShell stop backend'
+Assert-Contains $releaseBackupSource 'pg_dump -U shamrai -d shamrai -Fc'
+Assert-Contains $releaseBackupSource '-SinkFile $age'
+Assert-Contains $releaseBackupSource '-SourceFile $age'
+Assert-Contains $releaseBackupSource 'isolated_postgres_restore=true'
+Assert-Contains $releaseBackupSource 'plaintext_dump_persisted = $false'
+Assert-Contains $releaseBackupSource 'Restored backup row count differs for $table.'
+Assert-Contains $releaseBackupSource 'normalized_schema_hash'
+Assert-Contains $releaseBackupSource 'canonical_schema()'
+Assert-NotContains $releaseBackupSource 'CHECK <expression>'
+Assert-NotContains $releaseBackupSource 'WHERE <predicate>'
+Assert-Contains $releaseBackupSource 'up -d --no-deps backend'
+Assert-Contains $releaseBackupSource 'Binary pipeline exceeded the ${TimeoutSeconds}-second timeout.'
+Assert-Contains $releaseBackupSource '$source.Kill($true)'
+Assert-Contains $releaseBackupSource '$sink.Kill($true)'
+Assert-Contains $releaseBackupSource 'ConnectTimeout=15'
+Assert-Contains $releaseBackupSource 'ServerAliveInterval=15'
+Assert-Contains $releaseBackupSource 'ServerAliveCountMax=4'
+Assert-Contains $releaseBackupSource 'throw "Backend restart after release backup verification failed:'
+foreach ($protectedTable in @('subscription_plans', 'flat_subscription_credits', 'quizzes')) {
+  $expectedProtectedTableLine = '  "' + $protectedTable + '",'
+  Assert-Contains $releaseBackupSource $expectedProtectedTableLine
+}
+Assert-NotContains $releaseBackupSource 'pg_dump -f'
+Assert-NotContains $releaseBackupSource 'SHAMRAI_SSH_PASSWORD'
 
 foreach ($workflowPath in @($ciPath, $restorePath)) {
   $workflowSource = Get-Content -Raw -LiteralPath $workflowPath

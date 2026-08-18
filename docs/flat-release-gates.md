@@ -85,7 +85,7 @@ Remove-Item Env:\GITHUB_PERSONAL_ACCESS_TOKEN
 
 Never put that token in the repository, `.env`, PowerShell profile, command arguments, docs, tickets, or chat.
 
-The safe two-phase sequence for one exact commit is:
+The preferred S3-backed two-phase sequence for one exact commit is:
 
 1. Merge/push the clean commit to the protected default branch and download its successful CI attestation.
 2. Run the protected `Restore drill` workflow for that same SHA and download both S3 retention and restore attestations into `.deploy/`.
@@ -97,6 +97,32 @@ The safe two-phase sequence for one exact commit is:
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy-public-shamrai-web.ps1 -PreviewOnly -RepairShamraiConflicts
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy-public-shamrai-web.ps1 -RepairShamraiConflicts
 ```
+
+When the VDS has not yet been provisioned with the signed S3 backup timer and
+GitHub backup credentials, release must fail closed instead of inventing those
+credentials. The explicitly selected `-LocalEncryptedBackupGate` mode keeps the
+exact protected-main CI gate, prebuilds the candidate images while the old
+backend is still serving, then stops only the backend and streams `pg_dump`
+through SSH directly into local `age` encryption. It never persists a plaintext
+dump. The exact ciphertext is immediately decrypted as a stream into an
+isolated PostgreSQL container; Alembic revision, schema hash, and protected table
+counts must match before the release script may run migrations. PostgreSQL,
+Redis, nginx, and ports `80/443` are not restarted by this backup gate.
+
+```powershell
+pwsh -File .\scripts\deploy-public-shamrai-web.ps1 `
+  -PreviewOnly -LocalEncryptedBackupGate -RepairShamraiConflicts
+```
+
+The encrypted artifact and non-secret restore attestation are written under the
+git-ignored `.deploy/db-backups/` and `.deploy/` paths. A backup or restore
+failure automatically restarts the previous backend and blocks Alembic.
+While the backend remains stopped, the deploy also compares deterministic
+pre/post-migration fingerprints for users, bets, user bets, legacy payment
+fields, subscriptions, plans, flat subscriptions, quizzes, and historical
+statistics. It starts the new backend only after those fingerprints match,
+Alembic reports `20260802_0043`, existing plans remain visible, the checkout
+allowlist is empty, and existing flat subscriptions have `revision=1`.
 
 Before production release, the deploy gate must independently verify that:
 
