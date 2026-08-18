@@ -18,9 +18,32 @@ function ConvertTo-ComparableOutputText {
   return (($withoutAnsi -replace '\s+', ' ').Trim())
 }
 
+function Test-ContainsOrderedTokens {
+  param([Parameter(Mandatory = $true)][string]$Actual, [Parameter(Mandatory = $true)][string]$Expected)
+
+  $comparableActual = ConvertTo-ComparableOutputText $Actual
+  $expectedTokens = (ConvertTo-ComparableOutputText $Expected) -split ' ' |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  $position = 0
+
+  foreach ($token in $expectedTokens) {
+    $foundAt = $comparableActual.IndexOf(
+      $token,
+      $position,
+      [System.StringComparison]::Ordinal
+    )
+    if ($foundAt -lt 0) {
+      return $false
+    }
+    $position = $foundAt + $token.Length
+  }
+
+  return $true
+}
+
 function Assert-Contains {
   param([Parameter(Mandatory = $true)][string]$Actual, [Parameter(Mandatory = $true)][string]$Expected)
-  if (-not (ConvertTo-ComparableOutputText $Actual).Contains((ConvertTo-ComparableOutputText $Expected))) {
+  if (-not (Test-ContainsOrderedTokens -Actual $Actual -Expected $Expected)) {
     throw "Expected output to contain '$Expected'. Actual output:`n$Actual"
   }
 }
